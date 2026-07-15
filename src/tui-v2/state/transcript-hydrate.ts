@@ -256,7 +256,7 @@ export function serializeForHistory(
           status:
             item.status === "failed"
               ? "fail"
-              : item.status === "running"
+              : item.status === "running" || item.status === "queued"
                 ? "ok"
                 : item.status,
           exitCode: item.exitCode,

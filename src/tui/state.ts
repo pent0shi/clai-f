@@ -513,6 +513,8 @@ function applyEvent(state: TuiState, event: AgentEvent): TuiState {
         status: { running: false, activity: "", step: 0, startedAt: undefined },
       };
     }
+    default:
+      return state;
   }
 }
 
