@@ -1,0 +1,268 @@
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - bun-linux-x64
+          - bun-linux-arm64
+          - bun-darwin-x64
+          - bun-darwin-arm64
+          - bun-windows-x64
+    steps:
+      - uses: actions/checkout@v6
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npm run typecheck
+      - run: npm test
+      - name: Build binary
+        run: bun build ./src/index.ts --compile --target ${{ matrix.target }} --outfile release/clai-${{ matrix.target }}${{ contains(matrix.target, 'windows') && '.exe' || '' }}
+      - name: Compute SHA256 sidecar
+        run: |
+          set -euo pipefail
+          cd release
+          for asset in clai-*; do
+            if [[ "$asset" == *.sha256 ]]; then continue; fi
+            sha256sum "$asset" | awk '{print $1}' > "${asset}.sha256"
+            cat "${asset}.sha256"
+          done
+      - uses: actions/upload-artifact@v7
+        with:
+          name: clai-${{ matrix.target }}
+          path: release/*
+
+  publish:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: release
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v3
+        with:
+          files: release/*
+          generate_release_notes: true
+
+  publish-npm:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # required for npm provenance
+    steps:
+      - name: Skip if npm token is missing
+        id: gate
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -z "${NPM_TOKEN}" ]; then
+            echo "NPM_TOKEN secret not set; skipping npm publish." >&2
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v6
+        if: steps.gate.outputs.skip != 'true'
+
+      - uses: actions/setup-node@v6
+        if: steps.gate.outputs.skip != 'true'
+        with:
+          node-version: 24
+          cache: npm
+          registry-url: https://registry.npmjs.org
+
+      - name: Verify tag matches package.json version
+        if: steps.gate.outputs.skip != 'true'
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME#v}"
+          pkg="$(node -p "require('./package.json').version")"
+          if [ "$tag" != "$pkg" ]; then
+            echo "Tag v${tag} does not match package.json version ${pkg}; refusing to publish." >&2
+            exit 1
+          fi
+          echo "Publishing version ${pkg}."
+
+      - name: Skip if this version is already on npm
+        id: exists
+        if: steps.gate.outputs.skip != 'true'
+        run: |
+          set -euo pipefail
+          name="$(node -p "require('./package.json').name")"
+          ver="$(node -p "require('./package.json').version")"
+          if npm view "${name}@${ver}" version >/dev/null 2>&1; then
+            echo "${name}@${ver} is already published; skipping." >&2
+            echo "already=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "already=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install dependencies
+        if: steps.gate.outputs.skip != 'true' && steps.exists.outputs.already != 'true'
+        run: npm ci
+
+      - name: Run typecheck and tests
+        if: steps.gate.outputs.skip != 'true' && steps.exists.outputs.already != 'true'
+        run: |
+          npm run typecheck
+          npm test
+
+      - name: Publish to npm
+        if: steps.gate.outputs.skip != 'true' && steps.exists.outputs.already != 'true'
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          # Provenance requires the npm account 2FA to be "authorization only"
+          # (not "auth and writes"). Enable it by setting the repo VARIABLE
+          # NPM_PROVENANCE=true once your account is configured for it.
+          NPM_PROVENANCE: ${{ vars.NPM_PROVENANCE }}
+        run: |
+          set -euo pipefail
+          if [ "${NPM_PROVENANCE:-}" = "true" ]; then
+            npm publish --access public --provenance
+          else
+            npm publish --access public
+          fi
+
+  sync-tap:
+    needs: publish
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Skip if tap token is missing
+        id: gate
+        env:
+          TAP_GITHUB_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
+        run: |
+          if [ -z "${TAP_GITHUB_TOKEN}" ]; then
+            echo "TAP_GITHUB_TOKEN secret not set; skipping homebrew tap sync." >&2
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Resolve version
+        if: steps.gate.outputs.skip != 'true'
+        id: meta
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Download release binaries
+        if: steps.gate.outputs.skip != 'true'
+        uses: actions/download-artifact@v8
+        with:
+          path: release
+          merge-multiple: true
+
+      - name: Compute checksums
+        if: steps.gate.outputs.skip != 'true'
+        id: sha
+        run: |
+          set -euo pipefail
+          cd release
+          for asset in clai-bun-darwin-arm64 clai-bun-darwin-x64 clai-bun-linux-arm64 clai-bun-linux-x64; do
+            if [ ! -f "$asset" ]; then
+              echo "Missing release asset: $asset" >&2
+              exit 1
+            fi
+          done
+          {
+            echo "darwin_arm64=$(sha256sum clai-bun-darwin-arm64 | awk '{print $1}')"
+            echo "darwin_x64=$(sha256sum clai-bun-darwin-x64 | awk '{print $1}')"
+            echo "linux_arm64=$(sha256sum clai-bun-linux-arm64 | awk '{print $1}')"
+            echo "linux_x64=$(sha256sum clai-bun-linux-x64 | awk '{print $1}')"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Checkout homebrew tap
+        if: steps.gate.outputs.skip != 'true'
+        uses: actions/checkout@v6
+        with:
+          repository: pentoshi007/homebrew-clai
+          token: ${{ secrets.TAP_GITHUB_TOKEN }}
+          path: tap
+          persist-credentials: true
+
+      - name: Render formula
+        if: steps.gate.outputs.skip != 'true'
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+          DARWIN_ARM64: ${{ steps.sha.outputs.darwin_arm64 }}
+          DARWIN_X64: ${{ steps.sha.outputs.darwin_x64 }}
+          LINUX_ARM64: ${{ steps.sha.outputs.linux_arm64 }}
+          LINUX_X64: ${{ steps.sha.outputs.linux_x64 }}
+        run: |
+          mkdir -p tap/Formula
+          cat > tap/Formula/clai.rb <<RUBY
+          class Clai < Formula
+            desc "Cross-platform terminal AI assistant with ask and agent modes"
+            homepage "https://github.com/pentoshi007/clai"
+            version "${VERSION}"
+            license "MIT"
+
+            on_macos do
+              if Hardware::CPU.arm?
+                url "https://github.com/pentoshi007/clai/releases/download/v#{version}/clai-bun-darwin-arm64"
+                sha256 "${DARWIN_ARM64}"
+              else
+                url "https://github.com/pentoshi007/clai/releases/download/v#{version}/clai-bun-darwin-x64"
+                sha256 "${DARWIN_X64}"
+              end
+            end
+
+            on_linux do
+              if Hardware::CPU.arm?
+                url "https://github.com/pentoshi007/clai/releases/download/v#{version}/clai-bun-linux-arm64"
+                sha256 "${LINUX_ARM64}"
+              else
+                url "https://github.com/pentoshi007/clai/releases/download/v#{version}/clai-bun-linux-x64"
+                sha256 "${LINUX_X64}"
+              end
+            end
+
+            def install
+              bin.install Dir["clai-*"].first => "clai"
+            end
+
+            test do
+              assert_match version.to_s, shell_output("#{bin}/clai --version")
+            end
+          end
+          RUBY
+
+      - name: Commit and push to tap
+        if: steps.gate.outputs.skip != 'true'
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet Formula/clai.rb; then
+            echo "Formula already up to date for v${VERSION}; nothing to push."
+            exit 0
+          fi
+          git add Formula/clai.rb
+          git commit -m "clai ${VERSION}"
+          git push origin HEAD:main

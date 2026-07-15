@@ -1,0 +1,79 @@
+{
+  "name": "@pentoshi/clai",
+  "version": "3.1.0",
+  "description": "A fast, cross-platform AI CLI assistant with ask and agent modes for shell tasks, file operations, and cybersecurity workflows.",
+  "type": "module",
+  "license": "MIT",
+  "author": "pentoshi007",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/pentoshi007/clai.git"
+  },
+  "homepage": "https://github.com/pentoshi007/clai",
+  "keywords": [
+    "cli",
+    "ai",
+    "agent",
+    "terminal",
+    "cybersecurity",
+    "pentesting",
+    "nmap",
+    "llm",
+    "groq",
+    "gemini",
+    "nvidia",
+    "nim",
+    "ollama"
+  ],
+  "bin": {
+    "clai": "bin/clai.mjs"
+  },
+  "files": [
+    "bin",
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "dev": "node scripts/run-dev.mjs",
+    "dev:bun": "bun run src/index.ts",
+    "dev:node": "tsx src/index.ts",
+    "start": "node dist/index.js",
+    "build": "tsc -p tsconfig.json",
+    "prepublishOnly": "npm run build",
+    "compile": "bun run scripts/build.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "doctor": "tsx src/index.ts doctor"
+  },
+  "dependencies": {
+    "@inquirer/prompts": "^8.5.0",
+    "@opentui/core": "0.4.3",
+    "@opentui/keymap": "0.4.3",
+    "@opentui/react": "0.4.3",
+    "chalk": "^5.4.1",
+    "cheerio": "^1.0.0",
+    "commander": "14.0.3",
+    "conf": "15.1.0",
+    "execa": "^9.5.2",
+    "react": "19.2.7",
+    "string-width": "8.2.1"
+  },
+  "optionalDependencies": {
+    "@napi-rs/keyring": "^1.3.0"
+  },
+  "overrides": {
+    "encoding-sniffer": "^1.0.2"
+  },
+  "devDependencies": {
+    "@types/node": "26.1.0",
+    "@types/react": "19.2.17",
+    "fast-check": "^4.3.0",
+    "react-devtools-core": "7.0.1",
+    "tsx": "4.22.5",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.5"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
