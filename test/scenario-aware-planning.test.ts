@@ -94,10 +94,13 @@ describe("renderAgentSystemPrompt — pentest planning guidance", () => {
   });
 });
 
-describe("buildWorkflowDirective — unchanged shape", () => {
-  it("still contains both empty-directory and existing-project guidance", () => {
+describe("buildWorkflowDirective — stack-agnostic explore/continue guidance", () => {
+  it("requires explore and handles existing vs new projects", () => {
     const directive = buildWorkflowDirective();
-    expect(directive).toContain("dir is empty");
-    expect(directive).toContain("existing stack");
+    expect(directive).toMatch(/EXPLORE/i);
+    expect(directive).toMatch(/existing stack/i);
+    expect(directive).toMatch(/CONTINUE an existing project|NEVER re-scaffold/i);
+    expect(directive).toMatch(/Operation cancelled/i);
+    expect(directive).toMatch(/stack-agnostic/i);
   });
 });

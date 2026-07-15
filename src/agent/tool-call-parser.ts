@@ -986,6 +986,26 @@ export function salvageTruncatedWrite(text: string): {
   return undefined;
 }
 
+const NATIVE_WRITE_TOOLS = new Set(["fs.write", "fs.append", "fs.writeMany"]);
+
+/**
+ * Salvage partial file content from a native tool call's raw argument JSON
+ * (streaming cut off / finish_reason length / _parseError). Reuses the
+ * text-path salvage by reconstructing a minimal {"name","args"} shape.
+ */
+export function salvageTruncatedWriteFromNative(
+  name: string,
+  rawArguments: string | undefined,
+): ReturnType<typeof salvageTruncatedWrite> {
+  if (!NATIVE_WRITE_TOOLS.has(name) || !rawArguments?.trim()) return undefined;
+  const raw = rawArguments.trim();
+  // raw is usually the args object JSON only; wrap for salvageTruncatedWrite.
+  const synthetic = raw.includes(`"name"`)
+    ? raw
+    : `{"name":${JSON.stringify(name)},"args":${raw.startsWith("{") ? raw : `{}`}`;
+  return salvageTruncatedWrite(synthetic);
+}
+
 /**
  * Count the number of ```tool fenced blocks in a message. Models sometimes
  * emit MULTIPLE tool calls in one response (e.g. fs.writeMany + npm install +
@@ -1421,7 +1441,54 @@ export function looksLikeInformationalQuery(prompt: string): boolean {
 // Matrix of action-verb narration: the model says it is *about to* do
 // something but hasn't. Used to detect "narrate, don't act" stalls.
 const ACTION_NARRATION_RE =
-  /\b(?:let me|let's|i'?ll|i will|i'?m going to|i am going to|i need to|i should|i'?m about to|going to|now i'?ll|first[,]?\s*i'?ll)\s+(?:now\s+|first\s+|quickly\s+|just\s+|go\s+ahead\s+and\s+)?(?:explore|list|read|fetch|browse|check|inspect|examine|look|create|run|start|write|build|add|scaffold|set\s*up|setup|install|initialize|init|generate|make|review|open|find|search|verify|update|edit|modify|fix|implement|gather|assess|scan|audit)\b/i;
+  /\b(?:let me|let's|i'?ll|i will|i'?m going to|i am going to|i need to|i should|i'?m about to|going to|now i'?ll|first[,]?\s*i'?ll|we need to|we should|we'?ll|we will|we'?re going to)\s+(?:now\s+|first\s+|quickly\s+|just\s+|go\s+ahead\s+and\s+)?(?:explore|list|read|fetch|browse|check|inspect|examine|look|create|run|start|write|build|add|scaffold|set\s*up|setup|install|initialize|init|generate|make|review|open|find|search|verify|update|edit|modify|fix|implement|gather|assess|scan|audit|retry|restart)\b/i;
+
+/**
+ * Model diagnosed a concrete failure (build/runtime/HTTP) and implies a fix
+ * but emitted no tool call — must not end the turn.
+ */
+export function looksLikeErrorDiagnosisWithFixIntent(text: string): boolean {
+  const t = text.trim();
+  if (t.length < 20 || t.length > 2_000) return false;
+  if (t.includes("```tool")) return false;
+  const sawError =
+    /\b(?:error|exception|failed|failure|crash(?:ed)?|500|502|503|404|ECONNREFUSED|cannot\s+find|is\s+not\s+defined|use client|server component|module not found|syntaxerror|typeerror|build failed|internal server error)\b/i.test(
+      t,
+    );
+  if (!sawError) return false;
+  const fixIntent =
+    /\b(?:need to|needs? to|should|must|have to|let'?s|i'?ll|we'?ll|going to|fix|edit|add|patch|rewrite|change|update|retry|restart)\b/i.test(
+      t,
+    );
+  return fixIntent;
+}
+
+/** True when tool output is a local HTTP probe that did not return 2xx. */
+export function localHttpProbeIsFailure(output: string): boolean {
+  const head = output.slice(0, 400);
+  // http.fetch first line: "500 Internal Server Error http://localhost:3000/"
+  if (/^(?:[45]\d\d)\b/.test(head.trim()) || /\n(?:[45]\d\d)\s+\w+/.test(head)) {
+    return true;
+  }
+  if (/\b(?:[45]\d\d)\s+(?:Internal Server Error|Not Found|Bad Request|Unauthorized|Forbidden)\b/i.test(head)) {
+    return true;
+  }
+  if (/\bECONNREFUSED\b|\bconnect\s+ECONNREFUSED\b/i.test(head)) return true;
+  return false;
+}
+
+/** True when tool output shows a successful 2xx local probe. */
+export function localHttpProbeIsSuccess(output: string): boolean {
+  if (localHttpProbeIsFailure(output)) return false;
+  const head = output.slice(0, 200);
+  if (/^(?:[23]\d\d)\b/.test(head.trim())) return true;
+  if (/\b(?:200|201|204)\s+(?:OK|Created|No Content)\b/i.test(head)) return true;
+  // curl -sI / plain HTML with no status — treat as soft success only if no error signals
+  if (/<!doctype html|<html[\s>]/i.test(output) && !/\berror\b/i.test(head)) {
+    return true;
+  }
+  return false;
+}
 
 // Web-specific upcoming action (used to pick the right recovery nudge).
 const WEB_ACTION_NARRATION_RE =
@@ -1605,40 +1672,37 @@ export function freshnessGuardMessage(now = new Date()): string {
  * Directive injected for build/scaffold turns. Forces the careful
  * explore → understand → plan → implement loop instead of a one-shot dump,
  * and forbids stopping before the goal is reached.
+ * Language/stack-agnostic: principles only; pick tools that match the project.
  */
 export function buildWorkflowDirective(): string {
   return [
-    "BUILD WORKFLOW (this is a build/scaffold/feature task — follow this order EXACTLY; deviation is a failure):",
-    "1. EXPLORE: fs.list the working directory (and key subdirs) to see what already exists. Use tool.batch to parallelize reads.",
-    "2. UNDERSTAND: fs.read the files that matter (like package.json for js related and same for other languages too, config, entry points, existing components). Detect the existing stack/tooling and MATCH it. If the dir is empty or only has a stub, start fresh with a sensible modern default and say so.",
-    "3. PLAN: call plan.create with a COMPREHENSIVE plan — a detailed `detail` (stack chosen and WHY, architecture, how you'll verify) and 4-8 SEPARATE, ordered, high-quality tasks. The FIRST task initializes the project (scaffolder); the MIDDLE tasks MUST implement the ACTUAL FEATURE the user asked for by REPLACING the scaffolder's boilerplate (e.g. rewrite src/App.jsx into the real todo/blog/etc. UI, add components, state, styles); the LAST task verifies with a build. Scaffolding + install + run ALONE is NOT acceptable — that just leaves the Vite starter page. Each task is one distinct, verifiable action. Then STOP and wait for the user to /implement.",
-    "4. IMPLEMENT: once approved, work task by task in STRICT ORDER. For each task: call task.update {taskId, state:'in_progress'} → do the real work → VERIFY it actually succeeded (read a file you wrote, check the command's exit/output) → call task.update {taskId, state:'done'}, then move to the NEXT task. You MAY emit several tool calls in one message; they run in document order (independent read-only lookups run in parallel, while task.update and any write/command runs one at a time), and the batch STOPS if one fails. Keep every batch scoped to ONE task. A clean rhythm is: task.update in_progress + the work + task.update done together. Keep going until EVERY task is done. Do NOT claim work you didn't actually run.",
+    "BUILD WORKFLOW (build/scaffold/feature — follow this order EXACTLY; deviation is a failure):",
+    "1. EXPLORE (MANDATORY before plan.create): Read the WORKSPACE STATUS block if present. Also fs.list the process cwd, the user destination (Desktop/Documents/etc. if named), and any candidate project folder. Never assume a path is empty — non-empty dirs make scaffolders print 'Operation cancelled'.",
+    "2. UNDERSTAND: fs.read manifest/config/entry files that exist (package.json, Cargo.toml, go.mod, pyproject.toml, composer.json, Gemfile, pom.xml, CMakeLists.txt, Makefile, etc.). Detect the existing stack and MATCH it. If empty/missing, choose a sensible modern default for the ask and say so in the plan detail.",
+    "3. PLAN: call plan.create with a comprehensive plan — detail MUST state (a) what already exists on disk, (b) stack + why, (c) whether you will CONTINUE an existing project or create a NEW empty subfolder, (d) how you will verify. Tasks: 4–8 ordered steps. If the target project ALREADY EXISTS, the first task is NOT re-scaffold — it is inspect/continue. Middle tasks implement the REAL feature (replace boilerplate). Include install/build as needed. For local apps with a server, the FINAL task starts it (shell.start), waits until ready (shell.tail), probes it, LEAVES it running, reports URL/port/job id. Scaffold + install + run alone without the feature is a FAILURE.",
+    "4. IMPLEMENT: after /implement approval, task by task in STRICT ORDER: task.update in_progress → real work → VERIFY tool success → task.update done → next. Never mark done without a successful tool result. Never run install/server work under a pure implement task. Batch only within ONE task.",
     "",
-    "INITIALIZE WITH THE OFFICIAL SCAFFOLDER FIRST (do NOT hand-write build configs):",
-    "- DESTINATION PATHS ARE LITERAL. If the user names an absolute destination such as `/Users/alice/Desktop`, use that exact absolute path as the shell cwd and file prefix. Never remove its leading slash or recreate it under the current project (for example, `Users/alice/Desktop` would incorrectly become `<cwd>/Users/alice/Desktop`). Resolve and state the final absolute project directory before scaffolding, create directly there, and do not scaffold in cwd then move it. If the destination is outside the approved write roots, request confirmation instead of silently falling back to cwd. Clean up only empty directories that your failed attempt created.",
-    '- React/Vue/Svelte/vanilla → `npm create vite@latest <appname> -- --template react` (templates: react, react-ts, vue, vue-ts, svelte, vanilla). Next.js → `npx --yes create-next-app@latest <appname> --yes --eslint --no-tailwind --app --src-dir --import-alias "@/*"`. Node API → `npm init -y`.',
-    "- GET THE TEMPLATE FLAG RIGHT. With `npm create vite@latest NAME -- --template react` the `--` IS required (it forwards --template to create-vite). With `npx create-vite@latest NAME --template react` do NOT add `--` (npx passes args straight through, so `-- --template react` makes npx DROP the flag and you silently get the WRONG, vanilla template). Pick ONE form and keep the template flag attached. After scaffolding, fs.read the generated index.html / src entry to CONFIRM you got React (a src/main.jsx + App.jsx, not a vanilla main.js/counter.js). If it's the wrong template, delete the folder and re-run with the correct command.",
-    "- RUN SCAFFOLDERS NON-INTERACTIVELY and into a NEW SUBFOLDER (`<appname>`). Scaffolders REFUSE to run in a non-empty directory and then print 'Operation cancelled' — and the current dir frequently already has a file like .DS_Store. So scaffold into a subfolder (always works). `--yes` does NOT fix the non-empty-dir cancel; a subfolder does. NEVER background a scaffolder with `&` or pipe `yes |` into it.",
-    '- If a scaffolder cannot be driven non-interactively or keeps failing, FALL BACK to hand-writing a minimal Vite setup (package.json with "type":"module", @vitejs/plugin-react, index.html that loads /src/main.jsx, src/main.jsx, src/App.jsx) then `npm install`. That never prompts and you control every file.',
-    "- VERIFY the init actually worked before marking the task done: fs.read package.json (it must now exist AND list react + react-dom) and fs.read index.html (it must reference your jsx entry). 'Operation cancelled' / non-zero exit means the task FAILED — do not proceed as if it succeeded.",
+    "PATHS & SCAFFOLDING (stack-agnostic):",
+    "- DESTINATION PATHS ARE LITERAL. Absolute destinations keep their leading `/`. Never turn `/Users/alice/Desktop` into relative `Users/alice/Desktop` under cwd. Create/work at the real absolute path. Outside-sandbox paths need confirmation, not a silent fallback to the agent cwd.",
+    "- Agent process cwd may be THIS tool's source tree — never write the user's app into it. Prefer absolute paths under the real project root for every fs/shell call.",
+    "- Prefer the ecosystem's official non-interactive scaffolder into a NEW EMPTY subfolder. Examples (use only when that stack is appropriate): JS `npm create … <name>`, Rust `cargo new <name>`, Go `go mod init`, Python `poetry new` / language defaults, Rails `rails new`, etc. Scaffolders REFUSE non-empty directories → 'Operation cancelled'. `--yes` does not fix that. NEVER re-scaffold into an existing project; continue it instead.",
+    "- If a scaffolder cannot run non-interactively, hand-write a minimal correct tree for that stack and install deps yourself.",
+    "- VERIFY init: project markers/files must exist after scaffold. 'Operation cancelled', non-zero exit, or missing tree = FAILED task — do not pretend success.",
     "",
     "CRITICAL RULES during IMPLEMENTATION:",
-    "- You may batch tool calls: emit one or several ```tool blocks in a message. They run in document order — independent READ-ONLY lookups (fs.read/list/search, dns/whois, http.fetch GET, web.search/fetch, sysinfo) run in parallel, while task.update and any write/command (fs.write*, shell.exec, pkg.install, net.scan) run one at a time. If any call fails, the rest of that batch is cancelled so you can react — so order dependent steps correctly and keep every batch scoped to ONE task. A good batch is task.update(in_progress) + the work + task.update(done) for ONE task.",
-    "- Do NOT re-explore. Step 1 (EXPLORE) was already completed during planning. Start executing the first pending task immediately.",
-    "- ONE task at a time, in ORDER. Do NOT skip ahead to task 3 before task 2 is done.",
-    "- Write complete, production-quality files; never shorten code merely to fit a tool call. Prefer fs.writeMany for several normal files, fs.write for one large/new file, fs.edit for exact-text atomic changes, and fs.replaceLines only after fs.read has established precise line coordinates. If fs.writeMany is cut off, split only the FILE LIST into smaller batches. If one fs.write is cut off, retry that file alone and split the component into cohesive modules only when that improves the design. A truncated call never ran, so never move on until a complete write succeeds.",
-    "- VERIFY each step before marking it done: you MUST NOT mark a task 'done' in advance or assume it is complete. You must first verify and have full, absolute knowledge that all commands, operations, and file changes scoped to that task have been successfully executed and are correct. After writing/editing files, you MUST call fs.read to verify that the file contents are complete, syntactically correct (braces, tags, parens are balanced), and exactly what you intended. After running commands or packages, confirm they completed with exit code 0. Only when you have verified all work for a task should you call task.update to mark it 'done' and move on to the next task. Marking a task done without a successful, verified tool call is the worst failure.",
-    "- VERIFY THE BUILD, not just the dev server. `vite` / `npm run dev` reports 'ready' even when your App.jsx has syntax errors (the error only shows in the browser). To actually confirm the app works, run `npm run build` (it fails on real syntax/JSX errors) and check it exits 0. Seeing 'VITE ready' is NOT proof the app renders.",
-    "- If a tool call FAILS (error output, non-zero exit, file missing), the task is NOT done. Mark it 'failed', diagnose WHY, fix it, and retry until it succeeds.",
-    "- ERROR ANALYSIS: If an error is given (build failure, compilation error, or runtime crash), do NOT jump directly into editing. You must first analyze which file has the error, what is causing it, and what needs to change. Make sure to read the relevant file context if you don't already have it.",
-    "- ATOMIC AND PRECISE EDITS: You must perform precise, atomic edits instead of replacing or regenerating entire files. Use fs.edit, fs.replaceLines, or fs.append to modify only the specific lines of code that need fixing. Keep your changes focused and precise so that the existing code remains intact and the editing process is perfectly reliable.",
-    "- NEVER claim a task is done, files were created, a dependency is installed, or a server is running unless the tool call ACTUALLY succeeded and you saw the success output. If you have not run it, say so.",
-    "- After the production build passes, start the dev server / app with shell.start (background job) so it keeps running, NOT `npm run dev &` via shell.exec. Check readiness with shell.tail AND make one bounded local HTTP request (curl with a short timeout or http.fetch). A build passing does not prove a server is running. Never print a localhost link or say `running` unless shell.start returned a live job and the HTTP probe succeeded. Keep the server running so the user can interact with the live application, and print the localhost link. Do not spend time polling repeatedly.",
-    "- THE DELIVERABLE IS THE WORKING FEATURE, NOT THE SCAFFOLD. After scaffolding you MUST replace the starter boilerplate (Vite's default App.jsx counter, Next's starter page, etc.) with the actual app the user asked for. If the user asked for a todo app, src/App.jsx must contain a real todo UI with state — finishing with the untouched Vite starter page is a FAILURE even if the build passes.",
-    "- REVISING PLANS FOR NEW USER REQUESTS: If the user asks for new features, modifications, or additions after a plan has already been created/implemented, you MUST update/revise the plan. Call plan.create to create/overwrite the plan. In the revised plan, preserve all previously completed tasks (retaining their order and descriptions) and append the new tasks needed for the new features/modifications at the end of the task list. Do NOT skip plan revision or start implementing new features directly in existing completed tasks. After calling plan.create, STOP and wait for user approval. Once approved, resume execution of the revised plan from the first new/uncompleted task; do NOT execute completed tasks again.",
+    "- Batch tool calls carefully: read-only lookups may parallelize; writes/commands are sequential. Keep each batch on ONE task.",
+    "- During /implement, do not re-do full explore unless WORKSPACE STATUS is missing or a path is ambiguous — start the first pending task.",
+    "- ONE task at a time, in ORDER.",
+    "- Write complete files; never shorten to fit a tool call. Prefer fs.writeMany for several files, fs.write for one large file, fs.edit for exact text, fs.replaceLines only with fresh line numbers from fs.read.",
+    "- VERIFY before done: after writes, confirm content; after commands, exit 0; after builds, the project’s real build/test command succeeds. A dev server 'ready' line is NOT proof the app is correct — run the stack’s build or tests when they exist.",
+    "- On failure: mark failed, diagnose root cause, fix, retry. Do not jump edits without reading the error context.",
+    "- NEVER claim done / installed / running without a successful tool result you actually saw.",
+    "- For local server apps: shell.start (not background via shell.exec), shell.tail + one localhost probe, leave running, report URL + job id.",
+    "- THE DELIVERABLE IS THE WORKING FEATURE, NOT THE SCAFFOLD. Replace starter boilerplate with what the user asked for (todo UI, API routes, CLI commands, etc.). Leaving the default starter is a failure even if build passes.",
+    "- REVISING PLANS: new user requests → plan.create with prior completed tasks preserved + new tasks appended; wait for approval; do not re-run done tasks. Run-only requests after a finished plan → tools only, no new plan.",
     "",
-    "FORBIDDEN before plan approval (/implement): you MUST NOT use fs.write, fs.writeMany, fs.edit, fs.append, shell.exec, shell.start, pkg.install, or pkg.uninstall. The ONLY tool allowed before approval is plan.create (and the read/list tools for exploration). If you are nudged to 'take action' before a plan exists, your action MUST be plan.create.",
-    "If the task is genuinely trivial (a single tiny file), you may skip the plan — but for an app/feature, ALWAYS plan first.",
+    "FORBIDDEN until plan.create + user /implement: fs.write, fs.writeMany, fs.edit, fs.append, shell.exec (except bare version probes), shell.start, pkg.install, pkg.uninstall, and all scaffolders. Allowed before the plan: fs.list/read/search, tool.check, sysinfo, web.search/web.fetch (docs only), and plan.create. If nudged to act with no plan yet: explore read-only (optional web research), then plan.create — never freestyle scaffold. Scaffolders/install can take many quiet minutes — do not abandon them; if a run is interrupted but package.json already exists, CONTINUE (npm install + implement feature), do not re-scaffold.",
+    "Trivial single-file typo fixes may skip the plan; multi-file apps/features ALWAYS plan.create first, then wait for /implement.",
   ].join("\n");
 }
 

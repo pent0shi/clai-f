@@ -65,7 +65,7 @@ export const agentrouterProvider: LlmProvider = {
   ): Promise<CompletionResult> {
     if (!auth.apiKey) throw new Error("AgentRouter API key is required");
     const model = request.model ?? defaultModels.agentrouter;
-    const text = await openAiCompatibleComplete({
+    const payload = await openAiCompatibleComplete({
       provider: "AgentRouter",
       baseUrl,
       apiKey: auth.apiKey,
@@ -77,8 +77,17 @@ export const agentrouterProvider: LlmProvider = {
       reasoning: request.thinking,
       reasoningStyle: "openai",
       headers: agentRouterHeaders,
+      tools: request.tools,
+      toolChoice: request.toolChoice,
+      parallelToolCalls: request.parallelToolCalls,
     });
-    return { text, provider: "agentrouter", model };
+    return {
+      text: payload.text,
+      provider: "agentrouter",
+      model,
+      ...(payload.toolCalls?.length ? { toolCalls: payload.toolCalls } : {}),
+      ...(payload.finishReason ? { finishReason: payload.finishReason } : {}),
+    };
   },
   async stream(
     request: CompletionRequest,
@@ -87,7 +96,7 @@ export const agentrouterProvider: LlmProvider = {
   ): Promise<CompletionResult> {
     if (!auth.apiKey) throw new Error("AgentRouter API key is required");
     const model = request.model ?? defaultModels.agentrouter;
-    const text = await openAiCompatibleStream({
+    const payload = await openAiCompatibleStream({
       provider: "AgentRouter",
       baseUrl,
       apiKey: auth.apiKey,
@@ -97,6 +106,7 @@ export const agentrouterProvider: LlmProvider = {
       temperature: request.temperature,
       signal: request.signal,
       onToken,
+      onToolCallDelta: request.onToolCallDelta,
       reasoning: request.thinking,
       reasoningStyle: "openai",
       // AgentRouter's upstreams (gpt-5, claude opus, etc.) often spend
@@ -104,7 +114,16 @@ export const agentrouterProvider: LlmProvider = {
       // recommended 5-minute idle timeout so the UI doesn't bail early.
       idleTimeoutMs: 300_000,
       headers: agentRouterHeaders,
+      tools: request.tools,
+      toolChoice: request.toolChoice,
+      parallelToolCalls: request.parallelToolCalls,
     });
-    return { text, provider: "agentrouter", model };
+    return {
+      text: payload.text,
+      provider: "agentrouter",
+      model,
+      ...(payload.toolCalls?.length ? { toolCalls: payload.toolCalls } : {}),
+      ...(payload.finishReason ? { finishReason: payload.finishReason } : {}),
+    };
   },
 };

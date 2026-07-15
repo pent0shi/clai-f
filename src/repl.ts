@@ -41,6 +41,7 @@ import {
 } from "./store/history.js";
 import { assertProvider, defaultModels, getProviderInfoText } from "./llm/provider.js";
 import { getProvider, providerAuth } from "./llm/router.js";
+import { clearTextOnlyModels } from "./llm/tool-protocol.js";
 import { providerIds } from "./types.js";
 import {
   runUpdate,
@@ -841,6 +842,9 @@ async function handleSlash(
         }
         state.model = picked;
         setProviderModel(state.provider, picked);
+        // Sticky text-only from a prior tools-unsupported 400 should not
+        // permanently disable native tools after the user switches models.
+        clearTextOnlyModels();
         console.log(renderProviderSwitch(state.provider, picked));
         maybePrintThinkingTip(state.provider, picked);
         return true;
@@ -856,12 +860,14 @@ async function handleSlash(
         const picked = models[num - 1]!;
         state.model = picked;
         setProviderModel(state.provider, picked);
+        clearTextOnlyModels();
         console.log(renderProviderSwitch(state.provider, picked));
         maybePrintThinkingTip(state.provider, picked);
       } else {
         // Name → set directly
         state.model = arg;
         setProviderModel(state.provider, arg);
+        clearTextOnlyModels();
         console.log(renderProviderSwitch(state.provider, arg));
         maybePrintThinkingTip(state.provider, arg);
       }
@@ -873,6 +879,7 @@ async function handleSlash(
       const config = getConfig();
       state.provider = config.defaultProvider;
       state.model = getProviderModel(state.provider);
+      clearTextOnlyModels();
       console.log(renderProviderSwitch(state.provider, state.model));
       maybePrintThinkingTip(state.provider, state.model);
       return true;

@@ -193,21 +193,88 @@ export async function pingSweep(args: PingSweepArgs): Promise<ToolResult> {
     };
   }
 
-  // Method selection
+  // Method selection. For "auto", try nmap first, but fall through to ARP
+  // methods when nmap returns 0 hosts (common without root — no ARP probe).
   if (method === "nmap" || (method === "auto" && commandAvailable("nmap"))) {
-    const result = await runCommand("nmap", ["-sn", target], timeoutMs);
-    const devices = parseNmapPingSweep(result.stdout);
-    return {
-      ok: result.ok,
-      output: formatDevices(devices) + (result.ok ? "" : `\n\nStderr: ${result.stderr}`),
-    };
+    // Prefer non-interactive cached sudo when available so nmap can ARP-scan.
+    let result = await runCommand("nmap", ["-sn", target], timeoutMs);
+    let devices = parseNmapPingSweep(result.stdout + "\n" + result.stderr);
+    if (devices.length === 0 && platform() !== "win32" && commandAvailable("sudo")) {
+      // -n: only works if sudo timestamp is already valid (no password prompt).
+      const elevated = await runCommand(
+        "sudo",
+        ["-n", "nmap", "-sn", target],
+        timeoutMs,
+      );
+      const elevatedDevices = parseNmapPingSweep(
+        elevated.stdout + "\n" + elevated.stderr,
+      );
+      if (elevatedDevices.length > 0) {
+        return {
+          ok: true,
+          output:
+            formatDevices(elevatedDevices) +
+            "\n\n(via sudo -n nmap — password was already cached)",
+        };
+      }
+      if (elevated.ok) {
+        result = elevated;
+        devices = elevatedDevices;
+      }
+    }
+
+    if (devices.length > 0) {
+      return {
+        ok: result.ok || devices.length > 0,
+        output: formatDevices(devices) + (result.ok ? "" : `\n\nStderr: ${result.stderr}`),
+      };
+    }
+
+    // nmap found nothing — in "nmap" mode return that; in "auto" fall through.
+    if (method === "nmap") {
+      return {
+        ok: result.ok,
+        output:
+          formatDevices(devices) +
+          (result.ok
+            ? "\n\nNote: 0 hosts from nmap -sn. Without root, LAN discovery is weak. " +
+              "Retry after `sudo -v`, use method \"arp\", or run an elevated nmap -sn."
+            : `\n\nStderr: ${result.stderr}`),
+        exitCode: result.exitCode ?? (result.ok ? 0 : 1),
+      };
+    }
+    // auto + empty → continue to ARP/neigh below
   }
 
   if (method === "arp" || method === "auto") {
-    // Try arp-scan first (gives richer data)
+    // Try arp-scan first (gives richer data; often needs root)
     if (commandAvailable("arp-scan")) {
-      const result = await runCommand("arp-scan", ["--localnet"], timeoutMs);
-      const devices = parseArpScanOutput(result.stdout);
+      let result = await runCommand("arp-scan", ["--localnet"], timeoutMs);
+      let devices = parseArpScanOutput(result.stdout);
+      if (
+        devices.length === 0 &&
+        platform() !== "win32" &&
+        commandAvailable("sudo")
+      ) {
+        const elevated = await runCommand(
+          "sudo",
+          ["-n", "arp-scan", "--localnet"],
+          timeoutMs,
+        );
+        const elevatedDevices = parseArpScanOutput(elevated.stdout);
+        if (elevatedDevices.length > 0) {
+          return {
+            ok: true,
+            output:
+              formatDevices(elevatedDevices) +
+              "\n\n(via sudo -n arp-scan — password was already cached)",
+          };
+        }
+        if (elevated.ok) {
+          result = elevated;
+          devices = elevatedDevices;
+        }
+      }
       if (devices.length > 0) {
         return {
           ok: true,
@@ -220,11 +287,14 @@ export async function pingSweep(args: PingSweepArgs): Promise<ToolResult> {
     if (platform() === "linux" && commandAvailable("ip")) {
       const result = await runCommand("ip", ["neigh", "show"], timeoutMs);
       const devices = parseIpNeigh(result.stdout);
-      return {
-        ok: true,
-        output: formatDevices(devices) +
-          "\n\nNote: ARP cache only shows recently-seen devices. For comprehensive discovery, install nmap: `pkg.install nmap`",
-      };
+      if (devices.length > 0 || method === "arp") {
+        return {
+          ok: true,
+          output:
+            formatDevices(devices) +
+            "\n\nNote: ARP cache only shows recently-seen devices. For comprehensive discovery, run elevated nmap -sn or install arp-scan.",
+        };
+      }
     }
 
     // Fallback: arp -a (available everywhere)
@@ -232,8 +302,10 @@ export async function pingSweep(args: PingSweepArgs): Promise<ToolResult> {
     const devices = parseArpTable(result.stdout);
     return {
       ok: true,
-      output: formatDevices(devices) +
-        "\n\nNote: ARP cache only shows recently-seen devices. For comprehensive discovery, install nmap: `pkg.install nmap`",
+      output:
+        formatDevices(devices) +
+        "\n\nNote: ARP cache only shows recently-seen devices. " +
+        "nmap -sn without root often returns 0 hosts on LAN — try `sudo -v` then retry, or elevate nmap.",
     };
   }
 

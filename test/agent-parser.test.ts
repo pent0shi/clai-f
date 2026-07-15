@@ -10,6 +10,9 @@ import {
   looksLikeActionNarration,
   looksLikeWebActionNarration,
   looksLikeIdleOrSocialPrompt,
+  looksLikeErrorDiagnosisWithFixIntent,
+  localHttpProbeIsFailure,
+  localHttpProbeIsSuccess,
   preprocessJson,
   groupToolCallsForExecution,
   buildTurnHistory,
@@ -388,9 +391,46 @@ describe("fresh web-search guard", () => {
     expect(
       looksLikeActionNarration("Let me create the components next."),
     ).toBe(true);
+    expect(
+      looksLikeActionNarration("We need to add use client. Let's edit the file."),
+    ).toBe(true);
     expect(looksLikeWebActionNarration("I'll list the files now.")).toBe(
       false,
     );
+  });
+
+  it("detects error diagnosis + fix intent so the runner does not stop mid-fix", () => {
+    expect(
+      looksLikeErrorDiagnosisWithFixIntent(
+        'The error: need "use client" directive because page is a server component. We need to add "use client" at top of page.tsx. Let\'s edit file to add that.',
+      ),
+    ).toBe(true);
+    expect(
+      looksLikeErrorDiagnosisWithFixIntent(
+        "500 Internal Server Error — I should fix the component and retry.",
+      ),
+    ).toBe(true);
+    expect(
+      looksLikeErrorDiagnosisWithFixIntent(
+        "All tasks completed. Server is running at http://localhost:3000.",
+      ),
+    ).toBe(false);
+  });
+
+  it("classifies local HTTP probe success vs failure from tool output", () => {
+    expect(
+      localHttpProbeIsFailure(
+        "500 Internal Server Error http://localhost:3000/\nattempts=3",
+      ),
+    ).toBe(true);
+    expect(localHttpProbeIsSuccess("200 OK http://localhost:3000/\n")).toBe(
+      true,
+    );
+    expect(
+      localHttpProbeIsSuccess(
+        "500 Internal Server Error http://localhost:3000/",
+      ),
+    ).toBe(false);
   });
 
   it("detects idle/social prompts so the runner can skip forced tool use", () => {

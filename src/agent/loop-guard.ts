@@ -74,6 +74,43 @@ export class LoopGuard {
     // redundant loop.
     if (ok) this.signatureSuccess.set(sig, true);
     else if (!this.signatureSuccess.has(sig)) this.signatureSuccess.set(sig, false);
+
+    // X11: after a successful mutate on a path, allow re-reading that path.
+    if (
+      ok &&
+      (name === "fs.write" ||
+        name === "fs.writeMany" ||
+        name === "fs.edit" ||
+        name === "fs.replaceLines" ||
+        name === "fs.append" ||
+        name === "fs.delete")
+    ) {
+      this.invalidateReadsForMutatedPaths(name, args);
+    }
+  }
+
+  /** Drop successful fs.read signatures that touch the mutated path(s). */
+  private invalidateReadsForMutatedPaths(
+    name: string,
+    args: Record<string, unknown>,
+  ): void {
+    const paths: string[] = [];
+    if (typeof args.path === "string") paths.push(args.path);
+    if (name === "fs.writeMany" && Array.isArray(args.files)) {
+      for (const f of args.files) {
+        if (f && typeof f === "object" && typeof (f as { path?: string }).path === "string") {
+          paths.push((f as { path: string }).path);
+        }
+      }
+    }
+    if (paths.length === 0) return;
+    for (const [sig] of this.signatureCount) {
+      if (!sig.startsWith("fs.read::")) continue;
+      if (paths.some((p) => sig.includes(p))) {
+        this.signatureCount.delete(sig);
+        this.signatureSuccess.delete(sig);
+      }
+    }
   }
 
   /**
@@ -126,7 +163,9 @@ export class LoopGuard {
         block: false,
         reason: isWrite
           ? `${name} already wrote this exact path/content once. If that file is finished, move on to the NEXT file or step — do NOT rewrite it.`
-          : `${name} has already been called with these arguments once and succeeded. Consider using the results you already have.`,
+          : name === "fs.read"
+            ? `${name} already succeeded with these args. Use that prior output, or pass a different offset/limit for another range. After you edit the file, re-read is allowed automatically.`
+            : `${name} has already been called with these arguments once and succeeded. Consider using the results you already have.`,
       };
     }
 
@@ -135,7 +174,9 @@ export class LoopGuard {
       block: true,
       reason: isWrite
         ? `${name} was already called ${count} time(s) with the identical path and content. That file is already written. Continue with the remaining files/steps or give your final answer.`
-        : `${name} was already called ${count} time(s) with the same arguments. The data is already in your context — analyze what you have and move to the next step.`,
+        : name === "fs.read"
+          ? `${name} was already called ${count} time(s) with the same arguments. Use the prior read in context, or change offset/limit. After a mutating edit on this path, re-read is allowed.`
+          : `${name} was already called ${count} time(s) with the same arguments. The data is already in your context — analyze what you have and move to the next step.`,
     };
   }
 

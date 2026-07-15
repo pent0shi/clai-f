@@ -40,6 +40,13 @@ export interface ClaiConfig {
   disableKeychain: boolean;
   /** Permissions mode for auto-confirming tool calls ("default" or "allow-all"). */
   permissions?: "default" | "allow-all";
+  /**
+   * Tool calling protocol:
+   * - auto (default): native when dialect supports it, text fallback otherwise
+   * - native: prefer native; still text-fallback on tools-unsupported
+   * - text: force legacy fenced tool protocol
+   */
+  toolCalling?: "auto" | "native" | "text";
 }
 
 /**
@@ -87,6 +94,7 @@ const defaults: ClaiConfig = {
   activeSearchProvider: "duckduckgo",
   disableKeychain: false,
   permissions: "default",
+  toolCalling: "auto",
 };
 
 const store = (() => {

@@ -62,7 +62,7 @@ export const bynaraProvider: LlmProvider = {
   ): Promise<CompletionResult> {
     if (!auth.apiKey) throw new Error("Bynara API key is required");
     const model = request.model ?? defaultModels.bynara;
-    const text = await openAiCompatibleComplete({
+    const payload = await openAiCompatibleComplete({
       provider: "Bynara",
       baseUrl,
       apiKey: auth.apiKey,
@@ -73,8 +73,17 @@ export const bynaraProvider: LlmProvider = {
       signal: request.signal,
       reasoning: request.thinking,
       reasoningStyle: "openai",
+      tools: request.tools,
+      toolChoice: request.toolChoice,
+      parallelToolCalls: request.parallelToolCalls,
     });
-    return { text, provider: "bynara", model };
+    return {
+      text: payload.text,
+      provider: "bynara",
+      model,
+      ...(payload.toolCalls?.length ? { toolCalls: payload.toolCalls } : {}),
+      ...(payload.finishReason ? { finishReason: payload.finishReason } : {}),
+    };
   },
   async stream(
     request: CompletionRequest,
@@ -83,7 +92,7 @@ export const bynaraProvider: LlmProvider = {
   ): Promise<CompletionResult> {
     if (!auth.apiKey) throw new Error("Bynara API key is required");
     const model = request.model ?? defaultModels.bynara;
-    const text = await openAiCompatibleStream({
+    const payload = await openAiCompatibleStream({
       provider: "Bynara",
       baseUrl,
       apiKey: auth.apiKey,
@@ -93,9 +102,19 @@ export const bynaraProvider: LlmProvider = {
       temperature: request.temperature,
       signal: request.signal,
       onToken,
+      onToolCallDelta: request.onToolCallDelta,
       reasoning: request.thinking,
       reasoningStyle: "openai",
+      tools: request.tools,
+      toolChoice: request.toolChoice,
+      parallelToolCalls: request.parallelToolCalls,
     });
-    return { text, provider: "bynara", model };
+    return {
+      text: payload.text,
+      provider: "bynara",
+      model,
+      ...(payload.toolCalls?.length ? { toolCalls: payload.toolCalls } : {}),
+      ...(payload.finishReason ? { finishReason: payload.finishReason } : {}),
+    };
   },
 };

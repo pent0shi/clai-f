@@ -164,7 +164,11 @@ describe("agent recovery request shaping", () => {
 
     const system = request?.messages[0];
     expect(system).toMatchObject({ role: "system" });
-    expect(system?.content).toContain("Call one tool");
+    // Compact path: either legacy fence teaching or native compact tools.
+    expect(
+      system?.content?.includes("Call one tool") ||
+        system?.content?.includes("Call them natively"),
+    ).toBe(true);
     expect(system?.content).not.toContain("SECURITY POSTURE — FULL OFFENSIVE CAPABILITY");
     expect(estimateTokens(system?.content ?? "")).toBeLessThan(2_000);
   });

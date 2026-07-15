@@ -1,56 +1,30 @@
-import type { ChatMessage, CompletionRequest, CompletionResult, ReasoningPreference } from "../types.js";
+import type {
+  CompletionRequest,
+  CompletionResult,
+  ReasoningPreference,
+} from "../types.js";
 import {
   defaultModels,
   type LlmProvider,
   type ProviderAuth,
 } from "./provider.js";
 import { readJson, readStreamLines } from "./http.js";
+import {
+  anthropicToolBodyFields,
+  createAnthropicToolStreamState,
+  finalizeAnthropicToolStream,
+  handleAnthropicStreamEvent,
+  parseAnthropicToolUseBlocks,
+  toAnthropicToolMessages,
+} from "./adapters/anthropic-tools.js";
 
 const baseUrl = "https://api.anthropic.com/v1";
 const anthropicVersion = "2023-06-01";
 
-type AnthropicBlock =
-  | { type: "text"; text: string }
-  | {
-      type: "image";
-      source: { type: "base64"; media_type: string; data: string };
-    };
-
-/**
- * Convert clai messages to Anthropic's format, expanding any image
- * attachments on user turns into base64 image content blocks (the same
- * shape Claude Code uses). Non-image turns keep a plain string content.
- */
-function toAnthropicMessages(
-  messages: ChatMessage[],
-): Array<{ role: "user" | "assistant"; content: string | AnthropicBlock[] }> {
-  return messages
-    .filter((message) => message.role !== "system")
-    .map((message) => {
-      const role = message.role === "assistant" ? "assistant" : "user";
-      if (role === "user" && message.images && message.images.length > 0) {
-        const blocks: AnthropicBlock[] = [];
-        if (message.content) blocks.push({ type: "text", text: message.content });
-        for (const img of message.images) {
-          blocks.push({
-            type: "image",
-            source: {
-              type: "base64",
-              media_type: img.mediaType,
-              data: img.dataBase64,
-            },
-          });
-        }
-        return { role, content: blocks };
-      }
-      return { role, content: message.content };
-    });
-}
-
-function anthropicThinkingBudget(reasoning: ReasoningPreference | undefined): number | undefined {
+function anthropicThinkingBudget(
+  reasoning: ReasoningPreference | undefined,
+): number | undefined {
   if (!reasoning?.enabled) return undefined;
-  // Map to a sensible token budget. Anthropic requires budget < max_tokens
-  // and >= 1024.
   switch (reasoning.effort) {
     case "low":
       return 1_024;
@@ -59,6 +33,35 @@ function anthropicThinkingBudget(reasoning: ReasoningPreference | undefined): nu
     default:
       return 4_096;
   }
+}
+
+function buildAnthropicBody(request: CompletionRequest, stream: boolean): string {
+  const model = request.model ?? defaultModels.anthropic;
+  const system = request.messages.find(
+    (message) => message.role === "system",
+  )?.content;
+  const messages = toAnthropicToolMessages(request.messages);
+  const thinkingBudget = anthropicThinkingBudget(request.thinking);
+  return JSON.stringify({
+    model,
+    system,
+    messages,
+    max_tokens: request.maxTokens ?? 1_024,
+    temperature: request.temperature ?? 0.2,
+    ...(stream ? { stream: true } : {}),
+    ...(thinkingBudget !== undefined
+      ? {
+          thinking: {
+            type: "enabled",
+            budget_tokens: thinkingBudget,
+          },
+        }
+      : {}),
+    ...anthropicToolBodyFields({
+      tools: request.tools,
+      toolChoice: request.toolChoice,
+    }),
+  });
 }
 
 export const anthropicProvider: LlmProvider = {
@@ -83,10 +86,6 @@ export const anthropicProvider: LlmProvider = {
   ): Promise<CompletionResult> {
     if (!auth.apiKey) throw new Error("Anthropic API key is required");
     const model = request.model ?? defaultModels.anthropic;
-    const system = request.messages.find(
-      (message) => message.role === "system",
-    )?.content;
-    const messages = toAnthropicMessages(request.messages);
     const response = await fetch(`${baseUrl}/messages`, {
       method: "POST",
       signal: request.signal ?? null,
@@ -95,40 +94,40 @@ export const anthropicProvider: LlmProvider = {
         "x-api-key": auth.apiKey,
         "anthropic-version": anthropicVersion,
       },
-      body: JSON.stringify({
-        model,
-        system,
-        messages,
-        max_tokens: request.maxTokens ?? 1_024,
-        temperature: request.temperature ?? 0.2,
-        ...(anthropicThinkingBudget(request.thinking) !== undefined
-          ? {
-              thinking: {
-                type: "enabled",
-                budget_tokens: anthropicThinkingBudget(request.thinking),
-              },
-            }
-          : {}),
-      }),
+      body: buildAnthropicBody(request, false),
     });
     const data = await readJson<{
-      content?: Array<{ type: string; text?: string; thinking?: string }>;
+      content?: Array<{
+        type: string;
+        text?: string;
+        thinking?: string;
+        id?: string;
+        name?: string;
+        input?: unknown;
+      }>;
+      stop_reason?: string;
     }>(response);
-    const thinkingText = data.content
-      ?.filter((part) => part.type === "thinking")
-      .map((part) => part.thinking ?? "")
-      .join("")
-      .trim();
-    const text = data.content
-      ?.filter((part) => part.type === "text")
-      .map((part) => part.text ?? "")
-      .join("")
-      .trim();
-    if (!text) {
+    const parsed = parseAnthropicToolUseBlocks(data.content);
+    if (!parsed.text && parsed.toolCalls.length === 0) {
       throw new Error("Anthropic returned no completion text");
     }
-    const final = thinkingText ? `<think>${thinkingText}</think>${text}` : text;
-    return { text: final, provider: "anthropic", model };
+    const final = parsed.thinkingText
+      ? `<think>${parsed.thinkingText}</think>${parsed.text}`
+      : parsed.text;
+    return {
+      text: final,
+      provider: "anthropic",
+      model,
+      ...(parsed.toolCalls.length ? { toolCalls: parsed.toolCalls } : {}),
+      ...(data.stop_reason
+        ? {
+            finishReason:
+              data.stop_reason === "tool_use" ? "tool_calls" : data.stop_reason,
+          }
+        : parsed.toolCalls.length
+          ? { finishReason: "tool_calls" }
+          : {}),
+    };
   },
   async stream(
     request: CompletionRequest,
@@ -137,10 +136,6 @@ export const anthropicProvider: LlmProvider = {
   ): Promise<CompletionResult> {
     if (!auth.apiKey) throw new Error("Anthropic API key is required");
     const model = request.model ?? defaultModels.anthropic;
-    const system = request.messages.find(
-      (message) => message.role === "system",
-    )?.content;
-    const messages = toAnthropicMessages(request.messages);
     const response = await fetch(`${baseUrl}/messages`, {
       method: "POST",
       signal: request.signal ?? null,
@@ -149,22 +144,7 @@ export const anthropicProvider: LlmProvider = {
         "x-api-key": auth.apiKey,
         "anthropic-version": anthropicVersion,
       },
-      body: JSON.stringify({
-        model,
-        system,
-        messages,
-        max_tokens: request.maxTokens ?? 1_024,
-        temperature: request.temperature ?? 0.2,
-        stream: true,
-        ...(anthropicThinkingBudget(request.thinking) !== undefined
-          ? {
-              thinking: {
-                type: "enabled",
-                budget_tokens: anthropicThinkingBudget(request.thinking),
-              },
-            }
-          : {}),
-      }),
+      body: buildAnthropicBody(request, true),
     });
     if (!response.ok) {
       await readJson<unknown>(response);
@@ -174,6 +154,8 @@ export const anthropicProvider: LlmProvider = {
     }
     let full = "";
     let inThinking = false;
+    const streamState = createAnthropicToolStreamState();
+    let stopReason: string | undefined;
 
     const enterThinking = (): void => {
       if (inThinking) return;
@@ -194,25 +176,54 @@ export const anthropicProvider: LlmProvider = {
       const trimmed = line.trim();
       if (!trimmed.startsWith("data:")) continue;
       const payload = trimmed.slice(5).trim();
-      if (payload === "[DONE]") {
-        exitThinking();
-        return { text: full, provider: "anthropic", model };
-      }
+      if (payload === "[DONE]") break;
       try {
         const parsed = JSON.parse(payload) as {
           type?: string;
-          delta?: { type?: string; text?: string; thinking?: string };
+          index?: number;
+          content_block?: {
+            type?: string;
+            id?: string;
+            name?: string;
+            text?: string;
+            thinking?: string;
+          };
+          delta?: {
+            type?: string;
+            text?: string;
+            thinking?: string;
+            partial_json?: string;
+            stop_reason?: string;
+          };
         };
-        if (parsed.type === "content_block_delta") {
-          const deltaType = parsed.delta?.type;
-          if (deltaType === "thinking_delta" && parsed.delta?.thinking) {
+        if (parsed.type === "message_delta" && parsed.delta?.stop_reason) {
+          stopReason = parsed.delta.stop_reason;
+        }
+        if (
+          parsed.type === "content_block_start" ||
+          parsed.type === "content_block_delta"
+        ) {
+          const deltas = handleAnthropicStreamEvent(streamState, parsed);
+          if (deltas.thinkingDelta) {
             enterThinking();
-            full += parsed.delta.thinking;
-            onToken(parsed.delta.thinking);
-          } else if (deltaType === "text_delta" && parsed.delta?.text) {
+            full += deltas.thinkingDelta;
+            onToken(deltas.thinkingDelta);
+          }
+          if (deltas.textDelta) {
             if (inThinking) exitThinking();
-            full += parsed.delta.text;
-            onToken(parsed.delta.text);
+            full += deltas.textDelta;
+            onToken(deltas.textDelta);
+          }
+          if (deltas.toolCallDelta && request.onToolCallDelta) {
+            const d = deltas.toolCallDelta;
+            request.onToolCallDelta({
+              index: d.index,
+              ...(d.id !== undefined ? { id: d.id } : {}),
+              ...(d.name !== undefined ? { name: d.name } : {}),
+              ...(d.argumentsBytes !== undefined
+                ? { argumentsBytes: d.argumentsBytes }
+                : {}),
+            });
           }
         }
       } catch {
@@ -220,6 +231,25 @@ export const anthropicProvider: LlmProvider = {
       }
     }
     exitThinking();
-    return { text: full, provider: "anthropic", model };
+    const finalized = finalizeAnthropicToolStream(streamState);
+    if (!full.trim() && finalized.toolCalls.length === 0) {
+      throw new Error("Anthropic returned no completion text");
+    }
+    return {
+      text: full,
+      provider: "anthropic",
+      model,
+      ...(finalized.toolCalls.length
+        ? { toolCalls: finalized.toolCalls }
+        : {}),
+      ...(stopReason
+        ? {
+            finishReason:
+              stopReason === "tool_use" ? "tool_calls" : stopReason,
+          }
+        : finalized.toolCalls.length
+          ? { finishReason: "tool_calls" }
+          : {}),
+    };
   },
 };

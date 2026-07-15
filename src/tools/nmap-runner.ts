@@ -2,7 +2,14 @@ import { platform } from "node:os";
 import { commandAvailable } from "../os/pkgmgr.js";
 import type { ToolResult } from "../types.js";
 import { spawnArgv } from "./shell.js";
-import { nmapScanNeedsPrivilege, toConnectScanArgv } from "./validate.js";
+import {
+  isNmapSingleHostTarget,
+  looksLikeNmapNoHostsUp,
+  nmapArgvHasPn,
+  nmapScanNeedsPrivilege,
+  toConnectScanArgv,
+  withNmapSkipDiscovery,
+} from "./validate.js";
 import type { ToolRunOptions } from "./tool-types.js";
 
 /**
@@ -42,27 +49,39 @@ function looksLikePrivilegeError(output: string): boolean {
   );
 }
 
+function canInteractiveSudo(): boolean {
+  return Boolean(process.stdin.isTTY);
+}
+
 /**
  * Run an nmap scan, transparently obtaining the privileges a stealth/raw
  * scan needs and falling back to an unprivileged TCP connect scan when those
  * privileges can't be obtained (no sudo, password declined, etc.).
  *
  * Strategy:
- *   1. If the scan needs raw sockets and we're not root, wrap it in the
- *      OS-appropriate elevation helper (sudo / doas / gsudo). stdin is
- *      inherited so the user can type their password live — exactly the
- *      pattern documented for shell.exec sudo.
- *   2. If elevation is unavailable, or the privileged attempt fails in a way
+ *   1. Single-host port scans get -Pn so failed host-discovery pings do not
+ *      report "0 hosts up" while ports are actually open.
+ *   2. If the scan needs raw sockets and we're not root, wrap it in the
+ *      OS-appropriate elevation helper (sudo / doas / gsudo). Prefer the
+ *      secure requestSecret path (TUI); else interactive TTY sudo.
+ *   3. If elevation is unavailable, or the privileged attempt fails in a way
  *      that looks like a permission/privilege error, retry as `-sT` (TCP
  *      connect) which works for any user on every OS.
- * This is the "most general approach first, then fall back" behavior the
- * scans need so they never dead-end on "you must be root".
+ *   4. If a run still looks like "host down / 0 hosts up" without -Pn, retry
+ *      once with -Pn before returning.
  */
 export async function runNmapScan(
   argv: string[],
   options?: ToolRunOptions,
 ): Promise<ToolResult> {
-  const needsPrivilege = nmapScanNeedsPrivilege(argv);
+  // Known single hosts: skip discovery by default (ICMP/ARP often blocked or
+  // needs root; false "0 hosts up" is a common agent failure mode).
+  let scanArgv =
+    isNmapSingleHostTarget(argv) && !nmapArgvHasPn(argv)
+      ? withNmapSkipDiscovery(argv)
+      : [...argv];
+
+  const needsPrivilege = nmapScanNeedsPrivilege(scanArgv);
   const prefix = needsPrivilege ? await elevationPrefix() : undefined;
 
   const attempts: Array<{
@@ -78,89 +97,115 @@ export async function runNmapScan(
       // Authenticate in a short, dedicated process. In the TUI, never inherit
       // stdin for the long nmap scan: pipe the already-entered password to
       // sudo so Ink keeps receiving Escape/Ctrl+C while nmap is running.
-      options?.onOutput?.(
-        options?.requestSecret
-          ? "\nAdministrator access is required for a stealth scan. Complete the secure password prompt below.\n"
-          : "\nAdministrator access is required for a stealth scan. Enter your sudo password below; Ctrl+C cancels.\n",
-        "stdout",
-      );
-      let auth: ToolResult;
-      let sudoPassword: string | undefined;
-      if (options?.requestSecret) {
-        const password = await options.requestSecret({
-          title: "Administrator access",
-          prompt: "Enter your macOS password for sudo. It is sent only to sudo and is never stored.",
-        });
-        if (password === undefined) {
-          return { ok: false, output: "Administrator authentication cancelled.", exitCode: 130 };
-        }
-        sudoPassword = password;
-        auth = await spawnArgv({
-          command: "sudo",
-          argv: ["-S", "-p", "", "-v"],
-          stdinText: `${password}\n`,
-          timeoutMs: 30_000,
-          signal: options.signal,
-          onOutput: options.onOutput,
-          noArtifact: true,
-          interactiveStdin: false,
-        });
-      } else {
-        // Classic REPL: let sudo read directly from its controlling terminal.
-        auth = await spawnArgv({
-          command: "sudo",
-          argv: [...prefix.argv, "-v"],
-          timeoutMs: 120_000,
-          signal: options?.signal,
-          onOutput: options?.onOutput,
-          interactiveStdin: true,
-          noArtifact: true,
-        });
-      }
-      if (options?.signal?.aborted || auth.exitCode === 130) return auth;
-      if (auth.ok) {
-        attempts.push({
-          command: "sudo",
-          argv: options?.requestSecret ? ["-S", "-p", "", "nmap", ...argv] : ["-n", "nmap", ...argv],
-          stdinText: options?.requestSecret ? `${sudoPassword ?? ""}\n` : undefined,
-          note: "Administrator access confirmed. Starting stealth scan (ESC cancels).",
-        });
-      } else {
+      const useSecret = Boolean(options?.requestSecret);
+      const useTty = !useSecret && canInteractiveSudo();
+
+      if (!useSecret && !useTty) {
+        // No password UI and no TTY — interactive sudo would hang or fail
+        // with "a terminal is required". Skip straight to connect-scan.
         options?.onOutput?.(
-          "\nSudo authentication was not completed; using an unprivileged TCP connect scan instead.\n",
+          "\nCannot prompt for sudo password here (no secret UI / no TTY). Using an unprivileged TCP connect scan (-sT -Pn).\n",
           "stderr",
         );
+      } else {
+        options?.onOutput?.(
+          useSecret
+            ? "\nAdministrator access is required for a stealth scan. Complete the secure password prompt below.\n"
+            : "\nAdministrator access is required for a stealth scan. Enter your sudo password below; Ctrl+C cancels.\n",
+          "stdout",
+        );
+        let auth: ToolResult;
+        let sudoPassword: string | undefined;
+        if (useSecret && options?.requestSecret) {
+          const password = await options.requestSecret({
+            title: "Administrator access",
+            prompt:
+              "Enter your password for sudo (nmap raw-socket scan). It is sent only to sudo and is never stored.",
+          });
+          if (password === undefined) {
+            return {
+              ok: false,
+              output:
+                "Administrator authentication cancelled. Re-run and enter your password, or use profile.scanType \"tcp\" for an unprivileged connect scan.",
+              exitCode: 130,
+            };
+          }
+          sudoPassword = password;
+          auth = await spawnArgv({
+            command: "sudo",
+            argv: ["-S", "-p", "", "-v"],
+            stdinText: `${password}\n`,
+            timeoutMs: 30_000,
+            signal: options.signal,
+            onOutput: options.onOutput,
+            noArtifact: true,
+            interactiveStdin: false,
+          });
+        } else {
+          // Classic REPL: let sudo read directly from its controlling terminal.
+          auth = await spawnArgv({
+            command: "sudo",
+            argv: [...prefix.argv, "-v"],
+            timeoutMs: 120_000,
+            signal: options?.signal,
+            onOutput: options?.onOutput,
+            interactiveStdin: true,
+            noArtifact: true,
+          });
+        }
+        if (options?.signal?.aborted || auth.exitCode === 130) return auth;
+        if (auth.ok) {
+          attempts.push({
+            command: "sudo",
+            // -n after a successful -v uses the cached credential without
+            // another password prompt (and without needing another stdin).
+            argv: useSecret
+              ? ["-S", "-p", "", "nmap", ...scanArgv]
+              : ["-n", "nmap", ...scanArgv],
+            stdinText: useSecret ? `${sudoPassword ?? ""}\n` : undefined,
+            note: "Administrator access confirmed. Starting stealth scan (ESC cancels).",
+          });
+        } else {
+          const detail = auth.output?.trim()
+            ? `\n${auth.output.trim().slice(0, 400)}`
+            : "";
+          options?.onOutput?.(
+            `\nSudo authentication failed or was not completed; using an unprivileged TCP connect scan instead.${detail}\n`,
+            "stderr",
+          );
+        }
       }
     } else if (prefix.command) {
       attempts.push({
         command: prefix.command,
-        argv: [...prefix.argv, "nmap", ...argv],
+        argv: [...prefix.argv, "nmap", ...scanArgv],
         interactiveStdin: true,
         note: `Running a stealth scan with ${prefix.command} (you may be prompted for your password).`,
       });
     } else {
       // Already root.
-      attempts.push({ command: "nmap", argv });
+      attempts.push({ command: "nmap", argv: scanArgv });
     }
     // Fallback: unprivileged connect scan if elevation fails/declines.
+    const connectArgv = withNmapSkipDiscovery(toConnectScanArgv(scanArgv));
     attempts.push({
       command: "nmap",
-      argv: toConnectScanArgv(argv),
-      note: "Privileged scan unavailable — falling back to an unprivileged TCP connect scan (-sT).",
+      argv: connectArgv,
+      note: "Privileged scan unavailable — falling back to an unprivileged TCP connect scan (-sT -Pn).",
     });
   } else if (needsPrivilege && !prefix) {
     // No elevation helper at all — go straight to the connect-scan fallback,
     // but tell the user why the stealth scan was downgraded.
     attempts.push({
       command: "nmap",
-      argv: toConnectScanArgv(argv),
+      argv: withNmapSkipDiscovery(toConnectScanArgv(scanArgv)),
       note:
         platform() === "win32"
-          ? "No elevation helper found (sudo/gsudo). Run from an Administrator terminal with Npcap for a SYN scan; using a TCP connect scan (-sT) for now."
-          : "No sudo/doas available for a raw-socket SYN scan — using an unprivileged TCP connect scan (-sT) instead.",
+          ? "No elevation helper found (sudo/gsudo). Run from an Administrator terminal with Npcap for a SYN scan; using a TCP connect scan (-sT -Pn) for now."
+          : "No sudo/doas available for a raw-socket SYN scan — using an unprivileged TCP connect scan (-sT -Pn) instead.",
     });
   } else {
-    attempts.push({ command: "nmap", argv });
+    attempts.push({ command: "nmap", argv: scanArgv });
   }
 
   let last: ToolResult | undefined;
@@ -170,7 +215,7 @@ export async function runNmapScan(
       return { ok: false, output: "Command aborted.", exitCode: 130 };
     }
     if (attempt.note) options?.onOutput?.(`\n${attempt.note}\n`, "stdout");
-    const result = await spawnArgv({
+    let result = await spawnArgv({
       command: attempt.command,
       argv: attempt.argv,
       stdinText: attempt.stdinText,
@@ -181,10 +226,51 @@ export async function runNmapScan(
         ? { interactiveStdin: attempt.interactiveStdin }
         : {}),
     });
+
+    // Host discovery false negative: retry once with -Pn on the same elevation.
+    if (
+      result.ok &&
+      looksLikeNmapNoHostsUp(result.output) &&
+      !nmapArgvHasPn(attempt.argv) &&
+      isNmapSingleHostTarget(attempt.argv)
+    ) {
+      options?.onOutput?.(
+        "\nHost discovery reported no hosts up — retrying once with -Pn (treat host as online).\n",
+        "stdout",
+      );
+      result = await spawnArgv({
+        command: attempt.command,
+        argv: withNmapSkipDiscovery(attempt.argv),
+        stdinText: attempt.stdinText,
+        timeoutMs: 300_000,
+        signal: options?.signal,
+        onOutput: options?.onOutput,
+        ...(attempt.interactiveStdin !== undefined
+          ? { interactiveStdin: attempt.interactiveStdin }
+          : {}),
+      });
+    }
+
     last = result;
     // Success, or a non-privilege failure we shouldn't paper over → return.
     const isLastAttempt = i === attempts.length - 1;
     if (result.ok || isLastAttempt || !looksLikePrivilegeError(result.output)) {
+      // Annotate empty single-host results so the model does not loop forever.
+      if (
+        result.ok &&
+        looksLikeNmapNoHostsUp(result.output) &&
+        isNmapSingleHostTarget(attempt.argv)
+      ) {
+        return {
+          ...result,
+          output:
+            result.output +
+            "\n\nNote: nmap still reported no live host/open ports after -Pn. " +
+            "The target may be offline, firewalled, or blocking this host. " +
+            "Do not retry the same net.scan args in a loop — try different ports, " +
+            "confirm the IP with net.context / net.pingSweep, or use shell.exec for a custom nmap line.",
+        };
+      }
       return result;
     }
     // Otherwise loop to the next (fallback) attempt.

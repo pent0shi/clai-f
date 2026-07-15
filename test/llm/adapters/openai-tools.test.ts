@@ -1,0 +1,121 @@
+import { describe, expect, it } from "vitest";
+import {
+  openAiToolBodyFields,
+  toOpenAiToolMessages,
+  toOpenAiTools,
+} from "../../../src/llm/adapters/openai-tools.js";
+import { getToolDefinitions } from "../../../src/tools/definitions.js";
+import { toOpenAiMessages } from "../../../src/llm/http.js";
+import {
+  accumulateOpenAiToolCallDelta,
+  finalizeOpenAiToolCalls,
+} from "../../../src/llm/tool-protocol.js";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+
+describe("openai tools adapter", () => {
+  it("toOpenAiTools shape", () => {
+    const defs = getToolDefinitions({ names: ["fs.write"] });
+    const tools = toOpenAiTools(defs);
+    expect(tools[0]).toMatchObject({
+      type: "function",
+      function: { name: "fs_write" },
+    });
+    expect(tools[0]!.function.parameters.type).toBe("object");
+  });
+
+  it("message round-trip: assistant tool_calls + tool results", () => {
+    const wire = toOpenAiToolMessages(
+      [
+        { role: "user", content: "write it" },
+        {
+          role: "assistant",
+          content: "",
+          toolCalls: [
+            {
+              id: "call_1",
+              name: "fs.write",
+              args: { path: "a.ts", content: "x" },
+            },
+          ],
+        },
+        {
+          role: "tool",
+          toolCallId: "call_1",
+          name: "fs.write",
+          content: "Wrote a.ts",
+        },
+      ],
+      (m) => m.content,
+    );
+    expect(wire[1]).toMatchObject({
+      role: "assistant",
+      tool_calls: [
+        {
+          id: "call_1",
+          type: "function",
+          function: { name: "fs_write" },
+        },
+      ],
+    });
+    expect(wire[2]).toMatchObject({
+      role: "tool",
+      tool_call_id: "call_1",
+      content: "Wrote a.ts",
+    });
+  });
+
+  it("toOpenAiMessages no longer rewrites tool → user", () => {
+    const msgs = toOpenAiMessages([
+      {
+        role: "tool",
+        content: "ok",
+        toolCallId: "c1",
+      },
+    ]);
+    expect(msgs[0]!.role).toBe("tool");
+    expect((msgs[0] as { tool_call_id?: string }).tool_call_id).toBe("c1");
+  });
+
+  it("openAiToolBodyFields attaches tools when present", () => {
+    const body = openAiToolBodyFields({
+      tools: getToolDefinitions({ names: ["fs.read"] }),
+      toolChoice: "auto",
+    });
+    expect(body.tools).toHaveLength(1);
+    expect(body.tool_choice).toBe("auto");
+    expect(body.parallel_tool_calls).toBe(true);
+  });
+
+  it("stream fixture reassembly for large content", () => {
+    const fixturePath = resolve(
+      __dirname,
+      "../fixtures/openai-stream-tool-deltas.jsonl",
+    );
+    const lines = readFileSync(fixturePath, "utf8")
+      .trim()
+      .split("\n")
+      .filter(Boolean);
+    const state = new Map();
+    for (const line of lines) {
+      const parsed = JSON.parse(line) as {
+        choices?: Array<{
+          delta?: {
+            tool_calls?: Array<{
+              index?: number;
+              id?: string;
+              function?: { name?: string; arguments?: string };
+            }>;
+          };
+        }>;
+      };
+      for (const tc of parsed.choices?.[0]?.delta?.tool_calls ?? []) {
+        accumulateOpenAiToolCallDelta(state, tc);
+      }
+    }
+    const calls = finalizeOpenAiToolCalls(state);
+    expect(calls[0]!.name).toBe("fs.write");
+    expect(String(calls[0]!.args.content)).toContain("export const VALUE");
+    expect(String(calls[0]!.args.content).length).toBeGreaterThan(1000);
+  });
+});

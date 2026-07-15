@@ -3,6 +3,7 @@ import { asToolCallId } from "../../../src/app/events/app-event.js";
 import type { ToolItem } from "../../../src/tui-v2/state/transcript-types.js";
 import {
   cleanToolOutputLines,
+  evidencePreviewLines,
   presentOutput,
   presentTool,
 } from "../../../src/tui-v2/rendering/tool-presenter.js";
@@ -143,6 +144,41 @@ describe("presentOutput (CHAT-005, PERF-003)", () => {
     const p = presentOutput("", undefined, false);
     expect(p.lines).toEqual([]);
     expect(p.hiddenAboveCount).toBe(0);
+  });
+
+  it("keeps web.search evidence at top when collapsed (R5)", () => {
+    const body = [
+      "duckduckgo: 5 results",
+      "",
+      '  "title": "Official UK PM"',
+      '  "url": "https://www.gov.uk/government/ministers/prime-minister"',
+      '  "title": "News junk"',
+      '  "url": "https://example-seo.example/pm"',
+      ...Array.from({ length: 20 }, (_, i) => `noise line ${i}`),
+    ].join("\n");
+    const p = presentOutput(body, undefined, false, "web.search");
+    expect(p.lines[0]).toMatch(/duckduckgo|results/i);
+    expect(p.lines.some((l) => l.includes("gov.uk"))).toBe(true);
+    expect(p.lines.some((l) => l.startsWith("···"))).toBe(true);
+    const ev = evidencePreviewLines("web.search", body.split("\n"));
+    expect(ev?.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("keeps web.fetch title/lede when collapsed (R5)", () => {
+    const body = [
+      "HTTP 200 OK",
+      "Title: Prime Minister - GOV.UK",
+      "",
+      "The Prime Minister is the head of the UK government.",
+      "More body content about duties and history.",
+      "Even more content.",
+      ...Array.from({ length: 30 }, (_, i) => `paragraph ${i}`),
+    ].join("\n");
+    const p = presentOutput(body, undefined, false, "web.fetch");
+    expect(p.lines[0]).toMatch(/HTTP 200|Title/i);
+    expect(p.lines.some((l) => /Prime Minister is the head/i.test(l))).toBe(
+      true,
+    );
   });
 
   it("does not show ok/failed status lines in the body", () => {

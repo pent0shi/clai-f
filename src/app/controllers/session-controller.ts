@@ -7,6 +7,7 @@ import {
 import { createSessionPolicy, type SessionPolicy } from "../../agent/session-policy.js";
 import { generateSessionTitle } from "../../agent/session-title.js";
 import { completeWithProvider } from "../../llm/router.js";
+import { clearTextOnlyModels } from "../../llm/tool-protocol.js";
 import { getConfig, getProviderModel } from "../../store/config.js";
 import type { TranscriptItem as ClassicTranscriptItem } from "../../tui/state.js";
 import {
@@ -163,11 +164,14 @@ export class SessionController implements Disposable {
 
   setProvider(provider: ProviderId | undefined): void {
     this.provider = provider;
+    clearTextOnlyModels();
     this.notifyState();
   }
 
   setModel(model: string | undefined): void {
     this.model = model;
+    // Allow native tools again after /model switch (sticky text-only is process-global).
+    clearTextOnlyModels();
     this.notifyState();
   }
 

@@ -37,7 +37,7 @@ export const openaiProvider: LlmProvider = {
   ): Promise<CompletionResult> {
     if (!auth.apiKey) throw new Error("OpenAI API key is required");
     const model = request.model ?? defaultModels.openai;
-    const text = await openAiCompatibleComplete({
+    const payload = await openAiCompatibleComplete({
       provider: "OpenAI",
       baseUrl,
       apiKey: auth.apiKey,
@@ -48,8 +48,17 @@ export const openaiProvider: LlmProvider = {
       signal: request.signal,
       reasoning: request.thinking,
       reasoningStyle: "openai",
+      tools: request.tools,
+      toolChoice: request.toolChoice,
+      parallelToolCalls: request.parallelToolCalls,
     });
-    return { text, provider: "openai", model };
+    return {
+      text: payload.text,
+      provider: "openai",
+      model,
+      ...(payload.toolCalls?.length ? { toolCalls: payload.toolCalls } : {}),
+      ...(payload.finishReason ? { finishReason: payload.finishReason } : {}),
+    };
   },
   async stream(
     request: CompletionRequest,
@@ -58,7 +67,7 @@ export const openaiProvider: LlmProvider = {
   ): Promise<CompletionResult> {
     if (!auth.apiKey) throw new Error("OpenAI API key is required");
     const model = request.model ?? defaultModels.openai;
-    const text = await openAiCompatibleStream({
+    const payload = await openAiCompatibleStream({
       provider: "OpenAI",
       baseUrl,
       apiKey: auth.apiKey,
@@ -68,10 +77,20 @@ export const openaiProvider: LlmProvider = {
       temperature: request.temperature,
       signal: request.signal,
       onToken,
+      onToolCallDelta: request.onToolCallDelta,
       reasoning: request.thinking,
       reasoningStyle: "openai",
+      tools: request.tools,
+      toolChoice: request.toolChoice,
+      parallelToolCalls: request.parallelToolCalls,
     });
-    return { text, provider: "openai", model };
+    return {
+      text: payload.text,
+      provider: "openai",
+      model,
+      ...(payload.toolCalls?.length ? { toolCalls: payload.toolCalls } : {}),
+      ...(payload.finishReason ? { finishReason: payload.finishReason } : {}),
+    };
   },
 };
 

@@ -1,6 +1,7 @@
 import type { ChatMessage } from "../types.js";
 import { redactSecrets } from "../llm/provider.js";
 import { stripThinking } from "../ui/thinking.js";
+import { expandKeepStartForToolPairs } from "./tool-history.js";
 
 /**
  * Per-char token estimator. Real tokenization varies by provider, but for
@@ -97,8 +98,10 @@ export function compactMessages(
     start = 1;
   }
 
-  const tail = messages.slice(Math.max(start, messages.length - keepRecent));
-  const middle = messages.slice(start, messages.length - tail.length);
+  let tailStart = Math.max(start, messages.length - keepRecent);
+  tailStart = expandKeepStartForToolPairs(messages, tailStart);
+  const tail = messages.slice(tailStart);
+  const middle = messages.slice(start, tailStart);
   if (middle.length === 0) return messages;
 
   const bullets: string[] = [];
@@ -108,6 +111,11 @@ export function compactMessages(
     } else if (msg.role === "assistant") {
       const line = oneLine(msg.content, 200);
       if (line) bullets.push(`- assistant: ${line}`);
+      if (msg.toolCalls?.length) {
+        bullets.push(
+          `- assistant tools: ${msg.toolCalls.map((t) => t.name).join(", ")}`,
+        );
+      }
     } else if (msg.role === "tool") {
       bullets.push(`- tool result: ${oneLine(msg.content, 200)}`);
     }

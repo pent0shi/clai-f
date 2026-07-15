@@ -16,6 +16,7 @@ import {
   resolveUiChoice,
 } from '../tui-v2/bootstrap/ui-selection.js';
 import { printProviderKeys } from './providers.js';
+import { resolveToolDialect } from '../llm/capabilities.js';
 
 const pentestTools = [
   'nmap', 'nikto', 'sqlmap', 'gobuster', 'ffuf', 'hydra', 'masscan',
@@ -74,6 +75,14 @@ export async function runDoctor(): Promise<void> {
   }
   console.log(`Package manager: ${pkgmgr.id}`);
   const config = getConfig();
+  const toolDialect = resolveToolDialect(
+    config.defaultProvider,
+    config.defaultModel,
+    config.toolCalling,
+  );
+  console.log(
+    `Tool calling: ${config.toolCalling ?? 'auto'} → dialect ${toolDialect} for ${config.defaultProvider}/${config.defaultModel}`,
+  );
   const offline =
     process.env.CLAI_OFFLINE === '1' ||
     process.env.CLAI_NO_UPDATE_CHECK === '1' ||

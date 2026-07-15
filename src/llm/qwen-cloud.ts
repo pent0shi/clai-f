@@ -57,7 +57,7 @@ export const qwenCloudProvider: LlmProvider = {
   ): Promise<CompletionResult> {
     if (!auth.apiKey) throw new Error("Qwen Cloud API key is required");
     const model = request.model ?? defaultModels["qwen-cloud"];
-    const text = await openAiCompatibleComplete({
+    const payload = await openAiCompatibleComplete({
       provider: "Qwen Cloud",
       baseUrl,
       apiKey: auth.apiKey,
@@ -68,8 +68,17 @@ export const qwenCloudProvider: LlmProvider = {
       signal: request.signal,
       reasoning: request.thinking,
       reasoningStyle: "openai",
+      tools: request.tools,
+      toolChoice: request.toolChoice,
+      parallelToolCalls: request.parallelToolCalls,
     });
-    return { text, provider: "qwen-cloud", model };
+    return {
+      text: payload.text,
+      provider: "qwen-cloud",
+      model,
+      ...(payload.toolCalls?.length ? { toolCalls: payload.toolCalls } : {}),
+      ...(payload.finishReason ? { finishReason: payload.finishReason } : {}),
+    };
   },
   async stream(
     request: CompletionRequest,
@@ -78,7 +87,7 @@ export const qwenCloudProvider: LlmProvider = {
   ): Promise<CompletionResult> {
     if (!auth.apiKey) throw new Error("Qwen Cloud API key is required");
     const model = request.model ?? defaultModels["qwen-cloud"];
-    const text = await openAiCompatibleStream({
+    const payload = await openAiCompatibleStream({
       provider: "Qwen Cloud",
       baseUrl,
       apiKey: auth.apiKey,
@@ -88,9 +97,19 @@ export const qwenCloudProvider: LlmProvider = {
       temperature: request.temperature,
       signal: request.signal,
       onToken,
+      onToolCallDelta: request.onToolCallDelta,
       reasoning: request.thinking,
       reasoningStyle: "openai",
+      tools: request.tools,
+      toolChoice: request.toolChoice,
+      parallelToolCalls: request.parallelToolCalls,
     });
-    return { text, provider: "qwen-cloud", model };
+    return {
+      text: payload.text,
+      provider: "qwen-cloud",
+      model,
+      ...(payload.toolCalls?.length ? { toolCalls: payload.toolCalls } : {}),
+      ...(payload.finishReason ? { finishReason: payload.finishReason } : {}),
+    };
   },
 };

@@ -80,11 +80,43 @@ function backgroundsAProcess(command: string): boolean {
 }
 
 /**
+ * One-shot project scaffolders — finish and exit. Must stay in the
+ * foreground even when the command string mentions `vite` / `next`.
+ */
+const SCAFFOLD_FOREGROUND_PATTERNS: RegExp[] = [
+  /\bnpm\s+create\b/i,
+  /\bnpm\s+init\b/i,
+  /\byarn\s+create\b/i,
+  /\bpnpm\s+create\b/i,
+  /\bbun\s+create\b/i,
+  /\bnpx\s+(?:--yes\s+)?create-[\w-]+/i,
+  /\bnpmx?\s+create-[\w-]+/i,
+  /\bdeno\s+run\b.*\bcreate\b/i,
+  // Non-JS one-shot project creators (must stay foreground)
+  /\bcargo\s+new\b/i,
+  /\bcargo\s+init\b/i,
+  /\bgo\s+mod\s+init\b/i,
+  /\bpoetry\s+new\b/i,
+  /\bdjango-admin\s+startproject\b/i,
+  /\brails\s+new\b/i,
+  /\bcomposer\s+create-project\b/i,
+  /\bmix\s+new\b/i,
+  /\bflutter\s+create\b/i,
+  /\bdotnet\s+new\b/i,
+];
+
+export function looksLikeOneShotScaffolder(command: string): boolean {
+  return SCAFFOLD_FOREGROUND_PATTERNS.some((p) => p.test(command));
+}
+
+/**
  * Returns true if the command appears to be a long-running process that
  * should not block the foreground shell. This is a heuristic — false
  * negatives are safer than false positives.
  */
 export function looksLongRunning(command: string): boolean {
+  // X5: npm create vite / create-next-app exit; do not background them.
+  if (looksLikeOneShotScaffolder(command)) return false;
   return (
     backgroundsAProcess(command) ||
     LONG_RUNNING_PATTERNS.some((pattern) => pattern.test(command))

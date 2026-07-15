@@ -10,6 +10,12 @@ import {
   type ProviderAuth,
 } from "./provider.js";
 import { ProviderError, readJson, readStreamLines } from "./http.js";
+import {
+  geminiToolBodyFields,
+  parseGeminiFunctionCalls,
+  toGeminiToolContents,
+} from "./adapters/gemini-tools.js";
+import { fromWireName } from "./tool-protocol.js";
 
 type GeminiPart =
   | { text: string }
@@ -18,34 +24,10 @@ type GeminiPart =
 function geminiContents(
   messages: ChatMessage[],
 ): Array<{ role: "user" | "model"; parts: GeminiPart[] }> {
-  const contents: Array<{ role: "user" | "model"; parts: GeminiPart[] }> = [];
-
-  for (const message of messages) {
-    if (message.role === "system") continue;
-    const role = message.role === "assistant" ? "model" : "user";
-    const parts: GeminiPart[] = [];
-    if (message.content.trim()) parts.push({ text: message.content });
-    if (role === "user" && message.images) {
-      for (const img of message.images) {
-        parts.push({
-          inlineData: { mimeType: img.mediaType, data: img.dataBase64 },
-        });
-      }
-    }
-
-    // Never serialize an empty content part. Apart from being meaningless,
-    // Gemini can subsequently return empty candidates after an empty `model`
-    // turn. If a caller omitted an assistant turn, merge the adjacent user
-    // instructions instead to retain Gemini's alternating-role invariant.
-    if (parts.length === 0) continue;
-    const previous = contents.at(-1);
-    if (previous?.role === role) {
-      previous.parts.push(...parts);
-    } else {
-      contents.push({ role, parts });
-    }
-  }
-  return contents;
+  return toGeminiToolContents(messages) as Array<{
+    role: "user" | "model";
+    parts: GeminiPart[];
+  }>;
 }
 
 function systemInstruction(
@@ -122,6 +104,10 @@ export function geminiBody(request: CompletionRequest): string {
         ? { thinkingConfig }
         : {}),
     },
+    ...geminiToolBodyFields({
+      tools: request.tools,
+      toolChoice: request.toolChoice,
+    }),
   };
   const sys = systemInstruction(request.messages);
   if (sys) body.systemInstruction = sys;
@@ -180,8 +166,17 @@ export const geminiProvider: LlmProvider = {
     const data = await readJson<{
       candidates?: Array<{
         content?: {
-          parts?: Array<{ text?: string; thought?: boolean }>;
+          parts?: Array<{
+            text?: string;
+            thought?: boolean;
+            functionCall?: {
+              name?: string;
+              args?: Record<string, unknown>;
+              id?: string;
+            };
+          }>;
         };
+        finishReason?: string;
       }>;
     }>(response);
     const parts = data.candidates?.[0]?.content?.parts ?? [];
@@ -190,16 +185,24 @@ export const geminiProvider: LlmProvider = {
       .map((part) => part.text ?? "")
       .join("")
       .trim();
-    const text = parts
-      .filter((part) => !part.thought)
-      .map((part) => part.text ?? "")
-      .join("")
-      .trim();
-    if (!text) {
+    const parsed = parseGeminiFunctionCalls(parts);
+    if (!parsed.text && parsed.toolCalls.length === 0) {
       throw new ProviderError("Gemini completed without a visible answer.");
     }
-    const final = thought ? `<think>${thought}</think>${text}` : text;
-    return { text: final, provider: "gemini", model };
+    const final = thought
+      ? `<think>${thought}</think>${parsed.text}`
+      : parsed.text;
+    return {
+      text: final,
+      provider: "gemini",
+      model,
+      ...(parsed.toolCalls.length ? { toolCalls: parsed.toolCalls } : {}),
+      ...(data.candidates?.[0]?.finishReason
+        ? { finishReason: data.candidates[0].finishReason }
+        : parsed.toolCalls.length
+          ? { finishReason: "tool_calls" }
+          : {}),
+    };
   },
   async stream(
     request: CompletionRequest,
@@ -226,6 +229,16 @@ export const geminiProvider: LlmProvider = {
     let full = "";
     let visible = "";
     let inThought = false;
+    const collectedParts: Array<{
+      text?: string;
+      thought?: boolean;
+      functionCall?: {
+        name?: string;
+        args?: Record<string, unknown>;
+        id?: string;
+      };
+    }> = [];
+    let finishReason: string | undefined;
 
     const enterThought = (): void => {
       if (inThought) return;
@@ -246,23 +259,46 @@ export const geminiProvider: LlmProvider = {
       const trimmed = line.trim();
       if (!trimmed.startsWith("data:")) continue;
       const payload = trimmed.slice(5).trim();
-      if (payload === "[DONE]") {
-        exitThought();
-        if (!visible.trim()) {
-          throw new ProviderError("Gemini completed without a visible answer.");
-        }
-        return { text: full, provider: "gemini", model };
-      }
+      if (payload === "[DONE]") break;
       try {
         const parsed = JSON.parse(payload) as {
           candidates?: Array<{
+            finishReason?: string;
             content?: {
-              parts?: Array<{ text?: string; thought?: boolean }>;
+              parts?: Array<{
+                text?: string;
+                thought?: boolean;
+                functionCall?: {
+                  name?: string;
+                  args?: Record<string, unknown>;
+                  id?: string;
+                };
+              }>;
             };
           }>;
         };
-        const parts = parsed.candidates?.[0]?.content?.parts ?? [];
+        const candidate = parsed.candidates?.[0];
+        if (candidate?.finishReason) finishReason = candidate.finishReason;
+        const parts = candidate?.content?.parts ?? [];
         for (const part of parts) {
+          collectedParts.push(part);
+          if (part.functionCall) {
+            if (request.onToolCallDelta && part.functionCall.name) {
+              const idx =
+                collectedParts.filter((p) => p.functionCall).length - 1;
+              const wire = part.functionCall.name;
+              request.onToolCallDelta({
+                index: idx,
+                ...(part.functionCall.id
+                  ? { id: part.functionCall.id }
+                  : {}),
+                name: fromWireName(wire) ?? wire,
+                argumentsBytes: JSON.stringify(part.functionCall.args ?? {})
+                  .length,
+              });
+            }
+            continue;
+          }
           if (!part.text) continue;
           if (part.thought) {
             enterThought();
@@ -280,9 +316,22 @@ export const geminiProvider: LlmProvider = {
       }
     }
     exitThought();
-    if (!visible.trim()) {
+    const toolParsed = parseGeminiFunctionCalls(collectedParts);
+    if (!visible.trim() && toolParsed.toolCalls.length === 0) {
       throw new ProviderError("Gemini completed without a visible answer.");
     }
-    return { text: full, provider: "gemini", model };
+    return {
+      text: full,
+      provider: "gemini",
+      model,
+      ...(toolParsed.toolCalls.length
+        ? { toolCalls: toolParsed.toolCalls }
+        : {}),
+      ...(finishReason
+        ? { finishReason }
+        : toolParsed.toolCalls.length
+          ? { finishReason: "tool_calls" }
+          : {}),
+    };
   },
 };

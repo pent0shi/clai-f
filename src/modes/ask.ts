@@ -1,12 +1,19 @@
 import type { ChatMessage, ChatImage, ProviderId, ToolCall } from "../types.js";
 import type { AgentEvent } from "../agent/events.js";
 import { streamWithProvider } from "../llm/router.js";
+import { resolveToolDialect } from "../llm/capabilities.js";
+import { syntheticToolCallId } from "../llm/tool-protocol.js";
 import { renderAskSystemPrompt } from "../prompts/index.js";
 import { getConfig } from "../store/config.js";
 import { ensureProviderConfigured } from "../commands/providers.js";
 import { loadProjectContext } from "../store/project.js";
 import { parseAllToolCalls, formatToolArgs, looksLikePromptLeak } from "../agent/runner.js";
 import { runToolCall } from "../tools/registry.js";
+import { getToolDefinitions } from "../tools/definitions.js";
+import {
+  appendAssistantWithTools,
+  appendToolResult,
+} from "../agent/tool-history.js";
 
 /**
  * Signal raised when the model, while in ask mode, tries to call a mutating
@@ -147,17 +154,20 @@ async function buildAskMessages(
   const config = getConfig();
   const provider = options.provider ?? config.defaultProvider;
   await ensureProviderConfigured(provider);
+  const model = options.model ?? config.defaultModel;
   const projectContext = await loadProjectContext();
+  const native =
+    resolveToolDialect(provider, model, config.toolCalling) !== "none";
   const systemPrompt = projectContext
-    ? `${renderAskSystemPrompt()}\n\nProject context from .clai/context.md:\n${projectContext}`
-    : renderAskSystemPrompt();
+    ? `${renderAskSystemPrompt({ nativeTools: native })}\n\nProject context from .clai/context.md:\n${projectContext}`
+    : renderAskSystemPrompt({ nativeTools: native });
   const userMessage: ChatMessage = { role: "user", content: prompt };
   if (options.images && options.images.length > 0) {
     userMessage.images = options.images;
   }
   return {
     provider,
-    model: options.model ?? config.defaultModel,
+    model,
     messages: [
       { role: "system", content: systemPrompt },
       ...(options.history ?? []),
@@ -197,6 +207,8 @@ interface AskBaseRequest {
   maxTokens: number;
   thinking: ReturnType<typeof getConfig>["thinking"];
   signal?: AbortSignal | undefined;
+  tools?: ReturnType<typeof getToolDefinitions> | undefined;
+  toolChoice?: "auto" | undefined;
 }
 
 /**
@@ -210,27 +222,42 @@ async function streamAskRound(
   request: AskBaseRequest,
   messages: ChatMessage[],
   onToken: (token: string) => void,
-): Promise<string> {
+): Promise<{ text: string; toolCalls?: ToolCall[]; nativeIds?: string[] }> {
   let full = "";
   let forwardedLen = 0;
   let suppressed = false;
-  await streamWithProvider({ ...request, messages }, (token) => {
-    full += token;
-    if (suppressed) return;
-    const toolAt = toolCallStartIndex(full);
-    if (toolAt >= 0) {
-      // Forward only the clean prefix before the tool-call marker, once.
-      if (toolAt > forwardedLen) onToken(full.slice(forwardedLen, toolAt));
-      forwardedLen = full.length;
-      suppressed = true;
-      return;
-    }
-    if (full.length > forwardedLen) {
-      onToken(full.slice(forwardedLen));
-      forwardedLen = full.length;
-    }
-  });
-  return full;
+  const completion = await streamWithProvider(
+    { ...request, messages },
+    (token) => {
+      full += token;
+      if (suppressed) return;
+      // When native tools are attached, do not suppress prose on fence markers
+      // (there should be none); still suppress if the model emits fences anyway.
+      const toolAt = toolCallStartIndex(full);
+      if (toolAt >= 0) {
+        if (toolAt > forwardedLen) onToken(full.slice(forwardedLen, toolAt));
+        forwardedLen = full.length;
+        suppressed = true;
+        return;
+      }
+      if (full.length > forwardedLen) {
+        onToken(full.slice(forwardedLen));
+        forwardedLen = full.length;
+      }
+    },
+  );
+  const text = full || completion.text;
+  if (completion.toolCalls?.length) {
+    return {
+      text,
+      toolCalls: completion.toolCalls.map((tc) => ({
+        name: tc.name,
+        args: tc.args,
+      })),
+      nativeIds: completion.toolCalls.map((tc) => tc.id),
+    };
+  }
+  return { text };
 }
 
 /**
@@ -255,6 +282,17 @@ async function resolveAskAnswer(
 ): Promise<string> {
   const config = getConfig();
   const maxTokens = config.thinking?.enabled ? 8_192 : 4_096;
+  const native =
+    resolveToolDialect(provider, model, config.toolCalling) !== "none";
+  // Research tools + agent.handoff (meta; not executed as research — action UX).
+  const askDefs = native
+    ? [
+        ...getToolDefinitions({ askMode: true }).filter((d) =>
+          ASK_RESEARCH_TOOLS.has(d.name),
+        ),
+        ...getToolDefinitions({ names: ["agent.handoff"] }),
+      ]
+    : undefined;
   const baseRequest: AskBaseRequest = {
     provider,
     model,
@@ -262,6 +300,9 @@ async function resolveAskAnswer(
     maxTokens,
     thinking: config.thinking,
     ...(options.signal ? { signal: options.signal } : {}),
+    ...(askDefs?.length
+      ? { tools: askDefs, toolChoice: "auto" as const }
+      : {}),
   };
 
   // Surface research activity (web.search/web.fetch/…) to the UI as tool
@@ -300,25 +341,33 @@ async function resolveAskAnswer(
       content:
         `Fresh web.search was run before answering because the user requested current/web-backed information.\n` +
         `Query: ${query}\nResult:\n${truncateToolOutput(output, "web.search")}\n\n` +
-        "Answer from these current results. If the result is insufficient or contradictory, call web.search/web.fetch again before answering. Cite URLs you used.",
+        "Answer from these current results. Prefer high-trust hosts (.gov, major news). Treat a single junk/contradictory snippet as unverified until confirmed. If insufficient, call web.search/web.fetch again before answering. Your final answer MUST cite 1–3 URLs from tool results.",
     });
   }
 
   for (let round = 0; round < ASK_MAX_RESEARCH_ROUNDS; round += 1) {
     options.signal?.throwIfAborted();
-    const text = await streamAskRound(baseRequest, messages, onToken);
+    const roundResult = await streamAskRound(baseRequest, messages, onToken);
+    const text = roundResult.text;
 
     // ── Prompt-leak guard ──────────────────────────────────────────────
     // If the model's response contains distinctive system-prompt markers,
     // it is repeating its instructions (e.g. in response to "repeat your
-    // instructions verbatim"). Any ```tool blocks in that output are
-    // EXAMPLES from the prompt, not real tool requests. Treat the whole
-    // response as a final text answer to avoid executing stale examples.
+    // instructions verbatim"). Any tool blocks / native toolCalls in that
+    // output are EXAMPLES from the prompt, not real tool requests. Treat
+    // the whole response as a final text answer and do not execute tools.
     if (looksLikePromptLeak(text)) {
       return text;
     }
 
-    const allCalls = parseAllToolCalls(text);
+    // Prefer native toolCalls; fall back to text fences.
+    const allCalls: ToolCall[] =
+      roundResult.toolCalls?.length
+        ? roundResult.toolCalls
+        : parseAllToolCalls(text);
+    const nativeIds =
+      roundResult.nativeIds ??
+      allCalls.map((_, i) => syntheticToolCallId(i));
     const calls = allCalls.filter((call) => ASK_RESEARCH_TOOLS.has(call.name));
     if (calls.length === 0) {
       // No allowed research tool requested. If the model instead asked for a
@@ -371,8 +420,22 @@ async function resolveAskAnswer(
     }
     // Record the model's tool-call turn, then run the read-only tools and
     // feed their outputs back so the next round can synthesize.
-    messages.push({ role: "assistant", content: text });
-    for (const call of calls.slice(0, ASK_MAX_TOOLS_PER_ROUND)) {
+    if (roundResult.toolCalls?.length) {
+      appendAssistantWithTools(
+        messages,
+        stripToolCallSyntax(text),
+        roundResult.toolCalls.map((c, i) => ({
+          id: nativeIds[i] ?? syntheticToolCallId(i),
+          name: c.name,
+          args: c.args,
+        })),
+      );
+    } else {
+      messages.push({ role: "assistant", content: text });
+    }
+    for (const [callIndex, call] of calls
+      .slice(0, ASK_MAX_TOOLS_PER_ROUND)
+      .entries()) {
       options.signal?.throwIfAborted();
       const id = `ask-${(toolSeq += 1)}`;
       emit({
@@ -399,10 +462,22 @@ async function resolveAskAnswer(
         ok,
         summary: researchResultSummary(call, ok),
       });
-      messages.push({
-        role: "user",
-        content: `Result of ${call.name}(${JSON.stringify(call.args)}):\n${truncateToolOutput(output, call.name)}`,
-      });
+      const resultBody = `Result of ${call.name}(${JSON.stringify(call.args)}):\n${truncateToolOutput(output, call.name)}`;
+      if (roundResult.toolCalls?.length) {
+        const sourceIndex = allCalls.indexOf(call);
+        appendToolResult(
+          messages,
+          nativeIds[sourceIndex] ?? syntheticToolCallId(callIndex),
+          resultBody,
+          call.name,
+          ok,
+        );
+      } else {
+        messages.push({
+          role: "user",
+          content: resultBody,
+        });
+      }
     }
   }
 
@@ -411,9 +486,10 @@ async function resolveAskAnswer(
   messages.push({
     role: "user",
     content:
-      "Stop researching now. Using only what you have already gathered above, give your final answer to the original question. Do NOT call any more tools.",
+      "Stop researching now. Using only what you have already gathered above, give your final answer to the original question. Do NOT call any more tools. Prefer high-trust sources; only claim a page confirms a fact if that fact appears in the tool output; include 1–3 source URLs from the results above.",
   });
-  return streamAskRound(baseRequest, messages, onToken);
+  const finalRound = await streamAskRound(baseRequest, messages, onToken);
+  return finalRound.text;
 }
 
 export async function runAsk(

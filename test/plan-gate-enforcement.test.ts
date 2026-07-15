@@ -45,25 +45,31 @@ describe("agent plan gate enforcement", () => {
     vi.restoreAllMocks();
   });
 
-  it("allows mutating tool calls through to confirmation when no plan exists", async () => {
+  it("blocks freestyle scaffold on coding builds until plan.create exists", async () => {
     stream
       .mockImplementationOnce(
         streamReply('```tool\n{"name":"shell.exec","args":{"command":"npm create vite@latest todo-app"}}\n```')
       )
       .mockImplementationOnce(
-        streamReply("Done.")
-      );
+        streamReply(
+          '```tool\n{"name":"plan.create","args":{"goal":"todo app","detail":"vite react todo on Desktop","tasks":["scaffold project","implement todo feature","install deps","Start dev server with shell.start, probe localhost, leave running, report URL"],"kind":"coding"}}\n```',
+        ),
+      )
+      .mockImplementationOnce(streamReply("Plan ready — waiting for /implement."));
 
-    runTool.mockResolvedValueOnce({ ok: true, output: "vite setup done" });
+    // scaffold must NOT reach runTool; plan.create is handled in-runner
+    runTool.mockResolvedValue({ ok: true, output: "ok" });
 
-    await runAgent("create a todo app", {
+    await runAgent("create a todo app on desktop", {
       session: { sessionId: "session-123", planApproved: { value: false }, allow: new Set(), pentestAuthorized: { value: false } } as any,
-      maxSteps: 2,
+      maxSteps: 4,
       autoConfirm: true,
     });
 
-    expect(runTool).toHaveBeenCalledTimes(1);
-    expect(runTool.mock.calls[0]![0]).toMatchObject({ name: "shell.exec" });
+    const shellCalls = runTool.mock.calls.filter(
+      (c) => (c[0] as { name?: string })?.name === "shell.exec",
+    );
+    expect(shellCalls.length).toBe(0);
   });
 
   it("allows safe read-only tool calls when no active plan exists", async () => {

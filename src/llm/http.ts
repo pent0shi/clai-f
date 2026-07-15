@@ -1,5 +1,22 @@
-import type { ChatMessage, ReasoningPreference, ProviderId } from "../types.js";
+import type {
+  ChatMessage,
+  NativeToolCall,
+  ReasoningPreference,
+  ProviderId,
+  ToolChoice,
+  ToolDefinition,
+} from "../types.js";
 import { modelSupportsVision } from "./capabilities.js";
+import {
+  accumulateOpenAiToolCallDelta,
+  finalizeOpenAiToolCalls,
+  fromWireName,
+  parseOpenAiMessageToolCalls,
+} from "./tool-protocol.js";
+import {
+  openAiToolBodyFields,
+  toOpenAiToolMessages,
+} from "./adapters/openai-tools.js";
 
 export class ProviderError extends Error {
   constructor(
@@ -337,17 +354,19 @@ type OpenAiContentPart =
   | { type: "text"; text: string }
   | { type: "image_url"; image_url: { url: string; detail: "high" } };
 
+/** Result of OpenAI-compatible complete/stream (text + optional native tools). */
+export interface OpenAiCompatibleResult {
+  text: string;
+  toolCalls?: NativeToolCall[] | undefined;
+  finishReason?: string | undefined;
+}
+
 export function toOpenAiMessages(
   messages: ChatMessage[],
   supportsVision = true,
-): Array<{ role: string; content: string | OpenAiContentPart[] }> {
-  return messages.map((message) => {
-    const role = message.role === "tool" ? "user" : message.role;
-    // Attach images as OpenAI-style multimodal content parts (data URLs).
-    // Only user messages carry images; everything else stays a plain string
-    // so we don't disturb providers/models that expect string content.
+): Array<Record<string, unknown>> {
+  return toOpenAiToolMessages(messages, (message) => {
     if (
-      role === "user" &&
       supportsVision &&
       message.images &&
       message.images.length > 0
@@ -359,16 +378,14 @@ export function toOpenAiMessages(
           type: "image_url",
           image_url: {
             url: `data:${img.mediaType};base64,${img.dataBase64}`,
-            // Request high-detail vision so screenshots/UI images preserve
-            // colors, spacing, layout, and small text when providers support it.
             detail: "high",
           },
         });
       }
-      return { role, content: parts };
+      return parts;
     }
-    return { role, content: message.content };
-  });
+    return message.content;
+  }) as Array<Record<string, unknown>>;
 }
 
 export type ReasoningStyle =
@@ -544,6 +561,9 @@ function buildChatBody(options: {
   reasoning?: ReasoningPreference | undefined;
   reasoningStyle?: ReasoningStyle | undefined;
   supportsVision?: boolean | undefined;
+  tools?: ToolDefinition[] | undefined;
+  toolChoice?: ToolChoice | undefined;
+  parallelToolCalls?: boolean | undefined;
 }): string {
   const reasoning = buildReasoningPayload(
     options.reasoning,
@@ -568,6 +588,11 @@ function buildChatBody(options: {
     temperature: options.temperature ?? defaultTemperature,
     stream: options.stream,
     ...reasoning,
+    ...openAiToolBodyFields({
+      tools: options.tools,
+      toolChoice: options.toolChoice,
+      parallelToolCalls: options.parallelToolCalls,
+    }),
   };
   if (isMinimaxM3) {
     body.top_p = 0.95;
@@ -587,7 +612,10 @@ export async function openAiCompatibleComplete(options: {
   signal?: AbortSignal | undefined;
   reasoning?: ReasoningPreference | undefined;
   reasoningStyle?: ReasoningStyle | undefined;
-}): Promise<string> {
+  tools?: ToolDefinition[] | undefined;
+  toolChoice?: ToolChoice | undefined;
+  parallelToolCalls?: boolean | undefined;
+}): Promise<OpenAiCompatibleResult> {
   const supportsVision = modelSupportsVision(
     options.provider.toLowerCase() as ProviderId,
     options.model,
@@ -601,6 +629,9 @@ export async function openAiCompatibleComplete(options: {
     reasoning: options.reasoning,
     reasoningStyle: options.reasoningStyle,
     supportsVision,
+    tools: options.tools,
+    toolChoice: options.toolChoice,
+    parallelToolCalls: options.parallelToolCalls,
   });
   let response: Response;
   try {
@@ -625,10 +656,16 @@ export async function openAiCompatibleComplete(options: {
   }
   let data: {
     choices?: Array<{
+      finish_reason?: string;
       message?: {
-        content?: string;
+        content?: string | null;
         reasoning_content?: string;
         reasoning?: string;
+        tool_calls?: Array<{
+          id?: string;
+          type?: string;
+          function?: { name?: string; arguments?: string };
+        }>;
       };
     }>;
   };
@@ -645,9 +682,11 @@ export async function openAiCompatibleComplete(options: {
     }
     throw error;
   }
-  const message = data.choices?.[0]?.message;
-  const text = message?.content;
-  if (!text) {
+  const choice = data.choices?.[0];
+  const message = choice?.message;
+  const toolCalls = parseOpenAiMessageToolCalls(message?.tool_calls);
+  const text = message?.content ?? "";
+  if (!text && toolCalls.length === 0) {
     throw new ProviderError(
       `${options.provider} returned no completion text (model=${options.model}). The response was empty — try /variants off, raise max_tokens, or pick another model with /model.`,
     );
@@ -655,10 +694,19 @@ export async function openAiCompatibleComplete(options: {
   // If the API returns reasoning separately, prepend it inside <think>
   // tags so the existing thinking parser can pick it up uniformly.
   const reasoning = message?.reasoning_content ?? message?.reasoning;
-  if (reasoning && reasoning.trim()) {
-    return `<think>${reasoning}</think>${text}`;
-  }
-  return text;
+  const full =
+    reasoning && reasoning.trim()
+      ? `<think>${reasoning}</think>${text}`
+      : text;
+  return {
+    text: full,
+    ...(toolCalls.length ? { toolCalls } : {}),
+    ...(choice?.finish_reason
+      ? { finishReason: choice.finish_reason }
+      : toolCalls.length
+        ? { finishReason: "tool_calls" }
+        : {}),
+  };
 }
 
 export async function openAiCompatibleStream(options: {
@@ -674,6 +722,18 @@ export async function openAiCompatibleStream(options: {
   onToken: (token: string) => void;
   reasoning?: ReasoningPreference | undefined;
   reasoningStyle?: ReasoningStyle | undefined;
+  tools?: ToolDefinition[] | undefined;
+  toolChoice?: ToolChoice | undefined;
+  parallelToolCalls?: boolean | undefined;
+  /** Early native tool-call name/args progress (P2-3). */
+  onToolCallDelta?:
+    | ((delta: {
+        index: number;
+        id?: string;
+        name?: string;
+        argumentsBytes?: number;
+      }) => void)
+    | undefined;
   /** Abort a stream that produces no bytes for this long. Default 30s. */
   idleTimeoutMs?: number | undefined;
   /**
@@ -682,7 +742,7 @@ export async function openAiCompatibleStream(options: {
    * promptly. Defaults to the regular idle timeout.
    */
   initialIdleTimeoutMs?: number | undefined;
-}): Promise<string> {
+}): Promise<OpenAiCompatibleResult> {
   // Combine the caller's abort signal with an idle watchdog so a stuck
   // connection on a thinking model can't wedge the REPL forever.
   const idleTimeoutMs = options.idleTimeoutMs ?? DEFAULT_STREAM_IDLE_TIMEOUT_MS;
@@ -720,6 +780,9 @@ export async function openAiCompatibleStream(options: {
     reasoning: options.reasoning,
     reasoningStyle: options.reasoningStyle,
     supportsVision,
+    tools: options.tools,
+    toolChoice: options.toolChoice,
+    parallelToolCalls: options.parallelToolCalls,
   });
   let response: Response;
   try {
@@ -781,10 +844,16 @@ export async function openAiCompatibleStream(options: {
       requestId?: string;
       status?: string;
       choices?: Array<{
+        finish_reason?: string;
         message?: {
-          content?: string;
+          content?: string | null;
           reasoning_content?: string;
           reasoning?: string;
+          tool_calls?: Array<{
+            id?: string;
+            type?: string;
+            function?: { name?: string; arguments?: string };
+          }>;
         };
       }>;
     }>(response);
@@ -796,16 +865,26 @@ export async function openAiCompatibleStream(options: {
         JSON.stringify(data).slice(0, 1_000),
       );
     }
-    const message = data.choices?.[0]?.message;
+    const choice = data.choices?.[0];
+    const message = choice?.message;
+    const toolCalls = parseOpenAiMessageToolCalls(message?.tool_calls);
     const text = message?.content ?? "";
     const reasoning = message?.reasoning_content ?? message?.reasoning;
     const full =
       reasoning && reasoning.trim()
         ? `<think>${reasoning}</think>${text}`
         : text;
-    if (full.trim()) {
-      options.onToken(full);
-      return full;
+    if (full.trim() || toolCalls.length > 0) {
+      if (full.trim()) options.onToken(full);
+      return {
+        text: full,
+        ...(toolCalls.length ? { toolCalls } : {}),
+        ...(choice?.finish_reason
+          ? { finishReason: choice.finish_reason }
+          : toolCalls.length
+            ? { finishReason: "tool_calls" }
+            : {}),
+      };
     }
     throw new ProviderError(
       `${options.provider} returned JSON instead of an SSE stream, but no completion text was present.`,
@@ -822,6 +901,10 @@ export async function openAiCompatibleStream(options: {
   let reasoningSeen = "";
   let inReasoning = false;
   let finishReason: string | undefined;
+  const toolCallState = new Map<
+    number,
+    { id?: string; name?: string; arguments: string }
+  >();
 
   const enterReasoning = (): void => {
     if (inReasoning) return;
@@ -870,7 +953,8 @@ export async function openAiCompatibleStream(options: {
         if (payload === "[DONE]") {
           exitReasoning();
           cleanup();
-          if (!visible.trim()) {
+          const toolCalls = finalizeOpenAiToolCalls(toolCallState);
+          if (!visible.trim() && toolCalls.length === 0) {
             const cause = reasoningSeen.trim()
               ? finishReason === "length"
                 ? "hit the max_tokens limit while still thinking"
@@ -883,7 +967,15 @@ export async function openAiCompatibleStream(options: {
               `${options.provider} ${cause}.`,
             );
           }
-          return full;
+          return {
+            text: full,
+            ...(toolCalls.length ? { toolCalls } : {}),
+            ...(finishReason
+              ? { finishReason }
+              : toolCalls.length
+                ? { finishReason: "tool_calls" }
+                : {}),
+          };
         }
         try {
           const parsed = JSON.parse(payload) as {
@@ -894,6 +986,12 @@ export async function openAiCompatibleStream(options: {
                 reasoning_content?: string;
                 reasoning?: string;
                 role?: string;
+                tool_calls?: Array<{
+                  index?: number;
+                  id?: string;
+                  type?: string;
+                  function?: { name?: string; arguments?: string };
+                }>;
               };
             }>;
           };
@@ -920,6 +1018,33 @@ export async function openAiCompatibleStream(options: {
             full += token;
             options.onToken(token);
           }
+          if (delta?.tool_calls?.length) {
+            for (const tc of delta.tool_calls) {
+              const accInfo = accumulateOpenAiToolCallDelta(toolCallState, tc);
+              if (!options.onToolCallDelta) continue;
+              const wire = accInfo.name;
+              const canonical = wire
+                ? (fromWireName(wire) ?? wire)
+                : undefined;
+              // Fire when name first known; also when large arg payloads grow
+              // past 4KB so the UI can show "receiving args…".
+              const largeArgTick =
+                !accInfo.nameBecameKnown &&
+                accInfo.argumentsBytes > 0 &&
+                accInfo.argumentsBytes % 4096 <
+                  (typeof tc.function?.arguments === "string"
+                    ? tc.function.arguments.length
+                    : 0);
+              if (accInfo.nameBecameKnown || largeArgTick) {
+                options.onToolCallDelta({
+                  index: accInfo.index,
+                  ...(accInfo.id !== undefined ? { id: accInfo.id } : {}),
+                  ...(canonical !== undefined ? { name: canonical } : {}),
+                  argumentsBytes: accInfo.argumentsBytes,
+                });
+              }
+            }
+          }
         } catch (parseError) {
           if (parseError instanceof ProviderError) throw parseError;
           // Ignore malformed keepalive lines.
@@ -928,7 +1053,8 @@ export async function openAiCompatibleStream(options: {
     }
     exitReasoning();
     cleanup();
-    if (!visible.trim()) {
+    const toolCalls = finalizeOpenAiToolCalls(toolCallState);
+    if (!visible.trim() && toolCalls.length === 0) {
       const cause = reasoningSeen.trim()
         ? finishReason === "length"
           ? "hit the max_tokens limit while still thinking"
@@ -938,7 +1064,15 @@ export async function openAiCompatibleStream(options: {
         `${options.provider} ${cause}.`,
       );
     }
-    return full;
+    return {
+      text: full,
+      ...(toolCalls.length ? { toolCalls } : {}),
+      ...(finishReason
+        ? { finishReason }
+        : toolCalls.length
+          ? { finishReason: "tool_calls" }
+          : {}),
+    };
   } catch (error) {
     cleanup();
     // reader.cancel() returns a promise that rejects when the underlying

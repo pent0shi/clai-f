@@ -98,7 +98,7 @@ export const nvidiaProvider: LlmProvider = {
   ): Promise<CompletionResult> {
     if (!auth.apiKey) throw new Error("NVIDIA NIM API key is required");
     const model = request.model ?? defaultModels.nvidia;
-    const text = await openAiCompatibleComplete({
+    const payload = await openAiCompatibleComplete({
       provider: "NVIDIA NIM",
       baseUrl,
       apiKey: auth.apiKey,
@@ -109,8 +109,17 @@ export const nvidiaProvider: LlmProvider = {
       signal: request.signal,
       reasoning: request.thinking,
       reasoningStyle: "nvidia",
+      tools: request.tools,
+      toolChoice: request.toolChoice,
+      parallelToolCalls: request.parallelToolCalls,
     });
-    return { text, provider: "nvidia", model };
+    return {
+      text: payload.text,
+      provider: "nvidia",
+      model,
+      ...(payload.toolCalls?.length ? { toolCalls: payload.toolCalls } : {}),
+      ...(payload.finishReason ? { finishReason: payload.finishReason } : {}),
+    };
   },
   async stream(
     request: CompletionRequest,
@@ -119,7 +128,7 @@ export const nvidiaProvider: LlmProvider = {
   ): Promise<CompletionResult> {
     if (!auth.apiKey) throw new Error("NVIDIA NIM API key is required");
     const model = request.model ?? defaultModels.nvidia;
-    const text = await openAiCompatibleStream({
+    const payload = await openAiCompatibleStream({
       provider: "NVIDIA NIM",
       baseUrl,
       apiKey: auth.apiKey,
@@ -129,6 +138,7 @@ export const nvidiaProvider: LlmProvider = {
       temperature: request.temperature,
       signal: request.signal,
       onToken,
+      onToolCallDelta: request.onToolCallDelta,
       reasoning: request.thinking,
       reasoningStyle: "nvidia",
       // NIM queues/cold starts and the large agent prompt can take longer
@@ -136,7 +146,16 @@ export const nvidiaProvider: LlmProvider = {
       // short watchdog so a genuinely wedged stream is still cancellable.
       initialIdleTimeoutMs: 90_000,
       idleTimeoutMs: 30_000,
+      tools: request.tools,
+      toolChoice: request.toolChoice,
+      parallelToolCalls: request.parallelToolCalls,
     });
-    return { text, provider: "nvidia", model };
+    return {
+      text: payload.text,
+      provider: "nvidia",
+      model,
+      ...(payload.toolCalls?.length ? { toolCalls: payload.toolCalls } : {}),
+      ...(payload.finishReason ? { finishReason: payload.finishReason } : {}),
+    };
   },
 };

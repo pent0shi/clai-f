@@ -49,16 +49,33 @@ const INSTALL_HINTS: Record<string, string> = {
   tesseract: "pkg.install tesseract",
 };
 
+/** True if path is only a project-local node_modules/.bin shim (not global). */
+export function isProjectLocalNodeBin(path: string): boolean {
+  return /(?:^|[/\\])node_modules[/\\]\.bin[/\\]/i.test(path);
+}
+
 function findCommand(name: string): string | undefined {
   try {
     const cmd =
       platform() === "win32" ? `where.exe ${name}` : `command -v ${name}`;
+    // Sanitize PATH: drop node_modules/.bin entries so tool.check reports
+    // real system installs, not an unrelated project's local vite/npm bins
+    // (e.g. clai's node_modules while scaffolding on Desktop).
+    const env = { ...process.env };
+    if (env.PATH) {
+      env.PATH = env.PATH.split(platform() === "win32" ? ";" : ":")
+        .filter((p) => p && !/node_modules[/\\]\.bin$/i.test(p))
+        .join(platform() === "win32" ? ";" : ":");
+    }
     const result = execSync(cmd, {
       timeout: 3_000,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
+      env,
     });
-    return result.trim().split("\n")[0]?.trim();
+    const found = result.trim().split("\n")[0]?.trim();
+    if (found && isProjectLocalNodeBin(found)) return undefined;
+    return found;
   } catch {
     return undefined;
   }
@@ -110,7 +127,13 @@ export async function checkTools(names: string[]): Promise<ToolAvailability[]> {
 export async function toolCheckHandler(
   args: Record<string, unknown>,
 ): Promise<ToolResult> {
-  const toolsRaw = args.tools;
+  // Canonical: tools: string[] | "a,b". Aliases for single-tool mistakes
+  // models make from older schemas / prompts (name, binary, tool).
+  const toolsRaw =
+    args.tools ??
+    args.name ??
+    args.binary ??
+    args.tool;
   let names: string[];
   if (Array.isArray(toolsRaw)) {
     names = toolsRaw.filter((t): t is string => typeof t === "string");
@@ -140,19 +163,93 @@ export async function toolCheckHandler(
   }
 
   const results = await checkTools(names);
+  // Project-local CLIs: missing globally is fine for scaffold (use npx / local bin after install).
+  const LOCAL_OPTIONAL = new Set([
+    "vite",
+    "next",
+    "nuxt",
+    "tsc",
+    "eslint",
+    "prettier",
+    "webpack",
+    "parcel",
+  ]);
+  /**
+   * Interchangeable tool families. Missing one member is soft (○) when any
+   * other member in this check (or on PATH) is available — e.g. yarn ✗ with
+   * npm ✓ must not fail the whole tool.check (models often spray npm+yarn+pnpm).
+   */
+  const SUBSTITUTE_FAMILIES: string[][] = [
+    ["npm", "yarn", "pnpm", "bun"],
+    ["pip", "pip3", "poetry", "uv", "pipenv"],
+    ["python", "python3"],
+    ["node", "nodejs"],
+  ];
+
+  function familyOf(name: string): string[] | undefined {
+    const n = name.toLowerCase();
+    return SUBSTITUTE_FAMILIES.find((f) => f.includes(n));
+  }
+
+  function substituteAvailable(name: string): boolean {
+    const family = familyOf(name);
+    if (!family) return false;
+    if (results.some((r) => family.includes(r.name.toLowerCase()) && r.available)) {
+      return true;
+    }
+    // Substitute may not be in the requested list — probe PATH lightly
+    for (const alt of family) {
+      if (alt === name.toLowerCase()) continue;
+      if (findCommand(alt)) return true;
+    }
+    return false;
+  }
+
+  function isSoftMissing(name: string): boolean {
+    const n = name.toLowerCase();
+    if (LOCAL_OPTIONAL.has(n)) return true;
+    // Alternate package managers are always soft when missing: work proceeds with
+    // whichever manager is present; never hard-fail the whole check for yarn alone.
+    if (["yarn", "pnpm", "bun", "pipenv", "poetry", "uv"].includes(n)) return true;
+    if (substituteAvailable(n)) return true;
+    return false;
+  }
+
   const lines = results.map((r) => {
     if (r.available) {
       const ver = r.version ? ` (${r.version})` : "";
       return `✓ ${r.name}${ver} — ${r.path}`;
     }
     const hint = r.installHint ? ` — install: ${r.installHint}` : "";
+    if (LOCAL_OPTIONAL.has(r.name.toLowerCase())) {
+      return (
+        `○ ${r.name} — not on global PATH (ok for scaffold: use npx / project bin after install; ` +
+        `project-local node_modules/.bin is ignored)${hint}`
+      );
+    }
+    if (isSoftMissing(r.name)) {
+      const fam = familyOf(r.name);
+      const alts = fam
+        ? fam.filter((x) => x !== r.name.toLowerCase()).join("/")
+        : "an alternative";
+      return `○ ${r.name} — not found (optional; ${alts} can substitute)${hint}`;
+    }
     return `✗ ${r.name} — not found${hint}`;
   });
 
-  const allAvailable = results.every((r) => r.available);
+  // Fail only when a hard-required tool is missing. node+npm ✓ with yarn ○ is ok=true.
+  const hardMissing = results.filter((r) => !r.available && !isSoftMissing(r.name));
+  const ok = hardMissing.length === 0;
+  const footer =
+    hardMissing.length > 0
+      ? `\n\nHard-missing (required): ${hardMissing.map((r) => r.name).join(", ")}. ` +
+        `Install or use a substitute before relying on them.`
+      : results.some((r) => !r.available)
+        ? `\n\nNote: ○ = optional/substitute available — overall check OK. Proceed with the tools marked ✓.`
+        : "";
   return {
-    ok: allAvailable,
-    output: lines.join("\n"),
-    exitCode: allAvailable ? 0 : 1,
+    ok,
+    output: lines.join("\n") + footer,
+    exitCode: ok ? 0 : 1,
   };
 }

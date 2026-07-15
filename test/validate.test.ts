@@ -160,6 +160,34 @@ describe("phase 4 — privilege-aware nmap helpers", () => {
   });
 });
 
+describe("nmap host-discovery helpers", () => {
+  it("detects single-host vs CIDR targets", async () => {
+    const {
+      isNmapSingleHostTarget,
+      withNmapSkipDiscovery,
+      looksLikeNmapNoHostsUp,
+      nmapArgvHasPn,
+    } = await import("../src/tools/validate.js");
+    expect(isNmapSingleHostTarget(["-sS", "-sV", "192.168.1.10"])).toBe(true);
+    expect(isNmapSingleHostTarget(["-sS", "example.com"])).toBe(true);
+    expect(isNmapSingleHostTarget(["-sn", "192.168.1.0/24"])).toBe(false);
+    expect(nmapArgvHasPn(["-Pn", "-sT", "h"])).toBe(true);
+    expect(withNmapSkipDiscovery(["-sT", "h"])).toEqual(["-Pn", "-sT", "h"]);
+    expect(withNmapSkipDiscovery(["-sn", "192.168.1.0/24"])).toEqual([
+      "-sn",
+      "192.168.1.0/24",
+    ]);
+    expect(
+      looksLikeNmapNoHostsUp(
+        "Nmap done: 1 IP address (0 hosts up) scanned in 2.0 seconds",
+      ),
+    ).toBe(true);
+    expect(
+      looksLikeNmapNoHostsUp("Note: Host seems down. If it is really up..."),
+    ).toBe(true);
+  });
+});
+
 describe("phase 4 — assertSafePackageName", () => {
   it("accepts common identifiers", () => {
     expect(assertSafePackageName("nmap")).toBe("nmap");

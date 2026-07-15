@@ -7,6 +7,10 @@ import type { ToolResult } from "../types.js";
 import { getConfig } from "../store/config.js";
 import { isSecretPath } from "../safety/patterns.js";
 import { safeCwd } from "../os/cwd.js";
+import {
+  remapAgentCwdWrite,
+  resolveToolPath,
+} from "../agent/project-root.js";
 
 /** Compact integrity footer so the model trusts a write without re-reading. */
 function describeWrite(path: string, content: string, verb: string): string {
@@ -47,9 +51,10 @@ function expandHome(path: string): string {
   return path;
 }
 
-/** Resolve path with tilde expansion. */
+/** Resolve path with tilde expansion + sticky plan project root for relatives. */
 function resolvePath(path: string): string {
-  return resolve(expandHome(path));
+  const resolved = resolveToolPath(path);
+  return remapAgentCwdWrite(resolved, path);
 }
 
 function ensureNotSecret(resolved: string): void {
@@ -248,7 +253,15 @@ export async function fsReplaceLines(
     await unlink(temp).catch(() => undefined);
     throw error;
   }
-  return { ok: true, output: `Replaced lines ${startLine}-${endLine} in ${resolved}` };
+  // X10: receipt with line count + hash so the model notices size changes.
+  const verb =
+    content === ""
+      ? `Deleted lines ${startLine}-${endLine} in`
+      : `Replaced lines ${startLine}-${endLine} in`;
+  return {
+    ok: true,
+    output: describeWrite(resolved, next, verb),
+  };
 }
 
 export interface FileWrite {

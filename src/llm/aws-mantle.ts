@@ -15,6 +15,14 @@ import {
   readJson,
   readStreamLines,
 } from "./http.js";
+import {
+  anthropicToolBodyFields,
+  createAnthropicToolStreamState,
+  finalizeAnthropicToolStream,
+  handleAnthropicStreamEvent,
+  parseAnthropicToolUseBlocks,
+  toAnthropicToolMessages,
+} from "./adapters/anthropic-tools.js";
 
 const baseUrl = "https://bedrock-mantle.ap-south-1.api.aws/anthropic/v1";
 const openAiBaseUrl = "https://bedrock-mantle.ap-south-1.api.aws/v1";
@@ -23,39 +31,6 @@ const anthropicVersion = "2023-06-01";
 
 function getWorkspaceId(): string {
   return process.env.ANTHROPIC_WORKSPACE_ID ?? "default";
-}
-
-type AnthropicBlock =
-  | { type: "text"; text: string }
-  | {
-      type: "image";
-      source: { type: "base64"; media_type: string; data: string };
-    };
-
-function toAnthropicMessages(
-  messages: ChatMessage[],
-): Array<{ role: "user" | "assistant"; content: string | AnthropicBlock[] }> {
-  return messages
-    .filter((message) => message.role !== "system")
-    .map((message) => {
-      const role = message.role === "assistant" ? "assistant" : "user";
-      if (role === "user" && message.images && message.images.length > 0) {
-        const blocks: AnthropicBlock[] = [];
-        if (message.content) blocks.push({ type: "text", text: message.content });
-        for (const img of message.images) {
-          blocks.push({
-            type: "image",
-            source: {
-              type: "base64",
-              media_type: img.mediaType,
-              data: img.dataBase64,
-            },
-          });
-        }
-        return { role, content: blocks };
-      }
-      return { role, content: message.content };
-    });
 }
 
 function anthropicThinkingBudget(reasoning: ReasoningPreference | undefined): number | undefined {
@@ -115,7 +90,7 @@ export const mantleProvider: LlmProvider = {
     if (!auth.apiKey) throw new Error("Mantle API key is required");
     const model = request.model ?? defaultModels["aws-mantle"];
     if (!isAnthropicMantleModel(model)) {
-      const text = await openAiCompatibleComplete({
+      const payload = await openAiCompatibleComplete({
         provider: "AWS Mantle",
         baseUrl: openAiBaseUrl,
         apiKey: auth.apiKey,
@@ -126,13 +101,22 @@ export const mantleProvider: LlmProvider = {
         signal: request.signal,
         reasoning: request.thinking,
         reasoningStyle: "nvidia",
+        tools: request.tools,
+        toolChoice: request.toolChoice,
+        parallelToolCalls: request.parallelToolCalls,
       });
-      return { text, provider: "aws-mantle", model };
+      return {
+        text: payload.text,
+        provider: "aws-mantle",
+        model,
+        ...(payload.toolCalls?.length ? { toolCalls: payload.toolCalls } : {}),
+        ...(payload.finishReason ? { finishReason: payload.finishReason } : {}),
+      };
     }
     const system = request.messages.find(
       (message) => message.role === "system",
     )?.content;
-    const messages = toAnthropicMessages(request.messages);
+    const messages = toAnthropicToolMessages(request.messages);
     const response = await fetch(`${baseUrl}/messages`, {
       method: "POST",
       signal: request.signal ?? null,
@@ -148,6 +132,10 @@ export const mantleProvider: LlmProvider = {
         messages,
         max_tokens: request.maxTokens ?? 1_024,
         temperature: request.temperature ?? 0.2,
+        ...anthropicToolBodyFields({
+          tools: request.tools,
+          toolChoice: request.toolChoice,
+        }),
         ...(anthropicThinkingBudget(request.thinking) !== undefined
           ? {
               thinking: {
@@ -159,23 +147,37 @@ export const mantleProvider: LlmProvider = {
       }),
     });
     const data = await readJson<{
-      content?: Array<{ type: string; text?: string; thinking?: string }>;
+      content?: Array<{
+        type: string;
+        text?: string;
+        thinking?: string;
+        id?: string;
+        name?: string;
+        input?: unknown;
+      }>;
+      stop_reason?: string;
     }>(response);
-    const thinkingText = data.content
-      ?.filter((part) => part.type === "thinking")
-      .map((part) => part.thinking ?? "")
-      .join("")
-      .trim();
-    const text = data.content
-      ?.filter((part) => part.type === "text")
-      .map((part) => part.text ?? "")
-      .join("")
-      .trim();
-    if (!text) {
+    const parsed = parseAnthropicToolUseBlocks(data.content);
+    if (!parsed.text && parsed.toolCalls.length === 0) {
       throw new Error("Mantle returned no completion text");
     }
-    const final = thinkingText ? `<thinking>${thinkingText}</thinking>${text}` : text;
-    return { text: final, provider: "aws-mantle", model };
+    const final = parsed.thinkingText
+      ? `<thinking>${parsed.thinkingText}</thinking>${parsed.text}`
+      : parsed.text;
+    return {
+      text: final,
+      provider: "aws-mantle",
+      model,
+      ...(parsed.toolCalls.length ? { toolCalls: parsed.toolCalls } : {}),
+      ...(data.stop_reason
+        ? {
+            finishReason:
+              data.stop_reason === "tool_use" ? "tool_calls" : data.stop_reason,
+          }
+        : parsed.toolCalls.length
+          ? { finishReason: "tool_calls" }
+          : {}),
+    };
   },
   async stream(
     request: CompletionRequest,
@@ -185,7 +187,7 @@ export const mantleProvider: LlmProvider = {
     if (!auth.apiKey) throw new Error("Mantle API key is required");
     const model = request.model ?? defaultModels["aws-mantle"];
     if (!isAnthropicMantleModel(model)) {
-      const text = await openAiCompatibleStream({
+      const payload = await openAiCompatibleStream({
         provider: "AWS Mantle",
         baseUrl: openAiBaseUrl,
         apiKey: auth.apiKey,
@@ -195,15 +197,25 @@ export const mantleProvider: LlmProvider = {
         temperature: request.temperature,
         signal: request.signal,
         onToken,
+      onToolCallDelta: request.onToolCallDelta,
         reasoning: request.thinking,
         reasoningStyle: "nvidia",
+        tools: request.tools,
+        toolChoice: request.toolChoice,
+        parallelToolCalls: request.parallelToolCalls,
       });
-      return { text, provider: "aws-mantle", model };
+      return {
+        text: payload.text,
+        provider: "aws-mantle",
+        model,
+        ...(payload.toolCalls?.length ? { toolCalls: payload.toolCalls } : {}),
+        ...(payload.finishReason ? { finishReason: payload.finishReason } : {}),
+      };
     }
     const system = request.messages.find(
       (message) => message.role === "system",
     )?.content;
-    const messages = toAnthropicMessages(request.messages);
+    const messages = toAnthropicToolMessages(request.messages);
     const response = await fetch(`${baseUrl}/messages`, {
       method: "POST",
       signal: request.signal ?? null,
@@ -219,6 +231,10 @@ export const mantleProvider: LlmProvider = {
         messages,
         max_tokens: request.maxTokens ?? 1_024,
         temperature: request.temperature ?? 0.2,
+        ...anthropicToolBodyFields({
+          tools: request.tools,
+          toolChoice: request.toolChoice,
+        }),
         stream: true,
         ...(anthropicThinkingBudget(request.thinking) !== undefined
           ? {
@@ -238,6 +254,8 @@ export const mantleProvider: LlmProvider = {
     }
     let full = "";
     let inThinking = false;
+    const streamState = createAnthropicToolStreamState();
+    let stopReason: string | undefined;
 
     const enterThinking = (): void => {
       if (inThinking) return;
@@ -258,25 +276,54 @@ export const mantleProvider: LlmProvider = {
       const trimmed = line.trim();
       if (!trimmed.startsWith("data:")) continue;
       const payload = trimmed.slice(5).trim();
-      if (payload === "[DONE]") {
-        exitThinking();
-        return { text: full, provider: "aws-mantle", model };
-      }
+      if (payload === "[DONE]") break;
       try {
         const parsed = JSON.parse(payload) as {
           type?: string;
-          delta?: { type?: string; text?: string; thinking?: string };
+          index?: number;
+          content_block?: {
+            type?: string;
+            id?: string;
+            name?: string;
+            text?: string;
+            thinking?: string;
+          };
+          delta?: {
+            type?: string;
+            text?: string;
+            thinking?: string;
+            partial_json?: string;
+            stop_reason?: string;
+          };
         };
-        if (parsed.type === "content_block_delta") {
-          const deltaType = parsed.delta?.type;
-          if (deltaType === "thinking_delta" && parsed.delta?.thinking) {
+        if (parsed.type === "message_delta" && parsed.delta?.stop_reason) {
+          stopReason = parsed.delta.stop_reason;
+        }
+        if (
+          parsed.type === "content_block_start" ||
+          parsed.type === "content_block_delta"
+        ) {
+          const deltas = handleAnthropicStreamEvent(streamState, parsed);
+          if (deltas.thinkingDelta) {
             enterThinking();
-            full += parsed.delta.thinking;
-            onToken(parsed.delta.thinking);
-          } else if (deltaType === "text_delta" && parsed.delta?.text) {
+            full += deltas.thinkingDelta;
+            onToken(deltas.thinkingDelta);
+          }
+          if (deltas.textDelta) {
             if (inThinking) exitThinking();
-            full += parsed.delta.text;
-            onToken(parsed.delta.text);
+            full += deltas.textDelta;
+            onToken(deltas.textDelta);
+          }
+          if (deltas.toolCallDelta && request.onToolCallDelta) {
+            const d = deltas.toolCallDelta;
+            request.onToolCallDelta({
+              index: d.index,
+              ...(d.id !== undefined ? { id: d.id } : {}),
+              ...(d.name !== undefined ? { name: d.name } : {}),
+              ...(d.argumentsBytes !== undefined
+                ? { argumentsBytes: d.argumentsBytes }
+                : {}),
+            });
           }
         }
       } catch {
@@ -284,6 +331,20 @@ export const mantleProvider: LlmProvider = {
       }
     }
     exitThinking();
-    return { text: full, provider: "aws-mantle", model };
+    const finalized = finalizeAnthropicToolStream(streamState);
+    return {
+      text: full,
+      provider: "aws-mantle",
+      model,
+      ...(finalized.toolCalls.length ? { toolCalls: finalized.toolCalls } : {}),
+      ...(stopReason
+        ? {
+            finishReason:
+              stopReason === "tool_use" ? "tool_calls" : stopReason,
+          }
+        : finalized.toolCalls.length
+          ? { finishReason: "tool_calls" }
+          : {}),
+    };
   },
 };

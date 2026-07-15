@@ -1,0 +1,96 @@
+import { describe, expect, it } from "vitest";
+import {
+  assertDefinitionRegistryConsistency,
+  canonicalNameFor,
+  getToolDefinitions,
+  TOOL_DEFINITIONS,
+  wireNameFor,
+} from "../../src/tools/definitions.js";
+import { availableToolNames, toolRegistry } from "../../src/tools/registry.js";
+import { fromWireName, toWireName } from "../../src/llm/tool-protocol.js";
+
+describe("tool definitions", () => {
+  it("every registry key has a definition", () => {
+    expect(() =>
+      assertDefinitionRegistryConsistency(availableToolNames()),
+    ).not.toThrow();
+  });
+
+  it("wire names are unique and reverse-map (camel + snake aliases)", () => {
+    const wires = new Set<string>();
+    for (const d of TOOL_DEFINITIONS) {
+      expect(wires.has(d.wireName)).toBe(false);
+      wires.add(d.wireName);
+      expect(d.wireName).toBe(toWireName(d.name));
+      expect(fromWireName(d.wireName)).toBe(d.name);
+      expect(canonicalNameFor(d.wireName)).toBe(d.name);
+      expect(wireNameFor(d.name)).toBe(d.wireName);
+    }
+    // Models may emit pure snake_case for multi-word segments.
+    expect(fromWireName("fs_write_many")).toBe("fs.writeMany");
+    expect(fromWireName("fs_replace_lines")).toBe("fs.replaceLines");
+    expect(fromWireName("net_ping_sweep")).toBe("net.pingSweep");
+    expect(canonicalNameFor("fs_write_many")).toBe("fs.writeMany");
+    expect(canonicalNameFor("fs_replace_lines")).toBe("fs.replaceLines");
+    expect(canonicalNameFor("net_ping_sweep")).toBe("net.pingSweep");
+  });
+
+  it("ask mode excludes mutators", () => {
+    const ask = getToolDefinitions({ askMode: true });
+    expect(ask.every((d) => d.askMode)).toBe(true);
+    expect(ask.some((d) => d.name === "fs.write")).toBe(false);
+    expect(ask.some((d) => d.name === "web.search")).toBe(true);
+  });
+
+  it("core file tools have required fields matching handlers", () => {
+    const write = TOOL_DEFINITIONS.find((d) => d.name === "fs.write")!;
+    expect(write.parameters.required).toEqual(["path", "content"]);
+    expect(toolRegistry["fs.write"]).toBeTypeOf("function");
+  });
+
+  it("task.update includes failed; agent.handoff is defined", () => {
+    const task = TOOL_DEFINITIONS.find((d) => d.name === "task.update")!;
+    const state = task.parameters.properties.state as {
+      enum?: string[];
+    };
+    expect(state.enum).toContain("failed");
+    const handoff = TOOL_DEFINITIONS.find((d) => d.name === "agent.handoff")!;
+    expect(handoff.parameters.required).toEqual(["task", "reason"]);
+    expect(handoff.askMode).toBeFalsy();
+  });
+
+  it("web.fetch responseMode enum matches runtime RESPONSE_MODES", () => {
+    const fetch = TOOL_DEFINITIONS.find((d) => d.name === "web.fetch")!;
+    const mode = fetch.parameters.properties.responseMode as {
+      enum?: string[];
+    };
+    expect(mode.enum).toEqual(["readable", "raw"]);
+  });
+
+  it("tool.check schema uses tools not name", () => {
+    const check = TOOL_DEFINITIONS.find((d) => d.name === "tool.check")!;
+    expect(check.parameters.required).toEqual(["tools"]);
+    expect(check.parameters.properties.tools).toBeDefined();
+  });
+
+  it("compact set includes recon essentials (P2-2)", () => {
+    const compact = getToolDefinitions({ compact: true });
+    const names = new Set(compact.map((d) => d.name));
+    for (const n of [
+      "dns.lookup",
+      "whois.lookup",
+      "http.fetch",
+      "net.context",
+      "pentest.recon",
+      "wordlist.find",
+      "web.search",
+      "fs.write",
+      "shell.exec",
+    ]) {
+      expect(names.has(n)).toBe(true);
+    }
+    // Keep compact: net.scan (confirm/sudo heavy) still out of compact set.
+    expect(names.has("net.scan")).toBe(false);
+    expect(names.has("pkg.install")).toBe(false);
+  });
+});

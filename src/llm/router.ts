@@ -19,6 +19,10 @@ import { openaiProvider } from "./openai.js";
 import { openrouterProvider } from "./openrouter.js";
 import { qwenCloudProvider } from "./qwen-cloud.js";
 import type { LlmProvider, ProviderAuth } from "./provider.js";
+import {
+  isToolsUnsupportedError,
+  markTextOnlyModel,
+} from "./tool-protocol.js";
 
 const MAX_RETRIES = 6;
 // Wait at most this long overall per attempt (up to 2 minutes total wait budget).
@@ -234,10 +238,25 @@ export async function completeWithProvider(
             providerId === requested
               ? (request.model ?? provider.defaultModel)
               : provider.defaultModel;
-          return await provider.complete(
-            { ...request, provider: providerId, model },
-            auth,
-          );
+          const activeRequest = { ...request, provider: providerId, model };
+          try {
+            return await provider.complete(activeRequest, auth);
+          } catch (toolError) {
+            if (
+              activeRequest.tools?.length &&
+              isToolsUnsupportedError(toolError)
+            ) {
+              markTextOnlyModel(providerId, model);
+              const textRequest = {
+                ...activeRequest,
+                tools: undefined,
+                toolChoice: undefined,
+                parallelToolCalls: undefined,
+              };
+              return await provider.complete(textRequest, auth);
+            }
+            throw toolError;
+          }
         } catch (error) {
           if (isRetriableError(error)) {
             const wait = isRateLimited(error)
@@ -309,19 +328,39 @@ export async function streamWithProvider(
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       try {
         request.signal?.throwIfAborted();
-        if (provider.stream) {
-          return await provider.stream(
-            { ...request, provider: providerId, model },
-            auth,
-            onToken,
-          );
+        const activeRequest = { ...request, provider: providerId, model };
+        try {
+          if (provider.stream) {
+            return await provider.stream(activeRequest, auth, onToken);
+          }
+          const result = await provider.complete(activeRequest, auth);
+          onToken(result.text);
+          return result;
+        } catch (toolError) {
+          // One retry without tools when the model/provider rejects tools.
+          if (
+            activeRequest.tools?.length &&
+            isToolsUnsupportedError(toolError)
+          ) {
+            markTextOnlyModel(providerId, model);
+            emitStatus(
+              `ℹ ${providerId}/${model} does not support native tools — falling back to text protocol`,
+            );
+            const textRequest = {
+              ...activeRequest,
+              tools: undefined,
+              toolChoice: undefined,
+              parallelToolCalls: undefined,
+            };
+            if (provider.stream) {
+              return await provider.stream(textRequest, auth, onToken);
+            }
+            const result = await provider.complete(textRequest, auth);
+            onToken(result.text);
+            return result;
+          }
+          throw toolError;
         }
-        const result = await provider.complete(
-          { ...request, provider: providerId, model },
-          auth,
-        );
-        onToken(result.text);
-        return result;
       } catch (error) {
         if (isRetriableError(error)) {
           const wait = isRateLimited(error)

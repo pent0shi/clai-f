@@ -104,7 +104,7 @@ export const groqProvider: LlmProvider = {
   ): Promise<CompletionResult> {
     if (!auth.apiKey) throw new Error("Groq API key is required");
     const model = request.model ?? defaultModels.groq;
-    const text = await openAiCompatibleComplete({
+    const payload = await openAiCompatibleComplete({
       provider: "Groq",
       baseUrl,
       apiKey: auth.apiKey,
@@ -115,8 +115,17 @@ export const groqProvider: LlmProvider = {
       signal: request.signal,
       reasoning: request.thinking,
       reasoningStyle: "groq",
+      tools: request.tools,
+      toolChoice: request.toolChoice,
+      parallelToolCalls: request.parallelToolCalls,
     });
-    return { text, provider: "groq", model };
+    return {
+      text: payload.text,
+      provider: "groq",
+      model,
+      ...(payload.toolCalls?.length ? { toolCalls: payload.toolCalls } : {}),
+      ...(payload.finishReason ? { finishReason: payload.finishReason } : {}),
+    };
   },
   async stream(
     request: CompletionRequest,
@@ -125,7 +134,7 @@ export const groqProvider: LlmProvider = {
   ): Promise<CompletionResult> {
     if (!auth.apiKey) throw new Error("Groq API key is required");
     const model = request.model ?? defaultModels.groq;
-    const text = await openAiCompatibleStream({
+    const payload = await openAiCompatibleStream({
       provider: "Groq",
       baseUrl,
       apiKey: auth.apiKey,
@@ -135,9 +144,19 @@ export const groqProvider: LlmProvider = {
       temperature: request.temperature,
       signal: request.signal,
       onToken,
+      onToolCallDelta: request.onToolCallDelta,
       reasoning: request.thinking,
       reasoningStyle: "groq",
+      tools: request.tools,
+      toolChoice: request.toolChoice,
+      parallelToolCalls: request.parallelToolCalls,
     });
-    return { text, provider: "groq", model };
+    return {
+      text: payload.text,
+      provider: "groq",
+      model,
+      ...(payload.toolCalls?.length ? { toolCalls: payload.toolCalls } : {}),
+      ...(payload.finishReason ? { finishReason: payload.finishReason } : {}),
+    };
   },
 };

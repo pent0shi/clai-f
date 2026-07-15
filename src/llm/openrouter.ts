@@ -57,7 +57,7 @@ export const openrouterProvider: LlmProvider = {
   ): Promise<CompletionResult> {
     if (!auth.apiKey) throw new Error("OpenRouter API key is required");
     const model = request.model ?? defaultModels.openrouter;
-    const text = await openAiCompatibleComplete({
+    const payload = await openAiCompatibleComplete({
       provider: "OpenRouter",
       baseUrl,
       apiKey: auth.apiKey,
@@ -69,8 +69,17 @@ export const openrouterProvider: LlmProvider = {
       signal: request.signal,
       reasoning: request.thinking,
       reasoningStyle: "openrouter",
+      tools: request.tools,
+      toolChoice: request.toolChoice,
+      parallelToolCalls: request.parallelToolCalls,
     });
-    return { text, provider: "openrouter", model };
+    return {
+      text: payload.text,
+      provider: "openrouter",
+      model,
+      ...(payload.toolCalls?.length ? { toolCalls: payload.toolCalls } : {}),
+      ...(payload.finishReason ? { finishReason: payload.finishReason } : {}),
+    };
   },
   async stream(
     request: CompletionRequest,
@@ -79,7 +88,7 @@ export const openrouterProvider: LlmProvider = {
   ): Promise<CompletionResult> {
     if (!auth.apiKey) throw new Error("OpenRouter API key is required");
     const model = request.model ?? defaultModels.openrouter;
-    const text = await openAiCompatibleStream({
+    const payload = await openAiCompatibleStream({
       provider: "OpenRouter",
       baseUrl,
       apiKey: auth.apiKey,
@@ -90,9 +99,19 @@ export const openrouterProvider: LlmProvider = {
       headers,
       signal: request.signal,
       onToken,
+      onToolCallDelta: request.onToolCallDelta,
       reasoning: request.thinking,
       reasoningStyle: "openrouter",
+      tools: request.tools,
+      toolChoice: request.toolChoice,
+      parallelToolCalls: request.parallelToolCalls,
     });
-    return { text, provider: "openrouter", model };
+    return {
+      text: payload.text,
+      provider: "openrouter",
+      model,
+      ...(payload.toolCalls?.length ? { toolCalls: payload.toolCalls } : {}),
+      ...(payload.finishReason ? { finishReason: payload.finishReason } : {}),
+    };
   },
 };

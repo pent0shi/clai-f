@@ -32,6 +32,26 @@ export interface ChatImage {
   path?: string | undefined;
 }
 
+/** Structured tool call as returned by provider-native function calling. */
+export interface NativeToolCall {
+  id: string;
+  /** Canonical dotted name (e.g. fs.write). */
+  name: string;
+  args: Record<string, unknown>;
+  /** Original JSON arguments string when the provider sent one. */
+  rawArguments?: string | undefined;
+}
+
+/** Partial native tool call while the provider stream is still open (P2-3). */
+export interface ToolCallStreamDelta {
+  index: number;
+  id?: string | undefined;
+  /** Canonical name when known (may arrive before args complete). */
+  name?: string | undefined;
+  /** Accumulated argument JSON byte length so far. */
+  argumentsBytes?: number | undefined;
+}
+
 export interface ChatMessage {
   role: "system" | "user" | "assistant" | "tool";
   content: string;
@@ -43,6 +63,40 @@ export interface ChatMessage {
    * carries a note so the agent can fall back to OCR tools).
    */
   images?: ChatImage[] | undefined;
+  /** For role "tool": id of the assistant tool_call this result answers. */
+  toolCallId?: string | undefined;
+  /** For assistant turns that requested tools. */
+  toolCalls?: NativeToolCall[] | undefined;
+  /** Optional tool name (some providers require it on tool results). */
+  name?: string | undefined;
+  /** For role "tool": whether the tool succeeded (Anthropic is_error). */
+  ok?: boolean | undefined;
+}
+
+/** Tool choice for native function calling (canonical names). */
+export type ToolChoice =
+  | "auto"
+  | "none"
+  | "required"
+  | { type: "function"; name: string };
+
+/** JSON Schema object used for tool parameters. */
+export interface JsonSchemaObject {
+  type: "object";
+  properties: Record<string, unknown>;
+  required?: string[] | undefined;
+  additionalProperties?: boolean | undefined;
+}
+
+/** Canonical tool definition exposed to providers. */
+export interface ToolDefinition {
+  name: string;
+  wireName: string;
+  description: string;
+  parameters: JsonSchemaObject;
+  mutates?: boolean | undefined;
+  readOnly?: boolean | undefined;
+  askMode?: boolean | undefined;
 }
 
 export interface CompletionRequest {
@@ -60,12 +114,22 @@ export interface CompletionRequest {
   maxTokens?: number | undefined;
   signal?: AbortSignal | undefined;
   thinking?: ReasoningPreference | undefined;
+  /** Native tool definitions (canonical). Adapters convert to wire format. */
+  tools?: ToolDefinition[] | undefined;
+  toolChoice?: ToolChoice | undefined;
+  parallelToolCalls?: boolean | undefined;
+  /** Fired as native tool_call name/args stream in (early UI cards). */
+  onToolCallDelta?: ((delta: ToolCallStreamDelta) => void) | undefined;
 }
 
 export interface CompletionResult {
   text: string;
   provider: ProviderId;
   model: string;
+  toolCalls?: NativeToolCall[] | undefined;
+  finishReason?: "stop" | "tool_calls" | "length" | "error" | string | undefined;
+  /** Optional raw assistant payload for perfect replay (e.g. Anthropic blocks). */
+  rawAssistantMessage?: unknown | undefined;
 }
 
 export interface ProviderStatus {

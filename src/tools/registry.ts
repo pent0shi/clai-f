@@ -20,6 +20,9 @@ import {
 } from "./fs.js";
 import { httpFetch } from "./http.js";
 import { shellExec, spawnArgv } from "./shell.js";
+import {
+  isLongQuietInstallOrScaffoldCommand,
+} from "../agent/task-evidence.js";
 import { imageOcr } from "./image.js";
 import { pdfRead } from "./pdf.js";
 import { webFetch } from "./web/fetch.js";
@@ -43,6 +46,7 @@ import { looksLongRunning } from "./command-intent.js";
 import { packageBinaryName } from "./package-binary.js";
 import { runNmapScan } from "./nmap-runner.js";
 import { type ToolRunOptions, type ToolHandler } from "./tool-types.js";
+import { fromWireName, sanitizeToolName } from "../llm/tool-protocol.js";
 
 export type { ToolRunOptions, ToolHandler };
 
@@ -50,6 +54,18 @@ function requireString(args: Record<string, unknown>, key: string): string {
   const value = args[key];
   if (typeof value !== "string" || value.length === 0) {
     throw new Error(`Tool argument "${key}" must be a non-empty string`);
+  }
+  return value;
+}
+
+/** Like requireString but allows empty string (e.g. replaceLines delete). */
+function requireStringAllowEmpty(
+  args: Record<string, unknown>,
+  key: string,
+): string {
+  const value = args[key];
+  if (typeof value !== "string") {
+    throw new Error(`Tool argument "${key}" must be a string`);
   }
   return value;
 }
@@ -129,10 +145,16 @@ export const toolRegistry: Record<string, ToolHandler> = {
       }
       return job;
     }
+    // create-next-app / npm install often exceed the default 3 min shell timeout
+    // when the model omits timeoutMs — bump automatically for known long jobs.
+    const explicitTimeout = optionalNumber(args, "timeoutMs");
+    const timeoutMs =
+      explicitTimeout ??
+      (isLongQuietInstallOrScaffoldCommand(command) ? 900_000 : undefined);
     return shellExec({
       command,
       cwd: optionalString(args, "cwd"),
-      timeoutMs: optionalNumber(args, "timeoutMs"),
+      timeoutMs,
       signal: options?.signal,
       onOutput: options?.onOutput,
     });
@@ -584,11 +606,22 @@ export const toolRegistry: Record<string, ToolHandler> = {
     );
   },
   async "fs.replaceLines"(args, options) {
+    // Empty content / delete:true removes the line range (X6).
+    let content: string;
+    if (args.delete === true) {
+      content = "";
+    } else if (typeof args.content === "string") {
+      content = requireStringAllowEmpty(args, "content");
+    } else {
+      throw new Error(
+        'Tool argument "content" must be a string (use "" or delete:true to delete the line range)',
+      );
+    }
     return fsReplaceLines(
       requireString(args, "path"),
       requireNumber(args, "startLine"),
       requireNumber(args, "endLine"),
-      requireString(args, "content"),
+      content,
       { confirmed: options?.confirmed },
     );
   },
@@ -679,11 +712,24 @@ function buildShellCommandFromCall(
  * dangerous commands are gated exactly as a hand-written shell.exec would be.
  */
 export function normalizeToolCall(call: ToolCall): ToolCall {
-  if (toolRegistry[call.name]) return call;
-  const name = typeof call.name === "string" ? call.name.trim() : "";
+  // X1: strip channel/commentary tokens before registry lookup.
+  let name = typeof call.name === "string" ? call.name.trim() : "";
+  if (name && !toolRegistry[name]) {
+    const cleaned = sanitizeToolName(name);
+    const mapped = fromWireName(cleaned) ?? fromWireName(name) ?? cleaned;
+    if (mapped && toolRegistry[mapped]) {
+      return { name: mapped, args: call.args ?? {} };
+    }
+    if (cleaned && cleaned !== name) name = cleaned;
+  }
+  if (toolRegistry[name]) {
+    return name === call.name ? call : { name, args: call.args ?? {} };
+  }
   // Leave genuinely unknown namespaced tools (e.g. a typo'd "fs.reed") to
   // surface a clear error rather than guessing at a shell command.
-  if (!name || name.includes(".") || name.includes("/")) return call;
+  if (!name || name.includes(".") || name.includes("/")) {
+    return name === call.name ? call : { name, args: call.args ?? {} };
+  }
   const args = call.args ?? {};
   const command = buildShellCommandFromCall(name, args);
   if (!command) return call;

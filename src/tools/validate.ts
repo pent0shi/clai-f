@@ -165,6 +165,61 @@ export function toConnectScanArgv(argv: readonly string[]): string[] {
   return out;
 }
 
+/** True when argv already skips host discovery (-Pn). */
+export function nmapArgvHasPn(argv: readonly string[]): boolean {
+  return argv.some((t) => t === "-Pn" || t === "-P0" || t === "-PN");
+}
+
+/**
+ * Last non-flag token that looks like a single host (IP/hostname), not a
+ * CIDR/range. Used to decide when -Pn is safe/default for port scans.
+ */
+export function isNmapSingleHostTarget(argv: readonly string[]): boolean {
+  for (let i = argv.length - 1; i >= 0; i -= 1) {
+    const token = argv[i]!;
+    if (!token || token.startsWith("-")) continue;
+    // Skip values of previous flags (e.g. --top-ports 100).
+    const prev = argv[i - 1];
+    if (
+      prev &&
+      (prev === "-p" ||
+        prev === "--top-ports" ||
+        prev === "-T" ||
+        prev === "--max-retries" ||
+        prev === "--host-timeout" ||
+        prev === "-oN" ||
+        prev === "-oX" ||
+        prev === "-oG" ||
+        prev === "-iL" ||
+        prev === "--script" ||
+        prev === "--script-args")
+    ) {
+      continue;
+    }
+    if (token.includes("/")) return false; // CIDR
+    // nmap ranges like 192.168.1.1-50 or 10.0.0.1,10.0.0.2
+    if (/,/.test(token)) return false;
+    if (/^\d+\.\d+\.\d+\.\d+-\d+/.test(token)) return false;
+    return true;
+  }
+  return false;
+}
+
+/** Insert -Pn once near the front of argv (after any scan-type flags). */
+export function withNmapSkipDiscovery(argv: readonly string[]): string[] {
+  if (nmapArgvHasPn(argv)) return [...argv];
+  // Don't force -Pn on pure host-discovery (-sn) sweeps — that would scan every IP.
+  if (argv.includes("-sn") || argv.includes("-sL")) return [...argv];
+  return ["-Pn", ...argv];
+}
+
+/** nmap reported success but host discovery found nothing / host "down". */
+export function looksLikeNmapNoHostsUp(output: string): boolean {
+  return /(?:0 hosts? up|host seems down|note:\s*host seems down|all \d+ scanned (?:ports|hosts) on .* are in ignored states)/i.test(
+    output,
+  );
+}
+
 /** Convert a structured scan profile into safe argv for nmap. */
 export function profileToNmapArgs(profile: ScanProfile = {}): string[] {
   const args: string[] = [];

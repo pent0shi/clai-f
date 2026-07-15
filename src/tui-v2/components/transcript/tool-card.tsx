@@ -189,7 +189,7 @@ export function ToolCard(props: {
           hiddenAboveCount: 0,
           truncatedNotice: undefined as string | undefined,
         }
-      : presentOutput(tail, spoolState, expanded);
+      : presentOutput(tail, spoolState, expanded, item.name);
 
   const statusFg = theme[STATUS_COLOR[item.status]];
   const highlight =

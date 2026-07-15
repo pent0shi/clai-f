@@ -2,7 +2,7 @@
 
 > **Offensive-security agent in your terminal** — recon, enumerate, exploit, and report with an approve-before-run plan workflow. Also a strong coding/sysadmin agent for shell and files. Free to build, free to run.
 
-clai is an AI **agent CLI** built for people who break (and fix) systems: authorized pentests, red-team style workflows, CTFs, report verification, and day-to-day security engineering. It runs real tools (`nmap`, `ffuf`, `sqlmap`, `http` evidence capture, …), keeps a **durable engagement plan**, and never pretends a finding is real without tool output to back it up.
+clai is an AI **agent CLI** built for people who break (and fix) systems: authorized pentests, red-team style workflows, CTFs, report verification, and day-to-day security engineering. It runs real tools (`nmap`, `ffuf`, `sqlmap`, `http` evidence capture, …), keeps a **durable engagement plan**, and never pretends a finding is real without tool output to back it up. Providers that support it use **native function/tool calling** (config `toolCalling: auto|native|text`); text-fence tools remain as fallback.
 
 It also builds software and runs shell/file workflows when that is the job — same agent, same safety gate, same UI.
 

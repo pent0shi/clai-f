@@ -1,4 +1,7 @@
 import type { ProviderId } from "../types.js";
+import type { ToolDialect, ToolCallingMode } from "./tool-protocol.js";
+import { isTextOnlyModel } from "./tool-protocol.js";
+import { getConfig } from "../store/config.js";
 
 // Patterns of model names that support an explicit reasoning/thinking
 // toggle. The match is case-insensitive substring or regex.
@@ -167,4 +170,88 @@ export function preferredVisionModel(
   const fallback = preferredVisionModels[provider];
   if (!fallback) return undefined;
   return modelSupportsVision(provider, fallback) ? fallback : undefined;
+}
+
+/** Default wire dialect for each provider. */
+const providerToolDialect: Record<ProviderId, ToolDialect> = {
+  openai: "openai",
+  groq: "openai",
+  openrouter: "openai",
+  nvidia: "openai",
+  agentrouter: "openai",
+  kimchi: "openai",
+  bynara: "openai",
+  "qwen-cloud": "openai",
+  anthropic: "anthropic",
+  "aws-mantle": "openai", // refined by model below
+  gemini: "gemini",
+  ollama: "ollama",
+};
+
+/** Known non-tool / embedding / tiny models (light denylist). */
+const nativeToolsDenylist: RegExp[] = [
+  /embed/i,
+  /embedding/i,
+  /whisper/i,
+  /tts/i,
+  /dall-e/i,
+  /moderation/i,
+  /text-embedding/i,
+];
+
+/** Ollama families known to support tools. */
+const ollamaToolFamilies: RegExp[] = [
+  /llama3\.1/i,
+  /llama3\.2/i,
+  /llama3\.3/i,
+  /llama-?4/i,
+  /qwen/i,
+  /mistral/i,
+  /command-r/i,
+  /firefunction/i,
+  /tool/i,
+  /nemotron/i,
+  /deepseek/i,
+  /gpt-oss/i,
+  /gemma3/i,
+];
+
+function isAwsMantleAnthropicModel(model: string): boolean {
+  return /(?:^|[./-])(?:anthropic|claude)(?:[./-]|$)/i.test(model);
+}
+
+/**
+ * Resolve the native tool wire dialect for a provider/model pair.
+ * Returns "none" when tools should not be attached (text fallback).
+ */
+export function resolveToolDialect(
+  provider: ProviderId,
+  model: string,
+  toolCalling?: ToolCallingMode,
+): ToolDialect {
+  const mode = toolCalling ?? getConfig().toolCalling ?? "auto";
+  if (mode === "text") return "none";
+  if (isTextOnlyModel(provider, model)) return "none";
+  if (nativeToolsDenylist.some((re) => re.test(model))) return "none";
+
+  if (provider === "aws-mantle") {
+    return isAwsMantleAnthropicModel(model) ? "anthropic" : "openai";
+  }
+
+  if (provider === "ollama") {
+    if (mode === "native") return "ollama";
+    // native-preferred: only attach for known tool-capable families
+    if (ollamaToolFamilies.some((re) => re.test(model))) return "ollama";
+    return "none";
+  }
+
+  return providerToolDialect[provider] ?? "none";
+}
+
+export function modelSupportsNativeTools(
+  provider: ProviderId,
+  model: string,
+  toolCalling?: ToolCallingMode,
+): boolean {
+  return resolveToolDialect(provider, model, toolCalling) !== "none";
 }

@@ -453,7 +453,7 @@ describe("audit#6 — http helpers cap responses and watchdog streams", () => {
           initialIdleTimeoutMs: 100,
           idleTimeoutMs: 10,
         }),
-      ).resolves.toBe("ready");
+      ).resolves.toMatchObject({ text: "ready" });
     } finally {
       globalThis.fetch = originalFetch;
     }

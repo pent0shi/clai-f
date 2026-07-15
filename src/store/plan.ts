@@ -39,6 +39,8 @@ export interface PlanTask {
   title: string;
   state: TaskState;
   note?: string | undefined;
+  /** Model-supplied slugs (id/name) that resolve to this task via task.update. */
+  aliases?: string[] | undefined;
 }
 
 export interface SessionPlan {

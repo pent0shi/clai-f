@@ -154,6 +154,58 @@ export function cleanToolOutputLines(
 }
 
 /**
+ * Prefer keeping high-signal evidence lines at the top of a collapsed card
+ * for research tools (R5): top search hits, fetch title/status + lede.
+ */
+export function evidencePreviewLines(
+  toolName: string | undefined,
+  cleaned: readonly string[],
+): string[] | undefined {
+  if (!toolName || cleaned.length === 0) return undefined;
+  if (toolName === "web.search") {
+    // Keep summary line + first ~2 title/url hits when present.
+    const out: string[] = [];
+    for (const line of cleaned) {
+      if (out.length >= 8) break;
+      const t = line.trim();
+      if (!t) continue;
+      // title / url / snippet shaped lines or JSON-ish keys
+      if (
+        out.length < 2 ||
+        /^https?:\/\//i.test(t) ||
+        /"title"\s*:/i.test(t) ||
+        /"url"\s*:/i.test(t) ||
+        /^\d+\.\s/.test(t) ||
+        /^[-*]\s/.test(t)
+      ) {
+        out.push(line);
+      } else if (out.length < 3) {
+        out.push(line);
+      }
+    }
+    return out.length >= 2 ? out.slice(0, 8) : undefined;
+  }
+  if (toolName === "web.fetch" || toolName === "http.fetch") {
+    // Title/status-ish first lines + first meaningful paragraph body.
+    const out: string[] = [];
+    let bodyLines = 0;
+    for (const line of cleaned) {
+      const t = line.trim();
+      if (!t) {
+        if (out.length > 0 && bodyLines > 0) break;
+        continue;
+      }
+      out.push(line);
+      if (out.length <= 2) continue; // keep header/status
+      bodyLines += 1;
+      if (bodyLines >= 4 || out.length >= 8) break;
+    }
+    return out.length >= 2 ? out : undefined;
+  }
+  return undefined;
+}
+
+/**
  * Card body presentation.
  *
  * Collapsed: head + tail with a mid-body “··· N lines more ···” gap so the end
@@ -165,6 +217,7 @@ export function presentOutput(
   tail: string,
   state: BoundedTextState | undefined,
   expanded: boolean,
+  toolName?: string,
 ): OutputPresentation {
   const totalLines = roughLineCount(tail);
   const truncatedNotice = state?.truncated
@@ -213,7 +266,18 @@ export function presentOutput(
   let lines: string[];
   let hiddenAboveCount = 0;
 
-  if (cleaned.length <= budget) {
+  const evidence = !expanded
+    ? evidencePreviewLines(toolName, cleaned)
+    : undefined;
+
+  if (evidence && evidence.length > 0 && cleaned.length > budget) {
+    const rest = cleaned.length - evidence.length;
+    hiddenAboveCount = Math.max(0, totalLines - evidence.length, rest);
+    lines =
+      hiddenAboveCount > 0
+        ? [...evidence, `··· ${hiddenAboveCount} lines more ···`]
+        : evidence;
+  } else if (cleaned.length <= budget) {
     lines = cleaned;
     if (source !== tail && totalLines > cleaned.length) {
       hiddenAboveCount = Math.max(0, totalLines - cleaned.length);

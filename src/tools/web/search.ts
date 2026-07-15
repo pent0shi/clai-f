@@ -301,20 +301,73 @@ async function attemptProvider(
     };
   }
 
-  // Filter and validate hits per Requirement 7.3, then truncate.
+  // Filter and validate hits per Requirement 7.3, soft-boost high-trust
+  // hosts, then truncate so official sources surface earlier when present.
   const filtered: SearchResult[] = [];
   for (const hit of raw.hits) {
-    if (filtered.length >= maxResults) break;
     const normalised = normaliseHit(hit);
     if (!normalised) continue;
     filtered.push(normalised);
   }
+  filtered.sort(
+    (a, b) => trustHostScore(b.url) - trustHostScore(a.url),
+  );
+  const truncated = filtered.slice(0, maxResults);
 
   return {
     ok: true,
     provider: provider.id,
-    results: filtered,
+    results: truncated,
   };
+}
+
+/** Soft boost for official / major-wire hosts (stable sort key only). */
+function trustHostScore(url: string): number {
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    if (
+      host.endsWith(".gov") ||
+      host.endsWith(".gov.uk") ||
+      host.endsWith(".gov.au") ||
+      host.endsWith(".europa.eu") ||
+      host === "wikipedia.org" ||
+      host.endsWith(".wikipedia.org")
+    ) {
+      return 3;
+    }
+    if (
+      host === "bbc.co.uk" ||
+      host.endsWith(".bbc.co.uk") ||
+      host === "bbc.com" ||
+      host.endsWith(".bbc.com") ||
+      host === "reuters.com" ||
+      host.endsWith(".reuters.com") ||
+      host === "apnews.com" ||
+      host.endsWith(".apnews.com") ||
+      host === "theguardian.com" ||
+      host.endsWith(".theguardian.com") ||
+      host === "nytimes.com" ||
+      host.endsWith(".nytimes.com") ||
+      host.endsWith(".who.int") ||
+      host.endsWith(".un.org")
+    ) {
+      return 2;
+    }
+    if (
+      host === "github.com" ||
+      host.endsWith(".github.io") ||
+      host.endsWith(".mozilla.org") ||
+      host.endsWith(".microsoft.com") ||
+      host.endsWith(".apple.com") ||
+      host.endsWith(".google.com") ||
+      host.endsWith(".cloudflare.com")
+    ) {
+      return 1;
+    }
+  } catch {
+    // ignore invalid URLs
+  }
+  return 0;
 }
 
 // ---------------------------------------------------------------------------

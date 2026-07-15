@@ -41,7 +41,8 @@ describe("plan.create robust arg normalization", () => {
         name: "plan.create",
         args: {
           goal: "Build todo app",
-          tasks: "scaffold project\nimplement UI\nverify build",
+          tasks:
+            "scaffold project\nimplement UI\nverify build\nstart dev server, probe localhost, leave running, report URL",
           kind: "coding",
         },
       },
@@ -49,7 +50,9 @@ describe("plan.create robust arg normalization", () => {
       { loopGuard: new LoopGuard(), step: 1 },
     );
     expect(result.ok).toBe(true);
-    expect(result.plan?.tasks.length).toBe(3);
+    // coding app plans auto-inject an install step after scaffold
+    expect(result.plan?.tasks.length).toBe(5);
+    expect(result.plan?.tasks.some((t) => /install/i.test(t.title))).toBe(true);
   });
 
   it("still rejects empty goal/tasks with a helpful note", async () => {
