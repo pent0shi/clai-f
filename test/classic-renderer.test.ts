@@ -44,7 +44,7 @@ describe("classic renderer", () => {
 
     expect(stripAnsi(output)).toMatchInlineSnapshot(`
       "  ℹ current-info question detected
-        ▶ shell.exec {"command":"echo hi"}
+        ○ shell.exec {"command":"echo hi"}
         ✓
         hello
         world

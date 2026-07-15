@@ -82,16 +82,9 @@ function seedDraft(services: ReturnType<typeof build>, draft: SessionPlan = plan
 describe("plan lifecycle (PLAN-004, F-021/023, V2-070)", () => {
   it("pane implement dismisses open plan confirm without double-submit", async () => {
     const calls: string[] = [];
-    const persistence = fakePersistence();
-    const services = buildServices(persistence, fakeAgent(calls));
+    const services = build(calls);
     const draft = plan();
-    services.plan.observe(
-      new EventSequencer(asSessionId("s1")).build(
-        "plan-updated",
-        { planId: asPlanId("p1"), plan: draft },
-        undefined,
-      ),
-    );
+    seedDraft(services, draft);
     const confirmP = services.overlay.openConfirm({
       kind: "plan",
       prompt: "Implement?",

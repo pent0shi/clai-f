@@ -114,7 +114,7 @@ describe("transcript reducer (V2-050)", () => {
     expect(items).toHaveLength(1);
     expect(items[0]).toMatchObject({ kind: "tool", name: "fs.read" });
     expect(state.pendingAssistantId).toBeUndefined();
-    expect(state.runningStatus).toBe("fs.read");
+    expect(state.runningStatus).toBe("responding");
   });
 
   it("keeps finalized Response prose above the tool card", () => {
