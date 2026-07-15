@@ -31,17 +31,10 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci --ignore-scripts
+      # Platform packages declare os/cpu; without --force, npm skips non-host
+      # targets and `bun build --compile --target …` fails to resolve imports.
       - name: Install all @opentui/core platform binaries for cross-compile
-        run: |
-          npm install --no-save --ignore-scripts \
-            @opentui/core-darwin-x64@0.4.3 \
-            @opentui/core-darwin-arm64@0.4.3 \
-            @opentui/core-linux-x64@0.4.3 \
-            @opentui/core-linux-arm64@0.4.3 \
-            @opentui/core-win32-x64@0.4.3 \
-            @opentui/core-win32-arm64@0.4.3 \
-            @opentui/core-linux-x64-musl@0.4.3 \
-            @opentui/core-linux-arm64-musl@0.4.3
+        run: node scripts/install-opentui-platforms.mjs
       - run: npm run typecheck
       - run: npm test
       - name: Build binary

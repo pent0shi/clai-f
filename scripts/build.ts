@@ -10,6 +10,12 @@ const targets = [
   'bun-windows-x64',
 ] as const;
 
+// Bun resolves every @opentui/core-* dynamic import at compile time; force-
+// install all platform packages (npm skips non-host os/cpu without --force).
+await execa('node', ['scripts/install-opentui-platforms.mjs'], {
+  stdio: 'inherit',
+});
+
 await mkdir('release', { recursive: true });
 
 for (const target of targets) {

@@ -1,6 +1,6 @@
 {
   "name": "@pentoshi/clai",
-  "version": "3.5.0",
+  "version": "3.5.1",
   "description": "A fast, cross-platform AI CLI assistant with ask and agent modes for shell tasks, file operations, and cybersecurity workflows.",
   "type": "module",
   "license": "MIT",
@@ -41,6 +41,7 @@
     "build": "tsc -p tsconfig.json",
     "prepublishOnly": "npm run build",
     "compile": "bun run scripts/build.ts",
+    "install:opentui-platforms": "node scripts/install-opentui-platforms.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "doctor": "tsx src/index.ts doctor"
