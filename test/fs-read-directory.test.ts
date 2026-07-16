@@ -5,7 +5,7 @@ import {
   writeFileSync,
   rmSync,
 } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import {
   fsRead,
@@ -42,13 +42,37 @@ describe("fs.read on directories", () => {
 });
 
 describe("isOutsideWorkingDirectory", () => {
-  it("detects paths outside cwd", () => {
-    const outside = resolveFsToolPath("/tmp/clai-outside-test-xyz");
+  it("detects paths outside cwd (and outside tmpdir)", () => {
+    // `/tmp/...` is NOT a valid "outside" sample on Linux CI: tmpdir() is often
+    // `/tmp`, and isOutsideWorkingDirectory intentionally treats system temp as
+    // inside (agent scratch must not spam confirms). Use a synthetic root path
+    // that is under neither cwd nor tmpdir.
+    const candidates =
+      process.platform === "win32"
+        ? ["C:\\Windows\\clai-outside-test-xyz", "D:\\clai-outside-test-xyz"]
+        : [
+            "/var/clai-outside-test-xyz",
+            "/usr/local/clai-outside-test-xyz",
+            "/clai-outside-test-xyz",
+          ];
+    const cwd = resolve(process.cwd());
+    const tmp = resolve(tmpdir());
+    const outsideRaw = candidates.find((p) => {
+      const r = resolve(p);
+      return !r.startsWith(cwd + "/") && !r.startsWith(tmp + "/") && r !== cwd && r !== tmp;
+    });
+    expect(outsideRaw, "need a path outside cwd and tmpdir").toBeTruthy();
+    const outside = resolveFsToolPath(outsideRaw!);
     expect(isOutsideWorkingDirectory(outside)).toBe(true);
   });
 
   it("treats paths under cwd as inside", () => {
     const inside = resolveFsToolPath(join(process.cwd(), "package.json"));
     expect(isOutsideWorkingDirectory(inside)).toBe(false);
+  });
+
+  it("treats system temp as inside (scratch / no confirm spam)", () => {
+    const underTmp = resolveFsToolPath(join(tmpdir(), "clai-scratch-probe-xyz"));
+    expect(isOutsideWorkingDirectory(underTmp)).toBe(false);
   });
 });
