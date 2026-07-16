@@ -88,6 +88,13 @@ export async function runStreamingMarkdownSpike(): Promise<SpikeResult> {
     }
     return result;
   } finally {
-    setup.renderer.destroy();
+    try {
+      setup.renderer.destroy();
+    } catch (err) {
+      note(
+        result,
+        `renderer.destroy threw (ignored): ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 }

@@ -97,6 +97,10 @@ export async function runViewportCullingSpike(): Promise<SpikeResult> {
     measure(result, "rssMB", Number((mem.rss / 1024 / 1024).toFixed(1)));
     return result;
   } finally {
-    setup.renderer.destroy();
+    try {
+      setup.renderer.destroy();
+    } catch {
+      /* OpenTUI native teardown can throw; spike result already recorded */
+    }
   }
 }
