@@ -15,12 +15,7 @@ import {
   appendToolResult,
 } from "../agent/tool-history.js";
 
-/**
- * Signal raised when the model, while in ask mode, tries to call a mutating
- * tool (run a command, write a file, install a package, …). Ask mode is
- * read-only, so instead of leaking the raw tool-call JSON as the "answer" we
- * surface this so the caller can offer to switch into agent mode.
- */
+
 export interface AskActionRequired {
   /** The original prompt, so the caller can re-run it in agent mode. */
   prompt: string;
@@ -36,19 +31,9 @@ export interface AskOptions {
   history?: ChatMessage[] | undefined;
   signal?: AbortSignal | undefined;
   images?: ChatImage[] | undefined;
-  /**
-   * Invoked when the task needs actions ask mode can't perform. When set, the
-   * research loop returns an empty string and lets the caller drive the
-   * follow-up (e.g. prompt to switch to agent mode). When unset, ask mode
-   * falls back to a clean explanatory message instead of raw tool-call text.
-   */
+  
   onActionRequired?: ((info: AskActionRequired) => void) | undefined;
-  /**
-   * Optional event sink for live research activity. Ask mode emits
-   * `tool-call`/`tool-result` events for each read-only research tool it runs
-   * (web.search, web.fetch, …) so the UI can show what it's searching or
-   * fetching, mirroring agent-mode tool cards.
-   */
+ 
   onEvent?: ((event: AgentEvent) => void) | undefined;
 }
 
@@ -95,12 +80,7 @@ function researchResultSummary(call: ToolCall, ok: boolean): string {
 }
 
 
-/**
- * Read-only tools ask mode is allowed to call during its research loop.
- * Everything here is non-mutating: web lookups and local file inspection
- * only. Ask mode never runs shell commands, installs packages, or writes
- * files.
- */
+
 const ASK_RESEARCH_TOOLS = new Set([
   "web.search",
   "web.fetch",
@@ -176,13 +156,7 @@ async function buildAskMessages(
   };
 }
 
-/**
- * Find where (if anywhere) a tool-call block begins in `text`. Ask mode
- * streams each model round to the live display, but a round may turn out to
- * be a tool call rather than prose. We mirror tokens to the screen only up to
- * the point a tool-call delimiter appears, so raw tool JSON never streams to
- * the user. Returns -1 when no tool-call marker is present.
- */
+
 function toolCallStartIndex(text: string): number {
   const indicators: RegExp[] = [
     /```\s*tool/i,
@@ -211,13 +185,7 @@ interface AskBaseRequest {
   toolChoice?: "auto" | undefined;
 }
 
-/**
- * Run one model round as a stream, mirroring visible prose tokens to `onToken`
- * as they arrive (so the user sees the answer build up live) while suppressing
- * anything from a tool-call delimiter onward. Returns the round's full raw
- * text so the caller can detect/parse tool calls. Providers without a native
- * stream fall back to a single onToken call inside streamWithProvider.
- */
+
 async function streamAskRound(
   request: AskBaseRequest,
   messages: ChatMessage[],
@@ -260,18 +228,7 @@ async function streamAskRound(
   return { text };
 }
 
-/**
- * Drive ask mode to its final answer.
- *
- * Ask mode is non-agentic for the user — there is no plan, no confirmations,
- * no system changes — but it MAY ground its answer in current facts via a
- * bounded loop of read-only tools (web.search/web.fetch/tool.batch and
- * read-only fs.*). Each round is streamed to `onToken`: prose answers appear
- * live, and rounds that turn out to be tool calls are suppressed mid-stream so
- * raw tool JSON never reaches the screen. The returned string is always the
- * clean final answer, which callers treat as authoritative even if the live
- * stream briefly showed a tool-call preamble.
- */
+
 async function resolveAskAnswer(
   originalPrompt: string,
   provider: ProviderId,
@@ -350,12 +307,7 @@ async function resolveAskAnswer(
     const roundResult = await streamAskRound(baseRequest, messages, onToken);
     const text = roundResult.text;
 
-    // ── Prompt-leak guard ──────────────────────────────────────────────
-    // If the model's response contains distinctive system-prompt markers,
-    // it is repeating its instructions (e.g. in response to "repeat your
-    // instructions verbatim"). Any tool blocks / native toolCalls in that
-    // output are EXAMPLES from the prompt, not real tool requests. Treat
-    // the whole response as a final text answer and do not execute tools.
+    
     if (looksLikePromptLeak(text)) {
       return text;
     }
@@ -370,18 +322,12 @@ async function resolveAskAnswer(
       allCalls.map((_, i) => syntheticToolCallId(i));
     const calls = allCalls.filter((call) => ASK_RESEARCH_TOOLS.has(call.name));
     if (calls.length === 0) {
-      // No allowed research tool requested. If the model instead asked for a
-      // mutating/action tool, this is an agent task — surface it rather than
-      // returning the raw tool-call JSON as the answer.
+      
       const actionCalls = allCalls.filter(
         (call) => !ASK_RESEARCH_TOOLS.has(call.name),
       );
       if (actionCalls.length > 0) {
-        // The model signals it wants to act either via an explicit
-        // `agent.handoff` call (preferred — see the ask system prompt) or by
-        // emitting a real mutating tool call. Pull the reason out of a handoff
-        // when present, and never surface "agent.handoff" itself as a tool the
-        // user would recognize.
+       
         const handoff = actionCalls.find(
           (call) => call.name === "agent.handoff" || call.name === "agent.run",
         );
@@ -514,9 +460,7 @@ export async function runAskStream(
   options: AskOptions = {},
 ): Promise<string> {
   const request = await buildAskMessages(prompt, options);
-  // The answer is streamed to onToken live (with tool-call rounds suppressed),
-  // and the returned string is the authoritative final answer for callers that
-  // commit/persist it.
+ 
   return resolveAskAnswer(
     prompt,
     request.provider,

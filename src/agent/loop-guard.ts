@@ -35,10 +35,34 @@ const READ_ONLY_TOOLS = new Set([
  * Track and detect tool-call repetition patterns so the agent doesn't
  * waste steps in loops.
  */
+export interface LoopGuardOptions {
+  /** @deprecated Retry authorization belongs in RetryContext passed to shouldBlock. */
+  allowUnlimitedFailedRetries?: boolean;
+  /** @deprecated Unchanged failed retries are blocked immediately. */
+  failedRetryLimit?: number;
+}
+
+export interface RetryContext {
+  /** A dependency changed since the failed attempt. */
+  dependenciesChanged?: boolean;
+  /** The execution environment changed since the failed attempt. */
+  environmentChanged?: boolean;
+  /** Structured justification for retrying without an external change. */
+  retryReason?: {
+    code: string;
+    detail: string;
+  };
+}
+
 export class LoopGuard {
   private attempts: ToolAttempt[] = [];
   private signatureCount = new Map<string, number>();
   private signatureSuccess = new Map<string, boolean>();
+  /** Failed read-only signatures that already used their one free env-change retry. */
+  private failedReadRetryUsed = new Set<string>();
+  private lastSuccessfulNonMetaStep = -1;
+
+  constructor(_options: LoopGuardOptions = {}) {}
 
   /**
    * Produce a canonical string for a (name, args) pair so that calls
@@ -50,7 +74,11 @@ export class LoopGuard {
     for (const key of Object.keys(args).sort()) {
       let value = args[key];
       // Normalize command whitespace for shell.exec
-      if (name === "shell.exec" && key === "command" && typeof value === "string") {
+      if (
+        (name === "shell.exec" || name === "shell.start") &&
+        key === "command" &&
+        typeof value === "string"
+      ) {
         value = value.trim().replace(/\s+/g, " ");
       }
       sorted[key] = value;
@@ -68,29 +96,39 @@ export class LoopGuard {
     const sig = this.canonicalize(name, args);
     this.attempts.push({ step, callName: name, canonicalSignature: sig, ok, exitCode });
     this.signatureCount.set(sig, (this.signatureCount.get(sig) ?? 0) + 1);
-    // Remember whether this exact call has EVER succeeded. A call that only
-    // ever failed should be allowed to retry (e.g. fs.write that hit ENOENT,
-    // a command that needed installing first) without being flagged as a
-    // redundant loop.
-    if (ok) this.signatureSuccess.set(sig, true);
-    else if (!this.signatureSuccess.has(sig)) this.signatureSuccess.set(sig, false);
+    // Remember whether this exact call has EVER succeeded.
+    if (ok) {
+      this.signatureSuccess.set(sig, true);
+      if (name !== "task.update" && name !== "plan.create") {
+        this.lastSuccessfulNonMetaStep = step;
+      }
+    } else {
+      if (!this.signatureSuccess.has(sig)) this.signatureSuccess.set(sig, false);
+    }
 
-    // X11: after a successful mutate on a path, allow re-reading that path.
-    if (
-      ok &&
-      (name === "fs.write" ||
-        name === "fs.writeMany" ||
-        name === "fs.edit" ||
-        name === "fs.replaceLines" ||
-        name === "fs.append" ||
-        name === "fs.delete")
-    ) {
-      this.invalidateReadsForMutatedPaths(name, args);
+    // After successful *mutates* (not reads), allow re-list/re-read of those paths.
+    // Never invalidate on fs.read/list themselves — that wiped the dedup counter
+    // on every successful read and disabled loop detection.
+    if (ok && this.isPathMutatingTool(name)) {
+      this.invalidateReadsAfterSuccess(name, args);
     }
   }
 
-  /** Drop successful fs.read signatures that touch the mutated path(s). */
-  private invalidateReadsForMutatedPaths(
+  private isPathMutatingTool(name: string): boolean {
+    return (
+      name === "fs.write" ||
+      name === "fs.writeMany" ||
+      name === "fs.edit" ||
+      name === "fs.replaceLines" ||
+      name === "fs.append" ||
+      name === "fs.delete" ||
+      name === "shell.exec" ||
+      name === "shell.start"
+    );
+  }
+
+  /** Drop list/read signatures that touch paths a successful tool may have created. */
+  private invalidateReadsAfterSuccess(
     name: string,
     args: Record<string, unknown>,
   ): void {
@@ -103,12 +141,30 @@ export class LoopGuard {
         }
       }
     }
-    if (paths.length === 0) return;
-    for (const [sig] of this.signatureCount) {
-      if (!sig.startsWith("fs.read::")) continue;
-      if (paths.some((p) => sig.includes(p))) {
+    if (
+      (name === "shell.exec" || name === "shell.start") &&
+      typeof args.command === "string"
+    ) {
+      const cmd = args.command;
+      // mkdir -p path, create-vite name, cd path
+      for (const m of cmd.matchAll(
+        /(?:mkdir\s+(?:-p\s+)?|cd\s+|create-[\w@./-]+\s+|vite@\S+\s+)(['"]?)([^\s;'"]+)\1/gi,
+      )) {
+        if (m[2] && m[2] !== ".") paths.push(m[2]);
+      }
+      if (typeof args.cwd === "string") paths.push(args.cwd);
+    }
+    if (paths.length === 0) {
+      // Any successful shell still clears failed fs.list of unknown paths once
+      // via the generic read-only retry path in shouldBlock.
+      return;
+    }
+    for (const sig of [...this.signatureCount.keys()]) {
+      if (!sig.startsWith("fs.read::") && !sig.startsWith("fs.list::")) continue;
+      if (paths.some((p) => p.length > 1 && sig.includes(p))) {
         this.signatureCount.delete(sig);
         this.signatureSuccess.delete(sig);
+        this.failedReadRetryUsed.delete(sig);
       }
     }
   }
@@ -120,18 +176,15 @@ export class LoopGuard {
    * `{ block: false, reason: "..." }` for a warning (first repeat), or
    * `{ block: true, reason: "..." }` to force summary (second+ repeat).
    *
-   * A call whose every prior attempt FAILED is never blocked — the model is
-   * expected to fix the cause (install a tool, create a dir) and retry. Only
-   * calls that already SUCCEEDED are deduped, since re-running them wastes a
-   * step and risks an infinite summarize loop.
-   *
-   * Read-only tools (web.fetch, fs.read, etc.) get a higher threshold (3)
-   * because they may legitimately need re-calling after context compaction
-   * removes their results.
+   * Failed read-only tools may retry once after any successful intervening
+   * non-meta work (e.g. list missing dir → scaffold → list again). Failed
+   * mutates still need structured retry context or a changed path.
+   * Successful identical mutates are still deduped.
    */
   shouldBlock(
     name: string,
     args: Record<string, unknown>,
+    retryContext?: RetryContext,
   ): { block: boolean; reason?: string | undefined } {
     if (name === "task.update" || name === "plan.create") {
       return { block: false };
@@ -141,8 +194,44 @@ export class LoopGuard {
 
     if (count === 0) return { block: false };
 
-    // Prior attempts all failed → allow the retry, no warning.
-    if (this.signatureSuccess.get(sig) === false) return { block: false };
+    // Previously-failed signature: allow structured retry, or one free retry
+    // for read-only tools after environment-changing successful work.
+    if (this.signatureSuccess.get(sig) === false) {
+      const structuredReason = retryContext?.retryReason;
+      const authorized =
+        retryContext?.dependenciesChanged === true ||
+        retryContext?.environmentChanged === true ||
+        Boolean(structuredReason?.code.trim() && structuredReason.detail.trim());
+      if (authorized) {
+        return {
+          block: false,
+          reason: `${name} retry authorized by changed context or structured rationale.`,
+        };
+      }
+      if (READ_ONLY_TOOLS.has(name) && !this.failedReadRetryUsed.has(sig)) {
+        // Permit one retry after any successful non-meta tool since the fail.
+        const lastFailStep = [...this.attempts]
+          .reverse()
+          .find((a) => a.canonicalSignature === sig && !a.ok)?.step;
+        if (
+          lastFailStep !== undefined &&
+          this.lastSuccessfulNonMetaStep > lastFailStep
+        ) {
+          this.failedReadRetryUsed.add(sig);
+          // Reset counters so a successful retry is clean
+          this.signatureCount.delete(sig);
+          this.signatureSuccess.delete(sig);
+          return {
+            block: false,
+            reason: `${name} retry allowed after successful work changed the environment.`,
+          };
+        }
+      }
+      return {
+        block: true,
+        reason: `${name} previously failed with identical arguments. Change dependencies/environment or provide a structured retry reason.`,
+      };
+    }
 
     // Mutating file tools deserve tool-appropriate wording. Telling a model
     // that just wrote a file to "use the results you already have" is

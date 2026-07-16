@@ -140,7 +140,7 @@ export function CompactedRow(props: {
               <text selectable style={{ fg: theme.muted }}>
                 {"│ "}
               </text>
-              <text content={content} selectable />
+              <text content={content ?? " "} selectable />
             </box>
           ))}
           {hidden > 0 ? (

@@ -152,7 +152,10 @@ describe("loadImageAttachments", () => {
     const txt = join(dir, "notes.txt");
     writeFileSync(txt, "hello");
     const paths = imageAttachmentPaths(`${png} and ${txt} what is this`, dir);
-    expect(paths).toEqual([png]);
+    // Paths are stabilized into scratch/attachments for vision reliability.
+    expect(paths).toHaveLength(1);
+    expect(paths[0]).toMatch(/shot\.png$/);
+    expect(paths[0]).toContain("attachments");
   });
 
   it("imageAttachmentPaths returns empty when no images are referenced", () => {

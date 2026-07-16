@@ -25,12 +25,7 @@ export const groqFallbackModels = [
   "groq/compound",
 ];
 
-/**
- * Conservative input budgets for Groq models whose free-tier TPM limit is
- * smaller than clai's normal agent prompt. Leave room for the current user
- * message and protocol overhead instead of treating the published TPM number
- * as usable prompt space.
- */
+
 const groqInputTokenBudgets: Array<{ pattern: RegExp; tokens: number }> = [
   { pattern: /qwen\/qwen3-32b/i, tokens: 5_500 },
   { pattern: /openai\/gpt-oss-20b/i, tokens: 7_500 },

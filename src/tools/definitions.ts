@@ -290,6 +290,10 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
           type: "string",
           description: "Legacy flags string",
         },
+        background: {
+          type: "boolean",
+          description: "Force durable execution; deep/full profiles are durable automatically",
+        },
       },
       required: ["target"],
       additionalProperties: false,
@@ -373,7 +377,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   ),
   def(
     "pentest.recon",
-    "Bundled whois/dns/nmap recon. Prefer discrete tools when only one step is needed.",
+    "Bundled whois/dns/nmap recon. Prefer discrete tools when only one step is needed. Default nmap is top-100; escalate with topPorts, ports, or full for thorough engagements.",
     {
       type: "object",
       properties: {
@@ -381,11 +385,96 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         whois: { type: "boolean" },
         dns: { type: "boolean" },
         nmap: { type: "boolean" },
+        topPorts: {
+          type: "integer",
+          description: "nmap --top-ports N (default 100)",
+        },
+        ports: {
+          type: "string",
+          description: "nmap -p spec, e.g. 1-1000 or 80,443,8080",
+        },
+        full: {
+          type: "boolean",
+          description: "If true, scan all TCP ports (-p-)",
+        },
+        background: {
+          type: "boolean",
+          description: "Force durable nmap execution; deep/full scans are durable automatically",
+        },
       },
       required: ["target"],
       additionalProperties: false,
     },
     { mutates: true },
+  ),
+  def(
+    "pentest.webDiscover",
+    "Discover a scoped web surface with bounded concurrent requests to common and supplied paths.",
+    {
+      type: "object",
+      properties: {
+        baseUrl: { type: "string" },
+        paths: { type: "array", maxItems: 100, items: { type: "string" } },
+      },
+      required: ["baseUrl"],
+      additionalProperties: false,
+    },
+    { readOnly: true },
+  ),
+  def(
+    "pentest.apiEnumerate",
+    "Fetch and enumerate paths from an authorized OpenAPI/Swagger specification.",
+    {
+      type: "object",
+      properties: { specUrl: { type: "string" } },
+      required: ["specUrl"],
+      additionalProperties: false,
+    },
+    { readOnly: true },
+  ),
+  def(
+    "pentest.authCompare",
+    "Compare the same authorized endpoint across named authentication contexts. Credentials are never echoed.",
+    {
+      type: "object",
+      properties: {
+        url: { type: "string" },
+        contexts: {
+          type: "array",
+          minItems: 2,
+          maxItems: 10,
+          items: {
+            type: "object",
+            properties: {
+              label: { type: "string" },
+              headers: { type: "object", additionalProperties: { type: "string" } },
+            },
+            required: ["label", "headers"],
+            additionalProperties: false,
+          },
+        },
+      },
+      required: ["url", "contexts"],
+      additionalProperties: false,
+    },
+    { readOnly: true },
+  ),
+  def(
+    "pentest.scanStatus",
+    "Incrementally ingest a durable scan checkpoint by job id and byte offset.",
+    {
+      type: "object",
+      properties: {
+        id: { type: "string" },
+        offset: { type: "integer" },
+        bytes: { type: "integer" },
+        stream: { type: "string", enum: ["stdout", "stderr", "combined"] },
+        target: { type: "string" },
+      },
+      required: ["id", "target"],
+      additionalProperties: false,
+    },
+    { readOnly: true },
   ),
   def(
     "web.search",

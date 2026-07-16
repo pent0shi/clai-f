@@ -2,6 +2,10 @@ import type { ChatMessage } from "../types.js";
 import { redactSecrets } from "../llm/provider.js";
 import { stripThinking } from "../ui/thinking.js";
 import { expandKeepStartForToolPairs } from "./tool-history.js";
+import {
+  buildCompactionUserPrompt,
+  trimTranscriptForCompaction,
+} from "./compaction-summary.js";
 
 /**
  * Per-char token estimator. Real tokenization varies by provider, but for
@@ -152,6 +156,7 @@ export async function compactMessagesWithSummary(
   let keepRecent = Math.max(2, options.keepRecent ?? DEFAULT_KEEP_RECENT);
   const start = messages[0]?.role === "system" ? 1 : 0;
   let tailStart = Math.max(start, messages.length - keepRecent);
+  tailStart = expandKeepStartForToolPairs(messages, tailStart);
   let older = messages.slice(start, tailStart);
 
   // If forced and the older slice would be empty, try keeping fewer recent
@@ -159,6 +164,7 @@ export async function compactMessagesWithSummary(
   if (older.length === 0 && isForced && messages.length >= start + 2) {
     keepRecent = 1;
     tailStart = messages.length - 1;
+    tailStart = expandKeepStartForToolPairs(messages, tailStart);
     older = messages.slice(start, tailStart);
   }
 
@@ -177,41 +183,64 @@ export async function compactMessagesWithSummary(
   const messageTranscript = older
     .map((message) => {
       let content = redactSecrets(message.content);
-      // Strip <think> tags from assistant messages so thinking content
-      // never leaks into the compaction summary or model context.
       if (message.role === "assistant") {
         content = stripThinking(content).visible;
+      }
+      if (message.toolCalls?.length) {
+        content +=
+          "\n[tools: " +
+          message.toolCalls.map((t) => t.name).join(", ") +
+          "]";
       }
       return `${message.role.toUpperCase()}: ${content}`;
     })
     .join("\n\n");
-  // Prefer combining visual session material (tools/prompts) with older model
-  // turns so /compact after /history + new messages never loses either side.
+
   const visual = sessionTranscript?.trim()
     ? redactSecrets(sessionTranscript.trim())
     : "";
-  const fromMessages = messageTranscript.trim();
-  const transcript =
-    visual && fromMessages
-      ? `${visual}\n\n---\n\nOLDER MODEL TURNS:\n\n${fromMessages}`
-      : visual || fromMessages;
-  const prompt = [
-    "Create a complete but compact continuation memory of the entire session below for another assistant that will continue it.",
-    "The material may include a resumed history session plus newer turns — treat it as one continuous conversation.",
-    "Preserve user intentions and prompts, decisions, constraints, file paths, commands/tools run, steps taken, task states, outputs and results, errors and failed approaches, completed work, and exactly what remains.",
-    "Organize the memory under concise sections: User goals, Decisions and constraints, Work completed, Commands/tools and results, Current state, Remaining work.",
-    "Do not add facts, commentary, or markdown framing. Be concise but specific. Never include secrets or credentials.",
-    "",
-    transcript,
-  ].join("\n");
+  const isDurableSystem = (content: string): boolean =>
+    content.startsWith("ACTIVE PLAN") ||
+    content.startsWith("SESSION STATE") ||
+    content.startsWith("ENGAGEMENT SCOPE") ||
+    content.startsWith("TASK ANALYSIS") ||
+    content.includes("\nACTIVE PLAN") ||
+    content.includes("SESSION STATE / WORKING MEMORY");
 
-  // The summary is the only path. Any failure propagates to the caller —
-  // there is deliberately NO deterministic fallback.
-  // Strip <think> tags from the summary — the summarizer model may itself
-  // produce reasoning tags that would leak into the compacted context.
+  const durableBits = messages
+    .filter((m) => m.role === "system" && isDurableSystem(m.content))
+    .map((m) => {
+      // Large system prompts: extract only durable subsections when present.
+      if (m.content.length > 4_000) {
+        const chunks: string[] = [];
+        for (const marker of [
+          "ACTIVE PLAN",
+          "SESSION STATE / WORKING MEMORY",
+          "ENGAGEMENT SCOPE",
+          "TASK ANALYSIS",
+        ]) {
+          const idx = m.content.indexOf(marker);
+          if (idx >= 0) chunks.push(m.content.slice(idx, idx + 2_500));
+        }
+        return chunks.join("\n\n") || m.content.slice(0, 2_000);
+      }
+      return m.content;
+    })
+    .filter(Boolean)
+    .join("\n\n");
+
+  const rawCombined = buildCompactionUserPrompt({
+    visualTranscript: visual || undefined,
+    messageTranscript,
+    durableState: durableBits || undefined,
+  });
+  const prompt = trimTranscriptForCompaction(rawCombined);
+
   const rawSummary = redactSecrets((await summarize(prompt)).trim());
   const summary = stripThinking(rawSummary).visible.trim();
-  if (!summary) throw new Error("compaction failed: model returned an empty summary");
+  if (!summary) {
+    throw new Error("compaction failed: model returned an empty summary");
+  }
 
   const head = start === 1 ? [messages[0]!] : [];
   // Strip <think> tags from tail messages so thinking content never

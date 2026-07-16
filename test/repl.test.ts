@@ -4,7 +4,14 @@ import {
   getSlashCommandSuggestions,
   isKnownSlashCommand,
   renderSlashCommandMenu,
+  resetClassicSessionContext,
 } from "../src/repl.js";
+import { createSessionPolicy } from "../src/agent/session-policy.js";
+import {
+  clearActiveProjectRoot,
+  getActiveProjectRoot,
+  setActiveProjectRoot,
+} from "../src/agent/project-root.js";
 
 function stripAnsi(text: string): string {
   return text.replace(/\x1b\[[0-9;]*m/g, "");
@@ -62,6 +69,25 @@ describe("REPL slash command suggestions", () => {
         configurable: true,
         value: originalColumns,
       });
+    }
+  });
+});
+
+describe("classic REPL session lifecycle", () => {
+  it("clears project routing and rotates or adopts session identity", () => {
+    const state = { session: createSessionPolicy("previous-session") };
+    try {
+      setActiveProjectRoot("/tmp/clai-previous-project");
+      resetClassicSessionContext(state);
+      expect(getActiveProjectRoot()).toBeUndefined();
+      expect(state.session.sessionId).not.toBe("previous-session");
+
+      setActiveProjectRoot("/tmp/clai-another-project");
+      resetClassicSessionContext(state, "selected-history-session");
+      expect(getActiveProjectRoot()).toBeUndefined();
+      expect(state.session.sessionId).toBe("selected-history-session");
+    } finally {
+      clearActiveProjectRoot();
     }
   });
 });

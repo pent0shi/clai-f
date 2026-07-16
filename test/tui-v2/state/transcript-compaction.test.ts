@@ -66,6 +66,7 @@ function stateFrom(
         artifactPath: raw.artifactPath,
         reason: undefined,
         outputBytes: 0,
+        fileChanges: undefined,
       });
     } else {
       byId.set(raw.id, {

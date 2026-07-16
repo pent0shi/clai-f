@@ -12,7 +12,6 @@ coverage/
 providers-docs/
 provider-docs/
 enhancements.md
-improvements/
 improvements-v2/
 improvements-native-tools/
 AGENT_STATUS.md
@@ -21,3 +20,4 @@ vulnerability-assessment-report.md
 docs/v2/
 .vscode/
 debug-test.ts
+improvements/

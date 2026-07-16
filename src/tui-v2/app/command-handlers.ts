@@ -6,6 +6,7 @@
  */
 
 import type { AppServices } from "../bootstrap/composition-root.js";
+import type { CommandInvocation } from "../../app/commands/command.js";
 import { discardPlan, implementPlan } from "./plan-lifecycle.js";
 import {
   handleAllow,
@@ -44,6 +45,29 @@ import {
   handleSearch,
 } from "./commands/picker-commands.js";
 
+async function handlePlan(services: AppServices, invocation: CommandInvocation): Promise<void> {
+  const subcommand = invocation.args.trim().toLowerCase();
+  if (!subcommand || ["mode", "on", "enter"].includes(subcommand)) {
+    handleMode(services, "plan");
+    if (!subcommand) {
+      services.session.notice(
+        "info",
+        "plan mode on — describe the multi-step task you want to plan",
+      );
+    }
+    return;
+  }
+  if (["off", "agent"].includes(subcommand)) {
+    handleMode(services, "agent");
+    return;
+  }
+  if (["view", "show"].includes(subcommand)) {
+    handlePlanPager(services);
+    return;
+  }
+  services.session.notice("warn", "usage: /plan [view|off]");
+}
+
 export function attachCommandHandlers(services: AppServices): void {
   const c = services.commands;
   c.setHandler("ask", () => handleMode(services, "ask"));
@@ -55,7 +79,7 @@ export function attachCommandHandlers(services: AppServices): void {
   c.setHandler("history", () => void handleHistory(services));
   c.setHandler("permissions", (i) => handlePermissions(services, i));
   c.setHandler("output", (i) => handleOutput(services, i));
-  c.setHandler("plan", () => handlePlanPager(services));
+  c.setHandler("plan", (i) => handlePlan(services, i));
   c.setHandler("implement", () => {
     if (services.session.getState().running) {
       services.session.notice("warn", "a turn is already running");

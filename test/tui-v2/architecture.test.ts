@@ -24,6 +24,7 @@ const RENDERER_ALLOWED = new Set<string>([
   join(tuiV2Root, "bootstrap", "start-tui-v2.ts"),
   join(tuiV2Root, "bootstrap", "disable-native-selection.ts"),
   join(tuiV2Root, "bootstrap", "pager-export.ts"),
+  join(tuiV2Root, "bootstrap", "patch-opentui-text.ts"),
   join(tuiV2Root, "components", "transcript", "use-native-selection-copy.ts"),
   join(tuiV2Root, "components", "transcript", "use-click-without-drag.ts"),
   join(tuiV2Root, "components", "toast", "toast-host.tsx"),

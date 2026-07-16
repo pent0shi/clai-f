@@ -31,13 +31,53 @@ export async function saveToolOutput(
   }
 }
 
+const ERROR_LINE_RE =
+  /\b(?:error|exception|failed|failure|fatal|traceback|panic|ECONNREFUSED|ENOENT|TypeError|SyntaxError|ReferenceError|Cannot find|not found|exit code)\b/i;
+
+/**
+ * Truncate long tool output for the model. When `preferErrors` is set (failed
+ * commands), keep error-bearing lines and a heavy tail so stack traces survive.
+ */
 export function summarizeOutput(
   output: string,
   maxChars = 8_000,
+  opts?: { preferErrors?: boolean },
 ): { text: string; truncated: boolean } {
   if (output.length <= maxChars) return { text: output, truncated: false };
 
   const lines = output.split(/\r?\n/);
+
+  if (opts?.preferErrors) {
+    const errorLines = lines.filter((l) => ERROR_LINE_RE.test(l));
+    const tailBudget = Math.floor(maxChars * 0.55);
+    const errBudget = maxChars - tailBudget - 80;
+    const errBlock: string[] = [];
+    let used = 0;
+    for (const line of errorLines.slice(-80)) {
+      const cost = line.length + 1;
+      if (used + cost > errBudget) break;
+      errBlock.push(line);
+      used += cost;
+    }
+    const tail: string[] = [];
+    used = 0;
+    for (let i = lines.length - 1; i >= 0; i -= 1) {
+      const line = lines[i]!;
+      const cost = line.length + 1;
+      if (used + cost > tailBudget) break;
+      tail.unshift(line);
+      used += cost;
+    }
+    const body = [
+      ...(errBlock.length
+        ? ["[error-relevant lines]", ...errBlock, ""]
+        : []),
+      `... (${lines.length.toLocaleString()} lines truncated; tail kept) ...`,
+      ...tail,
+    ].join("\n");
+    return { text: body.slice(0, maxChars + 200), truncated: true };
+  }
+
   const head: string[] = [];
   const tail: string[] = [];
   let used = 0;
@@ -69,6 +109,22 @@ export function summarizeOutput(
   };
 }
 
+/** One-line failure cue prepended when a tool returns ok=false. */
+export function failureSummaryLine(result: {
+  ok: boolean;
+  exitCode?: number | undefined;
+  output?: string | undefined;
+}): string | undefined {
+  if (result.ok) return undefined;
+  const exit =
+    typeof result.exitCode === "number" ? `exit=${result.exitCode}` : "failed";
+  const head = (result.output ?? "").split(/\r?\n/).find((l) => l.trim()) ?? "";
+  const snippet = head.replace(/\s+/g, " ").trim().slice(0, 120);
+  return snippet
+    ? `FAILURE SUMMARY: ${exit}; ${snippet}`
+    : `FAILURE SUMMARY: ${exit}`;
+}
+
 // Tools whose output is the actual content the model needs verbatim (file
 // bodies, listings, search hits). Running these through the security-signal
 // `genericReducer` was wrong: it ranks lines by pentest keywords and drops
@@ -96,24 +152,41 @@ const WEB_FETCH_CAP_CHARS = 20_000;
 
 export function formatToolContext(call: ToolCall, result: ToolResult): string {
   const output = result.output.trim();
-  if (!output) return "";
+  if (!output) {
+    const fail = failureSummaryLine(result);
+    return fail ?? "";
+  }
+  const preferErrors = !result.ok;
+  const failLine = failureSummaryLine(result);
+
   if (call.name === "web.fetch" || call.name === "http.fetch") {
-    const { text, truncated } = summarizeOutput(output, WEB_FETCH_CAP_CHARS);
-    if (!truncated) return text;
-    const saved = result.outputPath
-      ? `\n\n[Response exceeds ${WEB_FETCH_CAP_CHARS.toLocaleString()} chars; showing the head and tail. The FULL response is saved at: ${result.outputPath} — re-fetch a narrower URL or read the saved file if you need the middle.]`
-      : `\n\n[Response exceeds ${WEB_FETCH_CAP_CHARS.toLocaleString()} chars; only head and tail shown.]`;
-    return `${text}${saved}`.trim();
+    const { text, truncated } = summarizeOutput(output, WEB_FETCH_CAP_CHARS, {
+      preferErrors,
+    });
+    const body = truncated
+      ? `${text}${
+          result.outputPath
+            ? `\n\n[Response exceeds ${WEB_FETCH_CAP_CHARS.toLocaleString()} chars; head/tail shown. Full: ${result.outputPath}]`
+            : `\n\n[Response exceeds ${WEB_FETCH_CAP_CHARS.toLocaleString()} chars; only head and tail shown.]`
+        }`
+      : text;
+    return [failLine, body].filter(Boolean).join("\n").trim();
   }
-  // Pass-through tools: never reduce — the model needs the real content.
+
   if (PASSTHROUGH_TOOLS.has(call.name)) {
-    const { text, truncated } = summarizeOutput(output, PASSTHROUGH_CAP_CHARS);
-    if (!truncated) return text;
-    const saved = result.outputPath
-      ? `\n\n[File content exceeds ${PASSTHROUGH_CAP_CHARS.toLocaleString()} chars; showing the head and tail. The FULL content is saved at: ${result.outputPath} — re-read specific line ranges with fs.read if you need the middle.]`
-      : `\n\n[File content exceeds ${PASSTHROUGH_CAP_CHARS.toLocaleString()} chars; only head and tail shown. Read it in smaller chunks if the middle is needed.]`;
-    return `${text}${saved}`.trim();
+    const { text, truncated } = summarizeOutput(output, PASSTHROUGH_CAP_CHARS, {
+      preferErrors,
+    });
+    const body = truncated
+      ? `${text}${
+          result.outputPath
+            ? `\n\n[File content exceeds ${PASSTHROUGH_CAP_CHARS.toLocaleString()} chars; head/tail shown. Full: ${result.outputPath}]`
+            : `\n\n[File content exceeds ${PASSTHROUGH_CAP_CHARS.toLocaleString()} chars; only head and tail shown.]`
+        }`
+      : text;
+    return [failLine, body].filter(Boolean).join("\n").trim();
   }
+
   let reduced: string | undefined;
   try {
     const command =
@@ -126,12 +199,10 @@ export function formatToolContext(call: ToolCall, result: ToolResult): string {
   } catch {
     reduced = undefined;
   }
-  // Hard cap on the reduced text — reducers should already be small, but
-  // never let one accidentally explode model context.
   const base = reduced && reduced.length > 0 ? reduced : output;
-  const summary = summarizeOutput(base, 8_000);
+  const summary = summarizeOutput(base, 8_000, { preferErrors });
   const saved = result.outputPath
     ? `\nFull output saved to: ${result.outputPath}`
     : "";
-  return `${summary.text}${saved}`.trim();
+  return [failLine, `${summary.text}${saved}`].filter(Boolean).join("\n").trim();
 }

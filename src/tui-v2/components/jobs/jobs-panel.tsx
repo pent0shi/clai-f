@@ -19,18 +19,24 @@ export interface JobsPanelProps {
   readonly theme: Theme;
 }
 
-const HUNG_AFTER_MS = 120_000;
 const POLL_MS = 1000;
 
 function statusView(job: BackgroundJob, theme: Theme): { text: string; fg: string } {
   if (job.status === "running") {
-    const elapsed = Date.now() - new Date(job.startedAt).getTime();
-    return elapsed > HUNG_AFTER_MS
-      ? { text: "running (possibly hung)", fg: theme.accent }
+    const heartbeatAge = job.heartbeatAt ? Date.now() - new Date(job.heartbeatAt).getTime() : undefined;
+    return heartbeatAge !== undefined && heartbeatAge > 120_000
+      ? { text: "running (quiet)", fg: theme.foreground }
       : { text: "running", fg: theme.foreground };
   }
   if (job.status === "exited") {
     return { text: `exited (${job.exitCode ?? "?"})`, fg: job.exitCode ? theme.accent : theme.muted };
+  }
+  if (job.status === "failed") {
+    return { text: `failed (${job.exitCode ?? "?"})`, fg: theme.accent };
+  }
+  if (job.status === "killed") {
+    const detail = [job.signal, job.exitCode].filter((value) => value !== undefined).join("/") || "?";
+    return { text: `killed (${detail})`, fg: theme.accent };
   }
   return { text: job.status, fg: theme.accent };
 }
@@ -42,12 +48,13 @@ function elapsedLabel(job: BackgroundJob): string {
 
 export function JobsPanel(props: JobsPanelProps): ReactNode {
   const { services, theme } = props;
-  const [jobs, setJobs] = useState<BackgroundJob[]>(() => services.ports.jobs.running());
+  const readJobs = (): BackgroundJob[] => services.ports.jobs.recent?.(100) ?? services.ports.jobs.running();
+  const [jobs, setJobs] = useState<BackgroundJob[]>(readJobs);
   const [selected, setSelected] = useState(0);
   const [note, setNote] = useState("");
 
   useEffect(() => {
-    const interval = setInterval(() => setJobs(services.ports.jobs.running()), POLL_MS);
+    const interval = setInterval(() => setJobs(readJobs()), POLL_MS);
     return () => clearInterval(interval);
   }, [services.ports.jobs]);
 
@@ -72,9 +79,10 @@ export function JobsPanel(props: JobsPanelProps): ReactNode {
         break;
       case "jobs.stop":
         if (job?.status === "running") {
-          const result = services.ports.jobs.stop(job.id);
-          setNote(result.output);
-          setJobs(services.ports.jobs.running());
+          void services.ports.jobs.stop(job.id).then((result) => {
+            setNote(result.output);
+            setJobs(readJobs());
+          });
         }
         break;
       case "jobs.tail":
@@ -93,6 +101,7 @@ export function JobsPanel(props: JobsPanelProps): ReactNode {
       style={{
         flexDirection: "column",
         width: "70%",
+        height: "70%",
         border: true,
         borderColor: theme.border,
         backgroundColor: theme.background,
@@ -104,6 +113,7 @@ export function JobsPanel(props: JobsPanelProps): ReactNode {
       <text style={{ fg: theme.muted }}>↑↓:select  ·  enter/t:tail  ·  k:kill  ·  q/esc:close</text>
       <text style={{ fg: theme.border }}>{"─".repeat(40)}</text>
       <text content=" " />
+      <scrollbox scrollY scrollX={false} viewportCulling style={{ flexGrow: 1, width: "100%" }}>
       {jobs.length === 0 ? (
         <text style={{ fg: theme.muted }}>no background jobs</text>
       ) : (
@@ -121,6 +131,7 @@ export function JobsPanel(props: JobsPanelProps): ReactNode {
           );
         })
       )}
+      </scrollbox>
       {note ? <text style={{ fg: theme.muted }}>{note}</text> : null}
     </box>
   );

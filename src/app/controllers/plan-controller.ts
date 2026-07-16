@@ -5,14 +5,11 @@ import type { Disposable } from "./disposable.js";
 
 export type PlanListener = () => void;
 
-/**
- * Holds the one current plan entity and keeps it in sync with the event stream
- * (PLAN-003: mutate the existing plan, never append duplicates). Approval and
- * discard mutate persisted status through the persistence port. Observable so
- * the UI can bind reactively without polling (PLAN-002).
- */
+
 export class PlanController implements Disposable {
   private plan: SessionPlan | undefined;
+  private loadGeneration = 0;
+  private activeSessionId: string | undefined;
   private readonly listeners = new Set<PlanListener>();
 
   constructor(private readonly persistence: PersistencePort) {}
@@ -28,30 +25,48 @@ export class PlanController implements Disposable {
 
   observe(event: AnyAppEvent): void {
     if (event.type === "plan-updated") {
+      const eventSessionId = event.payload.plan.sessionId;
+      if (this.activeSessionId && eventSessionId !== this.activeSessionId) {
+        return;
+      }
+      this.activeSessionId ??= eventSessionId;
+      // A live event is newer than any in-flight disk projection.
+      this.loadGeneration += 1;
       this.plan = event.payload.plan;
       this.notify();
     }
   }
 
   /**
-   * Load the plan for `sessionId` from disk into memory. Clears the in-memory
-   * plan when none is stored (so switching sessions never leaves a stale card).
+   * Load the plan for `sessionId` from disk into memory. The previous session's
+   * projection is cleared synchronously, and a generation token prevents a
+   * slower old-session load from repopulating the controller after /new.
    */
   async load(sessionId: string): Promise<SessionPlan | undefined> {
-    this.plan = await this.persistence.loadPlan(sessionId);
+    this.activeSessionId = sessionId;
+    const generation = ++this.loadGeneration;
+    this.plan = undefined;
+    this.notify();
+    const loaded = await this.persistence.loadPlan(sessionId);
+    if (generation !== this.loadGeneration) return this.plan;
+    this.plan = loaded;
     this.notify();
     return this.plan;
   }
 
   /** Drop the in-memory plan without touching disk. */
   clear(): void {
-    if (!this.plan) return;
+    // Always invalidate pending loads, even when the visible projection is
+    // already empty (a late promise must not resurrect it).
+    this.loadGeneration += 1;
+    const changed = this.plan !== undefined;
     this.plan = undefined;
-    this.notify();
+    if (changed) this.notify();
   }
 
   async approve(): Promise<SessionPlan | undefined> {
     if (!this.plan) return undefined;
+    this.loadGeneration += 1;
     const next: SessionPlan = { ...this.plan, status: "approved" };
     this.plan = next;
     await this.persistence.savePlan(next);
@@ -61,6 +76,7 @@ export class PlanController implements Disposable {
 
   async discard(): Promise<void> {
     if (!this.plan) return;
+    this.loadGeneration += 1;
     const { sessionId } = this.plan;
     this.plan = undefined;
     await this.persistence.deletePlan(sessionId);
@@ -68,6 +84,8 @@ export class PlanController implements Disposable {
   }
 
   dispose(): void {
+    this.loadGeneration += 1;
+    this.activeSessionId = undefined;
     this.plan = undefined;
     this.listeners.clear();
   }

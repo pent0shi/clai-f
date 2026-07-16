@@ -4,6 +4,11 @@ import {
   loadPlan,
   savePlan,
   markTask,
+  isBareTaskIdTitle,
+  isPlanTerminal,
+  isPlanSuccessful,
+  readyPlanTasks,
+  validateSessionPlan,
   type SessionPlan,
   type TaskState,
 } from "../store/plan.js";
@@ -12,6 +17,8 @@ import type { LoopGuard } from "./loop-guard.js";
 import type { SessionPolicy } from "./session-policy.js";
 import { isLumpedSingleTask } from "./tool-call-parser.js";
 import type { ToolCall } from "../types.js";
+import { getActiveProjectRoot } from "./project-root.js";
+import { detectPackageManager } from "./workspace-orient.js";
 
 /** Titles match for plan merge (exact or mutual long substring). */
 export function titlesMatchForPlan(a: string, b: string): boolean {
@@ -120,6 +127,93 @@ export function ensureCodingPlanInstallTask(
   return out;
 }
 
+function looksLikeFeatureImplementTask(title: string): boolean {
+  const t = title.toLowerCase();
+  if (looksLikeInstallTask(title) || looksLikeRunServerTask(title)) return false;
+  if (looksLikeScaffoldishTask(title) && !/\b(feature|todo|component|ui)\b/.test(t)) {
+    return false;
+  }
+  return (
+    /\b(implement|feature|todo|component|ui|crud|auth|localstorage|persist|integrate)\b/.test(
+      t,
+    ) ||
+    (/\b(add|build|write|create)\b/.test(t) &&
+      /\b(todo|feature|component|page|ui|list|form)\b/.test(t))
+  );
+}
+
+function looksLikeFeatureAppPlan(
+  goal: string,
+  detail: string,
+  tasks: string[],
+): boolean {
+  const blob = `${goal}\n${detail}\n${tasks.join("\n")}`.toLowerCase();
+  if (/\b(just|only)\s+(scaffold|init|boilerplate|starter)\b/.test(blob)) {
+    return false;
+  }
+  return (
+    /\b(todo|to-?do|blog|dashboard|chat|kanban|notes?|crm|shop|auth|login|crud|portfolio)\b/.test(
+      blob,
+    ) &&
+    /\b(app|application|project|site|ui|feature)\b/.test(blob)
+  );
+}
+
+/**
+ * Ensure feature-app plans include an implement-feature task (not scaffold-only).
+ */
+export function ensureCodingPlanFeatureTask(
+  kind: string,
+  goal: string,
+  detail: string,
+  tasks: string[],
+): string[] {
+  if (!looksLikeLocalAppScaffold(kind, goal, detail, tasks)) return tasks;
+  if (!looksLikeFeatureAppPlan(goal, detail, tasks)) return tasks;
+  if (tasks.some(looksLikeFeatureImplementTask)) return tasks;
+  const out = [...tasks];
+  // Insert after install if present, else after scaffold, else before last (verify)
+  const installIdx = out.findIndex(looksLikeInstallTask);
+  const scaffoldIdx = out.findIndex(looksLikeScaffoldishTask);
+  const runIdx = out.findIndex(looksLikeRunServerTask);
+  let insertAt: number;
+  if (installIdx >= 0) insertAt = installIdx + 1;
+  else if (scaffoldIdx >= 0) insertAt = scaffoldIdx + 1;
+  else if (runIdx >= 0) insertAt = runIdx;
+  else insertAt = out.length;
+  out.splice(
+    insertAt,
+    0,
+    "Implement the requested product feature (replace starter boilerplate with real UI/state)",
+  );
+  return out;
+}
+
+/** Ensure local app plans end with shell.start + probe + leave running. */
+export function ensureCodingPlanRunVerifyTask(
+  kind: string,
+  goal: string,
+  detail: string,
+  tasks: string[],
+): string[] {
+  if (!looksLikeLocalAppScaffold(kind, goal, detail, tasks)) return tasks;
+  if (tasks.some(looksLikeRunServerTask)) return tasks;
+  return [
+    ...tasks,
+    "Start dev server with shell.start, probe localhost, leave running, report URL/port/job id",
+  ];
+}
+
+/** Preserve the model/user-authored checklist exactly for fresh coding plans. */
+export function normalizeCodingPlanTasks(
+  _kind: string,
+  _goal: string,
+  _detail: string,
+  tasks: string[],
+): string[] {
+  return [...tasks];
+}
+
 /** Goal is only "run/start the existing app" — do not open a new plan. */
 export function looksLikeRunOnlyGoal(goal: string, detail: string): boolean {
   const blob = `${goal} ${detail}`.toLowerCase();
@@ -211,6 +305,9 @@ export function slugifyTaskId(text: string): string {
 export interface NormalizedPlanTask {
   title: string;
   aliases: string[];
+  dependencies: string[];
+  dependenciesSpecified: boolean;
+  resourceLocks: string[];
 }
 
 /**
@@ -232,13 +329,19 @@ export function normalizePlanTaskEntries(
       .split(/\n|;|(?:,\s*(?=[A-Z0-9\-]))/)
       .map((s) => s.replace(/^\s*[-*\d.)]+\s*/, "").trim())
       .filter(Boolean)
-      .map((title) => ({ title, aliases: [] as string[] }));
+      .map((title) => ({
+        title,
+        aliases: [] as string[],
+        dependencies: [] as string[],
+        dependenciesSpecified: false,
+        resourceLocks: [] as string[],
+      }));
   }
   if (!Array.isArray(raw)) return [];
   return raw
     .map((t) => {
       const title = normalizeTaskTitle(t);
-      if (!title) return null;
+      if (!title || isBareTaskIdTitle(title)) return null;
       const aliases: string[] = [];
       if (t && typeof t === "object") {
         const o = t as Record<string, unknown>;
@@ -258,7 +361,20 @@ export function normalizePlanTaskEntries(
       }
       const slug = slugifyTaskId(title);
       if (slug && !aliases.includes(slug)) aliases.push(slug);
-      return { title, aliases: [...new Set(aliases)] };
+      const object = t && typeof t === "object" ? (t as Record<string, unknown>) : {};
+      const stringArray = (value: unknown): string[] =>
+        Array.isArray(value)
+          ? [...new Set(value.filter((item): item is string => typeof item === "string").map((item) => item.trim()).filter(Boolean))]
+          : [];
+      return {
+        title,
+        aliases: [...new Set(aliases)],
+        dependencies: stringArray(object.dependencies ?? object.dependsOn),
+        dependenciesSpecified:
+          Object.prototype.hasOwnProperty.call(object, "dependencies") ||
+          Object.prototype.hasOwnProperty.call(object, "dependsOn"),
+        resourceLocks: stringArray(object.resourceLocks ?? object.resources),
+      };
     })
     .filter((x): x is NormalizedPlanTask => Boolean(x));
 }
@@ -275,14 +391,6 @@ export function resolvePlanTaskId(
   const slug = slugifyTaskId(raw);
   for (const t of plan.tasks) {
     if (t.aliases?.some((a) => a === raw || a.toLowerCase() === lower)) {
-      return t.id;
-    }
-    if (slugifyTaskId(t.title) === slug) return t.id;
-    if (
-      slug.length > 4 &&
-      (slugifyTaskId(t.title).includes(slug) ||
-        slug.includes(slugifyTaskId(t.title)))
-    ) {
       return t.id;
     }
   }
@@ -308,7 +416,7 @@ export interface PlanToolResult {
 export function planContextMessage(plan: SessionPlan, approved: boolean): string {
   const lines: string[] = [];
   lines.push(
-    `ACTIVE PLAN for this session (goal: ${plan.goal}, status: ${plan.status}):`,
+    `ACTIVE PLAN v${plan.version ?? 1} for this session (goal: ${plan.goal}, status: ${plan.status}):`,
   );
   if (plan.detail.trim()) lines.push(plan.detail.trim());
   lines.push("Tasks:");
@@ -317,46 +425,58 @@ export function planContextMessage(plan: SessionPlan, approved: boolean): string
       t.aliases?.length && t.aliases[0] !== t.id
         ? ` [aliases: ${t.aliases.slice(0, 3).join(", ")}]`
         : "";
-    lines.push(`  ${i + 1}. [${t.id}] (${t.state}) ${t.title}${aliasHint}`);
+    const dependencyHint = t.dependencies?.length
+      ? ` [depends: ${t.dependencies.join(", ")}]`
+      : "";
+    const resourceHint = t.resourceLocks?.length
+      ? ` [locks: ${t.resourceLocks.join(", ")}]`
+      : "";
+    const evidenceHint = t.evidence?.successWorkCount
+      ? ` [evidence: ${t.evidence.successWorkCount} successful tool${t.evidence.successWorkCount === 1 ? "" : "s"}${t.evidence.lastOkTool ? `; last ${t.evidence.lastOkTool}` : ""}]`
+      : "";
+    lines.push(`  ${i + 1}. [${t.id}] (${t.state}) ${t.title}${aliasHint}${dependencyHint}${resourceHint}${evidenceHint}`);
   });
   lines.push(
     "task.update taskId MUST be t1, t2, … from this list (or a listed alias) — never invent free-form slugs alone.",
   );
+  if (plan.meta?.projectRoot) {
+    lines.push(`project_root: ${plan.meta.projectRoot}`);
+  }
+  if (plan.meta?.packageManager) {
+    lines.push(`package_manager: ${plan.meta.packageManager}`);
+  }
   if (approved) {
     const inProgress = plan.tasks.find((t) => t.state === "in_progress");
-    const firstPending = plan.tasks.find((t) => t.state === "pending");
-    lines.push("The user APPROVED this plan. Execute it task by task NOW.");
+    const firstPending = readyPlanTasks(plan)[0];
+    lines.push(
+      "The user APPROVED this plan. Execute it NOW. Tasks are checkpoints — you still own the whole goal.",
+    );
     if (inProgress) {
       lines.push(
         `RESUME TASK ${inProgress.id} (${inProgress.title}) — it was started but interrupted. ` +
           "Retry what was in progress; do NOT restart completed work from scratch. " +
-          "Do NOT re-do tasks already marked done, and do NOT skip ahead to later tasks.",
+          "Do NOT re-do tasks already marked done.",
       );
     } else if (firstPending) {
       lines.push(
         `START WITH TASK ${firstPending.id} (${firstPending.title}). ` +
-          "Do NOT re-do tasks already marked done, and do NOT skip ahead to later tasks.",
+          "Do NOT re-do tasks already marked done.",
       );
     }
     lines.push(
-      "STRICT ORDER: call task.update {taskId, state:'in_progress'} → do the real work → " +
-        "WAIT for and READ the tool result → only if you are satisfied it succeeded, " +
-        "call task.update {taskId, state:'done'} → then open the NEXT task. " +
-        "Never mark done before a successful tool result. Never start the next task's work " +
-        "(or mark a later task in_progress) until the current one is done and verified. " +
-        "If a tool fails, mark the task 'failed' with a note, fix, retry. " +
-        "Never re-run tasks already marked done. " +
-        "For run/verify: shell.start, leave server running, final message includes URL, port, and job id.",
+      "Flow: task.update in_progress → real work → WAIT for and READ the tool result → " +
+        "mark done only when verified → next task. Durable evidence shown beside a task survives resume; use it to close that task rather than repeating already-confirmed work. " +
+        "Independent read-only lookups may parallelize within a task. " +
+        "Never mark done before successful relevant evidence. If a tool fails: mark failed, fix, retry. " +
+        "For run/verify: prove runtime (shell.start, ready tail, LISTEN, or localhost GET), leave server running, final message includes URL, port, and job id. " +
+        "Do not re-open done tasks. If mid-task evidence shows the plan is wrong, adapt (fix root cause; for pentest, revise plan with completed tasks preserved).",
     );
   } else {
     lines.push(
-      "This plan is NOT yet approved, so you MUST NOT execute any of its tasks yet. " +
-        "Any new free-text message from the user right now is a PLAN REVISION, not approval — even if it " +
-        "sounds like an instruction (e.g. 'do not install new tools', 'use only X', 'also add Y', 'skip task 2'). " +
-        "Treat it as feedback: call plan.create AGAIN with the revised goal/detail/tasks to produce an updated " +
-        "plan, then STOP and wait. Do NOT call shell.exec, pkg.install, net.scan, tool.check, fs.write, or any " +
-        "other execution tool. The user will APPROVE with /implement, or CANCEL with /discard. Only after " +
-        "/implement may you begin executing.",
+      "This plan is NOT yet approved — do not execute tasks (no scaffold/write/install/exploit). " +
+        "User free-text is PLAN REVISION feedback, not approval — even if it sounds like an instruction. " +
+        "Refine with plan.create and/or read-only explore/research, then STOP. " +
+        "User may Accept, Discard, View, or Suggest changes (or /implement / /discard).",
     );
   }
   return lines.join("\n");
@@ -370,9 +490,11 @@ export function planContextMessage(plan: SessionPlan, approved: boolean): string
 export async function handlePlanTool(
   call: ToolCall,
   session: SessionPolicy,
-  ctx: { loopGuard: LoopGuard; step: number },
+  ctx: { loopGuard: LoopGuard; step: number; autoApprove?: boolean },
 ): Promise<PlanToolResult> {
-  void ctx;
+  const autoApprove = Boolean(ctx.autoApprove);
+  void ctx.loopGuard;
+  void ctx.step;
   if (call.name === "plan.create") {
     const goal = normalizePlanGoal(call.args);
     const detail = normalizePlanDetail(call.args);
@@ -404,10 +526,9 @@ export async function handlePlanTool(
           "  ✗ plan.create: that single task lumps the whole build into one step\n",
         ),
         modelNote:
-          "plan.create rejected: you put everything into ONE task. Break it into 3-8 SEPARATE, " +
-          "ordered tasks — each a distinct action, e.g. 'scaffold package.json + vite config', " +
-          "'create index.html + entry (main.jsx)', 'build App + Post components', 'add posts data + styles', " +
-          "'install deps and run dev server to verify'. Call plan.create again with that tasks array.",
+          "plan.create rejected: you put everything into ONE task. Break it into separate " +
+          "ordered tasks — each a distinct action (scaffold, implement feature, install, run/verify). " +
+          "Call plan.create again with a proper tasks array.",
       };
     }
 
@@ -438,29 +559,23 @@ export async function handlePlanTool(
       };
     }
 
-    // X12: coding/local-app plans must include a final run/verify server task.
-    if (codingPlanNeedsRunVerifyTask(kind, goal, detail, taskTitles)) {
-      return {
-        handled: true,
-        ok: false,
-        display: chalk.red(
-          "  ✗ plan.create: coding app plan needs a final run/verify server task\n",
-        ),
-        modelNote:
-          "plan.create rejected: for local web/app scaffolds (React/Vite/Next/etc.), tasks MUST end with a " +
-          "final run/verify step — e.g. 'Start dev server (shell.start), tail until ready, probe localhost, " +
-          "leave server running, report URL/port/job id'. Prefer shell.start (background); do not shell.stop " +
-          "unless the user asks. Build alone is not enough. Add that final task and call plan.create again. " +
-          "Pure libraries/CLIs with no server do not need this.",
-      };
-    }
-
-    // Inject install step on fresh plans when model forgot it (avoids install
-    // blocked under implement + wrong auto-start attribution). Skip rewrite on
-    // merge/revise so completed task order stays stable.
+    // Preserve authored task count/order. Build, install, and verification
+    // evidence may span tasks; the runtime must not inject regex-derived
+    // checkpoints that change IDs or make progress diverge from the plan.
     const normalizedTitles = existingPlan
       ? taskTitles
-      : ensureCodingPlanInstallTask(kind, goal, detail, taskTitles);
+      : normalizeCodingPlanTasks(kind, goal, detail, taskTitles);
+
+    const root = getActiveProjectRoot();
+    const pm = root ? detectPackageManager(root) : undefined;
+    const meta =
+      root || existingPlan?.meta
+        ? {
+            ...(existingPlan?.meta ?? {}),
+            ...(root ? { projectRoot: root } : {}),
+            ...(pm ? { packageManager: pm } : {}),
+          }
+        : undefined;
 
     const plan = createPlan({
       sessionId: session.sessionId,
@@ -468,15 +583,28 @@ export async function handlePlanTool(
       detail,
       taskTitles: normalizedTitles,
       kind,
+      meta,
     });
     // Attach model-supplied slug aliases so task.update can resolve them (X3).
     for (let i = 0; i < plan.tasks.length; i++) {
       const aliases = taskEntries[i]?.aliases ?? [];
       if (aliases.length) plan.tasks[i]!.aliases = aliases;
+      const locks = taskEntries[i]?.resourceLocks ?? [];
+      if (locks.length) plan.tasks[i]!.resourceLocks = locks;
+    }
+    for (let i = 0; i < plan.tasks.length; i++) {
+      const rawDependencies = taskEntries[i]?.dependencies ?? [];
+      const dependencies = rawDependencies.map(
+        (dependency) => resolvePlanTaskId(plan, dependency) ?? dependency,
+      );
+      if (taskEntries[i]?.dependenciesSpecified) {
+        plan.tasks[i]!.dependencies = [...new Set(dependencies)];
+      }
     }
 
     let additiveOnly = false;
     if (existingPlan) {
+      plan.version = (existingPlan.version ?? 1) + 1;
       const usedOldIds = new Set<string>();
       const mappedNewTasks = plan.tasks.map((task) => {
         const match = existingPlan.tasks.find(
@@ -490,6 +618,7 @@ export async function handlePlanTool(
             id: match.id,
             state: match.state,
             note: match.note,
+            evidence: match.evidence,
           };
         }
         return task;
@@ -514,12 +643,43 @@ export async function handlePlanTool(
 
       const oldTasksToKeep = existingPlan.tasks.filter(
         (oldTask) =>
+          !isBareTaskIdTitle(oldTask.title) &&
           !mappedNewTasks.some((newTask) =>
             titlesMatchForPlan(oldTask.title, newTask.title),
           ),
       );
 
-      plan.tasks = [...oldTasksToKeep, ...mappedNewTasks];
+      plan.tasks = [...oldTasksToKeep, ...mappedNewTasks].filter(
+        (t) => !isBareTaskIdTitle(t.title),
+      );
+
+      
+      const finalIdByInputReference = new Map<string, string>();
+      for (let index = 0; index < mappedNewTasks.length; index += 1) {
+        const task = mappedNewTasks[index]!;
+        const entry = taskEntries[index];
+        finalIdByInputReference.set(`t${index + 1}`, task.id);
+        finalIdByInputReference.set(task.id, task.id);
+        finalIdByInputReference.set(slugifyTaskId(task.title), task.id);
+        for (const alias of entry?.aliases ?? []) {
+          finalIdByInputReference.set(alias, task.id);
+        }
+      }
+      for (let index = 0; index < mappedNewTasks.length; index += 1) {
+        const task = mappedNewTasks[index]!;
+        const entry = taskEntries[index];
+        const references = entry?.dependenciesSpecified
+          ? entry.dependencies
+          : index > 0
+            ? [`t${index}`]
+            : [];
+        task.dependencies = [...new Set(references.map(
+          (reference) =>
+            finalIdByInputReference.get(reference) ??
+            resolvePlanTaskId(plan, reference) ??
+            reference,
+        ))];
+      }
 
       // X7: keep approval when only additive pending work remains.
       const priorFinished = existingPlan.tasks.filter(
@@ -563,13 +723,27 @@ export async function handlePlanTool(
       }
     }
 
-    await savePlan(plan).catch(() => undefined);
+    const dag = validateSessionPlan(plan);
+    if (!dag.ok) {
+      return {
+        handled: true,
+        ok: false,
+        display: chalk.red(`  ✗ plan.create: invalid dependency graph — ${dag.reason}\n`),
+        modelNote: `plan.create failed: ${dag.reason}. Use only declared task ids/aliases and remove dependency cycles.`,
+      };
+    }
 
     if (additiveOnly) {
       session.planApproved.value = true;
+      plan.status = "in_progress";
+    } else if (autoApprove) {
+      session.planApproved.value = true;
+      plan.status = "approved";
     } else {
       session.planApproved.value = false;
     }
+
+    await savePlan(plan).catch(() => undefined);
 
     const checklist = renderPlanForTerminal(plan);
     const display = additiveOnly
@@ -580,15 +754,22 @@ export async function handlePlanTool(
           "  ✦ done tasks preserved — continue from the first pending task only.\n" +
             "    Do NOT re-run completed scaffold/build work.\n",
         )
-      : chalk.cyan("  ● planning\n") +
-        checklist +
-        "\n" +
-        chalk.dim(
-          "  ✦ plan created — press Ctrl+P to view it, /implement to approve and run it,\n" +
-            "    or /discard to cancel it. Any other message refines this plan.\n",
-        );
+      : autoApprove
+        ? chalk.cyan("  ● plan created (auto-approved)\n") +
+          checklist +
+          "\n" +
+          chalk.dim(
+            "  ✦ plan approved in agent mode — continue executing task by task.\n",
+          )
+        : chalk.cyan("  ● planning\n") +
+          checklist +
+          "\n" +
+          chalk.dim(
+            "  ✦ plan created — Accept to run, Discard, View, or Suggest changes\n" +
+              "    (/implement, /discard, Ctrl+P also work).\n",
+          );
 
-    const firstPending = plan.tasks.find((t) => t.state === "pending");
+    const firstPending = readyPlanTasks(plan)[0];
     return {
       handled: true,
       ok: true,
@@ -603,15 +784,17 @@ export async function handlePlanTool(
           "If the only new work is run/verify on an existing app, prefer shell.start + probe + report URL — " +
           "do not reboot the world. When the run/verify task finishes, final message MUST include " +
           "http://localhost:<port>, port, job id, and that the server is still running."
-        : `Plan saved with ${plan.tasks.length} task(s). STOP here and wait — produce NO other tool calls now. ` +
-          "Do NOT start executing tasks until the user approves with /implement. " +
-          "If the user's next message gives feedback instead of /implement, that is a REVISION: call plan.create " +
-          "again with the updated plan and STOP again. The user may cancel the whole plan with /discard. " +
-          "Only after /implement do you begin, working task by task, calling task.update to mark each " +
-          "in_progress before and done after you finish it. " +
-          "Do NOT call plan.create again only to add a run-dev-server step — put that in this plan's final task, " +
-          "or after completion use shell.start + probe directly. " +
-          "When run/verify completes: report URL, port, job id, and that the server is still running.",
+        : autoApprove
+          ? `Plan saved and approved with ${plan.tasks.length} task(s). Execute now. ` +
+            (firstPending
+              ? `Start with [${firstPending.id}] "${firstPending.title}". `
+              : "") +
+            "task.update in_progress → work → verify → done. When run/verify completes: report URL, port, job id, server still running."
+          : `Plan saved with ${plan.tasks.length} task(s). STOP here and wait — produce NO other tool calls now. ` +
+            "Do NOT start executing until the user accepts the plan. " +
+            "If the user's next message gives feedback, that is a REVISION: call plan.create again with the updated plan and STOP again. " +
+            "The user may discard the plan. After acceptance: task.update in_progress → work → verify → done. " +
+            "When run/verify completes: report URL, port, job id, and that the server is still running.",
     };
   }
 
@@ -655,54 +838,117 @@ export async function handlePlanTool(
   }
   // X3: accept t1..tn or model slug aliases / title slugs.
   const taskId = resolvePlanTaskId(plan, taskIdRaw) ?? taskIdRaw;
-  // Only one task may be in_progress at a time. This forces genuine
-  // task-by-task execution: the model must close (done/failed/skipped) the
-  // current task before opening the next one, instead of leaving a task
-  // "in_progress" as an umbrella while it quietly works through the rest
-  // of the plan underneath it.
+  
   if (stateRaw === "in_progress") {
-    const otherInProgress = plan.tasks.find(
-      (t) => t.id !== taskId && t.state === "in_progress",
-    );
-    if (otherInProgress) {
+    const target = plan.tasks.find((task) => task.id === taskId);
+    const ready = readyPlanTasks(plan).some((task) => task.id === taskId);
+    const retryingFailedTask = target?.state === "failed";
+    if (target?.state === "done" || target?.state === "skipped") {
+      const nextPending = readyPlanTasks(plan)[0];
+      const nextHint = nextPending
+        ? ` Continue with task.update {taskId:"${nextPending.id}", state:"in_progress"} ("${nextPending.title}").`
+        : " All ready work is finished — write the final summary if needed.";
       return {
         handled: true,
         ok: false,
         display: chalk.red(
-          `  \u2717 task.update: task [${otherInProgress.id}] "${otherInProgress.title}" is still in_progress\n`,
+          `  ✗ task.update: [${taskId}] is already ${target.state} — do not re-open\n`,
         ),
         modelNote:
-          `task.update failed: task [${otherInProgress.id}] "${otherInProgress.title}" is still in_progress. ` +
-          "Finish it first \u2014 call task.update with state 'done' (or 'failed'/'skipped' with a note) " +
-          `for [${otherInProgress.id}] before starting [${taskId}]. ` +
-          "Use ONLY ids like t1, t2 from the plan context (not title slugs).",
+          `task.update failed: [${taskId}] is already ${target.state}. ` +
+          `Do not re-run completed tasks.${nextHint}`,
       };
     }
+    if (target?.state !== "in_progress") {
+      const incompleteDependencies = (target?.dependencies ?? []).filter((dependency) => {
+        const dependencyTask = plan.tasks.find((task) => task.id === dependency);
+        return !dependencyTask || (dependencyTask.state !== "done" && dependencyTask.state !== "skipped");
+      });
+      const heldLocks = new Set(
+        plan.tasks
+          .filter((task) => task.state === "in_progress" && task.id !== taskId)
+          .flatMap((task) => task.resourceLocks ?? []),
+      );
+      const conflictingLocks = (target?.resourceLocks ?? []).filter((lock) => heldLocks.has(lock));
+      if (
+        (!ready && !retryingFailedTask) ||
+        incompleteDependencies.length > 0 ||
+        conflictingLocks.length > 0
+      ) {
+        const nextReady = readyPlanTasks(plan)[0];
+        return {
+          handled: true,
+          ok: false,
+          display: chalk.red(`  ✗ task.update: [${taskId}] is not dependency/resource ready\n`),
+          modelNote:
+            `task.update failed: [${taskId}] is not ready. ` +
+            (incompleteDependencies.length ? `Incomplete dependencies: ${incompleteDependencies.join(", ")}. ` : "") +
+            (conflictingLocks.length ? `Resources currently locked: ${conflictingLocks.join(", ")}. ` : "") +
+            (nextReady
+              ? `Open the next ready task first: ${nextReady.id} ("${nextReady.title}").`
+              : ""),
+        };
+      }
+    }
+    // A retry is a new execution attempt. Previous receipts proved only the
+    // failed attempt and must not close the task before recovery work succeeds.
+    if (retryingFailedTask && target) target.evidence = undefined;
   }
-  // X8: cannot mark later task done while an earlier task is still open.
   if (stateRaw === "done") {
-    const targetIdx = plan.tasks.findIndex((t) => t.id === taskId);
-    if (targetIdx > 0) {
-      const blocking = plan.tasks
-        .slice(0, targetIdx)
-        .filter(
-          (t) =>
-            t.state === "pending" ||
-            t.state === "in_progress" ||
-            t.state === "failed",
-        );
-      if (blocking.length > 0) {
-        const b = blocking[0]!;
+    const target = plan.tasks.find((task) => task.id === taskId);
+    const incompleteDependencies = (target?.dependencies ?? []).filter((dependency) => {
+      const dependencyTask = plan.tasks.find((task) => task.id === dependency);
+      return !dependencyTask || (dependencyTask.state !== "done" && dependencyTask.state !== "skipped");
+    });
+    if (incompleteDependencies.length > 0) {
+      return {
+        handled: true,
+        ok: false,
+        display: chalk.red(`  ✗ task.update: cannot complete [${taskId}] before dependencies\n`),
+        modelNote: `task.update failed: earlier task/dependency ${incompleteDependencies.join(", ")} is not complete for [${taskId}].`,
+      };
+    }
+    if (target && target.state !== "in_progress") {
+      // Soft-auto: pending + dependency-ready → open then complete in one call.
+      // Models often skip the ritual in_progress step after work already landed.
+      if (target.state === "pending" && incompleteDependencies.length === 0) {
+        const opened = markTask(plan, taskId, "in_progress", note);
+        if (!opened) {
+          return {
+            handled: true,
+            ok: false,
+            display: chalk.red(
+              `  ✗ task.update: could not auto-open [${taskId}] before completion\n`,
+            ),
+            modelNote: `task.update failed: could not auto-open pending [${taskId}].`,
+          };
+        }
+        // Fall through to mark done below (state is now in_progress).
+      } else if (target.state === "failed") {
         return {
           handled: true,
           ok: false,
           display: chalk.red(
-            `  ✗ task.update: cannot mark [${taskId}] done while [${b.id}] is ${b.state}\n`,
+            `  ✗ task.update: [${taskId}] is failed — retry with in_progress first\n`,
           ),
           modelNote:
-            `task.update failed: cannot mark [${taskId}] done while earlier task ` +
-            `[${b.id}] "${b.title}" is still ${b.state}. ` +
-            `Finish or skip [${b.id}] first (state done/skipped), then mark [${taskId}] done.`,
+            `task.update failed: [${taskId}] is failed. ` +
+            `Call task.update {taskId:"${taskId}", state:"in_progress"} to retry, then mark done after recovery work.`,
+        };
+      } else {
+        const nextReady = readyPlanTasks(plan)[0];
+        return {
+          handled: true,
+          ok: false,
+          display: chalk.red(
+            `  ✗ task.update: [${taskId}] must be in_progress before completion\n`,
+          ),
+          modelNote:
+            `task.update failed: [${taskId}] is ${target.state}. ` +
+            "Start or retry it, perform fresh work, then mark it done." +
+            (nextReady
+              ? ` Open next ready: ${nextReady.id} ("${nextReady.title}").`
+              : ""),
         };
       }
     }
@@ -730,18 +976,22 @@ export async function handlePlanTool(
   if (plan.status === "draft" || plan.status === "approved") {
     plan.status = "in_progress";
   }
-  const allDone = plan.tasks.every(
-    (t) => t.state === "done" || t.state === "skipped" || t.state === "failed",
-  );
-  if (allDone) plan.status = "completed";
+  const terminal = isPlanTerminal(plan);
+  const successful = isPlanSuccessful(plan);
+  if (terminal) plan.status = successful ? "completed" : "abandoned";
   await savePlan(plan).catch(() => undefined);
   const checklist = renderPlanForTerminal(plan);
-  const nextPending = plan.tasks.find((t) => t.state === "pending");
+  const nextPending = readyPlanTasks(plan)[0];
   let modelNote: string;
-  if (allDone) {
+  if (successful) {
     modelNote =
-      "Task updated. ALL tasks are now finished. Verify the result and give your final summary. " +
+      "Task updated. All required tasks succeeded or were explicitly skipped. Verify the result and give your final summary. " +
       "If a dev server was started: report URL, port, job id, and that it is still running.";
+  } else if (terminal) {
+    const failed = plan.tasks.filter((task) => task.state === "failed");
+    modelNote =
+      `Task updated. The plan is terminal but NOT successful: ${failed.length} task(s) failed. ` +
+      "Do not claim completion. Report a failed/partial outcome with the failed tasks and remaining user outcome.";
   } else if (stateRaw === "done" && nextPending) {
     modelNote =
       `Task [${taskId}] marked done after verified work. ` +

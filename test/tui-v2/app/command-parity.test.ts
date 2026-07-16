@@ -7,6 +7,10 @@ import { attachCommandHandlers } from "../../../src/tui-v2/app/command-handlers.
 import { detectCapabilities } from "../../../src/tui-v2/bootstrap/capabilities.js";
 import { slashCommands } from "../../../src/repl/slash-commands.js";
 import { normalizeCommandName } from "../../../src/app/commands/command.js";
+import {
+  getActiveProjectRoot,
+  setActiveProjectRoot,
+} from "../../../src/agent/project-root.js";
 
 function fakePersistence(): PersistencePort {
   return {
@@ -129,6 +133,22 @@ describe("command parity (V2-080)", () => {
     }
   });
 
+  it("/plan is canonical, enters plan mode without a plan, and /plan off returns to agent", async () => {
+    const services = buildServices();
+    expect(services.commands.resolve("plan")).toBe("plan");
+    expect(services.commands.resolve("plan-mode")).toBeUndefined();
+    expect(slashCommands.filter((entry) => entry.command === "/plan")).toHaveLength(1);
+    expect(slashCommands.some((entry) => entry.command.includes("plan-mode"))).toBe(false);
+
+    expect(await services.commands.dispatch({ name: "plan", args: "" })).toBe(true);
+    expect(services.session.getState().mode).toBe("plan");
+    expect(getConfig().defaultMode).toBe("plan");
+
+    expect(await services.commands.dispatch({ name: "plan", args: "off" })).toBe(true);
+    expect(services.session.getState().mode).toBe("agent");
+    expect(getConfig().defaultMode).toBe("agent");
+  });
+
   it("/ask and /agent switch mode and persist the default", async () => {
     const services = buildServices();
     await services.commands.dispatch({ name: "ask", args: "" });
@@ -156,6 +176,26 @@ describe("command parity (V2-080)", () => {
     await services.commands.dispatch({ name: "clean", args: "" });
     expect(services.session.sessionId).not.toBe(before);
     expect(notices(services).some((t) => t.includes("fresh session"))).toBe(true);
+  });
+
+  it("/new and /clean clear the projected plan before loading the new session", async () => {
+    for (const command of ["new", "clean"] as const) {
+      const services = buildServices();
+      setActiveProjectRoot("/tmp/clai-previous-project");
+      expect(getActiveProjectRoot()).toBe("/tmp/clai-previous-project");
+      const order: string[] = [];
+      vi.spyOn(services.plan, "clear").mockImplementation(() => {
+        order.push("clear");
+      });
+      vi.spyOn(services.plan, "load").mockImplementation(async () => {
+        order.push("load");
+        return undefined;
+      });
+
+      await services.commands.dispatch({ name: command, args: "" });
+      expect(order).toEqual(["clear", "load"]);
+      expect(getActiveProjectRoot()).toBeUndefined();
+    }
   });
 
   it("/allow and /disallow manage the session tool allow-list", async () => {

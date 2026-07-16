@@ -17,6 +17,7 @@ import { computeLayout } from "../../src/tui-v2/layout/compute-layout.js";
 import { presentOutput } from "../../src/tui-v2/rendering/tool-presenter.js";
 import { extractTranscriptSemanticDocument } from "../../src/tui-v2/rendering/transcript-semantic.js";
 import { applyAppEvent } from "../../src/tui-v2/state/transcript-reducer.js";
+import { TranscriptStore } from "../../src/tui-v2/state/transcript-store.js";
 import {
   EMPTY_TRANSCRIPT_STATE,
   type TranscriptState,
@@ -74,6 +75,25 @@ describe("V2-091 performance suite (Node pure paths)", () => {
     const presented = presentOutput(snap.tail, snap, false);
     expect(presented.lines.length).toBeLessThanOrEqual(4);
     expect(presented.truncatedNotice).toBeDefined();
+  });
+
+  it("uses finite production spool and transcript retention defaults", () => {
+    const spool = new OutputSpool();
+    for (let tool = 0; tool < 140; tool += 1) {
+      spool.replace(asToolCallId(`tool-${tool}`), "x".repeat(300 * 1024));
+    }
+    expect(spool.has(asToolCallId("tool-0"))).toBe(false);
+    const latest = spool.state(asToolCallId("tool-139"))!;
+    expect(latest.tail.length).toBeLessThanOrEqual(256 * 1024);
+    expect(latest.truncated).toBe(true);
+
+    const store = new TranscriptStore(100);
+    const seq = sequencer();
+    for (let i = 0; i < 1_000; i += 1) {
+      store.dispatch(seq.build("notice", { level: "info", text: `event-${i}` }, undefined));
+    }
+    expect(store.getState().order).toHaveLength(100);
+    expect(store.getState().byId.size).toBe(100);
   });
 
   it(`survives a resize storm within ${LAYOUT_STORM_BUDGET_MS}ms`, () => {

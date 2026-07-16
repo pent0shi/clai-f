@@ -6,10 +6,13 @@
  * one messy minified blob.
  */
 
-import { readFile } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
+import { createArtifactPagerSource, type ArtifactPagerSource } from "./artifact-pager-source.js";
 import { asToolCallId } from "../../app/events/app-event.js";
 import type { AppServices } from "../bootstrap/composition-root.js";
 import type { ToolItem } from "../state/transcript-types.js";
+import type { FileChange } from "../../tools/file-diff.js";
+import { formatModalPlainText } from "./file-diff-view.js";
 
 interface SearchHit {
   readonly title?: string | undefined;
@@ -102,32 +105,113 @@ export interface OpenToolOutputOptions {
   readonly titleOverride?: string;
   /** Skip artifact lookup even if item.artifactPath is set. */
   readonly skipArtifact?: boolean;
+  /**
+   * Open a single file-change snapshot (full file + green/red markers).
+   * Prefer this over the raw tool receipt when the tool card has fileChanges.
+   */
+  readonly fileChange?: FileChange;
+}
+
+async function resolveFileChangeBody(change: FileChange): Promise<string> {
+  let full: FileChange = change;
+  if (!change.afterText && change.snapshotPath) {
+    try {
+      const raw = await readFile(change.snapshotPath, "utf8");
+      const parsed = JSON.parse(raw) as FileChange;
+      if (parsed && typeof parsed === "object") {
+        full = { ...change, ...parsed, afterText: parsed.afterText ?? change.afterText };
+      }
+    } catch {
+      /* use inline change as-is */
+    }
+  }
+  return formatModalPlainText(full);
 }
 
 export async function openToolOutputPager(
   services: AppServices,
-  item: Pick<ToolItem, "toolCallId" | "name" | "argsDisplay" | "artifactPath">,
+  item: Pick<ToolItem, "toolCallId" | "name" | "argsDisplay" | "artifactPath"> & {
+    readonly fileChanges?: ToolItem["fileChanges"];
+  },
   options: OpenToolOutputOptions = {},
 ): Promise<void> {
   try {
+    // Prefer structured file-diff modal when available.
+    const fileChange =
+      options.fileChange ??
+      (item.fileChanges && item.fileChanges.length === 1
+        ? item.fileChanges[0]
+        : undefined);
+
+    if (fileChange && options.bodyOverride === undefined) {
+      const body = await resolveFileChangeBody(fileChange);
+      const title =
+        options.titleOverride ??
+        `${fileChange.kind === "create" ? "Created" : fileChange.kind === "delete" ? "Deleted" : fileChange.kind === "append" ? "Appended" : fileChange.kind === "overwrite" ? "Wrote" : "Edited"} · ${fileChange.basename}`;
+      const opened = services.overlay.openPager(
+        title,
+        body || "(empty file)",
+        undefined,
+        fileChange.path,
+      );
+      if (!opened) {
+        services.session.notice(
+          "warn",
+          "could not open output pager (another overlay is open)",
+        );
+      }
+      return;
+    }
+
+    // Multi-file: concatenate all snapshots when opening the parent card.
+    if (
+      item.fileChanges &&
+      item.fileChanges.length > 1 &&
+      options.bodyOverride === undefined &&
+      !options.fileChange
+    ) {
+      const parts: string[] = [];
+      for (const ch of item.fileChanges) {
+        parts.push(await resolveFileChangeBody(ch));
+        parts.push("\n────────\n");
+      }
+      const title =
+        options.titleOverride ??
+        toolPagerTitle(item.name, item.argsDisplay);
+      const opened = services.overlay.openPager(
+        title,
+        parts.join("\n").trim() || "(no output)",
+        undefined,
+        item.fileChanges[0]?.path,
+      );
+      if (!opened) {
+        services.session.notice(
+          "warn",
+          "could not open output pager (another overlay is open)",
+        );
+      }
+      return;
+    }
+
     let body: string;
-    let fromArtifact = false;
+    let artifactSource: ArtifactPagerSource | undefined;
 
     if (options.bodyOverride !== undefined) {
       body = options.bodyOverride;
     } else {
-      const spoolTail = services.session.spool.tail(asToolCallId(item.toolCallId));
-      body = spoolTail;
+      body = services.session.spool.tail(asToolCallId(item.toolCallId));
 
       if (item.artifactPath && !options.skipArtifact) {
         try {
-          const full = await readFile(item.artifactPath, "utf8");
-          if (full.length >= body.length) {
-            body = full;
-            fromArtifact = true;
+          const info = await stat(item.artifactPath);
+          if (info.isFile() && info.size >= Buffer.byteLength(body, "utf8")) {
+            artifactSource = createArtifactPagerSource(item.artifactPath);
+            const firstPage = await artifactSource.readPage(0);
+            body = firstPage.body;
           }
         } catch {
-          // Fall back to spool.
+          artifactSource?.dispose();
+          artifactSource = undefined;
         }
       }
     }
@@ -138,7 +222,7 @@ export async function openToolOutputPager(
       .replace(/^artifact: .+\n?/gim, "")
       .trimEnd();
 
-    body = formatToolPagerBody(body);
+    if (!artifactSource) body = formatToolPagerBody(body);
 
     // Optional one-line query header so the border title can stay short.
     let header = "";
@@ -155,7 +239,7 @@ export async function openToolOutputPager(
     if (item.artifactPath && options.bodyOverride === undefined) {
       note =
         `\n\n── full output saved at ──\n${item.artifactPath}` +
-        (fromArtifact ? "" : "\n(spool body; artifact unreadable)");
+        (artifactSource ? "\n(paged from disk)" : "\n(spool body; artifact unreadable)");
     }
 
     const title =
@@ -163,6 +247,7 @@ export async function openToolOutputPager(
     const opened = services.overlay.openPager(
       title,
       `${header}${body || "(no output)"}${note}`,
+      artifactSource,
     );
     if (!opened) {
       services.session.notice("warn", "could not open output pager (another overlay is open)");

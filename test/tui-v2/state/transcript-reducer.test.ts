@@ -41,6 +41,43 @@ describe("transcript reducer (V2-050)", () => {
     expect(item).toMatchObject({ kind: "user", text: "hello" });
   });
 
+  it("hides turn-started when displayPrompt is null (implement/revision directives)", () => {
+    const seq = buildSequencer();
+    const turnId = asTurnId("turn-1");
+    const events = [
+      seq.build(
+        "turn-started",
+        {
+          prompt: "Plan approved. Execute it. Work through pending tasks…",
+          displayPrompt: null,
+        },
+        turnId,
+      ),
+    ];
+    const state = fold(events);
+    expect(state.order).toHaveLength(0);
+  });
+
+  it("shows short displayPrompt instead of full model prompt for plan revisions", () => {
+    const seq = buildSequencer();
+    const turnId = asTurnId("turn-1");
+    const events = [
+      seq.build(
+        "turn-started",
+        {
+          prompt: "Plan revision request from the user…\nUser feedback:\nuse glassmorphism",
+          displayPrompt: "use glassmorphism",
+        },
+        turnId,
+      ),
+    ];
+    const state = fold(events);
+    expect(transcriptItems(state)[0]).toMatchObject({
+      kind: "user",
+      text: "use glassmorphism",
+    });
+  });
+
   it("coalesces assistant deltas into one streaming item, then finalizes on assistant-message", () => {
     const seq = buildSequencer();
     const turnId = asTurnId("turn-1");

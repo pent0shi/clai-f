@@ -2,17 +2,56 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import type { ToolCall } from "../types.js";
 import { getActiveProjectRoot } from "./project-root.js";
+import type { TaskEvidence } from "../store/plan.js";
 
-/**
- * Tracks successful non-meta tool work under the currently open plan task.
- * Models (esp. GPT-OSS) must not mark done or jump ahead without real
- * evidence from tool results this task has already received.
- */
-export interface TaskWorkLedger {
+/** Successful non-meta work under the open plan task (typed evidence for done). */
+export type TaskClass =
+  | "explore"
+  | "scaffold"
+  | "install"
+  | "implement"
+  | "verify"
+  | "recon"
+  | "exploit"
+  | "report"
+  | "generic";
+
+export interface TaskWorkLedger extends TaskEvidence {
   taskId: string;
-  /** Successful work tools since this task became in_progress. */
-  successWorkCount: number;
-  lastOkTool?: string | undefined;
+}
+
+/** Rehydrate the live task ledger from durable plan evidence after a resume. */
+export function ledgerFromTaskEvidence(
+  taskId: string,
+  evidence?: TaskEvidence | undefined,
+): TaskWorkLedger {
+  return {
+    taskId,
+    successWorkCount: evidence?.successWorkCount ?? 0,
+    ...(evidence ?? {}),
+  };
+}
+
+/** Store only serializable evidence on the plan; the task id is already its key. */
+export function taskEvidenceFromLedger(
+  ledger: TaskWorkLedger,
+): TaskEvidence {
+  const { taskId: _taskId, ...evidence } = ledger;
+  return evidence;
+}
+
+/** Optional signals recorded from a successful tool call. */
+export interface TaskWorkSignals {
+  sourceWrite?: boolean;
+  featureWrite?: boolean;
+  installOk?: boolean;
+  scaffoldOk?: boolean;
+  devServerStart?: boolean;
+  localHttpProbeOk?: boolean;
+  serverReady?: boolean;
+  portListening?: boolean;
+  remoteReconOk?: boolean;
+  remoteActiveTestOk?: boolean;
 }
 
 export function isMetaPlanTool(name: string): boolean {
@@ -24,31 +63,376 @@ export function isEvidenceWorkTool(name: string): boolean {
   return !isMetaPlanTool(name);
 }
 
+export function isPentestPlanKind(kind: string | undefined): boolean {
+  return (kind ?? "").toLowerCase() === "pentest";
+}
+
+export function classifyTaskTitle(
+  title: string,
+  opts?: { planKind?: string | undefined },
+): TaskClass {
+  const t = title.toLowerCase();
+  const pentest = isPentestPlanKind(opts?.planKind);
+
+  // Pentest plans: never map security work onto coding verify/implement gates.
+  if (pentest) {
+    if (/\b(report|write.?up|finding|summar|document|residual)\b/.test(t)) {
+      return "report";
+    }
+    if (
+      /\b(exploit|poc|payload|privesc|lateral|inject|bruteforce|sqlmap|listener|reverse\s+shell|c2)\b/.test(
+        t,
+      )
+    ) {
+      return "exploit";
+    }
+    if (
+      /\b(recon|enumerat|fingerprint|osint|whois|dns|nmap|discover|probe|scan|fuzz|content\s+discover|subdomain|port)\b/.test(
+        t,
+      )
+    ) {
+      return "recon";
+    }
+    if (/\b(explore|inspect|list|read|survey|map)\b/.test(t)) {
+      return "explore";
+    }
+    return "generic";
+  }
+
+  if (
+    /\b(dev\s*server|run\s+dev|start\s+.*server|localhost|shell\.start|leave\s+.*running|probe|verify\s+in\s+browser)\b/.test(
+      t,
+    ) ||
+    (/\b(start|run)\b/.test(t) && /\b(server|dev|app|verify)\b/.test(t))
+  ) {
+    return "verify";
+  }
+  if (looksLikeInstallTaskTitle(title)) return "install";
+  if (looksLikeScaffoldTaskTitle(title)) return "scaffold";
+  if (
+    /\b(implement|integrate|feature|rewrite|component|todo|persist|localstorage|styling|styles?|ui|page)\b/.test(
+      t,
+    ) ||
+    // endpoint/route only count as implement for product apps, not bare "API routes" recon phrasing
+    (/\b(endpoint|route)\b/.test(t) &&
+      /\b(implement|build|add|create|feature|component|ui|page)\b/.test(t))
+  ) {
+    return "implement";
+  }
+  if (/\b(recon|enumerat|fingerprint|osint|whois|dns|nmap|discover)\b/.test(t)) {
+    return "recon";
+  }
+  if (
+    /\b(exploit|poc|payload|privesc|lateral|inject|bruteforce|sqlmap)\b/.test(t)
+  ) {
+    return "exploit";
+  }
+  if (/\b(report|write.?up|finding|summar|document)\b/.test(t)) {
+    return "report";
+  }
+  if (
+    /\b(explore|inspect|list|read|survey|map)\b/.test(t) ||
+    /\bcheck\b.+\b(exists?|empty|directory|folder|path)\b/.test(t) ||
+    /\b(exists?|empty)\b.+\b(directory|folder|path|project)\b/.test(t) ||
+    // "Check Node.js and npm availability", "verify tools present", etc.
+    /\bcheck\b.+\b(node|npm|pnpm|yarn|bun|python|availability|available|installed|present|toolchain|tools?)\b/.test(
+      t,
+    ) ||
+    /\b(availability|available|installed|present)\b.+\b(node|npm|toolchain|tools?)\b/.test(
+      t,
+    ) ||
+    /\bverify\b.+\b(tools?|node|npm|setup|environment|prereq)\b/.test(t)
+  ) {
+    return "explore";
+  }
+  return "generic";
+}
+
+/** Successful work observed this turn without a credited open task. */
+export interface LooseWorkReceipt {
+  readonly toolName: string;
+  readonly signals?: TaskWorkSignals | undefined;
+}
+
+/**
+ * Whether a successful tool can satisfy a task of the given class.
+ * Used to retroactively credit preflight work (tool.check before in_progress).
+ */
+export function toolFitsTaskClass(
+  toolName: string,
+  taskTitle: string,
+  opts?: {
+    planKind?: string | undefined;
+    signals?: TaskWorkSignals | undefined;
+  },
+): boolean {
+  if (!isEvidenceWorkTool(toolName)) return false;
+  const cls = classifyTaskTitle(taskTitle, { planKind: opts?.planKind });
+  const s = opts?.signals;
+  switch (cls) {
+    case "explore":
+      return (
+        toolName === "tool.check" ||
+        toolName === "sysinfo" ||
+        toolName === "fs.list" ||
+        toolName === "fs.read" ||
+        toolName === "fs.search" ||
+        toolName === "net.context" ||
+        toolName === "shell.exec" // version probes, which/where
+      );
+    case "scaffold":
+      return (
+        Boolean(s?.scaffoldOk) ||
+        toolName === "fs.write" ||
+        toolName === "fs.writeMany" ||
+        toolName === "shell.exec" ||
+        toolName === "shell.start"
+      );
+    case "install":
+      return Boolean(s?.installOk) || toolName === "pkg.install";
+    case "implement":
+      return (
+        Boolean(s?.sourceWrite || s?.featureWrite) ||
+        toolName === "fs.write" ||
+        toolName === "fs.writeMany" ||
+        toolName === "fs.edit" ||
+        toolName === "fs.replaceLines" ||
+        toolName === "fs.append"
+      );
+    case "verify":
+      return (
+        Boolean(
+          s?.devServerStart ||
+            s?.localHttpProbeOk ||
+            s?.serverReady ||
+            s?.portListening,
+        ) ||
+        toolName === "shell.start" ||
+        toolName === "shell.tail" ||
+        toolName === "http.fetch" ||
+        toolName === "web.fetch"
+      );
+    case "recon":
+      return (
+        Boolean(s?.remoteReconOk) ||
+        /^(dns\.lookup|whois\.lookup|http\.fetch|web\.fetch|net\.scan|pentest\.recon|net\.pingSweep|net\.context|tool\.batch)$/.test(
+          toolName,
+        )
+      );
+    case "exploit":
+      return Boolean(s?.remoteActiveTestOk) || isEvidenceWorkTool(toolName);
+    default:
+      return true;
+  }
+}
+
+/**
+ * Fold turn-level loose successes into a task ledger so preflight work
+ * (tool.check / fs.list before in_progress) can satisfy explore/check tasks.
+ */
+export function absorbLooseWorkIntoLedger(
+  ledger: TaskWorkLedger | null,
+  taskId: string,
+  taskTitle: string,
+  loose: readonly LooseWorkReceipt[],
+  opts?: { planKind?: string | undefined },
+): TaskWorkLedger | null {
+  if (!taskId || loose.length === 0) return ledger;
+  let led = ledger;
+  for (const item of loose) {
+    if (
+      !toolFitsTaskClass(item.toolName, taskTitle, {
+        planKind: opts?.planKind,
+        signals: item.signals,
+      })
+    ) {
+      continue;
+    }
+    led = recordTaskWorkSuccess(led, taskId, item.toolName, item.signals);
+  }
+  return led;
+}
+
 export function recordTaskWorkSuccess(
   ledger: TaskWorkLedger | null,
   taskId: string | undefined,
   toolName: string,
+  signals?: TaskWorkSignals,
 ): TaskWorkLedger | null {
   if (!taskId || !isEvidenceWorkTool(toolName)) return ledger;
-  if (!ledger || ledger.taskId !== taskId) {
-    return { taskId, successWorkCount: 1, lastOkTool: toolName };
-  }
-  return {
-    taskId,
-    successWorkCount: ledger.successWorkCount + 1,
-    lastOkTool: toolName,
-  };
+  const base: TaskWorkLedger =
+    !ledger || ledger.taskId !== taskId
+      ? { taskId, successWorkCount: 1, lastOkTool: toolName }
+      : {
+          ...ledger,
+          successWorkCount: ledger.successWorkCount + 1,
+          lastOkTool: toolName,
+        };
+  if (signals?.sourceWrite) base.sawSourceWrite = true;
+  if (signals?.featureWrite) base.sawFeatureWrite = true;
+  if (signals?.installOk) base.sawInstallOk = true;
+  if (signals?.scaffoldOk) base.sawScaffoldOk = true;
+  if (signals?.devServerStart) base.sawDevServerStart = true;
+  if (signals?.localHttpProbeOk) base.sawLocalHttpProbeOk = true;
+  if (signals?.serverReady) base.sawServerReady = true;
+  if (signals?.portListening) base.sawPortListening = true;
+  if (signals?.remoteReconOk) base.sawRemoteReconOk = true;
+  if (signals?.remoteActiveTestOk) base.sawRemoteActiveTestOk = true;
+  return base;
 }
 
 export function openTaskLedger(taskId: string): TaskWorkLedger {
   return { taskId, successWorkCount: 0 };
 }
 
+export interface CanMarkTaskDoneOpts {
+  taskTitle?: string | undefined;
+  /** User asked for a product feature app (todo/blog/…). */
+  featureAppRequired?: boolean | undefined;
+  /** Session-level flag: feature write observed any time this turn. */
+  sessionFeatureSeen?: boolean | undefined;
+  /** A real project root was discovered, so a scaffold checkpoint is already satisfied. */
+  existingProject?: boolean | undefined;
+  /** An earlier plan task already proved the local server is ready and running. */
+  runtimeVerified?: boolean | undefined;
+  /** Plan kind: coding | pentest | general — selects domain gates. */
+  planKind?: string | undefined;
+  /** Any plan task already has successful remote recon/active test evidence. */
+  remoteWorkVerified?: boolean | undefined;
+}
+
+/** Local app runtime is proven by any strong independent signal. */
+export function hasLocalRuntimeProof(
+  evidence?: Pick<
+    TaskEvidence,
+    | "sawDevServerStart"
+    | "sawLocalHttpProbeOk"
+    | "sawServerReady"
+    | "sawPortListening"
+  > | null,
+): boolean {
+  return Boolean(
+    evidence?.sawDevServerStart ||
+      evidence?.sawLocalHttpProbeOk ||
+      evidence?.sawServerReady ||
+      evidence?.sawPortListening,
+  );
+}
+
+export function hasRemoteWorkProof(
+  evidence?: Pick<
+    TaskEvidence,
+    "sawRemoteReconOk" | "sawRemoteActiveTestOk"
+  > | null,
+): boolean {
+  return Boolean(evidence?.sawRemoteReconOk || evidence?.sawRemoteActiveTestOk);
+}
+
+/** Dev-server job log shows ready + local URL. */
+export function isServerReadyOutput(output: string): boolean {
+  if (!output) return false;
+  const hasUrl =
+    /\bhttps?:\/\/(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?\b/i.test(output) ||
+    /➜\s*Local:\s*https?:\/\//i.test(output);
+  const hasReady =
+    /\b(?:ready in|VITE\s+v?\d|compiled successfully|started server|listening on|Local:\s*http)\b/i.test(
+      output,
+    );
+  return hasUrl || hasReady;
+}
+
+/** lsof/ss (or similar) shows a process LISTENing on a local port. */
+export function isPortListeningOutput(command: string, output: string): boolean {
+  if (!output || !/\bLISTEN(?:ING)?\b/i.test(output)) return false;
+  const cmd = command.toLowerCase();
+  if (/\b(lsof|ss\b|netstat)\b/.test(cmd)) return true;
+  // Output-only: node/… LISTEN with a localhost/port line
+  return (
+    /\b(?:localhost|127\.0\.0\.1|\[::1\]|\*:)\S*\d+/i.test(output) ||
+    /\bTCP\b.+\bLISTEN/i.test(output)
+  );
+}
+
+/**
+ * Leave/keep-running observational tasks may inherit already-proven runtime.
+ * "for user to test" must NOT block inheritance (prior brittle exclusion of "test").
+ */
+export function isRuntimeObservationTask(title: string): boolean {
+  const t = title.toLowerCase();
+  const leaveKeep =
+    /\bleave\s+(?:it\s+)?running\b|\bkeep\s+(?:it\s+)?running\b|\bserver\s+(?:is\s+)?running\b|\bfor\s+(?:the\s+)?user\s+to\s+test\b/.test(
+      t,
+    );
+  if (!leaveKeep) return false;
+  // Primary action is still start/launch/probe → not pure observation
+  if (
+    /\b(?:start|launch|run)\s+(?:the\s+)?(?:dev\s*)?server\b/.test(t) ||
+    /\b(?:probe|curl)\s+(?:localhost|http)\b/.test(t)
+  ) {
+    // Combined "start … leave running" is verify work, not pure observation
+    if (/\b(start|run|launch)\b/.test(t) && /\b(dev\s*server|npm\s+run\s+dev|shell\.start)\b/.test(t)) {
+      return false;
+    }
+  }
+  // Titles that are ONLY leave/keep running (optionally "for user to test")
+  if (
+    /\bleave\s+(?:it\s+)?running\b|\bkeep\s+(?:it\s+)?running\b|\bfor\s+(?:the\s+)?user\s+to\s+test\b/.test(
+      t,
+    )
+  ) {
+    // If title is primarily leave-running without requiring a fresh start as the main verb first
+    if (!/^(?:start|run|launch)\b/.test(t.trim())) return true;
+    // "Leave server running for user to test" — leave is the head intent
+    if (/^leave\b|^keep\b/.test(t.trim())) return true;
+  }
+  return (
+    /\bserver\s+(?:is\s+)?running\b/.test(t) &&
+    !/\b(?:start|run|launch)\b/.test(t)
+  );
+}
+
+/** Report / residual documentation that can inherit prior remote evidence. */
+export function isRemoteObservationTask(title: string): boolean {
+  const t = title.toLowerCase();
+  if (/\b(report|write.?up|summar|document|residual|findings?\s+summary)\b/.test(t)) {
+    return true;
+  }
+  if (
+    /\bleave\s+(?:the\s+)?(?:listener|job|tunnel)\s+running\b|\bkeep\s+(?:the\s+)?listener\b/.test(
+      t,
+    )
+  ) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Typed evidence gate: base rule is ≥1 successful work tool; implement/install/verify
+ * (and pentest recon) require stronger signals when classified. Existing project and
+ * already-proven runtime/remote facts satisfy corresponding observational tasks.
+ */
 export function canMarkTaskDone(
   ledger: TaskWorkLedger | null,
   taskId: string,
+  opts?: CanMarkTaskDoneOpts,
 ): { ok: true } | { ok: false; reason: string } {
-  if (!ledger || ledger.taskId !== taskId) {
+  const title = opts?.taskTitle ?? "";
+  const planKind = opts?.planKind;
+  const pentest = isPentestPlanKind(planKind);
+  const cls = title ? classifyTaskTitle(title, { planKind }) : "generic";
+  const leaveRunningIntent =
+    isRuntimeObservationTask(title) ||
+    /\bleave\s+(?:it\s+)?running\b|\bkeep\s+(?:it\s+)?running\b|\bfor\s+(?:the\s+)?user\s+to\s+test\b/i.test(
+      title,
+    );
+  const inheritedCompletion =
+    (cls === "scaffold" && Boolean(opts?.existingProject)) ||
+    (!pentest && leaveRunningIntent && Boolean(opts?.runtimeVerified)) ||
+    (pentest &&
+      isRemoteObservationTask(title) &&
+      Boolean(opts?.remoteWorkVerified));
+  if ((!ledger || ledger.taskId !== taskId) && !inheritedCompletion) {
     return {
       ok: false,
       reason:
@@ -57,18 +441,143 @@ export function canMarkTaskDone(
         `inspect the tool result, and only then mark done if you are satisfied.`,
     };
   }
-  if (ledger.successWorkCount < 1) {
+  if ((ledger?.successWorkCount ?? 0) < 1 && !inheritedCompletion) {
     return {
       ok: false,
       reason:
         `Cannot mark [${taskId}] done: no successful tool result observed since it went in_progress. ` +
         `Do the work, wait for the tool output, verify it succeeded, and only mark done when satisfied. ` +
-        (ledger.lastOkTool
+        (ledger?.lastOkTool
           ? ""
           : "Example: fs.write / shell.exec / shell.start must return ok first."),
     };
   }
+
+  const evidence =
+    ledger && ledger.taskId === taskId ? ledger : openTaskLedger(taskId);
+
+  // Feature implement gate is coding-only.
+  if (!pentest && cls === "implement" && opts?.featureAppRequired) {
+    const featureOk =
+      Boolean(evidence.sawFeatureWrite) || Boolean(opts.sessionFeatureSeen);
+    if (!featureOk) {
+      return {
+        ok: false,
+        reason:
+          `Cannot mark [${taskId}] done: this is a feature/implement task for a product app, ` +
+          `but no real feature code was written yet (starter boilerplate does not count). ` +
+          `Replace the default starter with the requested feature (e.g. todo add/list/toggle), then mark done.`,
+      };
+    }
+  }
+
+  if (!pentest && cls === "install" && !evidence.sawInstallOk) {
+    if (evidence.successWorkCount < 1) {
+      return {
+        ok: false,
+        reason:
+          `Cannot mark [${taskId}] done: install task needs a successful package install ` +
+          `(npm/pnpm/yarn/bun install, etc.) under this task.`,
+      };
+    }
+  }
+
+  // Local app runtime: multi-signal proof. Never apply to pentest plans.
+  if (!pentest && (cls === "verify" || leaveRunningIntent)) {
+    const wantsServer =
+      leaveRunningIntent ||
+      /\b(dev\s*server|localhost|shell\.start|run\s+dev|leave\s+.*running)\b/i.test(
+        title,
+      );
+    if (wantsServer) {
+      const proof =
+        hasLocalRuntimeProof(evidence) || Boolean(opts?.runtimeVerified);
+      if (!proof) {
+        return {
+          ok: false,
+          reason:
+            `Cannot mark [${taskId}] done: local app runtime not proven yet. ` +
+            `Accept any of: shell.start (dev server), shell.tail ready+URL, port LISTEN (lsof/ss), ` +
+            `or successful localhost GET probe. If an earlier plan task already proved the server, ` +
+            `confirm it is still alive once then mark done — do not thrash ports with restarts.`,
+        };
+      }
+    }
+  }
+
+  // Pentest recon: need real remote recon, not local fs noise alone.
+  if (pentest && cls === "recon") {
+    const remoteOk =
+      hasRemoteWorkProof(evidence) || Boolean(opts?.remoteWorkVerified);
+    if (!remoteOk) {
+      // Allow if last tool was a recon tool name even without typed flag (soft)
+      const last = evidence.lastOkTool ?? "";
+      const lastLooksRecon =
+        /^(dns\.lookup|whois\.lookup|http\.fetch|web\.fetch|net\.scan|pentest\.recon|net\.pingSweep|tool\.batch)$/.test(
+          last,
+        );
+      if (!lastLooksRecon) {
+        return {
+          ok: false,
+          reason:
+            `Cannot mark [${taskId}] done: recon needs successful remote evidence ` +
+            `(dns/http/net.scan/pentest.recon/whois against the target), not local-only tools.`,
+        };
+      }
+    }
+  }
+
   return { ok: true };
+}
+
+/** True when a tool call is remote recon (not local app tooling). */
+export function isRemoteReconToolCall(call: ToolCall): boolean {
+  if (
+    call.name === "dns.lookup" ||
+    call.name === "whois.lookup" ||
+    call.name === "net.scan" ||
+    call.name === "pentest.recon" ||
+    call.name === "net.pingSweep" ||
+    call.name === "net.context"
+  ) {
+    return true;
+  }
+  if (call.name === "http.fetch" || call.name === "web.fetch") {
+    const url = typeof call.args.url === "string" ? call.args.url : "";
+    // Localhost is coding probe, not remote recon
+    if (/^(?:https?:\/\/)?(?:localhost|127\.0\.0\.1|\[::1\])(?::|\/|$)/i.test(url)) {
+      return false;
+    }
+    return Boolean(url);
+  }
+  if (call.name === "shell.exec" || call.name === "shell.start") {
+    const cmd = commandOf(call);
+    return /\b(?:nmap|masscan|ffuf|gobuster|feroxbuster|nikto|nuclei|httpx|subfinder|amass|dig|whois|whatweb)\b/i.test(
+      cmd,
+    );
+  }
+  return false;
+}
+
+/** Active/offensive test (not passive recon). */
+export function isRemoteActiveTestCall(call: ToolCall): boolean {
+  if (call.name === "http.fetch") {
+    const method = String(call.args.method ?? "GET").toUpperCase();
+    if (method !== "GET" && method !== "HEAD" && method !== "OPTIONS") {
+      return true;
+    }
+    const url = typeof call.args.url === "string" ? call.args.url : "";
+    return /\b(?:union\s+select|<\s*script|javascript:|file:\/\/|169\.254\.169\.254)\b/i.test(
+      url,
+    );
+  }
+  if (call.name === "shell.exec" || call.name === "shell.start") {
+    const cmd = commandOf(call);
+    return /\b(?:sqlmap|hydra|nikto|nuclei|msfconsole|exploit|payload|reverse\s+shell)\b/i.test(
+      cmd,
+    );
+  }
+  return false;
 }
 
 function commandOf(call: ToolCall): string {
@@ -110,7 +619,7 @@ export function isDevServerCall(call: ToolCall): boolean {
   );
 }
 
-/** Preflight / inspect tools allowed before the model opens a task. */
+/** Inspect tools allowed without opening a plan task. */
 export function isPlanPreflightTool(name: string): boolean {
   return (
     name === "tool.check" ||
@@ -122,17 +631,49 @@ export function isPlanPreflightTool(name: string): boolean {
   );
 }
 
+/** Read-only recon tools that may run without an in_progress task on pentest plans. */
+export function isReadOnlyReconTool(name: string): boolean {
+  return (
+    isPlanPreflightTool(name) ||
+    name === "tool.batch" ||
+    name === "dns.lookup" ||
+    name === "whois.lookup" ||
+    name === "http.fetch" ||
+    name === "web.fetch" ||
+    name === "web.search" ||
+    name === "net.scan" ||
+    name === "pentest.recon" ||
+    name === "wordlist.find"
+  );
+}
+
 /**
- * Tools allowed on a coding BUILD turn before plan.create exists.
- * Explore + optional web research + plan — no scaffold/write/install freestyle.
+ * Tools whose failure must NOT cancel later siblings in the same model turn.
+ * Plan bookkeeping failures (task.update done-gate, etc.) and independent
+ * recon lookups should never wipe a whole batch of http.fetch / dns calls.
  */
+export function isBatchSoftFailTool(name: string): boolean {
+  if (name === "plan.create" || name === "task.update") return true;
+  if (name === "tool.batch" || name === "tool.check") return true;
+  if (isReadOnlyReconTool(name)) return true;
+  if (
+    name === "net.pingSweep" ||
+    name === "shell.jobs" ||
+    name === "shell.tail" ||
+    name === "sysinfo"
+  ) {
+    return true;
+  }
+  return false;
+}
+
+/** Tools allowed on a coding build turn before plan.create exists. */
 export function isBuildPrePlanAllowedTool(name: string): boolean {
   return (
     name === "plan.create" ||
     isPlanPreflightTool(name) ||
     name === "tool.batch" ||
     name === "fs.search" ||
-    // Research before planning (docs/examples) is fine; it does not mutate the project
     name === "web.search" ||
     name === "web.fetch"
   );
@@ -245,96 +786,21 @@ export function isPackageInstallCommand(cmd: string): boolean {
 }
 
 /**
- * Soft scope check: refuse run/verify tools while the open task is only
- * scaffold / implement / install.
- * When `planTaskTitles` is provided, install is only blocked on implement
- * tasks if the plan actually has a dedicated install task (otherwise allow).
- */
-export function workOutOfScopeForTask(
-  taskTitle: string,
-  call: ToolCall,
-  opts?: { planTaskTitles?: string[] },
-): string | undefined {
-  if (isMetaPlanTool(call.name)) return undefined;
-  const t = taskTitle.toLowerCase();
-  const isRunVerifyTask =
-    /\b(dev\s*server|run\s+dev|start\s+.*server|localhost|shell\.start|leave\s+.*running|probe|verify\s+in\s+browser)\b/.test(
-      t,
-    ) ||
-    (/\b(start|run)\b/.test(t) && /\b(server|dev|app|verify)\b/.test(t));
-
-  if (isRunVerifyTask) return undefined;
-
-  const isInstallOnly = looksLikeInstallTaskTitle(taskTitle);
-  const isScaffoldOnly = looksLikeScaffoldTaskTitle(taskTitle);
-  const isImplementOnly =
-    !isInstallOnly &&
-    !isScaffoldOnly &&
-    (/\b(implement|integrate|feature|rewrite|write\s+src|add\s+\w+\s+(component|module|handler|endpoint|page|route|model)|persist|localstorage|styling|styles?)\b/.test(
-      t,
-    ) ||
-      (/\b(component|module|handler|endpoint|ui|page|todo)\b/.test(t) &&
-        !/\b(install|scaffold|dev\s*server|create\s+project)\b/.test(t)));
-
-  // Install always OK under scaffold or install tasks
-  if (
-    (isScaffoldOnly || isInstallOnly) &&
-    call.name === "shell.exec" &&
-    isPackageInstallCommand(commandOf(call))
-  ) {
-    return undefined;
-  }
-
-  if (
-    (isInstallOnly || isScaffoldOnly || isImplementOnly) &&
-    (isDevServerCall(call) || isLocalHttpProbe(call))
-  ) {
-    return (
-      `Out of scope for current task "${taskTitle}": do not start the dev server or probe localhost yet. ` +
-      `Finish and VERIFY this task's own work, mark it done only when satisfied, then open the run/verify task with task.update in_progress.`
-    );
-  }
-
-  if (
-    isImplementOnly &&
-    call.name === "shell.exec" &&
-    isPackageInstallCommand(commandOf(call))
-  ) {
-    const planTitles = opts?.planTaskTitles;
-    const planHasInstallTask =
-      !planTitles ||
-      planTitles.length === 0 ||
-      planTitles.some((title) => looksLikeInstallTaskTitle(title));
-    if (planHasInstallTask) {
-      return (
-        `Out of scope for current task "${taskTitle}": run package install under the install task, not while implementing files.`
-      );
-    }
-    // No install task in the plan — allow install so work is not stuck.
-    return undefined;
-  }
-
-  return undefined;
-}
-
-/**
  * Choose which pending plan task should own this tool call (auto-start).
  * Prevents npm install from being attributed to "localStorage" / style tasks.
  */
 export function pickPendingTaskForToolCall<T extends { id: string; title: string }>(
   pending: T[],
   call: ToolCall,
-  allTitles?: string[],
+  _allTitles?: string[],
 ): T | undefined {
   if (pending.length === 0) return undefined;
-  const titles = allTitles ?? pending.map((p) => p.title);
   const cmd = commandOf(call);
 
   const score = (title: string): number => {
-    if (workOutOfScopeForTask(title, call, { planTaskTitles: titles })) {
-      return -100;
-    }
-    let s = 1; // any in-scope pending task is viable
+    // Heuristics rank likely ownership only. They must never make a pending
+    // task ineligible or authorize/block the underlying tool call.
+    let s = 1;
     if (isPackageInstallCommand(cmd)) {
       if (looksLikeInstallTaskTitle(title)) s += 20;
       else if (looksLikeScaffoldTaskTitle(title)) s += 10;
@@ -363,6 +829,18 @@ export function pickPendingTaskForToolCall<T extends { id: string; title: string
         s += 12;
       }
     }
+    // Keyword overlap (SSRF task ↔ /api/og-image fetch, fuzz ↔ /api/*, …)
+    const blob =
+      `${call.name} ${cmd} ${JSON.stringify(call.args ?? {})}`.toLowerCase();
+    const words = title
+      .toLowerCase()
+      .split(/[^a-z0-9]+/)
+      .filter((w) => w.length > 3);
+    let hits = 0;
+    for (const w of words) {
+      if (blob.includes(w)) hits += 1;
+    }
+    if (hits > 0) s += Math.min(12, hits * 3);
     return s;
   };
 
@@ -375,8 +853,7 @@ export function pickPendingTaskForToolCall<T extends { id: string; title: string
       bestScore = sc;
     }
   }
-  if (!best || bestScore < 0) return undefined;
-  return best;
+  return best ?? pending[0];
 }
 
 /**
@@ -447,34 +924,119 @@ export function extractWritePathsFromCall(call: ToolCall): string[] {
   return paths;
 }
 
-/**
- * True when a successful tool call implements product feature code (not only scaffold).
- */
-export function isFeatureImplementationCall(call: ToolCall): boolean {
-  const paths = extractWritePathsFromCall(call);
-  if (paths.some(isAppSourcePath)) return true;
-  // Hand-written multi-file setup without official scaffolder
-  if (call.name === "fs.writeMany" && paths.length >= 2) return true;
+/** Default framework starter / marketing copy — not the product feature. */
+export function looksLikeStarterBoilerplate(content: string): boolean {
+  const c = content.slice(0, 8_000);
+  return (
+    /\bWelcome to (?:Vite|React|Next\.js|Create React App|Nuxt|SvelteKit|Angular)\b/i.test(
+      c,
+    ) ||
+    /\bGet started by editing\b/i.test(c) ||
+    /\bEdit\s+`?(?:src\/)?App\.(?:tsx?|jsx?)`?\s+and save to (?:test|reload)/i.test(
+      c,
+    ) ||
+    /\blogos?\/(?:react|vite|next)\.svg\b/i.test(c) ||
+    /\bnext\.js logo\b/i.test(c) ||
+    /https?:\/\/(?:react\.dev|vitejs\.dev|nextjs\.org)\/(?:learn|docs)?/i.test(
+      c,
+    ) && /\b(?:Deploy|Learn|Templates|create-next-app)\b/i.test(c)
+  );
+}
+
+/** Content that looks like real product UI/logic for common feature apps. */
+export function looksLikeFeatureProductCode(content: string): boolean {
+  const c = content.slice(0, 12_000);
+  if (looksLikeStarterBoilerplate(c)) return false;
+  // Interactive product signals (todo/crud/auth/etc.)
+  if (
+    /\b(?:useState|useReducer|createContext|signal\(|createSignal|ref\()\b/.test(
+      c,
+    ) &&
+    /\b(?:todo|todos|onClick|onSubmit|addTodo|toggle|complete|delete|remove|login|signup|password|fetch\(|axios|localStorage)\b/i.test(
+      c,
+    )
+  ) {
+    return true;
+  }
+  if (
+    /\b(?:add|create|toggle|delete|remove|update)\b/i.test(c) &&
+    /\b(?:todo|item|task|post|note|user|cart)\b/i.test(c) &&
+    /\b(?:map\s*\(|filter\s*\(|set[A-Z]\w+|useState)\b/.test(c)
+  ) {
+    return true;
+  }
+  // API/backend feature
+  if (
+    /\b(?:app\.(?:get|post|put|patch|delete)|router\.(?:get|post)|@(?:Get|Post|Put|Delete)|def\s+\w+\(.*request)/i.test(
+      c,
+    ) &&
+    !looksLikeStarterBoilerplate(c)
+  ) {
+    return true;
+  }
   return false;
 }
 
+function extractWriteContentsFromCall(call: ToolCall): string[] {
+  const out: string[] = [];
+  if (
+    (call.name === "fs.write" ||
+      call.name === "fs.append" ||
+      call.name === "fs.replaceLines") &&
+    typeof call.args.content === "string"
+  ) {
+    out.push(call.args.content);
+  }
+  if (call.name === "fs.edit" && typeof call.args.newText === "string") {
+    out.push(call.args.newText);
+  }
+  if (call.name === "fs.writeMany" && Array.isArray(call.args.files)) {
+    for (const f of call.args.files) {
+      if (
+        f &&
+        typeof f === "object" &&
+        typeof (f as { content?: unknown }).content === "string"
+      ) {
+        out.push((f as { content: string }).content);
+      }
+    }
+  }
+  return out;
+}
+
 /**
- * Soft block: don't start the local server until the product feature exists.
- * Returns a message when the open work is still scaffold-only for a feature ask.
+ * True when a successful tool call implements product feature code (not only scaffold).
+ * Starter boilerplate alone does not count.
  */
-export function incompleteFeatureBeforeServerMessage(
-  userPrompt: string,
-  sawFeatureImpl: boolean,
-  call: ToolCall,
-): string | undefined {
-  if (!userAskedForFeatureApp(userPrompt)) return undefined;
-  if (sawFeatureImpl) return undefined;
-  if (!isDevServerCall(call) && !(call.name === "shell.start")) return undefined;
-  return (
-    `Feature incomplete: the user asked for a product app (not just a blank scaffold). ` +
-    `Implement the requested feature first (real UI/state or API — replace starter boilerplate), ` +
-    `THEN start the server. Do not shell.start / npm run dev until the feature is written.`
-  );
+export function isFeatureImplementationCall(call: ToolCall): boolean {
+  const paths = extractWritePathsFromCall(call);
+  const contents = extractWriteContentsFromCall(call);
+  if (contents.some(looksLikeFeatureProductCode)) return true;
+  // Content present but only starter → not feature
+  if (
+    contents.length > 0 &&
+    contents.every((c) => looksLikeStarterBoilerplate(c) || c.trim().length < 40)
+  ) {
+    return false;
+  }
+  // Path-only signal: source write without inspectable content still counts
+  // (e.g. truncated args) but not lockfiles/config alone.
+  if (paths.some(isAppSourcePath) && contents.length === 0) return true;
+  if (
+    paths.some(isAppSourcePath) &&
+    contents.some((c) => !looksLikeStarterBoilerplate(c) && c.trim().length >= 80)
+  ) {
+    return true;
+  }
+  // Hand-written multi-file setup with non-starter content
+  if (
+    call.name === "fs.writeMany" &&
+    paths.length >= 2 &&
+    contents.some((c) => !looksLikeStarterBoilerplate(c))
+  ) {
+    return true;
+  }
+  return false;
 }
 
 /**

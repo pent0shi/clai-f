@@ -7,6 +7,11 @@
 
 import type { BoundedTextState } from "../../app/events/event-buffer.js";
 import type { ToolItem, ToolStatus } from "../state/transcript-types.js";
+import {
+  fileToolTitle,
+  isFileMutationTool,
+  type FileChangeKind,
+} from "../../tools/file-diff.js";
 import { sanitizeDisplayText } from "./sanitize-display.js";
 
 const STATUS_GLYPH: Record<ToolStatus, string> = {
@@ -28,18 +33,59 @@ const STATUS_LABEL: Record<ToolStatus, string> = {
 export interface ToolPresentation {
   readonly glyph: string;
   readonly statusLabel: string;
+  /** Bold title — tool name or "Edited App.css". */
   readonly name: string;
   readonly argsLabel: string | undefined;
   readonly argsDisplay: string | undefined;
   readonly detail: string | undefined;
+  /** Full absolute path line under file-mutation titles. */
+  readonly pathLine: string | undefined;
+  /** True when the card should render a structured file-diff body. */
+  readonly isFileDiff: boolean;
 }
 
 export function presentTool(item: ToolItem): ToolPresentation {
-  const argsLabel = item.argsDisplay
+  const fileDiff =
+    isFileMutationTool(item.name) ||
+    Boolean(item.fileChanges && item.fileChanges.length > 0);
+
+  let name = item.name;
+  let argsLabel: string | undefined = item.argsDisplay
     ? item.name === "shell.exec"
       ? "command"
       : "input"
     : undefined;
+  let argsDisplay = item.argsDisplay || undefined;
+  let pathLine: string | undefined;
+
+  if (fileDiff) {
+    const kind = item.fileChanges?.[0]?.kind as FileChangeKind | undefined;
+    const pathOrDisplay =
+      item.fileChanges?.[0]?.path ??
+      item.argsDisplay ??
+      "";
+    const titled = fileToolTitle(item.name, item.status, pathOrDisplay, kind);
+    name = titled.title;
+    pathLine = titled.pathLine ?? item.fileChanges?.[0]?.path;
+    // Never dump oldText/newText JSON under a file mutation card.
+    if (
+      item.name === "fs.edit" ||
+      item.name === "fs.replaceLines" ||
+      item.name === "fs.delete" ||
+      item.name === "fs.write" ||
+      item.name === "fs.append" ||
+      item.fileChanges
+    ) {
+      argsLabel = undefined;
+      argsDisplay = undefined;
+    }
+    if (item.name === "fs.writeMany" && item.argsDisplay) {
+      // Title already carries summary; skip duplicate input line.
+      argsLabel = undefined;
+      argsDisplay = undefined;
+    }
+  }
+
   let detail: string | undefined;
   if (item.status === "blocked") {
     detail = item.reason;
@@ -56,10 +102,12 @@ export function presentTool(item: ToolItem): ToolPresentation {
   return {
     glyph: STATUS_GLYPH[item.status],
     statusLabel,
-    name: item.name,
+    name,
     argsLabel,
-    argsDisplay: item.argsDisplay || undefined,
+    argsDisplay,
     detail,
+    pathLine,
+    isFileDiff: Boolean(item.fileChanges && item.fileChanges.length > 0),
   };
 }
 

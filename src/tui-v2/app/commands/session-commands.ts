@@ -9,6 +9,7 @@ import { setDefaultMode, getConfig } from "../../../store/config.js";
 import { upsertSession, clearAllHistory } from "../../../store/history.js";
 import { safeCwd } from "../../../os/cwd.js";
 import { AUTO_COMPACT_TOKEN_BUDGET } from "../../../agent/context-manager.js";
+import { clearActiveProjectRoot } from "../../../agent/project-root.js";
 import type { CommandInvocation } from "../../../app/commands/command.js";
 import type { Mode } from "../../../types.js";
 import type { AppServices } from "../../bootstrap/composition-root.js";
@@ -39,6 +40,8 @@ export async function handleNew(services: AppServices): Promise<void> {
     // Save messages + visual transcript so /history can restore the old chat.
     await services.session.persistNow().catch(() => undefined);
   }
+  clearActiveProjectRoot();
+  services.plan.clear();
   services.session.reset({ mintNewId: true });
   services.transcript.reset();
   // New session id → no plan until the agent creates one.
@@ -48,6 +51,8 @@ export async function handleNew(services: AppServices): Promise<void> {
 }
 
 export function handleClean(services: AppServices): void {
+  clearActiveProjectRoot();
+  services.plan.clear();
   services.session.reset({ mintNewId: true });
   services.transcript.reset();
   void services.plan.load(services.session.sessionId).catch(() => undefined);

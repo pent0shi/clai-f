@@ -8,6 +8,7 @@
  */
 
 import type { ToolCallId, TurnId } from "../../app/events/app-event.js";
+import type { FileChange } from "../../tools/file-diff.js";
 
 interface ItemBase {
   readonly id: string;
@@ -46,6 +47,8 @@ export interface ToolItem extends ItemBase {
   readonly artifactPath: string | undefined;
   readonly reason: string | undefined;
   readonly outputBytes: number;
+  /** Structured file diffs for fs.edit / write / append / delete / … */
+  readonly fileChanges: readonly FileChange[] | undefined;
 }
 
 export type NoticeLevel = "info" | "warn" | "error";
@@ -82,8 +85,15 @@ export interface TranscriptState {
   readonly runningStatus: string | undefined;
   readonly expandThinkingGlobal: boolean;
   readonly expandOutputGlobal: boolean;
+  /**
+   * File-diff cards (fs.edit / write / …): when true, show full DIFF hunks;
+   * when false, collapse to verb + relative path only (unless overridden).
+   */
+  readonly expandFileDiffsGlobal: boolean;
   /** Per-item expand/collapse override; absent means "inherit the global". */
   readonly itemOverrides: ReadonlyMap<string, boolean>;
+  /** Per-tool-card file-diff expand override (key = tool item id). */
+  readonly fileDiffOverrides: ReadonlyMap<string, boolean>;
 }
 
 export const EMPTY_TRANSCRIPT_STATE: TranscriptState = {
@@ -95,7 +105,9 @@ export const EMPTY_TRANSCRIPT_STATE: TranscriptState = {
   runningStatus: undefined,
   expandThinkingGlobal: false,
   expandOutputGlobal: false,
+  expandFileDiffsGlobal: true,
   itemOverrides: new Map(),
+  fileDiffOverrides: new Map(),
 };
 
 /** CHAT-005/006/007: a per-item override always wins over the global toggle. */
@@ -108,6 +120,13 @@ export function isItemExpanded(state: TranscriptState, item: TranscriptItem): bo
     return state.expandOutputGlobal;
   }
   return true;
+}
+
+/** Whether a tool card should show its file-diff hunks (vs collapsed title row). */
+export function isFileDiffExpanded(state: TranscriptState, toolItemId: string): boolean {
+  const override = state.fileDiffOverrides.get(toolItemId);
+  if (override !== undefined) return override;
+  return state.expandFileDiffsGlobal;
 }
 
 export function transcriptItems(state: TranscriptState): TranscriptItem[] {

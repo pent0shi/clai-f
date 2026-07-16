@@ -2,10 +2,7 @@ import type { ToolResult } from "../../types.js";
 import type { BackgroundJob, JobsPort } from "../ports/jobs-port.js";
 import type { Disposable } from "./disposable.js";
 
-/**
- * Thin lifecycle wrapper over `JobsPort` (CORE-004). Jobs live in the core
- * manager and survive UI rerenders; this controller only observes and commands.
- */
+
 export class JobController implements Disposable {
   constructor(private readonly jobs: JobsPort) {}
 
@@ -25,7 +22,7 @@ export class JobController implements Disposable {
     return this.jobs.tail(id, bytes);
   }
 
-  stop(id: string): ToolResult {
+  stop(id: string): Promise<ToolResult> {
     return this.jobs.stop(id);
   }
 

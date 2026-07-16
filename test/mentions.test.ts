@@ -201,9 +201,10 @@ describe("expandMentions", () => {
     writeFileSync(image, Buffer.from([0x89, 0x50]));
     const line = `${image.replaceAll(" ", "\\ ")} what is it`;
     expect(extractExistingPathsFs(line, dir)).toEqual([image]);
-    expect(expandMentions(line, dir, true).attachments[0]).toMatchObject({
-      path: image,
-      kind: "image",
-    });
+    const att = expandMentions(line, dir, true).attachments[0];
+    expect(att?.kind).toBe("image");
+    // Stabilized into scratch/attachments so TemporaryItems/spaces don't break vision.
+    expect(att?.path).toMatch(/Screenshot.*\.png$/i);
+    expect(att?.path).toContain("attachments");
   });
 });

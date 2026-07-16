@@ -1,6 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { runAgent } from "../src/modes/agent.js";
 import { deletePlan } from "../src/store/plan.js";
+import {
+  clearActiveProjectRoot,
+  setActiveProjectRoot,
+} from "../src/agent/project-root.js";
 
 const stream = vi.fn();
 const runTool = vi.fn();
@@ -34,6 +40,15 @@ function streamReply(text: string) {
   };
 }
 
+function session(sessionId: string) {
+  return {
+    sessionId,
+    planApproved: { value: false },
+    allow: new Set(),
+    pentestAuthorized: { value: false },
+  } as any;
+}
+
 describe("agent plan gate enforcement", () => {
   beforeEach(async () => {
     stream.mockReset();
@@ -42,28 +57,65 @@ describe("agent plan gate enforcement", () => {
   });
 
   afterEach(() => {
+    clearActiveProjectRoot();
     vi.restoreAllMocks();
   });
 
-  it("blocks freestyle scaffold on coding builds until plan.create exists", async () => {
+  it("allows freestyle scaffold on coding builds in agent mode without plan.create", async () => {
     stream
       .mockImplementationOnce(
-        streamReply('```tool\n{"name":"shell.exec","args":{"command":"npm create vite@latest todo-app"}}\n```')
+        streamReply(
+          '```tool\n{"name":"shell.exec","args":{"command":"npm create vite@latest brand-new-todo-xyz -- --template react"}}\n```',
+        ),
+      )
+      .mockImplementationOnce(streamReply("Scaffold started."));
+
+    runTool.mockResolvedValue({ ok: true, output: "Scaffolding project..." });
+
+    await runAgent("create a todo app on desktop", {
+      session: {
+        sessionId: "session-123",
+        planApproved: { value: false },
+        allow: new Set(),
+        pentestAuthorized: { value: false },
+      } as any,
+      maxSteps: 3,
+      autoConfirm: true,
+      mode: "agent",
+    });
+
+    const shellCalls = runTool.mock.calls.filter(
+      (c) => (c[0] as { name?: string })?.name === "shell.exec",
+    );
+    expect(shellCalls.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("blocks scaffold in plan mode until the user accepts a plan", async () => {
+    stream
+      .mockImplementationOnce(
+        streamReply(
+          '```tool\n{"name":"shell.exec","args":{"command":"npm create vite@latest todo-app"}}\n```',
+        ),
       )
       .mockImplementationOnce(
         streamReply(
-          '```tool\n{"name":"plan.create","args":{"goal":"todo app","detail":"vite react todo on Desktop","tasks":["scaffold project","implement todo feature","install deps","Start dev server with shell.start, probe localhost, leave running, report URL"],"kind":"coding"}}\n```',
+          '```tool\n{"name":"plan.create","args":{"goal":"todo app","detail":"vite react on Desktop","tasks":["Scaffold project","Implement feature UI","Install deps","Run and verify"],"kind":"coding"}}\n```',
         ),
       )
-      .mockImplementationOnce(streamReply("Plan ready — waiting for /implement."));
+      .mockImplementation(streamReply("Plan is ready for acceptance."));
 
-    // scaffold must NOT reach runTool; plan.create is handled in-runner
     runTool.mockResolvedValue({ ok: true, output: "ok" });
 
     await runAgent("create a todo app on desktop", {
-      session: { sessionId: "session-123", planApproved: { value: false }, allow: new Set(), pentestAuthorized: { value: false } } as any,
-      maxSteps: 4,
+      session: {
+        sessionId: "session-123",
+        planApproved: { value: false },
+        allow: new Set(),
+        pentestAuthorized: { value: false },
+      } as any,
+      maxSteps: 5,
       autoConfirm: true,
+      mode: "plan",
     });
 
     const shellCalls = runTool.mock.calls.filter(
@@ -90,5 +142,104 @@ describe("agent plan gate enforcement", () => {
 
     expect(runTool).toHaveBeenCalledTimes(1);
     expect(runTool.mock.calls[0]![0]).toMatchObject({ name: "fs.list" });
+  });
+
+  it("honors auto-confirm for writes inside the pinned project root", async () => {
+    const project = join(homedir(), "Desktop", "bloging-app");
+    setActiveProjectRoot(project);
+    const confirmTool = vi.fn(async () => true);
+    stream
+      .mockImplementationOnce(
+        streamReply(
+          `\`\`\`tool\n{"name":"fs.write","args":{"path":"${project}/src/App.tsx","content":"ok"}}\n\`\`\``,
+        ),
+      )
+      .mockImplementationOnce(streamReply("Done."));
+    runTool.mockResolvedValue({ ok: true, output: "written" });
+
+    await runAgent("perform the requested operation", {
+      session: session("confirm-in-root"),
+      autoConfirm: true,
+      maxSteps: 3,
+      confirm: { confirmTool, confirmPentest: async () => true },
+    });
+
+    expect(confirmTool).not.toHaveBeenCalled();
+    expect(runTool).toHaveBeenCalledTimes(1);
+  });
+
+  it("still prompts for an allow-all write outside the pinned project root", async () => {
+    const project = join(homedir(), "Desktop", "bloging-app");
+    setActiveProjectRoot(project);
+    const confirmTool = vi.fn(async () => true);
+    const sibling = join(homedir(), "Desktop", "unrelated-app", "App.tsx");
+    stream
+      .mockImplementationOnce(
+        streamReply(
+          `\`\`\`tool\n{"name":"fs.write","args":{"path":"${sibling}","content":"ok"}}\n\`\`\``,
+        ),
+      )
+      .mockImplementationOnce(streamReply("Done."));
+    runTool.mockResolvedValue({ ok: true, output: "written" });
+
+    await runAgent("perform the requested operation", {
+      session: session("confirm-sibling"),
+      autoConfirm: true,
+      maxSteps: 3,
+      confirm: { confirmTool, confirmPentest: async () => true },
+    });
+
+    expect(confirmTool).toHaveBeenCalledTimes(1);
+  });
+
+  it("still prompts for deletes inside the pinned project root", async () => {
+    const project = join(homedir(), "Desktop", "bloging-app");
+    setActiveProjectRoot(project);
+    const confirmTool = vi.fn(async () => true);
+    stream
+      .mockImplementationOnce(
+        streamReply(
+          `\`\`\`tool\n{"name":"fs.delete","args":{"path":"${project}/src/old.ts"}}\n\`\`\``,
+        ),
+      )
+      .mockImplementationOnce(streamReply("Done."));
+    runTool.mockResolvedValue({ ok: true, output: "deleted" });
+
+    await runAgent("perform the requested operation", {
+      session: session("confirm-delete"),
+      autoConfirm: true,
+      maxSteps: 3,
+      confirm: { confirmTool, confirmPentest: async () => true },
+    });
+
+    expect(confirmTool).toHaveBeenCalledTimes(1);
+  });
+
+  it("turns a repeated successful read into non-terminal model feedback", async () => {
+    const repeated =
+      '```tool\n{"name":"fs.list","args":{"path":"/test"}}\n```';
+    stream
+      .mockImplementationOnce(streamReply(repeated))
+      .mockImplementationOnce(streamReply(repeated))
+      .mockImplementationOnce(streamReply(repeated))
+      .mockImplementationOnce(streamReply(repeated))
+      .mockImplementationOnce(streamReply("Inspection complete."));
+    runTool.mockResolvedValue({ ok: true, output: "file1, file2" });
+
+    const answer = await runAgent("inspect files", {
+      session: {
+        sessionId: "loop-guard-non-terminal",
+        planApproved: { value: false },
+        allow: new Set(),
+        pentestAuthorized: { value: false },
+      } as any,
+      maxSteps: 8,
+    });
+
+    // The fourth identical read is deduplicated by the loop guard, but that
+    // controller signal must not become a user-facing blocked/cancelled turn.
+    expect(runTool).toHaveBeenCalledTimes(3);
+    expect(answer).toContain("Inspection complete.");
+    expect(answer).not.toMatch(/Blocked or Cancelled|Status: blocked/i);
   });
 });

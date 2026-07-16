@@ -801,6 +801,18 @@ describe("scoped-parallel batch grouping (groupToolCallsForExecution)", () => {
     expect(groups.map((g) => g.length)).toEqual([4, 1]);
   });
 
+  it("spills oversized batches without dropping calls or changing order", () => {
+    const calls = Array.from({ length: 29 }, (_, index) => ({
+      name: "fs.read",
+      args: { path: String(index) },
+    }));
+    const groups = groupToolCallsForExecution(calls, safe, 8);
+    expect(groups.map((group) => group.length)).toEqual([8, 8, 8, 5]);
+    expect(groups.flat().map((item) => item.args.path)).toEqual(
+      calls.map((item) => item.args.path),
+    );
+  });
+
   it("splits a read-only run when a write appears mid-batch", () => {
     const groups = groupToolCallsForExecution(
       [call("fs.read"), call("fs.read"), call("fs.write"), call("fs.read")],

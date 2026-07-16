@@ -110,7 +110,12 @@ export async function confirmToolExecution(
   autoConfirm: boolean,
   session: SessionPolicy,
   confirmPort: ConfirmPort,
+  options?: { forceConfirm?: boolean | undefined },
 ): Promise<boolean> {
+  // Outside-cwd writes / deletes always prompt — even under allow-all / -y.
+  if (options?.forceConfirm) {
+    return confirmPort.confirmTool(call);
+  }
   const config = getConfig();
   if (config.permissions === "allow-all") return true;
   if (autoConfirm) return true;

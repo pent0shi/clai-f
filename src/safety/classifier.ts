@@ -20,12 +20,7 @@ import { classifyHost } from "../tools/web/ssrf-guard.js";
 import { pathInsideSandbox } from "../tools/fs.js";
 import { packageBinaryName } from "../tools/package-binary.js";
 
-/**
- * Sync PATH probe so the classifier can tell whether pkg.install is about to
- * be a real install or the no-op "already on PATH — skipping" branch it runs
- * itself. Mirrors the same `command -v` / `where.exe` pattern already used by
- * net-ping-sweep's own sync availability check.
- */
+
 function isBinaryOnPath(binary: string): boolean {
   try {
     const probe =
@@ -182,8 +177,12 @@ function containsPublicTarget(command: string): boolean {
 }
 
 export function isPentestToolCall(call: ToolCall): boolean {
-  if (call.name === "net.scan" || call.name === "pentest.recon") return true;
-  if (call.name !== "shell.exec") return false;
+  if (call.name === "net.scan" || call.name.startsWith("pentest.")) return true;
+  if (call.name === "http.fetch") {
+    const method = (stringArg(call.args, "method") ?? "GET").toUpperCase();
+    return method !== "GET" && method !== "HEAD" && method !== "OPTIONS";
+  }
+  if (call.name !== "shell.exec" && call.name !== "shell.start") return false;
   const command = stringArg(call.args, "command") ?? "";
   return commandContainsNetworkScanner(command);
 }
@@ -337,7 +336,17 @@ function isPublicTarget(target: string): boolean {
 }
 
 export function scopeTargetForToolCall(call: ToolCall): string | undefined {
-  if (call.name === "shell.exec") {
+  if (call.name === "http.fetch") {
+    const raw = stringArg(call.args, "url") ?? "";
+    try {
+      const target = new URL(raw).hostname;
+      return target && isPublicTarget(target) ? normalizeScopeTarget(target) : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  if (call.name === "shell.exec" || call.name === "shell.start") {
     const command = stringArg(call.args, "command") ?? "";
     if (
       !commandContainsNetworkScanner(command) ||

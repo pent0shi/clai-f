@@ -5,6 +5,7 @@ import {
   type CompactResult,
 } from "../../agent/context-manager.js";
 import { createSessionPolicy, type SessionPolicy } from "../../agent/session-policy.js";
+import { resolveTurnInput } from "../../attachments/service.js";
 import { generateSessionTitle } from "../../agent/session-title.js";
 import { completeWithProvider } from "../../llm/router.js";
 import { clearTextOnlyModels } from "../../llm/tool-protocol.js";
@@ -58,23 +59,13 @@ export interface SessionControllerDeps {
   readonly idFactory?: IdFactory | undefined;
   readonly clock?: Clock | undefined;
   readonly mintTurnId?: (() => TurnId) | undefined;
-  /**
-   * Optional snapshot of the visual transcript for history.db (classic shape).
-   * When provided, completed turns upsert session + transcript so /history
-   * can restore tools and prompts, not only ChatMessage[].
-   */
+  
   readonly getTranscriptSnapshot?: (() => ClassicTranscriptItem[] | undefined) | undefined;
   /** When true, never persist sessions or generate AI titles (CLI --no-history). */
   readonly noHistory?: boolean | undefined;
 }
 
-/**
- * Owns session-level state (mode, provider/model, cumulative history, queued
- * drafts) and runs turns through a single `TurnController`. Cumulative history
- * follows the current runner contract: `onMessages` hands back the full
- * conversation for the turn (prior context + this turn), which replaces the
- * stored history and is persisted on completion.
- */
+
 export type TurnEndListener = (result: TurnResult) => void;
 export type SessionStateListener = () => void;
 
@@ -100,6 +91,12 @@ export class SessionController implements Disposable {
    * settles, {@link continueQueue} runs this before any remaining queue items.
    */
   private priorityPrompt: string | undefined;
+  /**
+   * Display override for the next turn only (`null` = hide YOU bubble).
+   * Used when implement/revision directives are queued while a turn is running.
+   */
+  private nextTurnDisplayPrompt: string | null | undefined = undefined;
+  private nextTurnDisplayArmed = false;
   /** Re-entrancy guard for {@link continueQueue}. */
   private continuingQueue = false;
   private provider: ProviderId | undefined;
@@ -252,16 +249,12 @@ export class SessionController implements Disposable {
     if (this.turn.running) throw new Error("a turn is already running");
     if (this.compactingFlag) throw new Error("compaction already in progress");
 
-    // Fall back to config defaults so /compact works even before a turn sets
-    // the live provider/model on the session controller — including right after
-    // /history resume when no turn has run yet in this process.
+    
     const cfg = getConfig();
     const provider = this.provider ?? (cfg.defaultProvider as ProviderId | undefined);
     const model = this.model ?? cfg.defaultModel;
 
-    // Snapshot history at start: includes /history resume + any new turns.
-    // compactMessagesWithSummary keeps the recent tail and summarizes the rest
-    // together with the visual session transcript (when provided).
+    
     const historySnapshot = [...this.history];
 
     this.compactingFlag = true;
@@ -354,11 +347,7 @@ export class SessionController implements Disposable {
     });
   }
 
-  /**
-   * Ask the model for a short conversation title and upsert it into history.
-   * Cadence matches classic TUI: first completed exchange, then every +2 user
-   * turns so the name tracks the evolving topic.
-   */
+  
   async maybeRefreshTitle(): Promise<void> {
     if (this.deps.noHistory || getConfig().privateMode) return;
     if (this.titleInFlight) return;
@@ -404,7 +393,18 @@ export class SessionController implements Disposable {
     };
   }
 
-  enqueue(prompt: string): void {
+  /**
+   * Queue a prompt while a turn is running. Optional displayPrompt is applied
+   * to the next dequeued turn (null hides the YOU bubble).
+   */
+  enqueue(
+    prompt: string,
+    opts?: { displayPrompt?: string | null | undefined },
+  ): void {
+    if (opts && "displayPrompt" in opts) {
+      this.nextTurnDisplayPrompt = opts.displayPrompt;
+      this.nextTurnDisplayArmed = true;
+    }
     const text = prompt.trim();
     if (!text) return;
     this.queue.push(text);
@@ -422,10 +422,7 @@ export class SessionController implements Disposable {
     }
   }
 
-  /**
-   * Remove a queued draft and return its text (for "Edit" → composer).
-   * Returns undefined when the index is out of range.
-   */
+  
   takeQueued(index: number): string | undefined {
     if (index < 0 || index >= this.queue.length) return undefined;
     const [text] = this.queue.splice(index, 1);
@@ -457,11 +454,7 @@ export class SessionController implements Disposable {
     this.notifyState();
   }
 
-  /**
-   * Send a queued prompt immediately. If a turn is running, abort it first;
-   * the chosen prompt runs next (ahead of any remaining queue). If idle,
-   * submit it now.
-   */
+  
   sendQueuedNow(index: number): void {
     const text = this.takeQueued(index);
     if (text === undefined) return;
@@ -478,10 +471,7 @@ export class SessionController implements Disposable {
     this.turn.abort();
   }
 
-  /**
-   * After a turn settles, run any "send now" priority prompt, then drain the
-   * queue one-by-one. Safe to call from onTurnEnd (re-entrancy guarded).
-   */
+ 
   async continueQueue(): Promise<void> {
     if (this.continuingQueue || this.turn.running) return;
     this.continuingQueue = true;
@@ -498,11 +488,22 @@ export class SessionController implements Disposable {
           break;
         }
         if (next === undefined || !next.trim()) continue;
-        await this.runTurn(next);
+        const displayOpts = this.consumeNextTurnDisplay();
+        await this.runTurn(next, displayOpts);
       }
     } finally {
       this.continuingQueue = false;
     }
+  }
+
+  private consumeNextTurnDisplay():
+    | { displayPrompt?: string | null | undefined }
+    | undefined {
+    if (!this.nextTurnDisplayArmed) return undefined;
+    this.nextTurnDisplayArmed = false;
+    const displayPrompt = this.nextTurnDisplayPrompt;
+    this.nextTurnDisplayPrompt = undefined;
+    return { displayPrompt };
   }
 
   /** In-memory plan-approval flag consumed by the agent gate (CORE-005). */
@@ -520,11 +521,21 @@ export class SessionController implements Disposable {
     return () => this.turnEndListeners.delete(listener);
   }
 
-  async submit(prompt: string): Promise<TurnResult> {
+  async submit(
+    prompt: string,
+    opts?: { displayPrompt?: string | null | undefined },
+  ): Promise<TurnResult> {
     if (this.turn.running) {
       throw new Error("a turn is already running; enqueue() while busy");
     }
-    return this.runTurn(prompt);
+    // Explicit submit opts win over any armed queue display override.
+    if (opts && "displayPrompt" in opts) {
+      this.nextTurnDisplayArmed = false;
+      this.nextTurnDisplayPrompt = undefined;
+      return this.runTurn(prompt, opts);
+    }
+    const displayOpts = this.consumeNextTurnDisplay();
+    return this.runTurn(prompt, displayOpts ?? opts);
   }
 
   /**
@@ -545,12 +556,31 @@ export class SessionController implements Disposable {
     return results;
   }
 
-  private async runTurn(prompt: string): Promise<TurnResult> {
-    const request: RunTurnRequest = {
+  private async runTurn(
+    prompt: string,
+    opts?: { displayPrompt?: string | null | undefined },
+  ): Promise<TurnResult> {
+    const config = getConfig();
+    const provider = this.provider ?? config.defaultProvider;
+    const model = this.model ?? getProviderModel(provider);
+    const resolved = resolveTurnInput({
       prompt,
-      provider: this.provider,
-      model: this.model,
+      mode: this.mode,
+      provider,
+      model,
+    });
+    if (resolved.fallbackReason) this.notice("info", resolved.fallbackReason);
+    const request: RunTurnRequest = {
+      prompt: resolved.prompt,
+      mode: resolved.mode,
+      provider: resolved.provider,
+      model: resolved.model,
       history: this.history,
+      attachments: resolved.attachments,
+      images: resolved.images,
+      ...(opts?.displayPrompt !== undefined
+        ? { displayPrompt: opts.displayPrompt }
+        : {}),
     };
     const pending = this.turn.run(request, {
       confirm: this.deps.confirm,
@@ -561,9 +591,7 @@ export class SessionController implements Disposable {
         this.notifyState();
       },
     });
-    // `TurnController.run` marks itself active synchronously before its first
-    // await, so this makes the RUNNING strip appear even before a provider
-    // emits its first status event.
+  
     this.notifyState();
     const result = await pending;
     if (result.status === "completed") {

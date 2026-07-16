@@ -52,6 +52,7 @@ function toolItem(name: string, overrides: Partial<ToolItem> = {}): ToolItem {
     artifactPath: undefined,
     reason: undefined,
     outputBytes: 0,
+    fileChanges: undefined,
     ...overrides,
   };
 }
@@ -66,7 +67,17 @@ describe("tool registry parity for v2 (V2-082)", () => {
   it("presents every required tool shape without throwing", () => {
     for (const name of REQUIRED_TOOLS) {
       const presented = presentTool(toolItem(name));
-      expect(presented.name).toContain(name);
+      // File mutation tools use human titles (Edited / Wrote / …) instead of
+      // the dotted tool name; other tools still show the canonical name.
+      const fileTitle =
+        /^(Created|Wrote|Writing|Edited|Editing|Appended|Appending|Deleted|Deleting|Create failed|Write failed|Edit failed|Append failed|Delete failed)\b/.test(
+          presented.name,
+        );
+      if (!fileTitle) {
+        expect(presented.name).toContain(name);
+      } else {
+        expect(presented.name.length).toBeGreaterThan(0);
+      }
       expect(presented.statusLabel.length).toBeGreaterThan(0);
     }
     const blocked = presentTool(

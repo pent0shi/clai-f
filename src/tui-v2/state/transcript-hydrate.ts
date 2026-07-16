@@ -94,6 +94,7 @@ export function hydrateFromClassicTranscript(
         const status = mapToolStatus(raw.status);
         const output = typeof raw.output === "string" ? raw.output : "";
         if (output) toolOutputs.set(toolCallId, output);
+        const rawChanges = (raw as { fileChanges?: unknown }).fileChanges;
         const item: ToolItem = {
           ...base,
           kind: "tool",
@@ -106,6 +107,9 @@ export function hydrateFromClassicTranscript(
           artifactPath: raw.artifactPath,
           reason: undefined,
           outputBytes: Buffer.byteLength(output, "utf8"),
+          fileChanges: Array.isArray(rawChanges)
+            ? (rawChanges as ToolItem["fileChanges"])
+            : undefined,
         };
         byId.set(id, item);
         order.push(id);
@@ -262,6 +266,7 @@ export function serializeForHistory(
           exitCode: item.exitCode,
           summary: item.summary,
           artifactPath: item.artifactPath,
+          ...(item.fileChanges ? { fileChanges: item.fileChanges } : {}),
           done: true,
         });
         break;

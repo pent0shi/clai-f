@@ -1,20 +1,3 @@
-/**
- * CLI helpers for managing search-provider configuration and keys.
- *
- * Implements Requirements 3.1, 3.2, 3.5–3.7:
- *
- * - `clai set <id> [key]`     — store an API key for `brave`/`tavily`
- *                               (DuckDuckGo is keyless and is a no-op).
- * - `clai unset <id>`         — remove a stored key.
- * - `clai search-provider`    — set the active provider (`activeSearchProvider`).
- * - `clai keys`               — extends the LLM listing with search providers,
- *                               using the same masking rule.
- *
- * All key entry uses the `password` prompt with no terminal echo
- * (Requirement 3.2). Secrets land in the same keyring service as LLM
- * keys but under the namespaced account `search:<id>` so the two
- * keyspaces never collide (Requirement 3.1).
- */
 
 import { password } from "@inquirer/prompts";
 import chalk from "chalk";
@@ -57,11 +40,7 @@ async function promptForSecret(id: SearchProviderId): Promise<string> {
   });
 }
 
-/**
- * Returns `true` when the supplied id is a known search-provider id.
- * Used by `clai set <id>` to dispatch to the search-provider path
- * before falling through to the LLM-provider path.
- */
+
 export function isSearchProviderId(value: string): boolean {
   if (typeof value !== "string") return false;
   const normalized = value.trim().toLowerCase();
@@ -77,12 +56,7 @@ export interface SetSearchKeyOptions {
   stdin?: boolean | undefined;
 }
 
-/**
- * Persist a search-provider API key. DuckDuckGo is keyless and is a no-op.
- *
- * Requirement 3.2: prompts use the hidden-input `password` flow so the
- * entered key never lands in shell history or echo.
- */
+
 export async function setSearchProviderKey(
   providerValue: string,
   keyArg: string | undefined,
@@ -149,11 +123,7 @@ export async function useSearchProvider(providerValue: string): Promise<void> {
   console.log(`active search provider = ${provider}`);
 }
 
-/**
- * Print every configured search-provider entry next to the LLM
- * listing. Uses the same masking rule as `clai keys` for LLM keys
- * (Requirement 3.6).
- */
+
 export async function printSearchProviderKeys(): Promise<void> {
   console.log(chalk.bold("Search Providers:"));
   console.log(chalk.dim("  PROVIDER      SOURCE    KEY"));

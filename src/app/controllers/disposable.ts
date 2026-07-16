@@ -2,11 +2,7 @@ export interface Disposable {
   dispose(): void;
 }
 
-/**
- * Owns a set of disposables and tears them down in reverse creation order
- * (ARCHITECTURE.md lifecycle). Disposal is idempotent (REL-001): a second call
- * is a no-op, and one throwing disposer does not prevent the rest from running.
- */
+
 export class CompositeDisposable implements Disposable {
   private readonly items: Disposable[] = [];
   private disposed = false;

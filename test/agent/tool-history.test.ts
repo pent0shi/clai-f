@@ -7,6 +7,7 @@ import {
   fillMissingToolResults,
   hasOrphanToolMessages,
   missingToolResultIds,
+  validateToolProtocol,
 } from "../../src/agent/tool-history.js";
 import type { ChatMessage, NativeToolCall } from "../../src/types.js";
 
@@ -124,5 +125,37 @@ describe("tool-history", () => {
     const tools = messages.filter((m) => m.role === "tool");
     expect(tools.map((t) => t.toolCallId)).toEqual(["id-0", "id-1", "id-2"]);
     expect(allToolCallsHaveResults(messages)).toBe(true);
+  });
+
+  it("rejects malformed native groups before provider dispatch", () => {
+    const malformed: ChatMessage[] = [
+      {
+        role: "assistant",
+        content: "",
+        toolCalls: [
+          { id: "a", name: "fs.read", args: { path: "a" } },
+          { id: "b", name: "fs.read", args: { path: "b" } },
+        ],
+      },
+      { role: "tool", toolCallId: "a", content: "ok" },
+      { role: "user", content: "continue" },
+      { role: "tool", toolCallId: "unknown", content: "bad" },
+    ];
+    expect(validateToolProtocol(malformed).join("\n")).toMatch(/before results for b/);
+    expect(validateToolProtocol(malformed).join("\n")).toMatch(/orphan tool result unknown/);
+  });
+
+  it("accepts complete parallel native groups in any result order", () => {
+    const calls: NativeToolCall[] = Array.from({ length: 16 }, (_, index) => ({
+      id: `call-${index}`,
+      name: "fs.read",
+      args: { path: String(index) },
+    }));
+    const messages: ChatMessage[] = [];
+    appendAssistantWithTools(messages, "", calls);
+    for (const call of [...calls].reverse()) {
+      appendToolResult(messages, call.id, "ok", call.name, true);
+    }
+    expect(validateToolProtocol(messages)).toEqual([]);
   });
 });

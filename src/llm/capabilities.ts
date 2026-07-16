@@ -53,9 +53,7 @@ export function modelSupportsThinking(
   return patterns.some((pattern) => pattern.test(model));
 }
 
-// Patterns of model names that accept image input (multimodal vision).
-// Used to decide whether to send actual image bytes to the model (like
-// Claude Code) versus falling back to a text note + OCR tools.
+
 const visionPatterns: Record<ProviderId, RegExp[]> = {
   groq: [
     // Llama 4 (scout/maverick) and llama-3.2 vision models on Groq.
@@ -118,12 +116,60 @@ const visionPatterns: Record<ProviderId, RegExp[]> = {
     /llama-4/i,
     /qwen2?\.?5?-vl/i,
     /glm-4\.?\d*v/i,
+    /glm-?5/i,
   ],
   kimchi: [/kimi-k2/i, /minimax-m2/i, /minimax-m3/i, /nemotron-3-super/i],
-  "aws-mantle": [/claude-(?:opus|sonnet|haiku)-(?:3|3-5|3-7|4|4-\d)/i],
+  "aws-mantle": [
+    /claude-(?:opus|sonnet|haiku)-(?:3|3-5|3-7|4|4-\d)/i,
+    /claude-3(?:-|\.|$)/i,
+    /gpt-4o/i,
+    /gpt-4\.1/i,
+    /gpt-5/i,
+    /gemini-/i,
+    /llama-4/i,
+    /qwen2?\.?5?-vl/i,
+    /qwen-vl/i,
+    /glm-4\.?\d*v/i,
+    /glm-?5/i,
+    /vision/i,
+  ],
   bynara: [/mimo-v2\.5-free/i, /mistral-medium-3-5/i],
   "qwen-cloud": [/qwen3\.7-(?:plus|max)/i, /qwen3\.5-(?:plus|flash)/i, /qwen-vl/i],
 };
+
+const visionCapabilityCache = new Map<
+  string,
+  { vision: boolean; source: "provider" | "user"; observedAt: string }
+>();
+
+const capabilityKey = (provider: ProviderId, model: string): string =>
+  `${provider}:${model.trim().toLowerCase()}`;
+
+/** Provider discovery/user overrides can refresh capability knowledge at runtime. */
+export function registerModelVisionCapability(input: {
+  provider: ProviderId;
+  model: string;
+  vision: boolean;
+  source?: "provider" | "user";
+  observedAt?: string;
+}): void {
+  visionCapabilityCache.set(capabilityKey(input.provider, input.model), {
+    vision: input.vision,
+    source: input.source ?? "provider",
+    observedAt: input.observedAt ?? new Date().toISOString(),
+  });
+}
+
+export function clearModelVisionCapabilities(): void {
+  visionCapabilityCache.clear();
+}
+
+export function visionCapabilitySource(
+  provider: ProviderId,
+  model: string,
+): "provider" | "user" | "fallback-table" {
+  return visionCapabilityCache.get(capabilityKey(provider, model))?.source ?? "fallback-table";
+}
 
 /**
  * Whether the given provider/model can accept image input. When true, the
@@ -134,13 +180,13 @@ export function modelSupportsVision(
   provider: ProviderId,
   model: string,
 ): boolean {
+  const cached = visionCapabilityCache.get(capabilityKey(provider, model));
+  if (cached) return cached.vision;
   const patterns = visionPatterns[provider] ?? [];
   return patterns.some((pattern) => pattern.test(model));
 }
 
-// Fast same-provider fallback for image prompts when the user's selected
-// model is text-only. This keeps drag-and-drop images working like Claude
-// Code/Codex without changing the user's configured default model.
+
 const preferredVisionModels: Partial<Record<ProviderId, string>> = {
   groq: "meta-llama/llama-4-scout-17b-16e-instruct",
   gemini: "gemini-3.5-flash",
@@ -156,17 +202,19 @@ const preferredVisionModels: Partial<Record<ProviderId, string>> = {
   "qwen-cloud": "qwen3.7-plus",
 };
 
-/**
- * Return a same-provider vision model to use for an image request. If the
- * current model already supports vision, it is returned unchanged. If the
- * provider has no known vision fallback, returns undefined so callers can
- * fall back to OCR/text notes.
- */
+
 export function preferredVisionModel(
   provider: ProviderId,
   currentModel: string,
 ): string | undefined {
   if (modelSupportsVision(provider, currentModel)) return currentModel;
+  const envKey = `CLAI_VISION_MODEL_${provider.toUpperCase().replace(/-/g, "_")}`;
+  const override = process.env[envKey]?.trim();
+  if (override && modelSupportsVision(provider, override)) return override;
+  const discovered = [...visionCapabilityCache.entries()]
+    .filter(([key, value]) => key.startsWith(`${provider}:`) && value.vision)
+    .sort((a, b) => b[1].observedAt.localeCompare(a[1].observedAt))[0];
+  if (discovered) return discovered[0].slice(provider.length + 1);
   const fallback = preferredVisionModels[provider];
   if (!fallback) return undefined;
   return modelSupportsVision(provider, fallback) ? fallback : undefined;
@@ -220,10 +268,7 @@ function isAwsMantleAnthropicModel(model: string): boolean {
   return /(?:^|[./-])(?:anthropic|claude)(?:[./-]|$)/i.test(model);
 }
 
-/**
- * Resolve the native tool wire dialect for a provider/model pair.
- * Returns "none" when tools should not be attached (text fallback).
- */
+
 export function resolveToolDialect(
   provider: ProviderId,
   model: string,

@@ -11,11 +11,7 @@ function compareSemver(a: string, b: string): number {
   return 0;
 }
 
-/**
- * Backs `UpdatesPort` with the current package version. The latest-release
- * lookup is injected so the port can be exercised without a network call and
- * so the network policy stays owned by the caller.
- */
+
 export function createCurrentUpdatesPort(
   fetchLatest?: () => Promise<string | undefined>,
 ): UpdatesPort {

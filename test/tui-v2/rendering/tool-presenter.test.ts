@@ -24,6 +24,7 @@ function toolItem(overrides: Partial<ToolItem> = {}): ToolItem {
     artifactPath: undefined,
     reason: undefined,
     outputBytes: 0,
+    fileChanges: undefined,
     ...overrides,
   };
 }
@@ -68,6 +69,42 @@ describe("presentTool (CHAT-004)", () => {
   it("labels non-shell args as input", () => {
     const p = presentTool(toolItem({ name: "fs.read", argsDisplay: "a.ts" }));
     expect(p.argsLabel).toBe("input");
+  });
+
+  it("titles fs.edit with basename and hides JSON args", () => {
+    const p = presentTool(
+      toolItem({
+        name: "fs.edit",
+        argsDisplay: "/Users/me/project/src/App.css",
+        status: "ok",
+        fileChanges: [
+          {
+            path: "/Users/me/project/src/App.css",
+            basename: "App.css",
+            kind: "edit",
+            stats: { oldLines: 3, newLines: 4, added: 2, removed: 1 },
+            previewHunks: [
+              {
+                oldStart: 2,
+                newStart: 2,
+                lines: [
+                  { op: "context", text: "keep", oldLine: 1, newLine: 1 },
+                  { op: "del", text: "old", oldLine: 2 },
+                  { op: "add", text: "new", newLine: 2 },
+                ],
+              },
+            ],
+            addedNewLines: [2],
+            deletedAt: [{ atNewLine: 1, oldStart: 2, lines: ["old"] }],
+            afterText: "keep\nnew\n",
+          },
+        ],
+      }),
+    );
+    expect(p.name).toBe("Edited App.css");
+    expect(p.argsDisplay).toBeUndefined();
+    expect(p.isFileDiff).toBe(true);
+    expect(p.pathLine).toContain("App.css");
   });
 });
 

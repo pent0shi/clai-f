@@ -63,7 +63,7 @@ describe("PlanController observability (V2-070)", () => {
     expect(controller.current()).toBeUndefined();
   });
 
-  it("notifies on load/approve/discard", async () => {
+  it("notifies on synchronous load clear, loaded result, approve, and discard", async () => {
     const persistence = fakePersistence();
     persistence.saved.push(plan());
     const controller = new PlanController(persistence);
@@ -71,18 +71,41 @@ describe("PlanController observability (V2-070)", () => {
     controller.subscribe(() => (notifications += 1));
 
     await controller.load("s1");
-    expect(notifications).toBe(1);
+    expect(notifications).toBe(2);
     expect(controller.current()?.status).toBe("draft");
 
     await controller.approve();
-    expect(notifications).toBe(2);
+    expect(notifications).toBe(3);
     expect(controller.current()?.status).toBe("approved");
     expect(persistence.saved.at(-1)?.status).toBe("approved");
 
     await controller.discard();
-    expect(notifications).toBe(3);
+    expect(notifications).toBe(4);
     expect(controller.current()).toBeUndefined();
     expect(persistence.deleted).toContain("s1");
+  });
+
+  it("ignores late plan events from a previously active session", async () => {
+    const controller = new PlanController(fakePersistence());
+    let notifications = 0;
+    controller.subscribe(() => (notifications += 1));
+    await controller.load("new-session");
+    const afterLoad = notifications;
+
+    const oldSequencer = new EventSequencer(asSessionId("old-session"));
+    controller.observe(
+      oldSequencer.build(
+        "plan-updated",
+        {
+          planId: asPlanId("old-plan"),
+          plan: plan({ sessionId: "old-session", goal: "stale" }),
+        },
+        undefined,
+      ),
+    );
+
+    expect(controller.current()).toBeUndefined();
+    expect(notifications).toBe(afterLoad);
   });
 
   it("unsubscribe stops further notifications", () => {

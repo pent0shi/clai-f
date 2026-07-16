@@ -52,7 +52,12 @@ describe("coding plan run/verify (X12)", () => {
     ).toBe(false);
   });
 
-  it("plan.create coding without run-server task fails with nudge", async () => {
+  it("plan.create coding preserves an authored build-only checklist", async () => {
+    const authored = [
+      "scaffold with create-vite",
+      "implement todo UI",
+      "verify with npm run build",
+    ];
     const result = await handlePlanTool(
       {
         name: "plan.create",
@@ -60,18 +65,15 @@ describe("coding plan run/verify (X12)", () => {
           goal: "Scaffold a Vite React todo app",
           detail: "Vite + React SPA",
           kind: "coding",
-          tasks: [
-            "scaffold with create-vite",
-            "implement todo UI",
-            "verify with npm run build",
-          ],
+          tasks: authored,
         },
       },
       createSessionPolicy("x12-no-run"),
       { loopGuard: new LoopGuard(), step: 1 },
     );
-    expect(result.ok).toBe(false);
-    expect(result.modelNote).toMatch(/run\/verify|dev server|shell\.start/i);
+    expect(result.ok).toBe(true);
+    expect(result.plan?.tasks.map((task) => task.title)).toEqual(authored);
+    expect(result.plan?.tasks.map((task) => task.id)).toEqual(["t1", "t2", "t3"]);
   });
 
   it("plan.create coding with final run-server task succeeds", async () => {
@@ -94,9 +96,9 @@ describe("coding plan run/verify (X12)", () => {
       { loopGuard: new LoopGuard(), step: 1 },
     );
     expect(result.ok).toBe(true);
-    // auto-injects install between scaffold and implement
-    expect(result.plan?.tasks.length).toBeGreaterThanOrEqual(4);
-    expect(result.plan?.tasks.some((t) => /install/i.test(t.title))).toBe(true);
+    expect(result.plan?.tasks).toHaveLength(4);
+    expect(result.plan?.tasks.some((t) => /install/i.test(t.title))).toBe(false);
+    expect(result.plan?.tasks.map((task) => task.id)).toEqual(["t1", "t2", "t3", "t4"]);
     expect(
       result.plan?.tasks.some((t) => /dev server|shell\.start|localhost/i.test(t.title)),
     ).toBe(true);
@@ -215,5 +217,38 @@ describe("plan merge no-reboot (X7)", () => {
     );
     expect(result.ok).toBe(false);
     expect(result.modelNote).toMatch(/shell\.start|Do NOT create a new plan/i);
+  });
+
+  it("refuses re-opening a done task and points at the next pending", async () => {
+    const session = createSessionPolicy("x-reopen-done");
+    const plan = createPlan({
+      sessionId: "x-reopen-done",
+      goal: "blog app",
+      detail: "app",
+      kind: "coding",
+      taskTitles: [
+        "scaffold",
+        "implement",
+        "Leave server running for user to test",
+      ],
+    });
+    plan.tasks[0]!.state = "done";
+    plan.tasks[1]!.state = "done";
+    plan.tasks[2]!.state = "pending";
+    plan.status = "in_progress";
+    await savePlan(plan);
+    session.planApproved.value = true;
+
+    const result = await handlePlanTool(
+      {
+        name: "task.update",
+        args: { taskId: "t1", state: "in_progress" },
+      },
+      session,
+      { loopGuard: new LoopGuard(), step: 1 },
+    );
+    expect(result.ok).toBe(false);
+    expect(result.modelNote).toMatch(/already done|Do not re-run/i);
+    expect(result.modelNote).toMatch(/t3|Leave server/i);
   });
 });

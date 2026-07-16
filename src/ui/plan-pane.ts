@@ -71,7 +71,7 @@ export function renderPlanDocument(plan: SessionPlan): string {
     chalk.dim(
       plan.status === "approved" || plan.status === "in_progress"
         ? "Approved. The agent is following this plan; tasks are marked as they complete."
-        : "Type /implement to approve and have the agent execute this plan, or refine it with another message.",
+        : "Accept the plan to run it, Suggest changes to revise, View for full text, or Discard. (/implement and /discard also work.)",
     ),
   );
   return lines.join("\n");

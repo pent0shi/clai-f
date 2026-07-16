@@ -65,6 +65,34 @@ export interface Theme {
   readonly toolBorder: string;
   /** Modal accent border. */
   readonly modalBorder: string;
+  /** Added lines in file-diff cards / pager (green). */
+  readonly diffAdd: string;
+  /** Removed lines in file-diff cards / pager (red). */
+  readonly diffDel: string;
+  /** Line-number gutter for diffs. */
+  readonly diffGutter: string;
+  /** Soft background wash for added diff lines (Cursor-style). */
+  readonly diffAddBg: string;
+  /** Soft background wash for removed diff lines. */
+  readonly diffDelBg: string;
+  /** Syntax: keyword (blue). */
+  readonly synKeyword: string;
+  /** Syntax: string (orange). */
+  readonly synString: string;
+  /** Syntax: comment. */
+  readonly synComment: string;
+  /** Syntax: number. */
+  readonly synNumber: string;
+  /** Syntax: function name. */
+  readonly synFunction: string;
+  /** Syntax: type / class. */
+  readonly synType: string;
+  /** Syntax: property / attr. */
+  readonly synProperty: string;
+  /** Syntax: operator. */
+  readonly synOperator: string;
+  /** Syntax: regex. */
+  readonly synRegex: string;
 }
 
 const DARK_THEME: Theme = {
@@ -98,6 +126,20 @@ const DARK_THEME: Theme = {
   userBorder: "#0E7490",
   toolBorder: "#3B82F6",
   modalBorder: "#22D3EE",
+  diffAdd: "#4ADE80",
+  diffDel: "#F87171",
+  diffGutter: "#64748B",
+  diffAddBg: "#12261a",
+  diffDelBg: "#2a1414",
+  synKeyword: "#569CD6",
+  synString: "#CE9178",
+  synComment: "#6A9955",
+  synNumber: "#B5CEA8",
+  synFunction: "#DCDCAA",
+  synType: "#4EC9B0",
+  synProperty: "#9CDCFE",
+  synOperator: "#D4D4D4",
+  synRegex: "#D16969",
 };
 
 const LIGHT_THEME: Theme = {
@@ -130,6 +172,20 @@ const LIGHT_THEME: Theme = {
   userBorder: "#0e7490",
   toolBorder: "#2563eb",
   modalBorder: "#0891B2",
+  diffAdd: "#15803d",
+  diffDel: "#dc2626",
+  diffGutter: "#94a3b8",
+  diffAddBg: "#dcfce7",
+  diffDelBg: "#fee2e2",
+  synKeyword: "#0000ff",
+  synString: "#a31515",
+  synComment: "#008000",
+  synNumber: "#098658",
+  synFunction: "#795e26",
+  synType: "#267f99",
+  synProperty: "#001080",
+  synOperator: "#000000",
+  synRegex: "#811f3f",
 };
 
 export function themeFor(hint: ThemeHint): Theme {

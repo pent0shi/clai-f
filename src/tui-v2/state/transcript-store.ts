@@ -18,6 +18,10 @@ export class TranscriptStore {
   private state: TranscriptState = EMPTY_TRANSCRIPT_STATE;
   private readonly listeners = new Set<TranscriptListener>();
 
+  constructor(private readonly maxItems = 2_000) {
+    if (!Number.isInteger(maxItems) || maxItems <= 0) throw new RangeError("maxItems must be positive");
+  }
+
   getState(): TranscriptState {
     return this.state;
   }
@@ -34,6 +38,28 @@ export class TranscriptStore {
   /** CHAT-005/007: Ctrl+O toggles tool OUTPUT + compacted memory cards. */
   toggleOutputGlobal(): void {
     this.setState({ ...this.state, expandOutputGlobal: !this.state.expandOutputGlobal });
+  }
+
+  /** Expand/collapse every file-diff card in chat (hunks vs title-only). */
+  setFileDiffsGlobal(expanded: boolean): void {
+    this.setState({
+      ...this.state,
+      expandFileDiffsGlobal: expanded,
+      // Clear per-card overrides so global applies cleanly.
+      fileDiffOverrides: new Map(),
+    });
+  }
+
+  toggleFileDiffsGlobal(): void {
+    this.setFileDiffsGlobal(!this.state.expandFileDiffsGlobal);
+  }
+
+  /** Expand/collapse one tool's file-diff body. */
+  toggleFileDiffOverride(toolItemId: string, fallback: boolean): void {
+    const overrides = new Map(this.state.fileDiffOverrides);
+    const current = overrides.get(toolItemId) ?? fallback;
+    overrides.set(toolItemId, !current);
+    this.setState({ ...this.state, fileDiffOverrides: overrides });
   }
 
   /** Expand/collapse one item, overriding whichever global toggle applies. */
@@ -62,7 +88,9 @@ export class TranscriptStore {
       ...next,
       expandThinkingGlobal: this.state.expandThinkingGlobal,
       expandOutputGlobal: this.state.expandOutputGlobal,
+      expandFileDiffsGlobal: this.state.expandFileDiffsGlobal,
       itemOverrides: new Map(),
+      fileDiffOverrides: new Map(),
       pendingAssistantId: undefined,
       pendingThinkingId: undefined,
       runningStatus: undefined,
@@ -71,6 +99,25 @@ export class TranscriptStore {
 
   private setState(next: TranscriptState): void {
     if (next === this.state) return;
+    // Backfill fields for older hydrated states.
+    if (next.expandFileDiffsGlobal === undefined) {
+      next = { ...next, expandFileDiffsGlobal: true };
+    }
+    if (!next.fileDiffOverrides) {
+      next = { ...next, fileDiffOverrides: new Map() };
+    }
+    if (next.order.length > this.maxItems) {
+      const keep = new Set(next.order.slice(-this.maxItems));
+      if (next.pendingAssistantId) keep.add(next.pendingAssistantId);
+      if (next.pendingThinkingId) keep.add(next.pendingThinkingId);
+      const order = next.order.filter((id) => keep.has(id));
+      const byId = new Map([...next.byId].filter(([id]) => keep.has(id)));
+      const itemOverrides = new Map([...next.itemOverrides].filter(([id]) => keep.has(id)));
+      const fileDiffOverrides = new Map(
+        [...next.fileDiffOverrides].filter(([id]) => keep.has(id)),
+      );
+      next = { ...next, order, byId, itemOverrides, fileDiffOverrides };
+    }
     this.state = next;
     for (const listener of this.listeners) listener();
   }

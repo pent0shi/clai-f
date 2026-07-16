@@ -2,7 +2,7 @@ import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { CompletionRequest, CompletionResult } from "../../src/types.js";
+import type { ChatImage, CompletionRequest, CompletionResult } from "../../src/types.js";
 
 const streamMock = vi.fn();
 
@@ -105,7 +105,51 @@ describe("native tool loop integration", () => {
     const written = await readFile(target, "utf8");
     expect(written).toBe(body);
     expect(answer).toContain("done");
+    // The canonical prompt is recomposed immediately before every provider
+    // round and retains all authority-bearing state even under compact budgets.
+    expect(streamMock).toHaveBeenCalledTimes(2);
+    for (const [request] of streamMock.mock.calls as Array<[CompletionRequest]>) {
+      const system = request.messages.find((message) => message.role === "system")?.content ?? "";
+      expect(system).toContain("CURRENT MODE: AGENT");
+      expect(system).toContain("OUTCOME CONTRACT");
+      expect(system).toContain("ACTIVE PLAN");
+      expect(system).toContain("ENGAGEMENT SCOPE");
+      expect(system).toContain("TASK STATE");
+    }
     // No fence protocol required in first model response
     expect(streamMock.mock.calls[0]![0].tools?.length).toBeGreaterThan(0);
+  });
+
+  it("passes exact image bytes, MIME, and mode to the provider", async () => {
+    const image: ChatImage = {
+      dataBase64: Buffer.from([0, 1, 2, 253, 254, 255]).toString("base64"),
+      mediaType: "image/png",
+      path: join(cwd, "screen.png"),
+    };
+    streamMock.mockImplementation(
+      async (request: CompletionRequest): Promise<CompletionResult> => {
+        const user = request.messages.find((message) => message.role === "user");
+        expect(user?.images).toEqual([image]);
+        expect(Buffer.from(user!.images![0]!.dataBase64, "base64")).toEqual(
+          Buffer.from([0, 1, 2, 253, 254, 255]),
+        );
+        expect(request.messages[0]?.content).toContain("CURRENT MODE: ASK");
+        return {
+          text: "inspected",
+          provider: "openai",
+          model: "gpt-test",
+          finishReason: "stop",
+        };
+      },
+    );
+    const { runAgentLoop } = await import("../../src/agent/runner.js");
+    await expect(
+      runAgentLoop("inspect this image", {
+        provider: "openai",
+        model: "gpt-4o-mini",
+        mode: "ask",
+        images: [image],
+      }),
+    ).resolves.toBe("inspected");
   });
 });

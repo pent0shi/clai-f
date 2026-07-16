@@ -14,7 +14,7 @@ export const providerIds = [
 ] as const;
 
 export type ProviderId = (typeof providerIds)[number];
-export type Mode = "ask" | "agent";
+export type Mode = "ask" | "agent" | "plan";
 export type RiskLevel = "safe" | "confirm" | "block";
 export type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
 
@@ -156,11 +156,28 @@ export interface ToolStats {
   captureLimitHit?: boolean | undefined;
 }
 
+export interface BackgroundJobReceipt {
+  id: string;
+  status: string;
+  artifactPath: string;
+  profile?: string | undefined;
+  estimatedSeconds?: number | undefined;
+  nextOffset?: number | undefined;
+  exitCode?: number | undefined;
+  signal?: string | undefined;
+}
+
 export interface ToolResult {
   ok: boolean;
   output: string;
   exitCode?: number | undefined;
   outputPath?: string | undefined;
+  backgroundJob?: BackgroundJobReceipt | undefined;
   truncated?: boolean | undefined;
   stats?: ToolStats | undefined;
+  /**
+   * Structured before/after diffs for file mutation tools (fs.edit / write / …).
+   * UI renders Cursor-style green/red hunks; model history uses `output` only.
+   */
+  fileChanges?: import("./tools/file-diff.js").FileChange[] | undefined;
 }

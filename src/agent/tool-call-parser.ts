@@ -1218,8 +1218,16 @@ export function formatToolArgs(call: ToolCall): string {
   if (call.name === "dns.lookup")
     return `${call.args.target ?? ""}${call.args.record ? ` ${call.args.record}` : " A"}`;
   if (call.name === "whois.lookup") return String(call.args.target ?? "");
-  if (call.name === "fs.read" || call.name === "fs.write" || call.name === "fs.append")
+  if (
+    call.name === "fs.read" ||
+    call.name === "fs.write" ||
+    call.name === "fs.append" ||
+    call.name === "fs.edit" ||
+    call.name === "fs.replaceLines" ||
+    call.name === "fs.delete"
+  ) {
     return String(call.args.path ?? "");
+  }
   if (call.name === "fs.writeMany") {
     const files = Array.isArray(call.args.files) ? call.args.files : [];
     const names = files
@@ -1669,81 +1677,41 @@ export function freshnessGuardMessage(now = new Date()): string {
 }
 
 /**
- * Directive injected for build/scaffold turns. Forces the careful
- * explore → understand → plan → implement loop instead of a one-shot dump,
- * and forbids stopping before the goal is reached.
- * Language/stack-agnostic: principles only; pick tools that match the project.
+ * Compact build inject — reinforces judgment defaults without restating the
+ * full system playbook. Stack-agnostic.
  */
 export function buildWorkflowDirective(): string {
   return [
-    "BUILD WORKFLOW (build/scaffold/feature — follow this order EXACTLY; deviation is a failure):",
-    "1. EXPLORE (MANDATORY before plan.create): Read the WORKSPACE STATUS block if present. Also fs.list the process cwd, the user destination (Desktop/Documents/etc. if named), and any candidate project folder. Never assume a path is empty — non-empty dirs make scaffolders print 'Operation cancelled'.",
-    "2. UNDERSTAND: fs.read manifest/config/entry files that exist (package.json, Cargo.toml, go.mod, pyproject.toml, composer.json, Gemfile, pom.xml, CMakeLists.txt, Makefile, etc.). Detect the existing stack and MATCH it. If empty/missing, choose a sensible modern default for the ask and say so in the plan detail.",
-    "3. PLAN: call plan.create with a comprehensive plan — detail MUST state (a) what already exists on disk, (b) stack + why, (c) whether you will CONTINUE an existing project or create a NEW empty subfolder, (d) how you will verify. Tasks: 4–8 ordered steps. If the target project ALREADY EXISTS, the first task is NOT re-scaffold — it is inspect/continue. Middle tasks implement the REAL feature (replace boilerplate). Include install/build as needed. For local apps with a server, the FINAL task starts it (shell.start), waits until ready (shell.tail), probes it, LEAVES it running, reports URL/port/job id. Scaffold + install + run alone without the feature is a FAILURE.",
-    "4. IMPLEMENT: after /implement approval, task by task in STRICT ORDER: task.update in_progress → real work → VERIFY tool success → task.update done → next. Never mark done without a successful tool result. Never run install/server work under a pure implement task. Batch only within ONE task.",
-    "",
-    "PATHS & SCAFFOLDING (stack-agnostic):",
-    "- DESTINATION PATHS ARE LITERAL. Absolute destinations keep their leading `/`. Never turn `/Users/alice/Desktop` into relative `Users/alice/Desktop` under cwd. Create/work at the real absolute path. Outside-sandbox paths need confirmation, not a silent fallback to the agent cwd.",
-    "- Agent process cwd may be THIS tool's source tree — never write the user's app into it. Prefer absolute paths under the real project root for every fs/shell call.",
-    "- Prefer the ecosystem's official non-interactive scaffolder into a NEW EMPTY subfolder. Examples (use only when that stack is appropriate): JS `npm create … <name>`, Rust `cargo new <name>`, Go `go mod init`, Python `poetry new` / language defaults, Rails `rails new`, etc. Scaffolders REFUSE non-empty directories → 'Operation cancelled'. `--yes` does not fix that. NEVER re-scaffold into an existing project; continue it instead.",
-    "- If a scaffolder cannot run non-interactively, hand-write a minimal correct tree for that stack and install deps yourself.",
-    "- VERIFY init: project markers/files must exist after scaffold. 'Operation cancelled', non-zero exit, or missing tree = FAILED task — do not pretend success.",
-    "",
-    "CRITICAL RULES during IMPLEMENTATION:",
-    "- Batch tool calls carefully: read-only lookups may parallelize; writes/commands are sequential. Keep each batch on ONE task.",
-    "- During /implement, do not re-do full explore unless WORKSPACE STATUS is missing or a path is ambiguous — start the first pending task.",
-    "- ONE task at a time, in ORDER.",
-    "- Write complete files; never shorten to fit a tool call. Prefer fs.writeMany for several files, fs.write for one large file, fs.edit for exact text, fs.replaceLines only with fresh line numbers from fs.read.",
-    "- VERIFY before done: after writes, confirm content; after commands, exit 0; after builds, the project’s real build/test command succeeds. A dev server 'ready' line is NOT proof the app is correct — run the stack’s build or tests when they exist.",
-    "- On failure: mark failed, diagnose root cause, fix, retry. Do not jump edits without reading the error context.",
-    "- NEVER claim done / installed / running without a successful tool result you actually saw.",
-    "- For local server apps: shell.start (not background via shell.exec), shell.tail + one localhost probe, leave running, report URL + job id.",
-    "- THE DELIVERABLE IS THE WORKING FEATURE, NOT THE SCAFFOLD. Replace starter boilerplate with what the user asked for (todo UI, API routes, CLI commands, etc.). Leaving the default starter is a failure even if build passes.",
-    "- REVISING PLANS: new user requests → plan.create with prior completed tasks preserved + new tasks appended; wait for approval; do not re-run done tasks. Run-only requests after a finished plan → tools only, no new plan.",
-    "",
-    "FORBIDDEN until plan.create + user /implement: fs.write, fs.writeMany, fs.edit, fs.append, shell.exec (except bare version probes), shell.start, pkg.install, pkg.uninstall, and all scaffolders. Allowed before the plan: fs.list/read/search, tool.check, sysinfo, web.search/web.fetch (docs only), and plan.create. If nudged to act with no plan yet: explore read-only (optional web research), then plan.create — never freestyle scaffold. Scaffolders/install can take many quiet minutes — do not abandon them; if a run is interrupted but package.json already exists, CONTINUE (npm install + implement feature), do not re-scaffold.",
-    "Trivial single-file typo fixes may skip the plan; multi-file apps/features ALWAYS plan.create first, then wait for /implement.",
+    "BUILD FOCUS (this turn is a build/scaffold/feature — use judgment, not a rigid script):",
+    "EXPLORE once: read WORKSPACE STATUS; list the user destination and candidate project only as needed. After a project root is known, work there — do NOT repeatedly relist the parent destination. Non-empty dirs → CONTINUE an existing project / existing stack (NEVER re-scaffold). 'Operation cancelled' = failure.",
+    "UNDERSTAND: match existing stack from manifests/lockfiles (package manager from lockfile). Empty path → pick a modern default and say so. Stack-agnostic scaffolding only into NEW EMPTY folders.",
+    "Scaffold destination is the new subfolder (e.g. Desktop/app), not the parent. Feature apps: replace starter boilerplate — scaffold alone is a failure. For multi-phase app builds, create one concise durable plan with meaningful tasks before mutation and keep task states current; trivial edits can skip tasks.",
+    "Local apps end with shell.start + probe; LEAVE the server running; report URL/port/job id. Absolute paths; never write the user app into the agent package tree.",
+    "On tool WARN/error: change approach — never retry the identical failing command. Debug by root cause; never stop at diagnosis without fix+re-verify.",
+  ].join("\n");
+}
+
+export function narrowNmapOperationDirective(): string {
+  return [
+    "NARROW NMAP OPERATION (the user requested one bounded scan, not a broader pentest):",
+    "- Call net.scan exactly once with the requested target, ports, scan type, and timing/profile semantics.",
+    "- Do NOT call plan.create or task.update. Do NOT add WHOIS, DNS, HTTP fetching, crawling, vulnerability checks, reconnaissance, or attack-surface analysis unless the user explicitly requested them.",
+    "- If the scan needs administrator access, let net.scan open the secure password prompt. Never retry through shell.exec or place a password in command text.",
+    "- For a background result, use only backgroundJob.id as the shell.tail id. Report the canonical job ID and current/terminal status; do not mistake the artifact filename for the ID.",
+    "- Stop after reporting this scan's result or durable job receipt. Ask before broadening the operation.",
   ].join("\n");
 }
 
 /**
- * Directive injected for pentest / security engagements when no plan exists
- * yet. A pentest has a different shape than a coding build: you do NOT have
- * a clear scope, stack, or feature list up front. The plan must be BUILT
- * FROM recon findings, not invented in advance. This directive tells the
- * agent that recon is allowed before a plan exists, that the first plan
- * comes after real findings, that incremental task additions are expected
- * as new attack surface appears, and that any out-of-scope discovery must
- * be flagged to the user rather than acted on.
+ * Compact pentest inject — objective-first red team / VAPT defaults.
  */
 export function pentestWorkflowDirective(): string {
   return [
-    "PENTEST WORKFLOW (this is a security / pentest engagement — follow this order EXACTLY; deviation is a failure):",
-    "1. RECON FIRST, NO PLAN YET. For pentest engagements, run reconnaissance and discovery DIRECTLY before creating a plan. Read-only recon (whois.lookup, dns.lookup, net.context, http.fetch GET, tool.batch of read-only lookups, net.scan, pentest.recon) is allowed BEFORE any plan exists — these calls do not require an active plan or an in-progress task, because recon is what the plan is built FROM. Batch independent lookups with tool.batch to parallelize. Do NOT skip recon to 'get the plan started'.",
-    "2. FINGERPRINT THE TECH STACK. After initial recon, identify the target's technology stack FROM REAL EVIDENCE (http.fetch output includes a 'Tech Stack Detected' summary with Server, Framework, Frontend, CDN, Languages, Security Headers). Read this summary carefully. Once identified, ALL subsequent enumeration and exploitation MUST target that specific stack. Do NOT throw PHP wordlists at a Next.js target, .aspx payloads at a Python app, or Java exploits at a Node.js service. If the stack is unclear, probe a few discriminating endpoints (/_next/data, /wp-login.php, /api/, /elmah.axd) to confirm before committing.",
-    "3. PLAN FROM REAL FINDINGS. Call plan.create ONLY after you have real findings — open ports, services and versions, endpoints, technologies (identified stack), weaknesses, exposed surfaces. A pentest plan without findings is a guess. Use these exact response shapes: (A) RECON RESPONSE = one or more gathering calls only; NEVER include plan.create. (B) ANALYSIS + PLAN RESPONSE = reason from the returned tool output, then emit EXACTLY ONE standalone plan.create call; NEVER attach recon, exploitation, task.update, or any follow-on call. (C) AFTER PLAN RESPONSE = stop and wait for /implement approval. A plan based on proposed calls rather than returned evidence is invalid. The plan should reference the identified tech stack and scope tool/wordlist/payload choices to it.",
-    "4. INCREMENTAL PLAN UPDATES AS ATTACK SURFACE GROWS. A pentest is inherently open-ended — every new open port, service, endpoint, or weakness uncovers more attack surface. Call plan.create again with a REVISED tasks array that includes ALL previously completed tasks (preserved by id and order) followed by the new tasks at the end. The system merges and preserves the completed state of the old tasks. Do NOT delete done work to add new tasks; do NOT restart from scratch.",
-    "5. STAY INSIDE THE ENGAGEMENT SCOPE. The engagement scope is the hard boundary. Do NOT scan, probe, fuzz, or attack hosts / domains / ports that are out of scope. If a recon result exposes something clearly out of scope (a discovered subdomain, an adjacent service, an unrelated host, a port on a different network), STOP and FLAG it to the user in plain prose — do NOT act on it automatically. Out-of-scope targets require explicit user confirmation before any active testing.",
-    "6. ENUMERATE WITH STACK-TARGETED TOOLS. Most findings come from thorough, STACK-TARGETED enumeration — not from blindly fuzzing with every extension (.php, .asp, .aspx, .jsp, .cgi). Once you know the stack from step 2, use the right wordlists, extensions, and payloads for THAT stack ONLY. Once you have a vector, carry exploitation through with tools (build / adapt a PoC, generate the payload, run the attack, verify the result) — but pick the vector FROM the findings, not from a hunch.",
-    "7. DISCOVERY HYGIENE AND SIGNAL CONTROL. Do not guess dozens of directories/endpoints or wordlist paths and send speculative fetches. Derive candidates from returned links, robots.txt, sitemap, assets, banners, and the identified stack; use a dedicated, bounded discovery tool when one is warranted. For directory/content discovery, select an appropriate fuzzer (ffuf, gobuster, feroxbuster, dirsearch, or dirb) only after stack fingerprinting and a verified wordlist. Before using a non-standard binary call tool.check; if missing and appropriate, install only that needed tool via pkg.install and verify it before use. Before wordlist-driven discovery call wordlist.find. Configure scanners for quiet/structured output, include only candidate hits or relevant status codes, and filter known negative/wildcard responses at the scanner. Return successes and unusual findings; retain one representative failure only when there are no findings. Never spend model context on progress bars, verbose banners, or thousands of repeated failures.",
-    "8. COMPLETION = STOP. When plan tasks are done and you have written the findings/report (or the user only asked for recon findings), your final deliverable is the report/summary. Do NOT then explore the local workspace, do NOT read the clai package.json, do NOT run npm/bun/vite/next, and do NOT shell.start a localhost server. Remote targets are not local apps. Only start a local server if the user explicitly asked to run or test a local project.",
-    "",
-
-    "WHAT REQUIRES A PLAN vs. WHAT DOES NOT (read this carefully):",
-    "- Read-only recon (whois.lookup, dns.lookup, net.context, http.fetch GET, tool.batch of read-only lookups, net.scan, pentest.recon) DOES NOT require an active plan or an in-progress task. These calls gather the findings the plan is built on; they are allowed before plan.create and outside the task-update gate.",
-    "- Active / exploit calls (http.fetch with a non-GET method or a body, custom payloads, brute-force, sqlmap / hydra / msfconsole, listener / callback setup, shellcode execution, anything that mutates the target or generates side-effects) DO require an active plan AND an in-progress task AND a one-time pentest authorization prompt. Run them inside a plan task and update the task as you go (in_progress → work → done).",
-    "",
-
-    "CRITICAL RULES during a pentest engagement:",
-    "- TECH STACK AWARENESS: Every enumeration/exploit tool call MUST be relevant to the identified tech stack. If you detected Next.js, do NOT fuzz for .php, .asp, or .jsp files — focus on /_next/data, /api/ routes, .env, client-side JS analysis, SSR endpoints. If you detected WordPress, focus on wp-admin, wp-content, xmlrpc.php, plugin/theme enumeration. Wrong-stack tool calls waste context tokens and produce zero findings.",
-    "- VERIFY every claim from real tool output: an open port, a service version, an exploit success, a captured credential, a shell. Never fabricate findings. A reported 'vulnerability' without evidence is worse than no report.",
-    "- EVIDENCE: capture the exact command run and its real output for every finding. Long recon / scan transcripts are saved as artifacts you can reference; cite the artifact path in your report.",
-    "- NON-DESTRUCTIVE BY DEFAULT: prove a vulnerability with the least-invasive evidence (a benign PoC, a marker file, a reflected value, whoami / id after a shell). Do not destroy data, DoS the target, or exfiltrate real sensitive data unless the user explicitly asks for that impact.",
-    "- SCOPE BOUNDARY: if a recon call returns something clearly out of the engagement scope, do NOT keep exploring it. Flag it to the user in plain prose and ask whether to add it to scope. Do not silently expand scope.",
-    "- NO-SCOPE FALLBACK: if no engagement scope is configured, treat the explicitly-named target(s) in the user's request as the scope and flag everything else (subdomains, adjacent IPs, unrelated services) before touching it.",
-    "- REPORTING: each finding = TITLE, SEVERITY (critical / high / medium / low / info), AFFECTED asset or endpoint, EVIDENCE (command + key output), REPRODUCTION steps, IMPACT, concrete REMEDIATION.",
-    "- CTF / BOXES: the goal is the flag or the foothold — enumerate, get a shell, escalate, read the flag. Iterate quickly across likely vectors instead of exhausting one, and move on the moment you have what the objective needs.",
-    "- NO LOCAL DEV SERVER ON REMOTE ENGAGEMENTS: shell.start / npm run dev / bun run / vite / next dev / python -m http.server are FORBIDDEN unless the user explicitly named a local path/app to test. The working directory may be the clai tool itself — that is NOT the target. Never treat ~/.clai or the clai source tree as the application under test.",
+    "PENTEST FOCUS (security / pentest / VAPT engagement — find and verify real findings, not theater):",
+    "RECON FIRST (no plan needed): whois.lookup, dns.lookup, net.context, http.fetch GET, tool.batch, net.scan, pentest.recon — plus shell enum/fuzz as needed. Map surface hungrily: subdomains, ports (escalate beyond top-100 when thorough), content/API enum (ffuf/gobuster + wordlist.find), JS harvest, auth entry points. Background long scans; continue other recon.",
+    "Threat model from evidence → actively test high-ROI vectors (authz/IDOR, auth/session/JWT, business logic, real injection sinks, secrets in JS). Confirm with PoC evidence — not port lists alone.",
+    "Preferred shapes: RECON RESPONSE → ANALYSIS + PLAN RESPONSE (standalone plan.create from returned tool output). Incremental tasks as attack surface grows. Report TITLE/SEVERITY/EVIDENCE/REPRO/IMPACT/REMEDIATION + residual/untested.",
+    "Never claim mature posture if major classes were untested. Stay in engagement scope; FLAG out-of-scope hosts. Non-destructive default. No local dev server for remote targets.",
   ].join("\n");
 }
 
@@ -1755,9 +1723,9 @@ export function pentestNoLocalServerDirective(): string {
   return [
     "REMOTE / PENTEST SESSION RULE (always on for this engagement):",
     "- Target is remote (or remote-style). After findings/report delivery, STOP.",
-    "- FORBIDDEN unless the user explicitly asks for a local app: shell.start, npm/bun/pnpm/yarn run dev, vite, next dev, python -m http.server, and any localhost “dev server” workflow.",
-    "- FORBIDDEN as a post-report follow-up: fs.list/fs.read of the clai workspace or package.json to “figure out how to start the server”.",
-    "- If the user only said they want the assessment complete, answer in prose. Do not invent a new local-server task.",
+    "- Do not shell.start / npm|bun|pnpm|yarn run dev / vite / next dev / python -m http.server unless the user explicitly asked for a local app.",
+    "- Do not explore the clai workspace or package.json to invent a local server task.",
+    "- If assessment is complete, answer in prose with evidence — no local-server follow-up.",
   ].join("\n");
 }
 

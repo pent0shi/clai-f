@@ -10,10 +10,14 @@
  * tool.batch: parent card nests one mini-card per sub-tool. Click the parent
  * (header/footer) for the full batch; click a sub-card for that call only.
  * Ctrl+O expands sub-bodies in place the same as a normal tool.
+ *
+ * File diffs: compact single-height rows; chevron collapses hunks to a one-line
+ * title (verb + relative path). Collapse-all applies to every file-diff card.
  */
 
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { TextAttributes } from "@opentui/core";
+import type { MouseEvent } from "@opentui/core";
 import type { OutputSpool } from "../../../app/events/event-buffer.js";
 import type { AppServices } from "../../bootstrap/composition-root.js";
 import type { ToolItem } from "../../state/transcript-types.js";
@@ -29,6 +33,14 @@ import {
 } from "../../rendering/batch-sections.js";
 import { presentOutput, presentTool } from "../../rendering/tool-presenter.js";
 import { openToolOutputPager } from "../../rendering/open-tool-output.js";
+import {
+  collapsedFileChangesLabel,
+  presentFileChangePreview,
+  relativeDisplayPath,
+  rowBackground,
+  syntaxColor,
+} from "../../rendering/file-diff-view.js";
+import type { FileChange } from "../../../tools/file-diff.js";
 import { LinkableText } from "./linkable-text.js";
 import { useClickWithoutDrag } from "./use-click-without-drag.js";
 
@@ -68,6 +80,190 @@ function OutputLines(props: {
         );
       })}
     </>
+  );
+}
+
+/**
+ * Hover chip for collapse / collapse-all. Stops propagation so parent
+ * header click does NOT open the file modal.
+ */
+function DiffActionButton(props: {
+  label: string;
+  theme: Theme;
+  onClick: () => void;
+}): ReactNode {
+  const { label, theme, onClick } = props;
+  const [hovered, setHovered] = useState(false);
+  const fg = hovered ? theme.white : theme.muted;
+  const bg = hovered ? theme.selection : theme.statusBackground;
+  return (
+    <box
+      onMouseDown={(event: MouseEvent) => {
+        event.preventDefault();
+        event.stopPropagation();
+        onClick();
+      }}
+      onMouseUp={(event: MouseEvent) => {
+        event.preventDefault();
+        event.stopPropagation();
+      }}
+      onMouseOver={() => setHovered(true)}
+      onMouseOut={() => setHovered(false)}
+      style={{
+        flexDirection: "row",
+        alignItems: "center",
+        flexShrink: 0,
+        height: 1,
+        backgroundColor: bg,
+        marginLeft: 1,
+      }}
+    >
+      <text
+        selectable={false}
+        content={hovered ? ` ${label} ` : ` ${label} `}
+        style={{ fg, bg, attributes: hovered ? TextAttributes.BOLD : TextAttributes.NONE }}
+      />
+    </box>
+  );
+}
+
+/** One compact row: solid gutter · full-width code tint · height 1. */
+function DiffCodeRow(props: {
+  gutter: string;
+  spans: readonly { kind: import("../../rendering/syntax-highlight.js").SyntaxKind; text: string }[];
+  displayText: string;
+  tone: "context" | "add" | "del" | "gap" | "header";
+  theme: Theme;
+}): ReactNode {
+  const { gutter, spans, displayText, tone, theme } = props;
+  const bg = rowBackground(tone, theme);
+  const isGap = tone === "gap" || tone === "header";
+  const gutterFg = theme.diffGutter;
+  // Single-height row: solid "│" (not a box border — avoids dashed gaps).
+  return (
+    <box
+      style={{
+        flexDirection: "row",
+        width: "100%",
+        height: 1,
+        flexShrink: 0,
+      }}
+    >
+      <text selectable={false} style={{ height: 1 }}>
+        <span style={{ fg: gutterFg }}>{gutter}</span>
+        <span style={{ fg: gutterFg }}>{" │ "}</span>
+      </text>
+      <box
+        style={{
+          flexGrow: 1,
+          flexShrink: 1,
+          minWidth: 0,
+          height: 1,
+          ...(bg ? { backgroundColor: bg } : {}),
+        }}
+      >
+        <text
+          selectable={!isGap}
+          style={{
+            height: 1,
+            attributes: isGap ? TextAttributes.DIM : TextAttributes.NONE,
+          }}
+        >
+          {isGap ? (
+            <span style={{ fg: theme.muted }}>{displayText}</span>
+          ) : spans.length > 0 ? (
+            spans.map((sp, si) => (
+              <span key={si} style={{ fg: syntaxColor(sp.kind, theme) }}>
+                {sp.text}
+              </span>
+            ))
+          ) : (
+            <span style={{ fg: theme.foreground }}>{displayText || " "}</span>
+          )}
+        </text>
+      </box>
+    </box>
+  );
+}
+
+function FileDiffHunks(props: {
+  change: FileChange;
+  showPath: boolean;
+  theme: Theme;
+  onOpen: (change: FileChange) => void;
+}): ReactNode {
+  const { change, showPath, theme, onOpen } = props;
+  const rows = presentFileChangePreview(change);
+  const open = useClickWithoutDrag(() => onOpen(change));
+  return (
+    <box
+      style={{ flexDirection: "column", width: "100%" }}
+      onMouseDown={open.onMouseDown}
+      onMouseUp={open.onMouseUp}
+    >
+      {showPath ? (
+        <text
+          selectable={false}
+          style={{ height: 1, fg: theme.muted, attributes: TextAttributes.DIM }}
+        >
+          {relativeDisplayPath(change.path)}
+        </text>
+      ) : null}
+      {rows.map((row, ri) => (
+        <DiffCodeRow
+          key={ri}
+          gutter={row.gutter}
+          spans={row.spans}
+          displayText={row.displayText}
+          tone={row.tone}
+          theme={theme}
+        />
+      ))}
+    </box>
+  );
+}
+
+function FileDiffBody(props: {
+  changes: readonly FileChange[];
+  theme: Theme;
+  diffExpanded: boolean;
+  onOpen: (change: FileChange) => void;
+}): ReactNode {
+  const { changes, theme, diffExpanded, onOpen } = props;
+
+  const label = collapsedFileChangesLabel(changes);
+  const openPrimary = useClickWithoutDrag(() => {
+    if (changes[0]) onOpen(changes[0]!);
+  });
+
+  // Title row only — collapse buttons live beside the status "done" pill.
+  return (
+    <box style={{ flexDirection: "column", width: "100%", marginTop: 0 }}>
+      <box
+        style={{ flexDirection: "row", width: "100%", height: 1, flexShrink: 0 }}
+        onMouseDown={openPrimary.onMouseDown}
+        onMouseUp={openPrimary.onMouseUp}
+      >
+        <text
+          selectable
+          style={{ height: 1, fg: theme.foreground, attributes: TextAttributes.BOLD }}
+        >
+          {label}
+        </text>
+      </box>
+
+      {diffExpanded
+        ? changes.map((change, ci) => (
+            <FileDiffHunks
+              key={`${change.path}-${ci}`}
+              change={change}
+              showPath={changes.length > 1}
+              theme={theme}
+              onOpen={onOpen}
+            />
+          ))
+        : null}
+    </box>
   );
 }
 
@@ -164,11 +360,28 @@ export function ToolCard(props: {
   expanded: boolean;
   services: AppServices;
   onToggle: () => void;
+  /** File-diff hunks visible (vs one-line collapsed title). */
+  fileDiffExpanded?: boolean;
+  onToggleFileDiff?: () => void;
+  onCollapseAllFileDiffs?: () => void;
+  onExpandAllFileDiffs?: () => void;
 }): ReactNode {
-  const { item, theme, spool, expanded, services } = props;
-  const { glyph, statusLabel, name, argsLabel, argsDisplay, detail } = presentTool(item);
+  const {
+    item,
+    theme,
+    spool,
+    expanded,
+    services,
+    fileDiffExpanded = true,
+    onToggleFileDiff,
+    onCollapseAllFileDiffs,
+    onExpandAllFileDiffs,
+  } = props;
+  const { glyph, statusLabel, name, argsLabel, argsDisplay, detail, pathLine, isFileDiff } =
+    presentTool(item);
   const tail = spool.tail(item.toolCallId);
   const spoolState = spool.state(item.toolCallId);
+  const fileChanges = item.fileChanges;
 
   const isBatchName = isBatchToolName(item.name);
   const batchSections =
@@ -183,7 +396,7 @@ export function ToolCard(props: {
   const isBatchLive = isBatchName && item.status === "running";
 
   const { lines, hiddenAboveCount, truncatedNotice } =
-    isBatch || isBatchLive
+    isBatch || isBatchLive || isFileDiff
       ? {
           lines: [] as string[],
           hiddenAboveCount: 0,
@@ -204,11 +417,12 @@ export function ToolCard(props: {
   const hasBody =
     isBatch ||
     isBatchLive ||
+    isFileDiff ||
     lines.length > 0 ||
     item.outputBytes > 0 ||
     Boolean(item.artifactPath);
 
-  /** Open unbounded pager for the whole tool (or full batch). */
+  /** Open unbounded pager for the whole tool (or full batch / file diff). */
   const openFull = (): void => {
     if (expanded) return;
     if (item.status === "running" && !hasBody) return;
@@ -216,6 +430,11 @@ export function ToolCard(props: {
   };
   // Click without drag opens pager; drag-select includes output text.
   const openFullClick = useClickWithoutDrag(openFull);
+
+  const openFileChange = (change: FileChange): void => {
+    if (expanded) return;
+    void openToolOutputPager(services, item, { fileChange: change });
+  };
 
   const openSection = (section: BatchSection): void => {
     void openToolOutputPager(
@@ -225,6 +444,7 @@ export function ToolCard(props: {
         name: section.name,
         argsDisplay: `#${section.index}`,
         artifactPath: undefined,
+        fileChanges: undefined,
       },
       {
         bodyOverride: formatBatchSectionForPager(section),
@@ -234,9 +454,13 @@ export function ToolCard(props: {
     );
   };
 
-  // Footer: keyboard expand always advertised; click-for-modal only when collapsed.
+  // Footer: shorter for file diffs (title already carries the path).
   let footerHint: string | undefined;
-  if (item.status !== "running" && hasBody) {
+  if (isFileDiff && item.status !== "running") {
+    footerHint = fileDiffExpanded
+      ? "click hunk · open file"
+      : "click title · open file";
+  } else if (item.status !== "running" && hasBody) {
     if (expanded) {
       footerHint = isBatch
         ? "sub-calls expanded · click batch or sub-tool for pager · Ctrl+O collapses"
@@ -281,28 +505,52 @@ export function ToolCard(props: {
         paddingBottom: 0,
       }}
     >
-      {/* Header: name + status pill. Click opens full tool/batch pager. */}
+      {/* Header: name + status pill. Collapse chips sit beside "done" (file diffs only). */}
       <box
         style={{
           flexDirection: "row",
           width: "100%",
           paddingTop: 0,
           paddingBottom: 0,
+          alignItems: "center",
         }}
-        onMouseDown={openFullClick.onMouseDown}
-        onMouseUp={openFullClick.onMouseUp}
       >
-        <text selectable style={{ fg: statusFg, attributes: TextAttributes.BOLD }}>
-          {glyph} {name}
-        </text>
-        <text content=" " selectable />
-        <text selectable style={{ fg: statusFg, bg: theme.chip, attributes: TextAttributes.BOLD }}>
-          {` ${statusLabel} `}
-        </text>
+        <box
+          style={{ flexDirection: "row", flexShrink: 0 }}
+          onMouseDown={openFullClick.onMouseDown}
+          onMouseUp={openFullClick.onMouseUp}
+        >
+          <text selectable style={{ fg: statusFg, attributes: TextAttributes.BOLD }}>
+            {/* File diffs put the verb+path in the body title — avoid a second tall name. */}
+            {isFileDiff ? `${glyph}` : `${glyph} ${name}`}
+          </text>
+          <text content=" " selectable={false} />
+          <text selectable={false} style={{ fg: statusFg, bg: theme.chip, attributes: TextAttributes.BOLD }}>
+            {` ${statusLabel} `}
+          </text>
+        </box>
+        {isFileDiff ? (
+          <>
+            <DiffActionButton
+              label={fileDiffExpanded ? "collapse" : "expand"}
+              theme={theme}
+              onClick={() => onToggleFileDiff?.()}
+            />
+            <DiffActionButton
+              label={fileDiffExpanded ? "collapse all" : "expand all"}
+              theme={theme}
+              onClick={() =>
+                fileDiffExpanded
+                  ? onCollapseAllFileDiffs?.()
+                  : onExpandAllFileDiffs?.()
+              }
+            />
+          </>
+        ) : null}
         {isBatch || isBatchLive ? (
           <>
-            <text content=" " selectable />
-            <text selectable style={{ fg: theme.muted, attributes: TextAttributes.DIM }}>
+            <text content=" " selectable={false} />
+            <text selectable={false} style={{ fg: theme.muted, attributes: TextAttributes.DIM }}>
               batch
             </text>
           </>
@@ -314,6 +562,11 @@ export function ToolCard(props: {
           <text selectable style={{ fg: theme.muted }}>{argsLabel}: </text>
           {/* Aqua input/command text — stands out from muted labels + white output. */}
           <text selectable style={{ fg: theme.cyan }}>{argsDisplay}</text>
+        </box>
+      ) : null}
+      {pathLine && !isFileDiff ? (
+        <box style={{ flexDirection: "row", width: "100%", marginTop: 0 }}>
+          <LinkableText text={pathLine} theme={theme} fg={theme.muted} selectable />
         </box>
       ) : null}
       {detail ? <LinkableText text={detail} theme={theme} fg={theme.mode} selectable /> : null}
@@ -357,8 +610,27 @@ export function ToolCard(props: {
           ))
         : null}
 
+      {/* File mutation diffs — compact rows; chevron collapses to title. */}
+      {!isBatch && !isBatchLive && isFileDiff && fileChanges ? (
+        <box
+          style={{
+            flexDirection: "column",
+            width: "100%",
+            marginTop: 0,
+            flexShrink: 1,
+          }}
+        >
+          <FileDiffBody
+            changes={fileChanges}
+            theme={theme}
+            diffExpanded={fileDiffExpanded}
+            onOpen={openFileChange}
+          />
+        </box>
+      ) : null}
+
       {/* Normal (non-batch) output body — click opens pager; drag selects. */}
-      {!isBatch && !isBatchLive && lines.length > 0 ? (
+      {!isBatch && !isBatchLive && !isFileDiff && lines.length > 0 ? (
         <box
           style={{
             flexDirection: "column",
@@ -380,7 +652,8 @@ export function ToolCard(props: {
         </box>
       ) : null}
 
-      {item.artifactPath ? (
+      {/* Skip SAVED line for file diffs — path is already in the title. */}
+      {item.artifactPath && !isFileDiff ? (
         <box style={{ flexDirection: "row", width: "100%", marginTop: 0 }}>
           <text selectable style={{ fg: theme.white, bg: theme.chipTeal, attributes: TextAttributes.BOLD }}>
             {" SAVED "}

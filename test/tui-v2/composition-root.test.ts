@@ -8,20 +8,22 @@ import type { ChatMessage } from "../../src/types.js";
 import type { PersistencePort } from "../../src/app/ports/persistence-port.js";
 import { createCompositionRoot } from "../../src/tui-v2/bootstrap/composition-root.js";
 import { detectCapabilities } from "../../src/tui-v2/bootstrap/capabilities.js";
+import { createTurnOutcome, type TurnOutcome } from "../../src/agent/turn-outcome.js";
 
 class StubAgent implements AgentPort {
   async runTurn(
     _req: RunTurnRequest,
     handlers: RunTurnHandlers,
-  ): Promise<string> {
+  ): Promise<TurnOutcome> {
+    const outcome = createTurnOutcome({ status: "succeeded", answer: "hi", steps: 1, remainingCriteria: [] });
     handlers.onEvent({ type: "turn-start", prompt: "go" });
     handlers.onEvent({ type: "assistant-message", text: "hi" });
-    handlers.onEvent({ type: "turn-end", finalAnswer: "hi", steps: 1 });
+    handlers.onEvent({ type: "turn-end", outcome, finalAnswer: "hi", steps: 1 });
     handlers.onMessages?.([
       { role: "user", content: "go" },
       { role: "assistant", content: "hi" },
     ]);
-    return "hi";
+    return outcome;
   }
 }
 
@@ -70,6 +72,7 @@ describe("createCompositionRoot", () => {
       capabilities: caps,
     });
     const result = await services.session.submit("go");
+    if (result.status === "error") throw result.error;
     expect(result.status).toBe("completed");
     expect(services.recordedEvents.length).toBeGreaterThan(0);
     // sequence is monotonic per session

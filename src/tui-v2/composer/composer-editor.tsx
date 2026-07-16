@@ -35,6 +35,7 @@ import { useOverlayState } from "../state/use-overlay.js";
 import { useSessionState } from "../state/use-session-state.js";
 import { clipComposerMeta, formatComposerMeta } from "./composer-meta.js";
 import { transcriptScrollPort } from "../components/transcript/transcript-scroll-port.js";
+import { consumePlanSuggestionInput } from "../app/plan-lifecycle.js";
 import {
   countComposerVisualLines,
   resolveComposerTextRows,
@@ -433,6 +434,20 @@ export function ComposerEditor(props: ComposerEditorProps): ReactNode {
           "warn",
           `command /${invocation.name} is not available right now`,
         );
+      }
+      return;
+    }
+    // After plan-ready `s`, free-text is revision feedback (stay in plan mode).
+    const revision = consumePlanSuggestionInput(services, prompt);
+    if (revision) {
+      if (services.session.getState().running) {
+        services.session.enqueue(revision.modelPrompt, {
+          displayPrompt: revision.displayPrompt,
+        });
+      } else {
+        await services.session.submit(revision.modelPrompt, {
+          displayPrompt: revision.displayPrompt,
+        });
       }
       return;
     }

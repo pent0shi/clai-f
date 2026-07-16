@@ -1,0 +1,341 @@
+/**
+ * Pure presentation helpers for Cursor-style file-change previews in the
+ * tool card and export/copy paths.
+ */
+
+import { relative } from "node:path";
+import type {
+  DiffLine,
+  DiffOp,
+  FileChange,
+  ModalDiffLine,
+} from "../../tools/file-diff.js";
+import {
+  buildModalLines,
+  changeVerb,
+  formatUnifiedPreview,
+} from "../../tools/file-diff.js";
+import { getActiveProjectRoot } from "../../agent/project-root.js";
+import { safeCwd } from "../../os/cwd.js";
+import type { Theme } from "./theme.js";
+import {
+  clipSpans,
+  emptyCarry,
+  highlightLineForPath,
+  type LangId,
+  type SyntaxKind,
+  type SyntaxSpan,
+} from "./syntax-highlight.js";
+
+export type DiffLineTone = "context" | "add" | "del" | "gap" | "header";
+
+export interface PresentedDiffRow {
+  readonly tone: DiffLineTone;
+  /** Right-aligned gutter (line number or blank). */
+  readonly gutter: string;
+  /** Prefix character: space / + / − / · */
+  readonly prefix: string;
+  readonly text: string;
+  /** Soft-clipped body for chat cards. */
+  readonly displayText: string;
+  /** Syntax spans for the display body (clipped). */
+  readonly spans: readonly SyntaxSpan[];
+}
+
+const DEFAULT_CLIP = 96;
+
+function gutterWidth(change: FileChange): number {
+  let max = 1;
+  for (const h of change.previewHunks) {
+    for (const l of h.lines) {
+      const n = l.newLine ?? l.oldLine ?? 0;
+      if (n > max) max = n;
+    }
+  }
+  for (const n of change.addedNewLines) {
+    if (n > max) max = n;
+  }
+  return String(max).length;
+}
+
+function lineGutter(dl: DiffLine, width: number): string {
+  const n =
+    dl.op === "del"
+      ? dl.oldLine
+      : dl.newLine ?? dl.oldLine;
+  if (typeof n !== "number") return " ".repeat(width);
+  return String(n).padStart(width, " ");
+}
+
+function prefixFor(op: DiffOp): string {
+  if (op === "add") return "+";
+  if (op === "del") return "−";
+  return " ";
+}
+
+function clip(text: string, max: number): string {
+  if (text.length <= max) return text;
+  return `${text.slice(0, Math.max(0, max - 1))}…`;
+}
+
+export function syntaxColor(kind: SyntaxKind, theme: Theme): string {
+  switch (kind) {
+    case "keyword":
+      return theme.synKeyword;
+    case "string":
+      return theme.synString;
+    case "comment":
+      return theme.synComment;
+    case "number":
+      return theme.synNumber;
+    case "function":
+      return theme.synFunction;
+    case "type":
+      return theme.synType;
+    case "property":
+      return theme.synProperty;
+    case "operator":
+      return theme.synOperator;
+    case "regex":
+      return theme.synRegex;
+    case "punctuation":
+      return theme.muted;
+    default:
+      return theme.foreground;
+  }
+}
+
+export function rowBackground(
+  tone: DiffLineTone,
+  theme: Theme,
+): string | undefined {
+  if (tone === "add") return theme.diffAddBg;
+  if (tone === "del") return theme.diffDelBg;
+  return undefined;
+}
+
+/** Flatten preview hunks into styled rows for the tool card. */
+export function presentFileChangePreview(
+  change: FileChange,
+  options: { maxLineChars?: number; maxRows?: number } = {},
+): PresentedDiffRow[] {
+  const maxLineChars = options.maxLineChars ?? DEFAULT_CLIP;
+  const maxRows = options.maxRows ?? 48;
+  const rows: PresentedDiffRow[] = [];
+  const carry = emptyCarry();
+
+  if (change.binary) {
+    rows.push({
+      tone: "header",
+      gutter: "",
+      prefix: " ",
+      text: `binary · ${change.basename}`,
+      displayText: `binary · ${change.basename}`,
+      spans: [{ kind: "plain", text: `binary · ${change.basename}` }],
+    });
+    return rows;
+  }
+
+  const width = gutterWidth(change);
+  let used = 0;
+
+  for (const hunk of change.previewHunks) {
+    if (used >= maxRows) break;
+    for (const dl of hunk.lines) {
+      if (used >= maxRows) break;
+      const text = dl.text;
+      const fullSpans = highlightLineForPath(text, change.path, carry);
+      const displayText = clip(text, maxLineChars);
+      const spans = clipSpans(fullSpans, maxLineChars);
+      rows.push({
+        tone: dl.op,
+        gutter: lineGutter(dl, width),
+        prefix: prefixFor(dl.op),
+        text,
+        displayText,
+        spans,
+      });
+      used += 1;
+    }
+  }
+
+  if (change.truncated || used >= maxRows) {
+    const gap = `··· +${change.stats.added}/−${change.stats.removed} · click for full ···`;
+    rows.push({
+      tone: "gap",
+      gutter: " ".repeat(width),
+      prefix: "·",
+      text: gap,
+      displayText: gap,
+      spans: [{ kind: "plain", text: gap }],
+    });
+  }
+
+  if (rows.length === 0) {
+    const empty = "(no line changes)";
+    rows.push({
+      tone: "context",
+      gutter: " ".repeat(width),
+      prefix: " ",
+      text: empty,
+      displayText: empty,
+      spans: [{ kind: "plain", text: empty }],
+    });
+  }
+
+  return rows;
+}
+
+export function presentAllFileChangePreviews(
+  changes: readonly FileChange[],
+  options: { maxLineChars?: number } = {},
+): Array<{ change: FileChange; rows: PresentedDiffRow[] }> {
+  return changes.map((change) => ({
+    change,
+    rows: presentFileChangePreview(change, options),
+  }));
+}
+
+/** Plain-text export of a file change (no ANSI). */
+export function fileChangeExportText(change: FileChange): string {
+  const head = `${change.kind} ${change.path}`;
+  const body = formatUnifiedPreview(change);
+  return `${head}\n${body}`;
+}
+
+/** Structured modal row for pager (gutter split from body). */
+export interface ModalPagerRow {
+  readonly gutter: string;
+  /** Prefix + body without line number, e.g. `+ const x = 1` */
+  readonly body: string;
+  readonly tone: DiffOp | "header";
+  readonly spans: readonly SyntaxSpan[];
+  /** Raw code only (no prefix) for copy. */
+  readonly code: string;
+}
+
+export function buildModalPagerRows(
+  change: FileChange,
+  options: { maxHighlightLines?: number } = {},
+): ModalPagerRow[] {
+  const maxHl = options.maxHighlightLines ?? 5_000;
+  const lines = buildModalLines(change);
+  const width = Math.max(
+    1,
+    ...lines.map((l) =>
+      typeof l.lineNo === "number"
+        ? String(l.lineNo).length
+        : typeof l.oldLineNo === "number"
+          ? String(l.oldLineNo).length
+          : 1,
+    ),
+  );
+  const carry = emptyCarry();
+  const rows: ModalPagerRow[] = [];
+
+  rows.push({
+    gutter: " ".repeat(width),
+    body: `${change.kind} · ${change.path}`,
+    tone: "header",
+    spans: [{ kind: "plain", text: `${change.kind} · ${change.path}` }],
+    code: `${change.kind} · ${change.path}`,
+  });
+  rows.push({
+    gutter: " ".repeat(width),
+    body: `+${change.stats.added} −${change.stats.removed} lines`,
+    tone: "header",
+    spans: [
+      {
+        kind: "plain",
+        text: `+${change.stats.added} −${change.stats.removed} lines`,
+      },
+    ],
+    code: `+${change.stats.added} −${change.stats.removed} lines`,
+  });
+  rows.push({
+    gutter: " ".repeat(width),
+    body: "",
+    tone: "header",
+    spans: [{ kind: "plain", text: "" }],
+    code: "",
+  });
+
+  let idx = 0;
+  for (const l of lines) {
+    const num =
+      l.op === "del"
+        ? typeof l.oldLineNo === "number"
+          ? String(l.oldLineNo).padStart(width, " ")
+          : " ".repeat(width)
+        : typeof l.lineNo === "number"
+          ? String(l.lineNo).padStart(width, " ")
+          : " ".repeat(width);
+    const p = l.op === "add" ? "+" : l.op === "del" ? "−" : " ";
+    const spans =
+      idx < maxHl
+        ? highlightLineForPath(l.text, change.path, carry)
+        : ([{ kind: "plain" as const, text: l.text }] as SyntaxSpan[]);
+    rows.push({
+      gutter: num,
+      body: `${p} ${l.text}`,
+      tone: l.op,
+      spans,
+      code: l.text,
+    });
+    idx += 1;
+  }
+  return rows;
+}
+
+/**
+ * Build numbered modal body for the pager (plain string fallback).
+ * Format: `<lineno> │ <+/−/ > <text>` so the pager can split gutter/body.
+ */
+export function formatModalPlainText(change: FileChange): string {
+  const rows = buildModalPagerRows(change);
+  return rows
+    .map((r) => {
+      if (r.tone === "header") {
+        return r.body ? `${r.gutter} │ ${r.body}` : `${r.gutter} │`;
+      }
+      return `${r.gutter} │ ${r.body}`;
+    })
+    .join("\n");
+}
+
+export type { ModalDiffLine, SyntaxSpan, LangId };
+
+/**
+ * Prefer project-relative path for chat titles (Cursor-style).
+ * Falls back to absolute when outside the project root / cwd.
+ */
+export function relativeDisplayPath(absPath: string): string {
+  const roots = [getActiveProjectRoot(), safeCwd()].filter(
+    (r): r is string => Boolean(r),
+  );
+  for (const root of roots) {
+    try {
+      const rel = relative(root, absPath);
+      if (rel && !rel.startsWith("..") && !rel.startsWith("/")) {
+        return rel.split("\\").join("/");
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+  return absPath;
+}
+
+/** Compact one-line summary for a collapsed file-diff card. */
+export function collapsedFileChangeLabel(change: FileChange): string {
+  const verb = changeVerb(change.kind, "ok");
+  return `${verb}  ${relativeDisplayPath(change.path)}`;
+}
+
+/** Multi-file collapsed label. */
+export function collapsedFileChangesLabel(changes: readonly FileChange[]): string {
+  if (changes.length === 0) return "files";
+  if (changes.length === 1) return collapsedFileChangeLabel(changes[0]!);
+  const first = relativeDisplayPath(changes[0]!.path);
+  return `Wrote ${changes.length} files  ·  ${first}…`;
+}

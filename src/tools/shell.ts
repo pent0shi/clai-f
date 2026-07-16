@@ -56,6 +56,24 @@ const DEFAULT_MAX_CAPTURE_BYTES = 500 * 1024 * 1024;
 const DEFAULT_TIMEOUT_MS = 180_000;
 
 /**
+ * When false, children never inherit process.stdin (no TTY password prompts).
+ * OpenTUI sets this false at startup — inheriting stdin freezes the TUI
+ * (Esc/Ctrl+C/clicks die; raw "Password:" leaks under the composer).
+ * Defaults to false for every frontend: privileged commands must use the
+ * managed SecretPort path and may never take over process.stdin.
+ */
+let allowInteractiveStdinInherit = false;
+
+/** Disable/enable TTY stdin inheritance for password prompts. */
+export function setAllowInteractiveStdinInherit(allow: boolean): void {
+  allowInteractiveStdinInherit = allow;
+}
+
+export function getAllowInteractiveStdinInherit(): boolean {
+  return allowInteractiveStdinInherit;
+}
+
+/**
  * Heuristic: does this command line need to read from a real TTY so a
  * password / passphrase / yes-no prompt can reach the user?
  *
@@ -146,15 +164,14 @@ function chooseStdio(
   command: string,
   preference: boolean | "auto" | undefined,
 ): ["ignore" | "inherit", "pipe", "pipe"] {
+  // Hard ban: TUI and other hosts that cannot survive stdin takeover.
+  if (!allowInteractiveStdinInherit) return ["ignore", "pipe", "pipe"];
+  if (preference === false) return ["ignore", "pipe", "pipe"];
   const wantInteractive =
     preference === true ||
-    (preference !== false &&
-      (preference === "auto" || preference === undefined) &&
+    ((preference === "auto" || preference === undefined) &&
       looksInteractiveStdin(command));
   if (!wantInteractive) return ["ignore", "pipe", "pipe"];
-  // Honor only when the parent actually has a TTY on stdin. Inheriting
-  // a piped or closed stdin gains us nothing and would let an
-  // interactive child hang forever in non-interactive contexts.
   if (process.stdin.isTTY) return ["inherit", "pipe", "pipe"];
   return ["ignore", "pipe", "pipe"];
 }
@@ -162,9 +179,7 @@ function chooseStdio(
 /**
  * Capture stdin's current `isRaw` state and switch it to cooked mode so
  * an interactive child (sudo, ssh) can read a password line through the
- * inherited stdin. Returns a function that restores the previous mode
- * when the child exits — the REPL relies on raw mode for its key
- * handling, so we must put it back the way we found it.
+ * inherited stdin. Returns an idempotent restore used from every exit path.
  */
 function takeOverCookedStdin(): () => void {
   if (!process.stdin.isTTY) return () => {};
@@ -172,16 +187,22 @@ function takeOverCookedStdin(): () => void {
   const wasRaw = Boolean(stream.isRaw);
   try {
     if (wasRaw) stream.setRawMode(false);
-    // `pause` on a raw-mode stdin can drop bytes; we already disabled
-    // raw, so a normal pause is safe and prevents the REPL's data
-    // listener from gulping the password line before sudo reads it.
     process.stdin.pause();
   } catch {
     /* ignore */
   }
+  let restored = false;
   return () => {
+    if (restored) return;
+    restored = true;
     try {
-      if (wasRaw && process.stdin.isTTY) stream.setRawMode(true);
+      if (process.stdin.isTTY) {
+        if (wasRaw) stream.setRawMode(true);
+      }
+    } catch {
+      /* ignore */
+    }
+    try {
       process.stdin.resume();
     } catch {
       /* ignore */

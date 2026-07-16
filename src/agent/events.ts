@@ -1,7 +1,13 @@
 import type { SessionPlan } from "../store/plan.js";
+import type { TurnOutcome } from "./turn-outcome.js";
 
 export type AgentEvent =
-  | { type: "turn-start"; prompt: string }
+  | {
+      type: "turn-start";
+      prompt: string;
+      /** Chat YOU bubble text; null/empty = hide system choreography from transcript. */
+      displayPrompt?: string | null;
+    }
   | { type: "status"; text: string }
   | { type: "thinking-delta"; text: string }
   | { type: "thinking-block"; content: string }
@@ -20,6 +26,8 @@ export type AgentEvent =
       exitCode?: number;
       summary: string;
       artifactPath?: string;
+      /** Cursor-style file diffs for fs.* mutation tools. */
+      fileChanges?: import("../tools/file-diff.js").FileChange[] | undefined;
     }
   | { type: "tool-blocked"; id: string; name: string; reason: string }
   | { type: "plan-update"; plan: SessionPlan }
@@ -29,7 +37,7 @@ export type AgentEvent =
       kind: "tool" | "pentest" | "reset" | "continue" | "plan" | "switch";
       prompt: string;
     }
-  | { type: "turn-end"; finalAnswer: string; steps: number }
+  | { type: "turn-end"; outcome: TurnOutcome; finalAnswer: string; steps: number }
   | { type: "turn-aborted" }
   | { type: "turn-error"; message: string }
   | { type: "compacted"; summary: string; beforeTokens: number; afterTokens: number };

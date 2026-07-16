@@ -12,6 +12,7 @@ import { searchProviders } from "../../../tools/web/providers/provider.js";
 import { searchProviderIds, type SearchProviderId } from "../../../tools/web/types.js";
 import { providerIds, type ProviderId, type ReasoningEffort } from "../../../types.js";
 import { getKnownModels } from "../../../repl/slash-commands.js";
+import { clearActiveProjectRoot } from "../../../agent/project-root.js";
 import {
   getConfig,
   getProviderModel,
@@ -380,6 +381,8 @@ export async function handleHistory(services: AppServices): Promise<void> {
         return;
       }
 
+      clearActiveProjectRoot();
+      services.plan.clear();
       services.session.loadHistory(session.messages, {
         sessionId: session.id,
         title: session.name,

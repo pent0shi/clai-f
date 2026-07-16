@@ -1,7 +1,7 @@
 import { mkdir, readFile, writeFile, chown } from "node:fs/promises";
 import { fixOwner, handlePermissionError, safeExists } from "../os/permissions.js";
 
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { homedir, tmpdir } from "node:os";
 import net from "node:net";
 
@@ -15,7 +15,10 @@ export interface EngagementScope {
   name?: string | undefined;
   authorizedTargets: string[];
   excludedTargets?: string[] | undefined;
-  allowedPhases?: Array<"recon" | "enumeration" | "exploitation" | "post-exploitation"> | undefined;
+  allowedPhases?: Array<"recon" | "enumeration" | "authentication" | "exploitation" | "post-exploitation"> | undefined;
+  allowedPorts?: number[] | undefined;
+  allowedPaths?: string[] | undefined;
+  allowedMethods?: string[] | undefined;
   maxRate?: number | undefined;
   maxConcurrency?: number | undefined;
   authorizationNote?: string | undefined;
@@ -45,7 +48,7 @@ export async function loadScope(): Promise<EngagementScope | undefined> {
 
 export async function saveScope(scope: EngagementScope): Promise<void> {
   try {
-    const dir = join(homedir(), ".clai");
+    const dir = dirname(scopeFile);
     await mkdir(dir, { recursive: true });
     await fixOwner(dir);
     await writeFile(scopeFile, `${JSON.stringify(scope, null, 2)}\n`, { mode: 0o600 });

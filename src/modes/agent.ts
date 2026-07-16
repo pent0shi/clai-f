@@ -1,7 +1,14 @@
-import type { ChatMessage, ChatImage, ProviderId, ToolCall } from "../types.js";
+import type {
+  ChatMessage,
+  ChatImage,
+  Mode,
+  ProviderId,
+  ToolCall,
+} from "../types.js";
 import type { AgentEvent } from "../agent/events.js";
+import { renderTurnOutcome } from "../agent/turn-outcome.js";
 import {
-  runAgentLoop,
+  runAgentTurn,
   parseToolCall,
   createSessionPolicy,
   type ConfirmPort,
@@ -28,6 +35,7 @@ export interface AgentOptions {
   onEvent?: ((event: AgentEvent) => void) | undefined;
   onMessages?: ((messages: ChatMessage[]) => void) | undefined;
   confirm?: ConfirmPort | undefined;
+  mode?: Mode | undefined;
 }
 
 export { parseToolCall, createSessionPolicy };
@@ -37,5 +45,6 @@ export async function runAgent(
   prompt: string,
   options: AgentOptions = {},
 ): Promise<string> {
-  return runAgentLoop(prompt, options);
+  const outcome = await runAgentTurn(prompt, options);
+  return renderTurnOutcome(outcome);
 }

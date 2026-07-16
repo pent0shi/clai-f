@@ -39,8 +39,8 @@ describe("phase 1 — session policy", () => {
 });
 
 describe("plan-awaiting-approval gate — allowed tools", () => {
-  it("permits only plan + read-only exploration before /implement", () => {
-    // These let the agent (re)plan and gather context to refine a plan.
+  it("permits plan, read-only exploration, and research/recon before /implement", () => {
+    // Refine draft plans with context + recon/research — no mutates.
     for (const tool of [
       "plan.create",
       "task.update",
@@ -49,15 +49,23 @@ describe("plan-awaiting-approval gate — allowed tools", () => {
       "fs.search",
       "sysinfo",
       "tool.batch",
+      "tool.check",
       "net.context",
+      "web.search",
+      "web.fetch",
+      "dns.lookup",
+      "whois.lookup",
+      "http.fetch",
+      "net.scan",
+      "pentest.recon",
+      "wordlist.find",
     ]) {
       expect(isPreApprovalAllowedTool(tool)).toBe(true);
     }
   });
 
-  it("blocks execution/mutation tools until the plan is approved", () => {
-    // A free-text message after a plan is a REVISION, not a 'go' signal, so
-    // none of these may run before /implement.
+  it("blocks mutation / execution tools until the plan is approved", () => {
+    // Free-text after a plan is REVISION, not a 'go' signal.
     for (const tool of [
       "shell.exec",
       "shell.start",
@@ -66,11 +74,6 @@ describe("plan-awaiting-approval gate — allowed tools", () => {
       "fs.writeMany",
       "fs.edit",
       "fs.delete",
-      "net.scan",
-      "pentest.recon",
-      "tool.check",
-      "http.fetch",
-      "web.fetch",
       "net.pingSweep",
     ]) {
       expect(isPreApprovalAllowedTool(tool)).toBe(false);

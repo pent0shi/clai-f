@@ -50,9 +50,13 @@ describe("plan.create robust arg normalization", () => {
       { loopGuard: new LoopGuard(), step: 1 },
     );
     expect(result.ok).toBe(true);
-    // coding app plans auto-inject an install step after scaffold
-    expect(result.plan?.tasks.length).toBe(5);
-    expect(result.plan?.tasks.some((t) => /install/i.test(t.title))).toBe(true);
+    expect(result.plan?.tasks.map((task) => task.title)).toEqual([
+      "scaffold project",
+      "implement UI",
+      "verify build",
+      "start dev server, probe localhost, leave running, report URL",
+    ]);
+    expect(result.plan?.tasks.some((t) => /install/i.test(t.title))).toBe(false);
   });
 
   it("still rejects empty goal/tasks with a helpful note", async () => {
@@ -66,5 +70,46 @@ describe("plan.create robust arg normalization", () => {
     );
     expect(result.ok).toBe(false);
     expect(result.modelNote).toMatch(/tasks array/i);
+  });
+
+  it("drops bare tN strings interleaved as fake tasks", async () => {
+    const result = await handlePlanTool(
+      {
+        name: "plan.create",
+        args: {
+          goal: "Deep security assessment of example.com",
+          detail: "Exploit after recon",
+          kind: "pentest",
+          tasks: [
+            "Analyze JavaScript bundles for secrets",
+            "t1",
+            "Test SSRF with bypass techniques",
+            "t2",
+            { title: "t3" },
+            { id: "t4", title: "Fuzz API endpoints" },
+            "t5",
+            "Compile final report",
+          ],
+        },
+      },
+      createSessionPolicy("plan-bare-ids"),
+      { loopGuard: new LoopGuard(), step: 1 },
+    );
+    expect(result.ok).toBe(true);
+    expect(result.plan?.tasks.map((t) => t.title)).toEqual([
+      "Analyze JavaScript bundles for secrets",
+      "Test SSRF with bypass techniques",
+      "Fuzz API endpoints",
+      "Compile final report",
+    ]);
+    expect(result.plan?.tasks.map((t) => t.id)).toEqual([
+      "t1",
+      "t2",
+      "t3",
+      "t4",
+    ]);
+    expect(result.plan?.tasks.every((t) => !/^t\d+$/i.test(t.title))).toBe(
+      true,
+    );
   });
 });

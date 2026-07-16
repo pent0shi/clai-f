@@ -8,7 +8,7 @@
  * before plan.create or implement.
  */
 
-import { existsSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readdirSync, statSync, type Dirent } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { safeCwd } from "../os/cwd.js";
@@ -69,6 +69,34 @@ export function detectProjectMarkers(dir: string): string[] {
   return found;
 }
 
+/**
+ * Infer package manager from lockfiles / markers present in a project dir.
+ * Prefer lockfile over bare package.json.
+ */
+export function detectPackageManager(
+  dir: string,
+): "npm" | "pnpm" | "yarn" | "bun" | "pip" | "poetry" | "cargo" | "go" | undefined {
+  if (!dir || !existsSync(dir)) return undefined;
+  if (existsSync(join(dir, "pnpm-lock.yaml"))) return "pnpm";
+  if (existsSync(join(dir, "yarn.lock"))) return "yarn";
+  if (
+    existsSync(join(dir, "bun.lockb")) ||
+    existsSync(join(dir, "bun.lock"))
+  ) {
+    return "bun";
+  }
+  if (existsSync(join(dir, "package-lock.json"))) return "npm";
+  if (existsSync(join(dir, "package.json"))) return "npm";
+  if (existsSync(join(dir, "poetry.lock")) || existsSync(join(dir, "pyproject.toml"))) {
+    // poetry.lock is definitive; pyproject may be non-poetry — still useful hint
+    if (existsSync(join(dir, "poetry.lock"))) return "poetry";
+  }
+  if (existsSync(join(dir, "requirements.txt"))) return "pip";
+  if (existsSync(join(dir, "Cargo.toml"))) return "cargo";
+  if (existsSync(join(dir, "go.mod"))) return "go";
+  return undefined;
+}
+
 export function isExistingProjectDir(dir: string): boolean {
   if (!dir || !existsSync(dir)) return false;
   try {
@@ -77,6 +105,54 @@ export function isExistingProjectDir(dir: string): boolean {
     return false;
   }
   return detectProjectMarkers(dir).length > 0;
+}
+
+const IGNORED_PROJECT_CHILDREN = new Set([
+  "node_modules",
+  "dist",
+  "build",
+  "coverage",
+  "target",
+  "vendor",
+  "__pycache__",
+]);
+
+/**
+ * Discover marker-bearing immediate children under a user-named destination.
+ * This is intentionally bounded and non-recursive: enough to resume an
+ * arbitrary existing Desktop project without crawling the user's filesystem.
+ */
+export function discoverImmediateProjectRoots(
+  parent: string,
+  maxEntries = 80,
+): string[] {
+  const root = resolve(parent);
+  if (!existsSync(root)) return [];
+  let entries: Dirent[];
+  try {
+    entries = readdirSync(root, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  const candidates = entries
+    .filter((entry) => {
+      const name = entry.name;
+      return Boolean(
+        name &&
+          !name.startsWith(".") &&
+          name !== ".DS_Store" &&
+          name !== "Thumbs.db" &&
+          !IGNORED_PROJECT_CHILDREN.has(name) &&
+          entry.isDirectory(),
+      );
+    })
+    .sort((a, b) => a.name.localeCompare(b.name));
+  const projects: string[] = [];
+  for (const entry of candidates) {
+    const candidate = join(root, entry.name);
+    if (isExistingProjectDir(candidate)) projects.push(candidate);
+  }
+  return projects.slice(0, Math.max(0, maxEntries));
 }
 
 export interface DirSnapshot {
@@ -176,11 +252,16 @@ function formatSnapshot(label: string, snap: DirSnapshot): string {
     : snap.emptyOrMissing
       ? "empty or only junk files — OK for a new scaffold into a subfolder here"
       : "non-empty directory (not a clear project root) — list carefully; scaffolders often refuse non-empty targets";
+  const pm = detectPackageManager(snap.path);
+  const pmLine = pm
+    ? `package manager (from lockfile/manifest): ${pm} — use this for install/run, do not invent another`
+    : undefined;
   return (
     `- ${label}: ${snap.path}\n` +
     `  status: ${kind}\n` +
     `  entries (${snap.entryCount}): ${entries}\n` +
-    `  ${markerLine}`
+    `  ${markerLine}` +
+    (pmLine ? `\n  ${pmLine}` : "")
   );
 }
 
@@ -272,14 +353,22 @@ export function buildWorkspaceOrientation(
     if (!paths.has(p)) paths.set(p, "related path");
   }
 
-  // If destination is a bare parent, also check guessed subfolder names under it
+  // If destination is a bare parent, snapshot bounded marker-bearing children
+  // regardless of their name (for example Desktop/blogging-app), plus a few
+  // conventional folders even when they are only partially materialized.
   const dest = input.destinationHint?.trim()
     ? resolve(input.destinationHint.trim())
     : undefined;
-  if (dest && isBareParentDirectory(dest)) {
-    // Common default names models invent without checking
+  const discoveryParent =
+    dest ?? (isBareParentDirectory(cwd) ? cwd : undefined);
+  if (discoveryParent) {
+    for (const project of discoverImmediateProjectRoots(discoveryParent)) {
+      if (!paths.has(project)) {
+        paths.set(project, "discovered existing project under destination");
+      }
+    }
     for (const guess of ["todo-app", "app", "my-app", "project"]) {
-      const p = join(dest, guess);
+      const p = join(discoveryParent, guess);
       if (!paths.has(p) && existsSync(p)) {
         paths.set(p, `existing subfolder under destination ("${guess}")`);
       }
@@ -313,12 +402,14 @@ export function extractScaffoldTargetName(command: string): string | undefined {
   const cmd = command.trim();
   if (!cmd) return undefined;
 
-  // Absolute / home path as target
-  const abs = cmd.match(
-    /(?:^|\s)((?:\/(?:Users|home)\/\S+|~\/\S+))(?:\s|$)/,
+  // Absolute path only when it is the scaffolder's target argument — never the
+  // `cd /path` destination (that wrongly returned "Desktop" for
+  // `cd ~/Desktop && npm create vite@latest blogging-app`).
+  const absCreate = cmd.match(
+    /(?:npm\s+create\s+\S+|npx\s+(?:--yes\s+)?create-[\w@./-]+|yarn\s+create\s+\S+|pnpm\s+create\s+\S+|bun\s+create\s+\S+|npm\s+init\s+\S+|create-[\w@./-]+|vite@\S+|cargo\s+new|rails\s+new|poetry\s+new|flutter\s+create|django-admin\s+startproject|composer\s+create-project\s+\S+|mix\s+new|dotnet\s+new\s+\S+\s+(?:-n|--name))\s+((?:\/(?:Users|home)\/\S+|~\/\S+))/i,
   );
-  if (abs?.[1] && !abs[1].includes("node_modules")) {
-    const base = abs[1].replace(/\/+$/, "").split(/[/\\]/).pop();
+  if (absCreate?.[1] && !absCreate[1].includes("node_modules")) {
+    const base = absCreate[1].replace(/\/+$/, "").split(/[/\\]/).pop();
     if (base && !base.startsWith("-")) return base;
   }
 
@@ -382,11 +473,13 @@ export function resolveScaffoldTargetPath(
   // Honour leading `cd /path && …` / `mkdir -p /path && cd /path && …`
   // so preflight sees the real target when models chain shell in one call.
   let base = resolve(shellCwd?.trim() || safeCwd());
+  const stripShellQuotes = (raw: string): string =>
+    raw.trim().replace(/^['"]|['"]$/g, "");
   const cdMatch = cmd.match(
     /(?:^|[;&|]\s*)cd\s+([^\s;&|]+)\s*(?:&&|;)/i,
   );
   if (cdMatch?.[1]) {
-    const cdTarget = cdMatch[1].replace(/^~(?=\/)/, homedir());
+    const cdTarget = stripShellQuotes(cdMatch[1]).replace(/^~(?=\/)/, homedir());
     base = isAbsolute(cdTarget) ? resolve(cdTarget) : resolve(base, cdTarget);
   }
   // `mkdir -p /abs/path && … create .` without explicit cd
@@ -394,9 +487,9 @@ export function resolveScaffoldTargetPath(
     /mkdir\s+(?:-p\s+)?([^\s;&|]+)\s*(?:&&|;)/i,
   );
   if (mkdirMatch?.[1] && !cdMatch) {
-    const m = mkdirMatch[1].replace(/^~(?=\/)/, homedir());
+    const m = stripShellQuotes(mkdirMatch[1]).replace(/^~(?=\/)/, homedir());
     if (isAbsolute(m) || m.startsWith("~/")) {
-      base = resolve(m.replace(/^~(?=\/)/, homedir()));
+      base = resolve(m);
     }
   }
 

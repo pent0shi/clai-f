@@ -1,10 +1,6 @@
 import type { OutputChunkRef, ToolCallId } from "./app-event.js";
 
-/**
- * Text buffer for a single tool stream. By default it keeps **all** characters
- * (no truncation) so Ctrl+O / click-to-open always shows the full body.
- * Pass a finite `maxChars` only for tests or memory-sensitive adapters.
- */
+
 export interface BoundedTextState {
   readonly tail: string;
   readonly totalBytes: number;
@@ -19,9 +15,9 @@ export class BoundedText {
 
   /**
    * @param maxChars Finite positive cap keeps only the last N chars.
-   *   `Infinity` / `Number.POSITIVE_INFINITY` (default) keeps everything.
+   *   Defaults to 256 KiB; use Infinity only in explicitly controlled tests.
    */
-  constructor(private readonly maxChars: number = Number.POSITIVE_INFINITY) {
+  constructor(private readonly maxChars: number = 256 * 1024) {
     if (!(this.maxChars > 0)) throw new RangeError("maxChars must be positive");
   }
 
@@ -38,11 +34,12 @@ export class BoundedText {
     this.tailBuf = combined.slice(overflow);
   }
 
-  /** Replace the buffer with an authoritative full body (never truncated). */
+  /** Replace with an authoritative body while preserving the configured cap. */
   replace(text: string): void {
-    this.tailBuf = text;
-    this.total = Buffer.byteLength(text, "utf8");
+    this.tailBuf = "";
+    this.total = 0;
     this.dropped = 0;
+    this.append(text);
   }
 
   get tail(): string {
@@ -71,22 +68,33 @@ export class BoundedText {
   }
 }
 
-/**
- * Per-tool-call output spool. Default is unbounded so the UI never loses
- * bytes. Full artifacts are still written to disk for persistence/export.
- */
+
 export class OutputSpool {
   private readonly byTool = new Map<ToolCallId, BoundedText>();
 
-  /** @param maxCharsPerTool Default Infinity — keep full output. */
-  constructor(private readonly maxCharsPerTool = Number.POSITIVE_INFINITY) {}
+  /** Finite production defaults; full bodies remain available in tool artifacts. */
+  constructor(
+    private readonly maxCharsPerTool = 256 * 1024,
+    private readonly maxTools = 128,
+  ) {
+    if (!Number.isInteger(maxTools) || maxTools <= 0) throw new RangeError("maxTools must be positive");
+  }
+
+  private bufferFor(toolCallId: ToolCallId): BoundedText {
+    let buffer = this.byTool.get(toolCallId);
+    if (buffer) return buffer;
+    while (this.byTool.size >= this.maxTools) {
+      const oldest = this.byTool.keys().next().value as ToolCallId | undefined;
+      if (oldest === undefined) break;
+      this.byTool.delete(oldest);
+    }
+    buffer = new BoundedText(this.maxCharsPerTool);
+    this.byTool.set(toolCallId, buffer);
+    return buffer;
+  }
 
   append(toolCallId: ToolCallId, chunk: string): OutputChunkRef {
-    let buffer = this.byTool.get(toolCallId);
-    if (!buffer) {
-      buffer = new BoundedText(this.maxCharsPerTool);
-      this.byTool.set(toolCallId, buffer);
-    }
+    const buffer = this.bufferFor(toolCallId);
     buffer.append(chunk);
     return {
       toolCallId,
@@ -95,16 +103,9 @@ export class OutputSpool {
     };
   }
 
-  /**
-   * Set the full authoritative body after a tool finishes (replaces any live
-   * stream so the pager never shows a truncated mid-run preview).
-   */
+  
   replace(toolCallId: ToolCallId, text: string): OutputChunkRef {
-    let buffer = this.byTool.get(toolCallId);
-    if (!buffer) {
-      buffer = new BoundedText(this.maxCharsPerTool);
-      this.byTool.set(toolCallId, buffer);
-    }
+    const buffer = this.bufferFor(toolCallId);
     buffer.replace(text);
     return {
       toolCallId,

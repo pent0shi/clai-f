@@ -246,15 +246,24 @@ export function applyAppEvent(state: TranscriptState, event: AnyAppEvent): Trans
   if (event.sequence <= state.lastSequence) return state;
   const withSeq = withSequence(state, event.sequence);
   switch (event.type) {
-    case "turn-started":
+    case "turn-started": {
+      // Backend-only directives (implement/revision) pass displayPrompt=null.
+      const display =
+        event.payload.displayPrompt !== undefined
+          ? event.payload.displayPrompt
+          : event.payload.prompt;
+      if (display === null || display === "") {
+        return withSeq;
+      }
       return appendItem(withSeq, {
         id: `user-${event.id}`,
         sequence: event.sequence,
         turnId: event.turnId,
         timestamp: event.timestamp,
         kind: "user",
-        text: event.payload.prompt,
+        text: display,
       });
+    }
 
     case "status":
       return { ...withSeq, runningStatus: event.payload.text };
@@ -314,6 +323,7 @@ export function applyAppEvent(state: TranscriptState, event: AnyAppEvent): Trans
         artifactPath: undefined,
         reason: undefined,
         outputBytes: 0,
+        fileChanges: undefined,
       };
       return {
         ...appendItem(cleaned, item),
@@ -353,6 +363,7 @@ export function applyAppEvent(state: TranscriptState, event: AnyAppEvent): Trans
         exitCode: event.payload.exitCode,
         summary: event.payload.summary,
         artifactPath: event.payload.artifactPath,
+        fileChanges: event.payload.fileChanges ?? item.fileChanges,
       }));
 
     case "tool-blocked":

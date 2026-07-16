@@ -3,7 +3,7 @@
  * Confirmation surface (CORE-002, PICK-002, V2-073).
  *
  * Docked above the composer by default — compact action bar, not a full-screen
- * black modal. Keys: y/n (or r for reset, i/d/p for plan).
+ * black modal. Keys: y/n (or r for reset, i/d/p/s for plan).
  */
 
 import type { ReactNode } from "react";
@@ -43,11 +43,21 @@ export function ConfirmModal(props: ConfirmModalProps): ReactNode {
       else if (chord === "escape") services.overlay.answerConfirm(false);
       else return;
     } else if (request.kind === "plan") {
-      if (chord === "y" || chord === "i") services.overlay.answerConfirm(true);
-      else if (chord === "n" || chord === "d" || chord === "escape") {
-        services.overlay.answerConfirm(false);
-      } else if (chord === "p") onViewPlan?.();
-      else return;
+      // Only explicit decision keys — free-text suggestions use `s` then composer.
+      if (chord === "y" || chord === "i" || chord === "enter") {
+        services.overlay.answerPlanConfirm("implement");
+      } else if (chord === "n" || chord === "d") {
+        services.overlay.answerPlanConfirm("discard");
+      } else if (chord === "s") {
+        services.overlay.answerPlanConfirm("suggest");
+      } else if (chord === "p") {
+        onViewPlan?.();
+      } else if (chord === "escape") {
+        // Dismiss only — leave draft plan pending (do not discard)
+        services.overlay.answerPlanConfirm("dismiss");
+      } else {
+        return;
+      }
     } else {
       if (chord === "y") services.overlay.answerConfirm(true);
       else if (chord === "n" || chord === "escape") {
@@ -70,7 +80,7 @@ export function ConfirmModal(props: ConfirmModalProps): ReactNode {
     request.kind === "reset"
       ? "r confirm  ·  esc cancel"
       : request.kind === "plan"
-        ? "y/i implement  ·  n/d discard  ·  p view plan  ·  esc cancel"
+        ? "y/i implement  ·  s suggest  ·  p view  ·  n/d discard  ·  esc dismiss"
         : request.kind === "continue"
           ? "y continue  ·  n stop  ·  esc cancel"
           : "y approve  ·  n deny  ·  esc cancel";

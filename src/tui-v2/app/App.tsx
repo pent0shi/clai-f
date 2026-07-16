@@ -73,6 +73,7 @@ export function App(): ReactNode {
   useEffect(() => {
     if (!plan) {
       seenPlanKey.current = undefined;
+      setPlanVisible(false);
       return;
     }
     const key = `${plan.sessionId}:${plan.updatedAt}`;
@@ -172,26 +173,7 @@ export function App(): ReactNode {
         break;
       case "app.toggle-plan":
         key.preventDefault();
-        // If the panel is about to open and we have no in-memory plan, try
-        // loading the plan for this session from disk (history resume, or
-        // plan created before a restart).
-        setPlanVisible((v) => {
-          const next = !v;
-          if (next && !services.plan.current()) {
-            void services.plan
-              .load(services.session.sessionId)
-              .then((loaded) => {
-                if (!loaded) {
-                  services.session.notice(
-                    "info",
-                    "no plan for this session yet",
-                  );
-                }
-              })
-              .catch(() => undefined);
-          }
-          return next;
-        });
+        toggleTasksPane();
         break;
       case "app.jobs":
         key.preventDefault();
@@ -305,6 +287,23 @@ export function App(): ReactNode {
     transcriptScrollPort.stopAutoScroll();
   }
 
+  function toggleTasksPane(): void {
+    // Same path as Ctrl+H — opening loads the active plan from disk when the
+    // in-memory projection is empty.
+    setPlanVisible((visible) => {
+      const next = !visible;
+      if (next && !services.plan.current()) {
+        void services.plan
+          .load(services.session.sessionId)
+          .then((loaded) => {
+            if (!loaded) services.session.notice("info", "no tasks for this session yet");
+          })
+          .catch(() => undefined);
+      }
+      return next;
+    });
+  }
+
   return (
     <box
       style={{
@@ -353,15 +352,15 @@ export function App(): ReactNode {
           </box>
           {layout.plan.placement === "split" ? (
             <box
-              title=" Plan "
+              title=" Tasks "
               border
               borderStyle="rounded"
               style={{
                 width: layout.plan.width,
                 height: "100%",
                 flexShrink: 0,
-                // CLAI wordmark top-of-"I" magenta (same as agent card frame).
-                borderColor: theme.magenta,
+                // Match composer input border so Tasks and input read as one chrome.
+                borderColor: theme.inputBorder,
                 backgroundColor: theme.statusBackground,
               }}
               onMouseDown={() => services.focus.focusRegion("plan")}
@@ -404,44 +403,25 @@ export function App(): ReactNode {
           seedDraft={composerSeed}
         />
 
-        {layout.status.height > 0 ? (
-          <StatusLine
-            session={services.session}
-            theme={theme}
-            activity={transcript.runningStatus}
-            width={contentInnerWidth}
-            planVisible={planVisible}
-            thinkingExpanded={transcript.expandThinkingGlobal}
-            outputExpanded={transcript.expandOutputGlobal}
-            onToggleThinking={() => services.transcript.toggleThinkingGlobal()}
-            onToggleOutput={() => services.transcript.toggleOutputGlobal()}
-            onTogglePlan={() => {
-              // Same path as Ctrl+H — open loads plan from disk when empty.
-              setPlanVisible((v) => {
-                const next = !v;
-                if (next && !services.plan.current()) {
-                  void services.plan
-                    .load(services.session.sessionId)
-                    .then((loaded) => {
-                      if (!loaded) {
-                        services.session.notice(
-                          "info",
-                          "no plan for this session yet",
-                        );
-                      }
-                    })
-                    .catch(() => undefined);
-                }
-                return next;
-              });
-            }}
-          />
-        ) : null}
+        <StatusLine
+          session={services.session}
+          mode={session.mode}
+          theme={theme}
+          activity={transcript.runningStatus}
+          width={contentInnerWidth}
+          hasActivePlan={Boolean(plan)}
+          planVisible={planVisible}
+          thinkingExpanded={transcript.expandThinkingGlobal}
+          outputExpanded={transcript.expandOutputGlobal}
+          onToggleThinking={() => services.transcript.toggleThinkingGlobal()}
+          onToggleOutput={() => services.transcript.toggleOutputGlobal()}
+          onTogglePlan={toggleTasksPane}
+        />
       </box>
 
       {layout.plan.placement === "overlay" && planVisible ? (
         <box
-          title=" Plan "
+          title=" Tasks "
           border
           borderStyle="rounded"
           style={{
@@ -452,8 +432,8 @@ export function App(): ReactNode {
             right: horizontalPadding,
             width: planOverlayWidth(width),
             height: Math.max(12, Math.floor(height * 0.72)),
-            // CLAI wordmark top-of-"I" magenta (same as agent card frame).
-            borderColor: theme.magenta,
+            // Match composer input border so Tasks and input read as one chrome.
+            borderColor: theme.inputBorder,
             backgroundColor: theme.statusBackground,
             zIndex: 50,
           }}

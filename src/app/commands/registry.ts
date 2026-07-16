@@ -7,12 +7,7 @@ import {
   type CommandInvocation,
 } from "./command.js";
 
-/**
- * Canonical command -> alias names. The legacy catalogue lists aliases as
- * separate rows ("alias for /X"); here they collapse onto one canonical
- * command so menus, help, keybindings, and dispatch all derive from a single
- * definition (CMD-002, FEATURE_PARITY "aliases point to the same handler").
- */
+
 const ALIAS_GROUPS: Record<string, readonly string[]> = {
   provider: ["use"],
   search: ["search-provider"],
@@ -28,11 +23,7 @@ export interface CommandHelpEntry {
   readonly aliases: readonly string[];
 }
 
-/**
- * One typed source of truth for slash commands. Registration is closed once
- * seeded; handlers are attached by whichever frontend consumes the registry so
- * UI-coupled handler bodies are not duplicated across legacy and v2.
- */
+
 export class CommandRegistry {
   private readonly byName = new Map<string, CommandDefinition>();
   private readonly aliasToName = new Map<string, string>();
@@ -124,11 +115,7 @@ export class CommandRegistry {
     return undefined;
   }
 
-  /**
-   * True when a submitted line should be treated as a slash-command attempt
-   * (known name, unique prefix, or command-shaped word) rather than a prompt.
-   * Paths like `/Users/...` return false.
-   */
+  
   looksLikeCommand(line: string): boolean {
     if (!line.startsWith("/") || line.length < 2) return false;
     const firstToken = line.slice(1).split(/\s/)[0] ?? "";
@@ -159,10 +146,7 @@ export class CommandRegistry {
   }
 }
 
-/**
- * Seed a registry from the shared legacy command catalogue so v2 and the
- * classic REPL agree on the command set without a second hand-maintained list.
- */
+
 export function buildDefaultCommandRegistry(): CommandRegistry {
   const registry = new CommandRegistry();
   const aliasNames = new Set<string>();

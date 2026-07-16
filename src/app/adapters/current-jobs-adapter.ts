@@ -6,6 +6,7 @@ export function createCurrentJobsPort(manager: JobManager = jobManager): JobsPor
   return {
     list: () => manager.listJobs(),
     running: () => manager.getRunningJobs(),
+    recent: (limit) => manager.getRecentJobs(limit),
     get: (id) => manager.getJob(id),
     tail: (id, bytes) => manager.tailJob(id, bytes),
     stop: (id) => manager.stopJob(id),

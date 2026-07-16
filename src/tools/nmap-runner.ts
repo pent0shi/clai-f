@@ -1,7 +1,11 @@
 import { platform } from "node:os";
 import { commandAvailable } from "../os/pkgmgr.js";
 import type { ToolResult } from "../types.js";
-import { spawnArgv } from "./shell.js";
+import { formatSudoStdinPassword } from "./elevated-shell.js";
+import {
+  getAllowInteractiveStdinInherit,
+  spawnArgv,
+} from "./shell.js";
 import {
   isNmapSingleHostTarget,
   looksLikeNmapNoHostsUp,
@@ -70,6 +74,53 @@ function canInteractiveSudo(): boolean {
  *   4. If a run still looks like "host down / 0 hosts up" without -Pn, retry
  *      once with -Pn before returning.
  */
+export type NmapScanDepth = "standard" | "deep" | "full";
+
+export interface NmapTimeoutPolicy {
+  readonly depth: NmapScanDepth;
+  readonly timeoutMs: number;
+  readonly source: "profile" | "environment";
+}
+
+const NMAP_TIMEOUTS_MS: Readonly<Record<NmapScanDepth, number>> = {
+  standard: 5 * 60_000,
+  deep: 15 * 60_000,
+  full: 45 * 60_000,
+};
+
+/** Resolve a resource-aware timeout from the effective Nmap argv.
+ * CLAI_NMAP_TIMEOUT_MS is an operator override, primarily for CI and tightly
+ * controlled environments; invalid/unsafe values are ignored.
+ */
+export function resolveNmapTimeoutPolicy(
+  argv: readonly string[],
+  env: NodeJS.ProcessEnv = process.env,
+): NmapTimeoutPolicy {
+  const configured = Number(env.CLAI_NMAP_TIMEOUT_MS);
+  if (Number.isSafeInteger(configured) && configured >= 30_000) {
+    return { depth: inferNmapScanDepth(argv), timeoutMs: configured, source: "environment" };
+  }
+
+  const depth = inferNmapScanDepth(argv);
+  return { depth, timeoutMs: NMAP_TIMEOUTS_MS[depth], source: "profile" };
+}
+
+function inferNmapScanDepth(argv: readonly string[]): NmapScanDepth {
+  if (argv.includes("-p-")) return "full";
+  const portsIndex = argv.findIndex((arg) => arg === "-p");
+  const portSpec = portsIndex >= 0 ? argv[portsIndex + 1] ?? "" : "";
+  if (/^(?:1-65535|1-65534|0-65535)$/.test(portSpec)) return "full";
+  const explicitPorts = portSpec ? portSpec.split(",").length : 0;
+
+  const topPortsIndex = argv.findIndex((arg) => arg === "--top-ports");
+  const topPorts = topPortsIndex >= 0 ? Number(argv[topPortsIndex + 1]) : 0;
+  const hasDeepEnumeration = argv.some((arg) =>
+    arg === "-sV" || arg === "-sC" || arg === "-A" || arg.startsWith("--script"),
+  );
+  if (topPorts > 1_000 || explicitPorts > 1_000 || hasDeepEnumeration) return "deep";
+  return "standard";
+}
+
 export async function runNmapScan(
   argv: string[],
   options?: ToolRunOptions,
@@ -94,17 +145,18 @@ export async function runNmapScan(
 
   if (needsPrivilege && prefix) {
     if (prefix.command === "sudo") {
-      // Authenticate in a short, dedicated process. In the TUI, never inherit
-      // stdin for the long nmap scan: pipe the already-entered password to
-      // sudo so Ink keeps receiving Escape/Ctrl+C while nmap is running.
+      // Never inherit stdin in OpenTUI (allowInteractiveStdinInherit=false):
+      // that freezes the UI with a raw "Password:" prompt. Prefer secret modal
+      // + sudo -S; classic REPL may still use TTY only when inherit is allowed.
       const useSecret = Boolean(options?.requestSecret);
-      const useTty = !useSecret && canInteractiveSudo();
+      const useTty =
+        !useSecret &&
+        canInteractiveSudo() &&
+        getAllowInteractiveStdinInherit();
 
       if (!useSecret && !useTty) {
-        // No password UI and no TTY — interactive sudo would hang or fail
-        // with "a terminal is required". Skip straight to connect-scan.
         options?.onOutput?.(
-          "\nCannot prompt for sudo password here (no secret UI / no TTY). Using an unprivileged TCP connect scan (-sT -Pn).\n",
+          "\nCannot prompt for sudo password in this UI without freezing it. Using an unprivileged TCP connect scan (-sT -Pn).\n",
           "stderr",
         );
       } else {
@@ -114,36 +166,62 @@ export async function runNmapScan(
             : "\nAdministrator access is required for a stealth scan. Enter your sudo password below; Ctrl+C cancels.\n",
           "stdout",
         );
-        let auth: ToolResult;
-        let sudoPassword: string | undefined;
         if (useSecret && options?.requestSecret) {
           const password = await options.requestSecret({
             title: "Administrator access",
             prompt:
-              "Enter your password for sudo (nmap raw-socket scan). It is sent only to sudo and is never stored.",
+              "Enter your password for sudo (nmap raw-socket scan). It is sent only to sudo and is never stored. Esc cancels.",
           });
           if (password === undefined) {
-            return {
-              ok: false,
-              output:
-                "Administrator authentication cancelled. Re-run and enter your password, or use profile.scanType \"tcp\" for an unprivileged connect scan.",
-              exitCode: 130,
-            };
+            options?.onOutput?.(
+              "\nSudo cancelled — falling back to unprivileged TCP connect scan (-sT -Pn).\n",
+              "stderr",
+            );
+          } else {
+            const stdinPassword = formatSudoStdinPassword(password);
+            // Validate password first for a clear error (wrong password →
+            // connect-scan fallback without starting nmap).
+            const auth = await spawnArgv({
+              command: "sudo",
+              argv: ["-S", "-p", "", "-v"],
+              stdinText: stdinPassword,
+              timeoutMs: 30_000,
+              signal: options.signal,
+              onOutput: options.onOutput,
+              noArtifact: true,
+              interactiveStdin: false,
+            });
+            if (options?.signal?.aborted || auth.exitCode === 130) {
+              options?.onOutput?.(
+                "\nSudo aborted — falling back to unprivileged TCP connect scan (-sT -Pn).\n",
+                "stderr",
+              );
+            } else if (auth.ok) {
+              // Pipe the password into the real scan. Do NOT use `sudo -n`
+              // after -v: OpenTUI spawns detached non-TTY children, so the
+              // macOS sudo timestamp ticket does not stick and you get
+              // "access confirmed" then "sudo: a password is required".
+              attempts.push({
+                command: "sudo",
+                argv: ["-S", "-p", "", "nmap", ...scanArgv],
+                stdinText: stdinPassword,
+                interactiveStdin: false,
+                note: "Administrator access confirmed. Starting stealth scan (ESC cancels).",
+              });
+            } else {
+              const detail = auth.output?.trim()
+                ? `\n${auth.output.trim().slice(0, 400)}`
+                : "";
+              options?.onOutput?.(
+                `\nSudo authentication failed; using an unprivileged TCP connect scan instead.${detail}\n`,
+                "stderr",
+              );
+            }
           }
-          sudoPassword = password;
-          auth = await spawnArgv({
-            command: "sudo",
-            argv: ["-S", "-p", "", "-v"],
-            stdinText: `${password}\n`,
-            timeoutMs: 30_000,
-            signal: options.signal,
-            onOutput: options.onOutput,
-            noArtifact: true,
-            interactiveStdin: false,
-          });
         } else {
-          // Classic REPL: let sudo read directly from its controlling terminal.
-          auth = await spawnArgv({
+          // Classic line REPL only (inherit allowed). TTY -v creates a
+          // ticket that -n can use because both share the same terminal.
+          const auth = await spawnArgv({
             command: "sudo",
             argv: [...prefix.argv, "-v"],
             timeoutMs: 120_000,
@@ -152,39 +230,43 @@ export async function runNmapScan(
             interactiveStdin: true,
             noArtifact: true,
           });
-        }
-        if (options?.signal?.aborted || auth.exitCode === 130) return auth;
-        if (auth.ok) {
-          attempts.push({
-            command: "sudo",
-            // -n after a successful -v uses the cached credential without
-            // another password prompt (and without needing another stdin).
-            argv: useSecret
-              ? ["-S", "-p", "", "nmap", ...scanArgv]
-              : ["-n", "nmap", ...scanArgv],
-            stdinText: useSecret ? `${sudoPassword ?? ""}\n` : undefined,
-            note: "Administrator access confirmed. Starting stealth scan (ESC cancels).",
-          });
-        } else {
-          const detail = auth.output?.trim()
-            ? `\n${auth.output.trim().slice(0, 400)}`
-            : "";
-          options?.onOutput?.(
-            `\nSudo authentication failed or was not completed; using an unprivileged TCP connect scan instead.${detail}\n`,
-            "stderr",
-          );
+          if (options?.signal?.aborted || auth.exitCode === 130) return auth;
+          if (auth.ok) {
+            attempts.push({
+              command: "sudo",
+              argv: ["-n", "nmap", ...scanArgv],
+              interactiveStdin: false,
+              note: "Administrator access confirmed. Starting stealth scan (ESC cancels).",
+            });
+          } else {
+            const detail = auth.output?.trim()
+              ? `\n${auth.output.trim().slice(0, 400)}`
+              : "";
+            options?.onOutput?.(
+              `\nSudo authentication failed or was not completed; using an unprivileged TCP connect scan instead.${detail}\n`,
+              "stderr",
+            );
+          }
         }
       }
     } else if (prefix.command) {
-      attempts.push({
-        command: prefix.command,
-        argv: [...prefix.argv, "nmap", ...scanArgv],
-        interactiveStdin: true,
-        note: `Running a stealth scan with ${prefix.command} (you may be prompted for your password).`,
-      });
+      // doas/gsudo: never inherit in TUI — fall through to connect scan.
+      if (getAllowInteractiveStdinInherit()) {
+        attempts.push({
+          command: prefix.command,
+          argv: [...prefix.argv, "nmap", ...scanArgv],
+          interactiveStdin: true,
+          note: `Running a stealth scan with ${prefix.command} (you may be prompted for your password).`,
+        });
+      } else {
+        options?.onOutput?.(
+          `\n${prefix.command} would need a TTY password prompt (blocked in this UI). Using unprivileged TCP connect scan (-sT -Pn).\n`,
+          "stderr",
+        );
+      }
     } else {
       // Already root.
-      attempts.push({ command: "nmap", argv: scanArgv });
+      attempts.push({ command: "nmap", argv: scanArgv, interactiveStdin: false });
     }
     // Fallback: unprivileged connect scan if elevation fails/declines.
     const connectArgv = withNmapSkipDiscovery(toConnectScanArgv(scanArgv));
@@ -208,6 +290,12 @@ export async function runNmapScan(
     attempts.push({ command: "nmap", argv: scanArgv });
   }
 
+  const timeoutPolicy = resolveNmapTimeoutPolicy(scanArgv);
+  options?.onOutput?.(
+    `[nmap] ${timeoutPolicy.depth} scan timeout: ${Math.round(timeoutPolicy.timeoutMs / 60_000)}m (${timeoutPolicy.source})\n`,
+    "stdout",
+  );
+
   let last: ToolResult | undefined;
   for (let i = 0; i < attempts.length; i += 1) {
     const attempt = attempts[i]!;
@@ -219,7 +307,7 @@ export async function runNmapScan(
       command: attempt.command,
       argv: attempt.argv,
       stdinText: attempt.stdinText,
-      timeoutMs: 300_000,
+      timeoutMs: timeoutPolicy.timeoutMs,
       signal: options?.signal,
       onOutput: options?.onOutput,
       ...(attempt.interactiveStdin !== undefined
@@ -242,7 +330,7 @@ export async function runNmapScan(
         command: attempt.command,
         argv: withNmapSkipDiscovery(attempt.argv),
         stdinText: attempt.stdinText,
-        timeoutMs: 300_000,
+        timeoutMs: timeoutPolicy.timeoutMs,
         signal: options?.signal,
         onOutput: options?.onOutput,
         ...(attempt.interactiveStdin !== undefined

@@ -10,8 +10,12 @@
 
 import type { FocusController, OverlayContext } from "./focus-controller.js";
 import type { PickerOption } from "../rendering/picker-filter.js";
+import type { ArtifactPagerSource } from "../rendering/artifact-pager-source.js";
 
 export type ConfirmKind = "tool" | "pentest" | "reset" | "continue" | "plan" | "switch";
+
+/** Rich outcome for plan-ready confirm (not a boolean y/n only). */
+export type PlanConfirmResult = "implement" | "discard" | "suggest" | "dismiss";
 
 export interface ConfirmRequest {
   readonly kind: ConfirmKind;
@@ -46,12 +50,21 @@ export type OverlayState =
   | {
       readonly kind: "confirm";
       readonly request: ConfirmRequest;
-      readonly resolve: (ok: boolean) => void;
+      /** Boolean for tool/pentest/etc.; plan uses PlanConfirmResult via answerPlanConfirm. */
+      readonly resolve: (ok: boolean | PlanConfirmResult) => void;
       readonly onViewPlan?: (() => void) | undefined;
+      readonly planResolve?: ((result: PlanConfirmResult) => void) | undefined;
     }
   | { readonly kind: "secret"; readonly request: SecretRequestView; readonly resolve: (value: string | undefined) => void }
   | { readonly kind: "prompt-actions"; readonly request: PromptActionsRequest }
-  | { readonly kind: "pager"; readonly title: string; readonly body: string }
+  | {
+      readonly kind: "pager";
+      readonly title: string;
+      readonly body: string;
+      readonly source?: ArtifactPagerSource | undefined;
+      /** Path for syntax highlighting in file-diff modals. */
+      readonly highlightPath?: string | undefined;
+    }
   | { readonly kind: "jobs" };
 
 export type OverlayListener = () => void;
@@ -89,11 +102,24 @@ export class OverlayController {
    * plan detail without resolving the confirm (F-021); closing the pager
    * restores the suspended confirm. Any other open overlay is still rejected.
    */
-  openPager(title: string, body: string): boolean {
-    if (this.state.kind === "confirm" && this.state.request.kind === "plan" && !this.suspended) {
-      return this.suspendUnder({ kind: "pager", title, body }, "pager");
-    }
-    return this.open({ kind: "pager", title, body }, "pager");
+  openPager(
+    title: string,
+    body: string,
+    source?: ArtifactPagerSource,
+    highlightPath?: string,
+  ): boolean {
+    const pager = {
+      kind: "pager" as const,
+      title,
+      body,
+      ...(source ? { source } : {}),
+      ...(highlightPath ? { highlightPath } : {}),
+    };
+    const opened = this.state.kind === "confirm" && this.state.request.kind === "plan" && !this.suspended
+      ? this.suspendUnder(pager, "pager")
+      : this.open(pager, "pager");
+    if (!opened) source?.dispose();
+    return opened;
   }
 
   openJobs(): boolean {
@@ -107,8 +133,45 @@ export class OverlayController {
   /** Resolves `false` if a blocking overlay was already open rather than hanging. */
   openConfirm(request: ConfirmRequest, onViewPlan?: () => void): Promise<boolean> {
     return new Promise((resolve) => {
-      const opened = this.open({ kind: "confirm", request, resolve, onViewPlan }, "modal");
+      const opened = this.open(
+        {
+          kind: "confirm",
+          request,
+          resolve: (ok) => resolve(ok === true || ok === "implement"),
+          onViewPlan,
+        },
+        "modal",
+      );
       if (!opened) resolve(false);
+    });
+  }
+
+  /**
+   * Plan-ready confirm with implement / discard / suggest / dismiss.
+   * Resolves `dismiss` if another overlay was already open.
+   */
+  openPlanConfirm(
+    request: ConfirmRequest,
+    onViewPlan?: () => void,
+  ): Promise<PlanConfirmResult> {
+    return new Promise((resolve) => {
+      const planResolve = (result: PlanConfirmResult): void => resolve(result);
+      const opened = this.open(
+        {
+          kind: "confirm",
+          request: { ...request, kind: "plan" },
+          resolve: (ok) => {
+            // Backward-compat path if something calls answerConfirm(true/false)
+            if (ok === true) resolve("implement");
+            else if (ok === false) resolve("discard");
+            else resolve(ok);
+          },
+          onViewPlan,
+          planResolve,
+        },
+        "modal",
+      );
+      if (!opened) resolve("dismiss");
     });
   }
 
@@ -123,10 +186,26 @@ export class OverlayController {
   answerConfirm(ok: boolean): void {
     const confirm = this.activeConfirm();
     if (!confirm) return;
+    // Plan confirm with rich resolver: map boolean to implement/discard
+    if (confirm.request.kind === "plan" && confirm.planResolve) {
+      this.answerPlanConfirm(ok ? "implement" : "discard");
+      return;
+    }
     const { resolve } = confirm;
     this.suspended = undefined;
     this.forceClose();
     resolve(ok);
+  }
+
+  answerPlanConfirm(result: PlanConfirmResult): void {
+    const confirm = this.activeConfirm();
+    if (!confirm || confirm.request.kind !== "plan") return;
+    const planResolve = confirm.planResolve;
+    const { resolve } = confirm;
+    this.suspended = undefined;
+    this.forceClose();
+    if (planResolve) planResolve(result);
+    else resolve(result === "implement");
   }
 
   answerSecret(value: string | undefined): void {
@@ -153,9 +232,19 @@ export class OverlayController {
   }
 
   dispose(): void {
-    if (this.suspended?.kind === "confirm") this.suspended.resolve(false);
-    else if (this.state.kind === "confirm") this.state.resolve(false);
-    else if (this.state.kind === "secret") this.state.resolve(undefined);
+    if (this.suspended?.kind === "confirm") {
+      if (this.suspended.request.kind === "plan" && this.suspended.planResolve) {
+        this.suspended.planResolve("dismiss");
+      } else {
+        this.suspended.resolve(false);
+      }
+    } else if (this.state.kind === "confirm") {
+      if (this.state.request.kind === "plan" && this.state.planResolve) {
+        this.state.planResolve("dismiss");
+      } else {
+        this.state.resolve(false);
+      }
+    } else if (this.state.kind === "secret") this.state.resolve(undefined);
     this.suspended = undefined;
     this.forceClose();
     this.listeners.clear();
@@ -199,6 +288,7 @@ export class OverlayController {
   }
 
   private restoreSuspended(): void {
+    if (this.state.kind === "pager") this.state.source?.dispose();
     const previous = this.suspended;
     this.suspended = undefined;
     this.closeFocus?.();
@@ -225,13 +315,19 @@ export class OverlayController {
       this.state = previous;
     } catch {
       this.state = NONE;
-      if (previous.kind === "confirm") previous.resolve(false);
-      else if (previous.kind === "secret") previous.resolve(undefined);
+      if (previous.kind === "confirm") {
+        if (previous.request.kind === "plan" && previous.planResolve) {
+          previous.planResolve("dismiss");
+        } else {
+          previous.resolve(false);
+        }
+      } else if (previous.kind === "secret") previous.resolve(undefined);
     }
     this.notify();
   }
 
   private forceClose(): void {
+    if (this.state.kind === "pager") this.state.source?.dispose();
     this.state = NONE;
     this.closeFocus?.();
     this.closeFocus = undefined;

@@ -13,10 +13,7 @@ export function toOllamaTools(defs: ToolDefinition[]) {
   return toOpenAiTools(defs);
 }
 
-/**
- * Prefer OpenAI-style tool roles. If a host rejects them, the runner falls
- * back via sticky text-only.
- */
+
 export function toOllamaToolMessages(
   messages: ChatMessage[],
 ): Array<Record<string, unknown>> {

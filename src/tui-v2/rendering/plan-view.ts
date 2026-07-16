@@ -223,7 +223,9 @@ export function formatPlanPagerDocument(plan: SessionPlan): string {
   lines.push(RULE);
   lines.push("");
   if (plan.status === "draft") {
-    lines.push("Next: /implement to approve and run, or refine the plan in chat.");
+    lines.push(
+      "Next: y/i or /implement to run · s then type feedback to revise · n discard · or refine in chat.",
+    );
   } else if (plan.status === "approved" || plan.status === "in_progress") {
     lines.push("Plan is approved — the agent marks tasks as they complete.");
   } else if (plan.status === "completed") {

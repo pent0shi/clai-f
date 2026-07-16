@@ -103,7 +103,9 @@ export const slashCommands: SlashCommand[] = [
   { command: "/context", description: "show estimated context size" },
   {
     command: "/plan",
-    description: "view the current session plan (also Ctrl+P)",
+    usage: "[view|off]",
+    description:
+      "enter plan mode; use /plan view or Ctrl+P to view current tasks",
   },
   {
     command: "/implement",
@@ -298,15 +300,7 @@ const knownSlashNames = new Set(
   slashCommands.map((c) => c.command.slice(1).toLowerCase()),
 );
 
-/**
- * Decide whether a line that starts with "/" is actually a slash command
- * versus an absolute filesystem path the user typed or drag-dropped (e.g.
- * `/Users/me/Desktop/Screenshot.png`). A real command is "/" + a single
- * known command word (optionally followed by arguments). An absolute path
- * has extra "/" segments in its first token and won't match a known command,
- * so we route it to the normal prompt path where expandMentions() turns it
- * into a file attachment.
- */
+
 export function looksLikeSlashCommand(line: string): boolean {
   if (!line.startsWith("/") || line.length < 2) return false;
   // First whitespace-delimited token, minus the leading slash.
@@ -315,15 +309,9 @@ export function looksLikeSlashCommand(line: string): boolean {
   // looks like a filename with an extension) is never a command.
   if (firstToken.includes("/") || firstToken.includes("\\")) return false;
   const name = firstToken.toLowerCase();
-  // Exact match against a known command, or a unique prefix of one (so
-  // partial typing like "/imp" still routes to the command handler, which
-  // already resolves abbreviations). Unknown words like a single-segment
-  // path token still fall through to handleSlash's "unknown command" help,
-  // which is the historical behavior for genuine typos.
+  
   if (knownSlashNames.has(name)) return true;
-  // Only treat as a (mistyped) command when it has no path/extension shape.
-  // "Users" alone (from "/Users") would be caught above by the "/" check,
-  // so here we accept bare alpha words as command attempts.
+  
   return /^[a-z][a-z0-9-]*$/i.test(firstToken);
 }
 
@@ -334,12 +322,9 @@ export function slashCommandLabel(command: SlashCommand): string {
 }
 
 export function slashCommandFilter(line: string): string | null {
-  // Show the menu immediately on '/' so the user can see available commands,
-  // but let Enter submit a raw '/' unless they explicitly navigate the menu.
+  
   if (!line.startsWith("/") || line.length < 1 || /\s/.test(line)) return null;
-  // Don't show the command menu for an absolute path the user is typing or
-  // drag-dropped (e.g. "/Users/me/file.png"): a path's first token has more
-  // "/" or backslash escapes in it. Those go to the normal prompt path.
+ 
   const firstToken = line.slice(1).split(/\s/)[0] ?? "";
   if (firstToken.includes("/") || firstToken.includes("\\")) return null;
   return line.slice(1).toLowerCase();

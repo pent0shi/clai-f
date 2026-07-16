@@ -1,18 +1,28 @@
 import type {
   ChatImage,
   ChatMessage,
+  Mode,
   ProviderId,
 } from "../../types.js";
+import type { Attachment } from "../../ui/mentions.js";
 import type { AgentEvent } from "../../agent/events.js";
 import type { SessionPolicy } from "../../agent/session-policy.js";
 import type { ConfirmationPort } from "./confirm-port.js";
 import type { SecretPort } from "./secret-port.js";
+import type { TurnOutcome } from "../../agent/turn-outcome.js";
 
 export interface RunTurnRequest {
   readonly prompt: string;
+  /**
+   * Text for the transcript YOU bubble. `null` hides the bubble (system
+   * implement/revision directives). Omit to show `prompt` as usual.
+   */
+  readonly displayPrompt?: string | null | undefined;
+  readonly mode: Mode;
   readonly provider?: ProviderId | undefined;
   readonly model?: string | undefined;
   readonly history?: readonly ChatMessage[] | undefined;
+  readonly attachments?: readonly Attachment[] | undefined;
   readonly images?: readonly ChatImage[] | undefined;
   readonly autoConfirm?: boolean | undefined;
   readonly maxSteps?: number | undefined;
@@ -29,8 +39,9 @@ export interface RunTurnHandlers {
 
 /**
  * The one agent implementation, consumed through structured events (CORE-001).
- * `runTurn` resolves with the final answer; events flow through `onEvent`.
+ * `runTurn` resolves with the authoritative structured outcome; rendering is a
+ * frontend concern and events flow through `onEvent`.
  */
 export interface AgentPort {
-  runTurn(request: RunTurnRequest, handlers: RunTurnHandlers): Promise<string>;
+  runTurn(request: RunTurnRequest, handlers: RunTurnHandlers): Promise<TurnOutcome>;
 }

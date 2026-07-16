@@ -1,0 +1,123 @@
+import { open, stat } from "node:fs/promises";
+
+export const DEFAULT_ARTIFACT_PAGE_BYTES = 64 * 1024;
+export const MAX_FULL_ARTIFACT_EXPORT_BYTES = 16 * 1024 * 1024;
+const MAX_PAGE_BYTES = 1024 * 1024;
+const SEARCH_CHUNK_BYTES = 64 * 1024;
+
+export interface ArtifactPage {
+  readonly body: string;
+  readonly offset: number;
+  readonly nextOffset: number;
+  readonly totalBytes: number;
+  readonly pageNumber: number;
+  readonly pageCount: number;
+}
+
+export interface ArtifactPagerSource {
+  readonly path: string;
+  readonly pageBytes: number;
+  readPage(offset: number): Promise<ArtifactPage>;
+  search(query: string, fromOffset?: number, reverse?: boolean): Promise<ArtifactPage | undefined>;
+  readAll(): Promise<string>;
+  dispose(): void;
+}
+
+export function createArtifactPagerSource(
+  path: string,
+  pageBytes = DEFAULT_ARTIFACT_PAGE_BYTES,
+): ArtifactPagerSource {
+  const boundedPageBytes = Math.max(1024, Math.min(MAX_PAGE_BYTES, Math.floor(pageBytes)));
+  let disposed = false;
+  const assertOpen = (): void => {
+    if (disposed) throw new Error("artifact pager source is disposed");
+  };
+
+  const readRange = async (offset: number, bytes: number): Promise<{ buffer: Buffer; total: number }> => {
+    assertOpen();
+    const info = await stat(path);
+    const start = Math.max(0, Math.min(Math.floor(offset), info.size));
+    const length = Math.max(0, Math.min(bytes, info.size - start));
+    const handle = await open(path, "r");
+    const buffer = Buffer.alloc(length);
+    try {
+      if (length > 0) await handle.read(buffer, 0, length, start);
+    } finally {
+      await handle.close();
+    }
+    return { buffer, total: info.size };
+  };
+
+  const readPage = async (offset: number): Promise<ArtifactPage> => {
+    const requested = Math.max(0, Math.floor(offset));
+    // Read a tiny overlap so UTF-8 code points split at a byte boundary are
+    // complete in at least one adjacent page. Navigation advances by the
+    // logical page size, so resident memory remains bounded.
+    const { buffer, total } = await readRange(requested, boundedPageBytes + 4);
+    let start = 0;
+    while (start < Math.min(4, buffer.length) && (buffer[start]! & 0xc0) === 0x80) start += 1;
+    const visible = buffer.subarray(start);
+    const pageCount = Math.max(1, Math.ceil(total / boundedPageBytes));
+    return {
+      body: new TextDecoder("utf-8", { fatal: false }).decode(visible),
+      offset: requested,
+      nextOffset: Math.min(total, requested + boundedPageBytes),
+      totalBytes: total,
+      pageNumber: Math.min(pageCount, Math.floor(requested / boundedPageBytes) + 1),
+      pageCount,
+    };
+  };
+
+  return {
+    path,
+    pageBytes: boundedPageBytes,
+    readPage,
+    async search(query, fromOffset = 0, reverse = false) {
+      assertOpen();
+      const needle = Buffer.from(query, "utf8");
+      if (needle.length === 0) return readPage(fromOffset);
+      const info = await stat(path);
+      if (!reverse) {
+        let offset = Math.max(0, Math.min(fromOffset, info.size));
+        let carry = Buffer.alloc(0);
+        while (offset < info.size) {
+          const { buffer } = await readRange(offset, SEARCH_CHUNK_BYTES);
+          const haystack = Buffer.concat([carry, buffer]);
+          const index = haystack.indexOf(needle);
+          if (index >= 0) {
+            const absolute = offset - carry.length + index;
+            return readPage(Math.max(0, absolute - Math.floor(boundedPageBytes / 2)));
+          }
+          if (buffer.length === 0) break;
+          carry = haystack.subarray(Math.max(0, haystack.length - needle.length + 1));
+          offset += buffer.length;
+        }
+        return undefined;
+      }
+      let end = Math.max(0, Math.min(fromOffset || info.size, info.size));
+      let carry = Buffer.alloc(0);
+      while (end > 0) {
+        const start = Math.max(0, end - SEARCH_CHUNK_BYTES);
+        const { buffer } = await readRange(start, end - start);
+        const haystack = Buffer.concat([buffer, carry]);
+        const index = haystack.lastIndexOf(needle);
+        if (index >= 0) return readPage(Math.max(0, start + index - Math.floor(boundedPageBytes / 2)));
+        carry = haystack.subarray(0, Math.min(needle.length - 1, haystack.length));
+        end = start;
+      }
+      return undefined;
+    },
+    async readAll() {
+      assertOpen();
+      const info = await stat(path);
+      if (info.size > MAX_FULL_ARTIFACT_EXPORT_BYTES) {
+        throw new Error(
+          `artifact is ${info.size.toLocaleString()} bytes; full copy/export is limited to ${MAX_FULL_ARTIFACT_EXPORT_BYTES.toLocaleString()} bytes. Page it in the UI or open ${path} directly.`,
+        );
+      }
+      const { buffer } = await readRange(0, info.size);
+      return buffer.toString("utf8");
+    },
+    dispose() { disposed = true; },
+  };
+}

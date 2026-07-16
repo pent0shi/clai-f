@@ -14,6 +14,7 @@ import { createCountingIdFactory } from "../../src/app/events/sequencer.js";
 import { SessionController } from "../../src/app/controllers/session-controller.js";
 import { PlanController } from "../../src/app/controllers/plan-controller.js";
 import { CompositeDisposable } from "../../src/app/controllers/disposable.js";
+import { createTurnOutcome, type TurnOutcome } from "../../src/agent/turn-outcome.js";
 
 const plan: SessionPlan = {
   sessionId: "sess-contract",
@@ -37,10 +38,15 @@ class ScriptedAgentPort implements AgentPort {
   async runTurn(
     _request: RunTurnRequest,
     handlers: RunTurnHandlers,
-  ): Promise<string> {
+  ): Promise<TurnOutcome> {
     for (const event of this.events) handlers.onEvent(event);
     handlers.onMessages?.(this.turnMessages);
-    return this.finalAnswer;
+    return createTurnOutcome({
+      status: "succeeded",
+      answer: this.finalAnswer,
+      steps: 1,
+      remainingCriteria: [],
+    });
   }
 }
 
@@ -72,7 +78,12 @@ const scriptedEvents: AgentEvent[] = [
   { type: "tool-result", id: "c1", ok: true, summary: "read", exitCode: 0 },
   { type: "plan-update", plan },
   { type: "assistant-message", text: "Done" },
-  { type: "turn-end", finalAnswer: "Done", steps: 1 },
+  {
+    type: "turn-end",
+    outcome: createTurnOutcome({ status: "succeeded", answer: "Done", steps: 1, remainingCriteria: [] }),
+    finalAnswer: "Done",
+    steps: 1,
+  },
 ];
 
 const turnMessages: ChatMessage[] = [
@@ -158,11 +169,62 @@ describe("V2-025 controllers run a complete scripted turn (Phase 2 gate)", () =>
   });
 });
 
+describe("PlanController session projection lifecycle", () => {
+  it("clears synchronously and ignores a stale load after clear", async () => {
+    let resolveSlow: ((value: SessionPlan | undefined) => void) | undefined;
+    const slow = new Promise<SessionPlan | undefined>((resolve) => {
+      resolveSlow = resolve;
+    });
+    const persistence: PersistencePort = {
+      async saveSession() {},
+      async loadPlan(sessionId) {
+        if (sessionId === "seed") return plan;
+        return slow;
+      },
+      async savePlan() {},
+      async deletePlan() {},
+    };
+    const controller = new PlanController(persistence);
+    await controller.load("seed");
+    expect(controller.current()).toBe(plan);
+
+    const pending = controller.load("old-session");
+    expect(controller.current()).toBeUndefined();
+    controller.clear();
+    resolveSlow?.(plan);
+    await pending;
+
+    expect(controller.current()).toBeUndefined();
+  });
+
+  it("lets a newer session load win over an older unresolved load", async () => {
+    let resolveOld: ((value: SessionPlan | undefined) => void) | undefined;
+    const old = new Promise<SessionPlan | undefined>((resolve) => {
+      resolveOld = resolve;
+    });
+    const persistence: PersistencePort = {
+      async saveSession() {},
+      async loadPlan(sessionId) {
+        return sessionId === "old" ? old : undefined;
+      },
+      async savePlan() {},
+      async deletePlan() {},
+    };
+    const controller = new PlanController(persistence);
+    const stale = controller.load("old");
+    await controller.load("new");
+    resolveOld?.(plan);
+    await stale;
+
+    expect(controller.current()).toBeUndefined();
+  });
+});
+
 describe("V2-025 abort is a distinct result from error", () => {
   class SignalAgent implements AgentPort {
-    runTurn(request: RunTurnRequest, handlers: RunTurnHandlers): Promise<string> {
+    runTurn(request: RunTurnRequest, handlers: RunTurnHandlers): Promise<TurnOutcome> {
       handlers.onEvent({ type: "turn-start", prompt: request.prompt });
-      return new Promise<string>((_resolve, reject) => {
+      return new Promise<TurnOutcome>((_resolve, reject) => {
         const signal = handlers.signal;
         const fail = () => {
           const error = new Error("Aborted");
@@ -177,7 +239,7 @@ describe("V2-025 abort is a distinct result from error", () => {
   }
 
   class ThrowingAgent implements AgentPort {
-    async runTurn(): Promise<string> {
+    async runTurn(): Promise<TurnOutcome> {
       throw new Error("boom");
     }
   }

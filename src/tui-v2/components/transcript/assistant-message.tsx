@@ -66,7 +66,8 @@ export function AssistantMessage(props: {
         <box style={{ flexDirection: "column", paddingLeft: 2, width: "100%", marginBottom: 1 }}>
           {lines.map((content, i) => (
             // Body is selectable — drag to select, release copies (OSC 52).
-            <text key={i} content={content} selectable />
+            // Never pass null/undefined content — OpenTUI crashes on text.chunks.
+            <text key={i} content={content ?? " "} selectable />
           ))}
         </box>
       ) : null}

@@ -138,9 +138,7 @@ function promptCursorPosition(
 } {
   const cols = Math.max(1, columns);
   const promptCols = promptColumnsForRender();
-  // Walk the buffer up to the cursor, advancing visual row/col. Newlines
-  // (from a multi-line paste) move to the next row at column 0; otherwise we
-  // wrap when a row fills. The prompt only offsets the very first row.
+  
   let row = 0;
   let col = promptCols < cols ? promptCols : 0;
   const end = Math.max(0, Math.min(cursor, line.length));
@@ -172,9 +170,7 @@ function buildPromptRows(
   const promptCols = promptColumnsForRender();
   const rows: string[] = [];
 
-  // Split on explicit newlines first (multi-line paste), then wrap each
-  // logical line by the terminal width. Only the first logical line carries
-  // the prompt prefix; continuation lines start at column 0.
+  
   const logicalLines = line.split("\n");
   logicalLines.forEach((logical, li) => {
     const prefix = li === 0 ? PROMPT : "";
@@ -219,11 +215,7 @@ export async function readPromptLine(options: {
     let historyIndex: number | null = null;
     let historyDraft = "";
     let lastCtrlCAt = 0;
-    // Bracketed-paste state. When the terminal wraps a paste in
-    // paste-start/paste-end markers, we buffer the whole paste (including
-    // its embedded newlines) and insert it as literal text — so a multi-line
-    // prompt is captured in full instead of the first newline submitting and
-    // dropping the rest.
+    
     let pasting = false;
     let pasteBuffer = "";
 
@@ -243,9 +235,7 @@ export async function readPromptLine(options: {
       return { visible: true, suggestions };
     };
 
-    // File @-mention autocomplete: active when the cursor sits inside an
-    // `@partial/path` token. Mutually exclusive with the slash menu (slash
-    // requires the line to start with "/" and contain no whitespace).
+   
     const getMentionState = (): {
       visible: boolean;
       query: string;
@@ -311,10 +301,7 @@ export async function readPromptLine(options: {
       const target = promptCursorPosition(line, cursor, cols);
       const blockRows = [...promptRows, ...menuLines];
 
-      // Always redraw the whole prompt block from its anchor. Partial row
-      // clearing is fragile once terminal autowrap, slash menus, and cursor
-      // movement mix; clearing to the end of screen leaves no stale wrapped
-      // prompt/menu rows behind and keeps the cursor anchor stable.
+      
       if (promptCursorRow > 0) {
         moveCursor(output, 0, -promptCursorRow);
       }
@@ -389,9 +376,7 @@ export async function readPromptLine(options: {
       cursorTo(output, 0);
       output.write("\x1b[J");
 
-      // Write final prompt using the same wrapping rules as refresh(), then
-      // move to the next line. Do not include the extra cursor-only row used
-      // for interactive editing at exact terminal-width boundaries.
+      
       output.write(buildPromptRows(line, terminalColumns(), false).join("\n"));
       output.write("\n");
       promptCursorRow = 0;
@@ -405,11 +390,7 @@ export async function readPromptLine(options: {
       // here so the user's navigation keys don't bleed into the input line.
       if (isPagerActive()) return;
 
-      // Bracketed paste
-      // The terminal brackets a paste with paste-start / paste-end markers.
-      // Buffer everything in between (including embedded newlines) and insert
-      // it literally, so a long multi-line prompt is captured in full and the
-      // first newline does not submit early.
+     
       if (key?.name === "paste-start") {
         pasting = true;
         pasteBuffer = "";
@@ -443,16 +424,11 @@ export async function readPromptLine(options: {
           }
         : getMentionState();
 
-      // Cmd+C on macOS terminals is handled by the OS (it never reaches us),
-      // but some Linux terminals forward Meta+C. Treat that as a no-op so
-      // selecting + copying never breaks the REPL.
+     
       if (key.meta && !key.ctrl && key.name === "c") return;
 
       if (isCtrlC(key)) {
-        // First press: clear the current line. Second press within 1s: exit.
-        // This mirrors bash / Claude Code and avoids killing the REPL by
-        // accident when users habitually press Ctrl+C to copy in some
-        // terminals.
+       
         const now = Date.now();
         if (line.length > 0) {
           editLine("", 0);
@@ -661,9 +637,7 @@ export async function readPromptLine(options: {
     output.write(PROMPT);
     if (input.isTTY) {
       input.setRawMode(true);
-      // Enable bracketed paste so multi-line pastes arrive as one chunk
-      // (wrapped in paste-start/paste-end) instead of submitting at the
-      // first embedded newline.
+      
       output.write("\x1b[?2004h");
     }
     input.resume();

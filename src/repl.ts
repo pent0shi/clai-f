@@ -5,12 +5,14 @@ import chalk from "chalk";
 import type { ChatImage, ChatMessage, Mode, ProviderId, ReasoningEffort } from "./types.js";
 import { confirm } from "@inquirer/prompts";
 import { runAskStream, type AskActionRequired } from "./modes/ask.js";
+import { resolveTurnInput, shouldRunImageOcr } from "./attachments/service.js";
 import {
   runAgent,
   createSessionPolicy,
   type SessionPolicy,
 } from "./modes/agent.js";
 import { attachClassicRenderer } from "./agent/classic-renderer.js";
+import { clearActiveProjectRoot } from "./agent/project-root.js";
 import {
   providerSwitcher,
   printProviderKeys,
@@ -34,7 +36,6 @@ import {
 } from "./store/config.js";
 import {
   listSessions,
-  saveSession,
   upsertSession,
   clearAllHistory,
   getSession,
@@ -92,8 +93,13 @@ import {
   expandMentions,
   loadImageAttachments,
   imageAttachmentPaths,
+  stabilizeImagePaths,
 } from "./ui/mentions.js";
 import { imageOcr } from "./tools/image.js";
+import {
+  handleDraftPlanDecision,
+  IMPLEMENT_DIRECTIVE,
+} from "./agent/plan-decision.js";
 import {
   readPromptLine,
   stripAnsi,
@@ -134,6 +140,15 @@ export interface ReplOptions {
   provider?: ProviderId | undefined;
   model?: string | undefined;
   noHistory?: boolean | undefined;
+}
+
+/** Reset process-global project routing and rotate/adopt classic session identity together. */
+export function resetClassicSessionContext(
+  state: { session: SessionPolicy },
+  sessionId?: string,
+): void {
+  clearActiveProjectRoot();
+  state.session = createSessionPolicy(sessionId);
 }
 
 function splitCommand(line: string): string[] {
@@ -793,14 +808,12 @@ async function persistSession(
   state: {
     messages: ChatMessage[];
     historyId: string | undefined;
+    session: SessionPolicy;
   },
   name?: string,
 ): Promise<void> {
-  if (state.historyId) {
-    await upsertSession(state.historyId, state.messages, name);
-    return;
-  }
-  const record = await saveSession(state.messages, name);
+  const id = state.historyId ?? state.session.sessionId;
+  const record = await upsertSession(id, state.messages, name);
   state.historyId = record.id;
 }
 
@@ -1042,6 +1055,7 @@ async function handleSlash(
           console.log(chalk.dim("  current session saved"));
         }
       }
+      resetClassicSessionContext(state);
       state.messages.length = 0;
       state.resumedMessageCount = 0;
       state.historyId = undefined;
@@ -1093,6 +1107,8 @@ async function handleSlash(
         return true;
       }
 
+      clearActiveProjectRoot();
+
       // Load the selected session
       const session = await getSession(selectedId);
       if (!session) {
@@ -1106,6 +1122,8 @@ async function handleSlash(
           await persistSession(state);
         }
       }
+
+      resetClassicSessionContext(state, session.id);
 
       // Replay messages
       console.log(chalk.dim(`\n  ── resuming session ──\n`));
@@ -1134,7 +1152,7 @@ async function handleSlash(
         console.log(chalk.dim(`  saved session ${state.historyId}`));
         return true;
       }
-      const record = await saveSession(state.messages, name);
+      const record = await upsertSession(state.session.sessionId, state.messages, name);
       state.historyId = record.id;
       console.log(chalk.dim(`  saved session ${record.id}`));
       return true;
@@ -1223,25 +1241,43 @@ async function handleSlash(
       return true;
     }
     case "/plan": {
-      const plan = await loadPlan(state.session.sessionId).catch(
-        () => undefined,
-      );
-      if (!plan) {
+      const sub = (args[0] ?? "").toLowerCase();
+      if (!sub || sub === "mode" || sub === "on" || sub === "enter") {
+        state.mode = "plan";
+        setDefaultMode("plan");
+        console.log(renderModeSwitch("plan"));
         console.log(
           chalk.dim(
-            '  no plan yet — ask clai to plan a multi-step task (e.g. "build a react blog app")',
+            "  plan mode on — describe the multi-step task you want to plan.\n",
           ),
         );
         return true;
       }
-      if (process.stdout.isTTY && input.isTTY) {
-        await openPager({
-          title: `plan · ${plan.goal}`,
-          body: renderPlanDocument(plan),
-        });
-      } else {
-        console.log(renderPlanDocument(plan));
+      if (sub === "off" || sub === "agent") {
+        state.mode = "agent";
+        setDefaultMode("agent");
+        console.log(renderModeSwitch("agent"));
+        return true;
       }
+      if (sub === "view" || sub === "show") {
+        const plan = await loadPlan(state.session.sessionId).catch(
+          () => undefined,
+        );
+        if (!plan) {
+          console.log(chalk.dim("  no active plan to view"));
+          return true;
+        }
+        if (process.stdout.isTTY && input.isTTY) {
+          await openPager({
+            title: `plan · ${plan.goal}`,
+            body: renderPlanDocument(plan),
+          });
+        } else {
+          console.log(renderPlanDocument(plan));
+        }
+        return true;
+      }
+      console.log(chalk.dim("  usage: /plan [view|off]"));
       return true;
     }
     case "/discard": {
@@ -1860,15 +1896,12 @@ export async function startRepl(options: ReplOptions = {}): Promise<void> {
         );
         console.log(renderPlanChecklist(plan) + "\n");
         implementApproved = true;
-        effectiveLine =
-          "I approve the plan. Execute it now in STRICT ORDER. Task 1 (explore) is ALREADY COMPLETE from the planning phase — " +
-          "do NOT re-list or re-read the directory. Start with the FIRST pending task that still needs implementation work. " +
-          "For each task: call task.update {taskId, state:'in_progress'} → do the real work → VERIFY it succeeded → " +
-          "call task.update {taskId, state:'done'}, then move to the NEXT task. " +
-          "If a tool call FAILS, mark the task 'failed', fix the problem, and retry. Do NOT mark a task done when it failed. " +
-          "Build the project for real with fs.writeMany (create all files in as few calls as possible). " +
-          "Do NOT call web.search — you already know everything needed. " +
-          "Run real commands (installs, servers, verification) — do not claim anything ran without a successful tool call.";
+        if (state.mode === "plan") {
+          state.mode = "agent";
+          setDefaultMode("agent");
+          console.log(renderModeSwitch("agent"));
+        }
+        effectiveLine = IMPLEMENT_DIRECTIVE;
       }
 
       // Continuation detection
@@ -1921,51 +1954,40 @@ export async function startRepl(options: ReplOptions = {}): Promise<void> {
         // Expand @file mentions and drag-and-dropped paths into real context.
         // The user-visible `line` stays readable in history; the model gets
         // the line plus an appended block of file contents / path notes.
-        let requestModel = state.model;
-        let visionCapable = modelSupportsVision(state.provider, requestModel);
-        let expansion = expandMentions(effectiveLine, safeCwd(), visionCapable);
+        const resolvedInput = resolveTurnInput({
+          prompt: effectiveLine,
+          mode: state.mode,
+          provider: state.provider,
+          model: state.model,
+          baseDir: safeCwd(),
+        });
+        const requestModel = resolvedInput.model;
+        const visionCapable = modelSupportsVision(state.provider, requestModel);
+        const expansion = { attachments: resolvedInput.attachments };
+        const images = [...resolvedInput.images];
+        if (resolvedInput.fallbackReason) {
+          console.log(chalk.dim(`  ↳ ${resolvedInput.fallbackReason}`));
+        }
         const hasImageAttachment = expansion.attachments.some(
           (att) => att.kind === "image",
         );
-        if (hasImageAttachment && !visionCapable) {
-          const fallbackVisionModel = preferredVisionModel(
-            state.provider,
-            requestModel,
-          );
-          if (fallbackVisionModel && fallbackVisionModel !== requestModel) {
-            const previousModel = requestModel;
-            requestModel = fallbackVisionModel;
-            visionCapable = true;
-            expansion = expandMentions(effectiveLine, safeCwd(), true);
-            console.log(
-              chalk.dim("  ↳ vision model: ") +
-                chalk.dim(
-                  `${requestModel} (auto for image; ${previousModel} can't view images)`,
-                ),
-            );
-          }
-        }
-        const images = visionCapable
-          ? loadImageAttachments(effectiveLine, safeCwd())
-          : [];
         const sentImagePaths = new Set(
           images.map((img) => img.path).filter((p): p is string => Boolean(p)),
         );
-        // OCR grounding: extract text from any attached image locally and
-        // append it. This is the safety net for the case the user hit — a
-        // provider that accepts image bytes but silently ignores them, so the
-        // model otherwise hallucinates from the filename. Cheap, best-effort,
-        // and additive (vision models still get the real bytes).
-        const ocrGrounding = hasImageAttachment
+        // Vision is authoritative for visual analysis. OCR is opt-in when the
+        // selected model cannot see the image and the user specifically asks
+        // for text extraction; it is never treated as layout/color evidence.
+        const shouldOcr = shouldRunImageOcr({
+          hasImage: hasImageAttachment,
+          visionCapable,
+          prompt: effectiveLine,
+        });
+        const ocrGrounding = shouldOcr
           ? await buildImageOcrGrounding(effectiveLine, safeCwd())
           : "";
-        const contextParts = [expansion.contextBlock, ocrGrounding].filter(
-          (part) => part.length > 0,
-        );
-        const modelInput =
-          contextParts.length > 0
-            ? `${effectiveLine}\n\n${contextParts.join("\n\n")}`
-            : effectiveLine;
+        const modelInput = ocrGrounding
+          ? `${resolvedInput.prompt}\n\n${ocrGrounding}`
+          : resolvedInput.prompt;
         if (expansion.attachments.length > 0) {
           for (const att of expansion.attachments) {
             const tag =
@@ -2024,6 +2046,7 @@ export async function startRepl(options: ReplOptions = {}): Promise<void> {
               signal,
               session: state.session,
               images,
+              mode: state.mode === "plan" ? "plan" : "agent",
               onEvent: classicRenderer.onEvent,
             }),
           );
@@ -2038,6 +2061,112 @@ export async function startRepl(options: ReplOptions = {}): Promise<void> {
           role: "assistant",
           content: assistantContent,
         });
+
+        // After plan mode (or any draft plan), offer Accept / Discard / View / Suggest.
+        if (state.mode === "plan" || !state.session.planApproved.value) {
+          const draft = await loadPlan(state.session.sessionId).catch(
+            () => undefined,
+          );
+          if (draft && draft.status === "draft") {
+            input.pause();
+            if (input.isTTY) input.setRawMode(false);
+            try {
+              const decision = await handleDraftPlanDecision({
+                plan: draft,
+                sessionId: state.session.sessionId,
+                planApproved: state.session.planApproved,
+                setModeAgent: () => {
+                  state.mode = "agent";
+                  setDefaultMode("agent");
+                  console.log(renderModeSwitch("agent"));
+                },
+              });
+              if (decision.action === "implement") {
+                const classicRenderer = attachClassicRenderer();
+                const followUp = await withAbortableInput(async (signal) =>
+                  runAgent(decision.line, {
+                    provider: state.provider,
+                    model: requestModel,
+                    history: state.messages,
+                    signal,
+                    session: state.session,
+                    mode: "agent",
+                    onEvent: classicRenderer.onEvent,
+                  }),
+                );
+                console.log();
+                state.messages.push(
+                  { role: "user", content: decision.line },
+                  { role: "assistant", content: followUp },
+                );
+              } else if (decision.action === "suggest") {
+                state.mode = "plan";
+                setDefaultMode("plan");
+                const classicRenderer = attachClassicRenderer();
+                const revision = await withAbortableInput(async (signal) =>
+                  runAgent(decision.line, {
+                    provider: state.provider,
+                    model: requestModel,
+                    history: state.messages,
+                    signal,
+                    session: state.session,
+                    mode: "plan",
+                    onEvent: classicRenderer.onEvent,
+                  }),
+                );
+                console.log();
+                state.messages.push(
+                  { role: "user", content: decision.line },
+                  { role: "assistant", content: revision },
+                );
+                // Re-prompt if a new draft exists
+                const revised = await loadPlan(state.session.sessionId).catch(
+                  () => undefined,
+                );
+                if (revised && revised.status === "draft") {
+                  const again = await handleDraftPlanDecision({
+                    plan: revised,
+                    sessionId: state.session.sessionId,
+                    planApproved: state.session.planApproved,
+                    setModeAgent: () => {
+                      state.mode = "agent";
+                      setDefaultMode("agent");
+                      console.log(renderModeSwitch("agent"));
+                    },
+                  });
+                  if (again.action === "implement") {
+                    const classicRenderer2 = attachClassicRenderer();
+                    const followUp2 = await withAbortableInput(async (signal) =>
+                      runAgent(again.line, {
+                        provider: state.provider,
+                        model: requestModel,
+                        history: state.messages,
+                        signal,
+                        session: state.session,
+                        mode: "agent",
+                        onEvent: classicRenderer2.onEvent,
+                      }),
+                    );
+                    console.log();
+                    state.messages.push(
+                      { role: "user", content: again.line },
+                      { role: "assistant", content: followUp2 },
+                    );
+                  } else if (again.action === "suggest") {
+                    // Leave feedback in chat; next turn continues plan mode
+                    state.messages.push({
+                      role: "user",
+                      content: again.line,
+                    });
+                  }
+                }
+              }
+            } finally {
+              if (input.isTTY) input.setRawMode(true);
+              input.resume();
+            }
+          }
+        }
       } catch (error) {
         if (error instanceof AbortRunError) {
           process.stdout.write(chalk.yellow("\n  ⏹ Aborted.\n"));

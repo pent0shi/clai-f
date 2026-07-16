@@ -99,7 +99,14 @@ export function OverlayHost(props: OverlayHostProps): ReactNode {
         <PromptActionsModal services={services} theme={theme} request={state.request} />
       ) : null}
       {state.kind === "pager" ? (
-        <Pager services={services} theme={theme} title={state.title} body={state.body} />
+        <Pager
+          services={services}
+          theme={theme}
+          title={state.title}
+          body={state.body}
+          source={state.source}
+          highlightPath={state.highlightPath}
+        />
       ) : null}
       {state.kind === "jobs" ? <JobsPanel services={services} theme={theme} /> : null}
     </box>

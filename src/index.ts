@@ -5,8 +5,8 @@ import type { Mode, ProviderId } from "./types.js";
 
 /** Absolute path to this module — used to re-exec under Bun for OpenTUI. */
 const CLAI_ENTRY = fileURLToPath(import.meta.url);
-import { runAsk, runAskStream } from "./modes/ask.js";
 import { runAgent } from "./modes/agent.js";
+import { resolveTurnInput } from "./attachments/service.js";
 import { startRepl } from "./repl.js";
 import {
   providerSwitcher,
@@ -63,6 +63,7 @@ function modeOption(): Option {
   return new Option("--mode <mode>", "execution mode").choices([
     "ask",
     "agent",
+    "plan",
   ]);
 }
 
@@ -134,49 +135,22 @@ async function oneShot(
 
   clearThinking();
   let answer = "";
-  if (mode === "ask") {
-    let sawToken = false;
-    const markdown = createMarkdownStreamWriter((chunk) =>
-      process.stdout.write(chunk),
-    );
-    const parser = createThinkingStreamParser((text) => markdown.push(text));
-    const raw = await runAskStream(
-      prompt,
-      (token) => {
-        sawToken = true;
-        parser.push(token);
-      },
-      {
-        provider,
-        model,
-      },
-    );
-    // Flush the live-display pipeline, but trust the returned text as the
-    // authoritative answer (the live stream may briefly mirror a tool-call
-    // preamble during research rounds).
-    parser.finish();
-    const result = rememberThinkingFromText(raw);
-    if (sawToken) {
-      markdown.finish();
-    } else if (result.visible) {
-      process.stdout.write(renderMarkdown(result.visible));
-    }
-    if (result.hasThinking) {
-      const prefix =
-        result.visible && !result.visible.endsWith("\n") ? "\n" : "";
-      process.stdout.write(
-        `${prefix}${renderThinkingSummary(result.thinkContent)}\n`,
-      );
-    }
-    process.stdout.write("\n");
-    answer = result.visible;
-  } else {
-    answer = await runAgent(prompt, {
-      provider,
-      model,
-      autoConfirm: options.yes,
-    });
+  const resolved = resolveTurnInput({
+    prompt,
+    mode,
+    provider: activeProvider,
+    model,
+  });
+  if (resolved.fallbackReason) {
+    console.error(chalk.dim(`  ${resolved.fallbackReason}`));
   }
+  answer = await runAgent(resolved.prompt, {
+    provider: resolved.provider,
+    model: resolved.model,
+    autoConfirm: options.yes,
+    mode: resolved.mode,
+    images: [...resolved.images],
+  });
   if (!options.noHistory) {
     await saveSession([
       { role: "user", content: prompt },
@@ -198,7 +172,7 @@ async function main(): Promise<void> {
   program
     .name("clai")
     .description(
-      "A cross-platform AI CLI assistant with ask and agent modes. Built by Aniket Pandey, pentoshi007 on GitHub.",
+      "A cross-platform AI CLI assistant with ask, agent, and plan modes. Built by Aniket Pandey, pentoshi007 on GitHub.",
     )
     .version(getCurrentVersion())
     .addOption(modeOption())
@@ -383,11 +357,11 @@ async function main(): Promise<void> {
   program
     .command("mode")
     .description("set default mode")
-    .argument("<mode>", "ask or agent")
+    .argument("<mode>", "ask, agent, or plan")
     .action((mode: string) => {
-      if (mode !== "ask" && mode !== "agent")
-        throw new Error("Mode must be ask or agent");
-      setDefaultMode(mode);
+      if (mode !== "ask" && mode !== "agent" && mode !== "plan")
+        throw new Error("Mode must be ask, agent, or plan");
+      setDefaultMode(mode as Mode);
       console.log(`mode=${mode}`);
     });
 

@@ -10,6 +10,8 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
   buildWorkspaceOrientation,
+  detectPackageManager,
+  discoverImmediateProjectRoots,
   extractScaffoldTargetName,
   guessProjectFolderName,
   isBareParentDirectory,
@@ -57,6 +59,15 @@ describe("workspace orientation (stack-agnostic)", () => {
     expect(isExistingProjectDir(empty)).toBe(false);
   });
 
+  it("detects package manager from lockfiles", () => {
+    const dir = tmpProject(true);
+    expect(detectPackageManager(dir)).toBe("npm");
+    writeFileSync(join(dir, "pnpm-lock.yaml"), "lockfileVersion: 9");
+    expect(detectPackageManager(dir)).toBe("pnpm");
+    const text = buildWorkspaceOrientation({ cwd: dir, candidateProject: dir });
+    expect(text).toMatch(/package manager \(from lockfile\/manifest\): pnpm/i);
+  });
+
   it("snapshots dir entries and markers", () => {
     const dir = tmpProject(true);
     writeFileSync(join(dir, "README.md"), "hi");
@@ -84,10 +95,55 @@ describe("workspace orientation (stack-agnostic)", () => {
     expect(text).toMatch(/do NOT re-scaffold/i);
   });
 
-  it("guesses todo-app from natural language", () => {
+  it("discovers arbitrary marker-bearing immediate projects under a bare destination", () => {
+    const root = mkdtempSync(join(tmpdir(), "clai-destination-"));
+    temps.push(root);
+    const desktop = join(root, "Desktop");
+    const blog = join(desktop, "blogging-app");
+    const hidden = join(desktop, ".hidden-project");
+    const dependencies = join(desktop, "node_modules");
+    mkdirSync(blog, { recursive: true });
+    mkdirSync(hidden, { recursive: true });
+    mkdirSync(dependencies, { recursive: true });
+    writeFileSync(join(blog, "package.json"), '{"name":"blogging-app"}');
+    writeFileSync(join(hidden, "package.json"), '{"name":"hidden"}');
+    writeFileSync(join(dependencies, "package.json"), '{"name":"noise"}');
+
+    expect(discoverImmediateProjectRoots(desktop)).toEqual([blog]);
+    const orientation = buildWorkspaceOrientation({
+      cwd: root,
+      destinationHint: desktop,
+    });
+    expect(orientation).toContain(blog);
+    expect(orientation).toMatch(/discovered existing project under destination/i);
+    const cwdOrientation = buildWorkspaceOrientation({ cwd: desktop });
+    expect(cwdOrientation).toContain(blog);
+    expect(cwdOrientation).not.toContain(hidden);
+    expect(cwdOrientation).not.toContain(dependencies);
+  });
+
+  it("filters noise before applying the discovered-project result cap", () => {
+    const root = mkdtempSync(join(tmpdir(), "clai-many-children-"));
+    temps.push(root);
+    const desktop = join(root, "Desktop");
+    mkdirSync(desktop, { recursive: true });
+    for (let index = 0; index < 100; index += 1) {
+      mkdirSync(join(desktop, `a-noise-${String(index).padStart(3, "0")}`));
+    }
+    const project = join(desktop, "z-real-project");
+    mkdirSync(project);
+    writeFileSync(join(project, "go.mod"), "module example.com/real");
+
+    expect(discoverImmediateProjectRoots(desktop, 1)).toEqual([project]);
+  });
+
+  it("guesses todo-app and blogging-app from natural language", () => {
     expect(
       guessProjectFolderName("create a react todo app in desktop directory"),
     ).toBe("todo-app");
+    expect(
+      guessProjectFolderName("create a react blogging app in desktop directory"),
+    ).toBe("blogging-app");
     expect(guessProjectFolderName("build app in Desktop/my-api")).toBe("my-api");
   });
 
@@ -117,6 +173,24 @@ describe("workspace orientation (stack-agnostic)", () => {
     ).toBe("/tmp/proj");
   });
 
+  it("resolves cd Desktop && create vite name to Desktop/name not Desktop", () => {
+    expect(
+      extractScaffoldTargetName(
+        "cd /Users/alice/Desktop && npm create vite@latest blogging-app -- --template react",
+      ),
+    ).toBe("blogging-app");
+    expect(
+      resolveScaffoldTargetPath(
+        "cd /Users/alice/Desktop && npm create vite@latest blogging-app -- --template react",
+      ),
+    ).toBe("/Users/alice/Desktop/blogging-app");
+    expect(
+      scaffoldTargetConflictMessage(
+        "cd /Users/alice/Desktop && npm create vite@latest brand-new-xyz -- --template react",
+      ),
+    ).toBeUndefined();
+  });
+
   it("resolves cd && create . chained shell commands", () => {
     expect(
       resolveScaffoldTargetPath(
@@ -124,6 +198,15 @@ describe("workspace orientation (stack-agnostic)", () => {
         "/Users/alice/Desktop/clai",
       ),
     ).toBe("/Users/alice/Desktop/todo-app");
+  });
+
+  it("strips quotes from cd/mkdir targets so scaffold post-check finds the real path", () => {
+    expect(
+      resolveScaffoldTargetPath(
+        'mkdir -p "/Users/alice/Desktop/blogging-app" && cd "/Users/alice/Desktop/blogging-app" && npm create vite@latest . -- --template react',
+        "/Users/alice/Desktop/clai",
+      ),
+    ).toBe("/Users/alice/Desktop/blogging-app");
   });
 
   it("detects cancelled scaffold output", () => {

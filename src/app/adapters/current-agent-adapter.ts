@@ -1,15 +1,11 @@
-import { runAgentLoop } from "../../agent/runner.js";
+import { runAgentTurn } from "../../agent/runner.js";
 import type { AgentPort } from "../ports/agent-port.js";
 
-/**
- * Wraps the existing `runAgentLoop` behind `AgentPort` without altering agent
- * semantics (CORE-001). Readonly request arrays are copied to the mutable
- * shapes the runner expects.
- */
+
 export function createCurrentAgentPort(): AgentPort {
   return {
     runTurn(request, handlers) {
-      return runAgentLoop(request.prompt, {
+      return runAgentTurn(request.prompt, {
         provider: request.provider,
         model: request.model,
         history: request.history ? [...request.history] : undefined,
@@ -22,6 +18,8 @@ export function createCurrentAgentPort(): AgentPort {
         confirm: handlers.confirm,
         requestSecret: handlers.requestSecret,
         session: handlers.session,
+        mode: request.mode,
+        displayPrompt: request.displayPrompt,
       });
     },
   };

@@ -1,8 +1,14 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import {
+  clearModelVisionCapabilities,
   modelSupportsThinking,
   modelSupportsVision,
+  preferredVisionModel,
+  registerModelVisionCapability,
+  visionCapabilitySource,
 } from "../src/llm/capabilities.js";
+
+beforeEach(() => clearModelVisionCapabilities());
 
 describe("modelSupportsThinking", () => {
   it("recognizes Kimi K2.6 on NVIDIA NIM", () => {
@@ -28,5 +34,30 @@ describe("modelSupportsThinking", () => {
   it("returns false for non-thinking models", () => {
     expect(modelSupportsThinking("openai", "gpt-4o-mini")).toBe(false);
     expect(modelSupportsThinking("groq", "llama-3.3-70b-versatile")).toBe(false);
+  });
+});
+
+describe("runtime vision capability metadata", () => {
+  it("prefers provider-discovered metadata over stale fallback regexes", () => {
+    registerModelVisionCapability({
+      provider: "openai",
+      model: "future-vision-model",
+      vision: true,
+      source: "provider",
+    });
+    expect(modelSupportsVision("openai", "future-vision-model")).toBe(true);
+    expect(visionCapabilitySource("openai", "future-vision-model")).toBe("provider");
+    expect(preferredVisionModel("openai", "text-only-model")).toBe("future-vision-model");
+  });
+
+  it("allows a user declaration to override a regex false positive", () => {
+    registerModelVisionCapability({
+      provider: "openai",
+      model: "gpt-4o-mini",
+      vision: false,
+      source: "user",
+    });
+    expect(modelSupportsVision("openai", "gpt-4o-mini")).toBe(false);
+    expect(visionCapabilitySource("openai", "gpt-4o-mini")).toBe("user");
   });
 });

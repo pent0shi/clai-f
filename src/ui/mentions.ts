@@ -1,4 +1,11 @@
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  statSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import {
   basename,
@@ -11,6 +18,7 @@ import {
 } from "node:path";
 import { safeCwd } from "../os/cwd.js";
 import type { ChatImage } from "../types.js";
+import { scratchDirFor } from "../prompts/index.js";
 
 /**
  * @-mention + drag-and-drop file support for the REPL prompt.
@@ -643,21 +651,26 @@ export function expandMentions(
         });
       }
     } else if (kind === "image") {
+      const stablePath = stabilizeImagePaths([absPath], baseDir)[0] ?? absPath;
       let oversized = false;
       try {
-        oversized = statSync(absPath).size > MAX_IMAGE_BYTES;
+        oversized = statSync(stablePath).size > MAX_IMAGE_BYTES;
       } catch {
-        /* ignore */
+        try {
+          oversized = statSync(absPath).size > MAX_IMAGE_BYTES;
+        } catch {
+          /* ignore */
+        }
       }
       attachments.push({
         raw: token,
-        path: absPath,
+        path: stablePath,
         kind: "image",
         note: oversized
           ? `image is larger than ${Math.round(MAX_IMAGE_BYTES / 1_000_000)}MB and was NOT attached — downscale it first (macOS: sips -Z 1600 "<img>" --out /tmp/small.png; or use magick/ffmpeg), then reference the smaller copy`
           : visionCapable
-            ? "image file — attached as multimodal input; inspect it directly for text, colors, layout, spacing, and visual style. Do not use OCR unless the user specifically asks for extracted text."
-            : "image file — the current model can't view images; switch to a vision model for colors/layout/style, or extract text with OCR if only text is needed",
+            ? "image file — attached as multimodal input; inspect it directly for text, colors, layout, spacing, and visual style. Stable path used if original may vanish. Prefer vision over OCR unless the user asks for OCR."
+            : "image file — the current model can't view images; switch to a vision model for colors/layout/style, or extract text with OCR if only text is needed (OCR grounding may still be attached)",
       });
     } else if (kind === "document") {
       const isPdf = extname(absPath).toLowerCase() === ".pdf";
@@ -728,7 +741,39 @@ export function imageAttachmentPaths(
     seen.add(absPath);
     if (classifyPath(absPath) === "image") paths.push(absPath);
   }
-  return paths;
+  return stabilizeImagePaths(paths, baseDir);
+}
+
+/**
+ * Copy image paths into a stable scratch folder so vision/OCR still work if
+ * the original vanishes (macOS TemporaryItems, Desktop screenshots with
+ * spaces, drag-drop temps). Always stabilizes readable images.
+ */
+export function stabilizeImagePaths(
+  paths: string[],
+  baseDir: string = safeCwd(),
+): string[] {
+  const out: string[] = [];
+  const attachDir = join(scratchDirFor(baseDir), "attachments");
+  for (const p of paths) {
+    if (!existsSync(p)) {
+      out.push(p);
+      continue;
+    }
+    try {
+      mkdirSync(attachDir, { recursive: true });
+      const safeName = basename(p)
+        .replace(/[^\w.\-]+/g, "_")
+        .replace(/_+/g, "_")
+        .slice(0, 120) || "image";
+      const dest = join(attachDir, `${Date.now()}-${safeName}`);
+      copyFileSync(p, dest);
+      out.push(dest);
+    } catch {
+      out.push(p);
+    }
+  }
+  return out;
 }
 
 /**
@@ -743,13 +788,18 @@ export function loadImageAttachments(
 ): ChatImage[] {
   const images: ChatImage[] = [];
   const seen = new Set<string>();
-  const candidates = [
-    ...extractMentionTokens(line).map((t) => tokenToPath(t, baseDir)),
-    ...extractExistingPathsFs(line, baseDir),
-  ];
+  const candidates = stabilizeImagePaths(
+    [
+      ...extractMentionTokens(line).map((t) => tokenToPath(t, baseDir)),
+      ...extractExistingPathsFs(line, baseDir),
+    ].filter((p) => {
+      if (seen.has(p)) return false;
+      seen.add(p);
+      return true;
+    }),
+    baseDir,
+  );
   for (const absPath of candidates) {
-    if (seen.has(absPath)) continue;
-    seen.add(absPath);
     if (classifyPath(absPath) !== "image") continue;
     const mediaType = imageMediaType(absPath);
     if (!mediaType) continue;

@@ -11,7 +11,12 @@ import type { ReactNode } from "react";
 import type { OutputSpool } from "../../../app/events/event-buffer.js";
 import type { AppServices } from "../../bootstrap/composition-root.js";
 import type { TranscriptStore } from "../../state/transcript-store.js";
-import { isItemExpanded, type TranscriptItem, type TranscriptState } from "../../state/transcript-types.js";
+import {
+  isFileDiffExpanded,
+  isItemExpanded,
+  type TranscriptItem,
+  type TranscriptState,
+} from "../../state/transcript-types.js";
 import type { Theme } from "../../rendering/theme.js";
 import { UserMessage } from "./user-message.js";
 import { AssistantMessage } from "./assistant-message.js";
@@ -70,6 +75,12 @@ export function TranscriptRow(props: {
           services={services}
           expanded={isItemExpanded(state, item)}
           onToggle={() => store.toggleItemOverride(item.id, state.expandOutputGlobal)}
+          fileDiffExpanded={isFileDiffExpanded(state, item.id)}
+          onToggleFileDiff={() =>
+            store.toggleFileDiffOverride(item.id, state.expandFileDiffsGlobal)
+          }
+          onCollapseAllFileDiffs={() => store.setFileDiffsGlobal(false)}
+          onExpandAllFileDiffs={() => store.setFileDiffsGlobal(true)}
         />
       );
     case "notice":

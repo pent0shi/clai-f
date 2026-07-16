@@ -1,8 +1,4 @@
-/**
- * Command context = the focused surface a command is allowed to run in
- * (PICK-002, CMD-002). `global` commands run anywhere the focused surface
- * permits; others are scoped.
- */
+
 export type CommandContext =
   | "global"
   | "composer"

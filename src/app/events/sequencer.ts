@@ -17,11 +17,7 @@ export interface Clock {
 
 export const systemClock: Clock = { now: () => Date.now() };
 
-/**
- * Mints envelope ids and domain ids that lack a natural stable id (assistant
- * messages, thinking blocks). Tool-call ids come from the agent and are reused
- * verbatim. Injectable so tests can assert deterministic replay output.
- */
+
 export interface IdFactory {
   event(): string;
   message(): MessageId;
@@ -43,10 +39,7 @@ export function createRandomIdFactory(): IdFactory {
   };
 }
 
-/**
- * Assigns a monotonic, gap-free `sequence` per session and wraps a typed
- * payload in the `AppEvent` envelope. One sequencer instance owns one session.
- */
+
 export class EventSequencer {
   private seq = 0;
   private sessionId: SessionId;

@@ -136,16 +136,14 @@ export function parseToolArguments(raw: unknown): Record<string, unknown> {
   return {};
 }
 
+let syntheticToolCallSequence = 0;
+
 export function syntheticToolCallId(index: number): string {
-  return `call_${index}_${Date.now().toString(36)}`;
+  syntheticToolCallSequence += 1;
+  return `call_${index}_${Date.now().toString(36)}_${syntheticToolCallSequence.toString(36)}`;
 }
 
-/**
- * True only when the provider clearly rejects tools/function-calling as a
- * capability (not supported / disabled / unknown parameter). Validation
- * errors like "Invalid schema for function 'fs_write'" must return false
- * so we do not sticky-disable native tools for the rest of the process.
- */
+
 export function isToolsUnsupportedError(error: unknown): boolean {
   const status =
     error && typeof error === "object" && "status" in error

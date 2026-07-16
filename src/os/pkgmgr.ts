@@ -8,12 +8,7 @@ export interface PackageManager {
   ): { command: string; argv: string[]; needsSudo: boolean } | undefined;
 }
 
-/**
- * Strict allowlist for package names. Lets common upstream identifiers
- * through (alphanum, dot, dash, underscore, slash for cask paths, colon for
- * winget IDs and apt versioned packages, plus @ for npm-style scopes), but
- * blocks shell metacharacters.
- */
+
 const PACKAGE_NAME_RE = /^[A-Za-z0-9_.@:/+-]+$/;
 
 export function assertSafePackageName(tool: string): string {

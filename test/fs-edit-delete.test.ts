@@ -30,6 +30,10 @@ describe("fsEdit", () => {
     expect(result.output).toContain("1 occurrence");
     const content = readFileSync(file, "utf8");
     expect(content).toBe("hi world\ngoodbye world\n");
+    expect(result.fileChanges).toBeDefined();
+    expect(result.fileChanges![0]!.basename).toBe("test.txt");
+    expect(result.fileChanges![0]!.kind).toBe("edit");
+    expect(result.fileChanges![0]!.previewHunks.length).toBeGreaterThan(0);
   });
 
   it("fails on zero matches", async () => {

@@ -1,12 +1,6 @@
 import type { SessionPlan } from "../../store/plan.js";
 
-// Renderer-independent event envelope for the v2 application layer (Phase 2,
-// V2-020). The legacy `AgentEvent` union stays the emitter contract; the
-// `AgentEventAdapter` (V2-021) wraps each one in this envelope, assigning a
-// monotonic per-session `sequence` and stable domain IDs so reducers are pure
-// and replayable and persistence can subscribe independently of rendering.
 
-/** Opaque/branded string ID so distinct ID kinds cannot be mixed by accident. */
 export type Brand<T, B extends string> = T & { readonly __brand: B };
 
 export type SessionId = Brand<string, "SessionId">;
@@ -39,11 +33,7 @@ export interface AppEvent<TType extends string, TPayload> {
   readonly payload: TPayload;
 }
 
-/**
- * Tool output chunks are NOT concatenated into an unbounded string in the
- * envelope. The payload carries a reference into the `OutputSpool` (keyed by
- * tool-call id); components read a bounded tail on demand. See event-buffer.ts.
- */
+
 export interface OutputChunkRef {
   readonly toolCallId: ToolCallId;
   /** Byte length of the chunk that was just spooled (for progress display). */
@@ -53,7 +43,11 @@ export interface OutputChunkRef {
 }
 
 export interface AppEventPayloads {
-  "turn-started": { readonly prompt: string };
+  "turn-started": {
+    readonly prompt: string;
+    /** Transcript YOU text; null = omit user bubble (backend-only directives). */
+    readonly displayPrompt?: string | null | undefined;
+  };
   status: { readonly text: string; readonly step?: number | undefined };
   "thinking-delta": { readonly text: string };
   "thinking-block": { readonly messageId: MessageId; readonly content: string };
@@ -65,7 +59,7 @@ export interface AppEventPayloads {
     readonly name: string;
     readonly argsDisplay: string;
   };
-  /** Card was queued; now actively executing. */
+
   "tool-started": {
     readonly toolCallId: ToolCallId;
   };
@@ -76,6 +70,10 @@ export interface AppEventPayloads {
     readonly exitCode?: number | undefined;
     readonly summary: string;
     readonly artifactPath?: string | undefined;
+    /** Cursor-style file diffs for fs.* mutation tools. */
+    readonly fileChanges?:
+      | import("../../tools/file-diff.js").FileChange[]
+      | undefined;
   };
   "tool-blocked": {
     readonly toolCallId: ToolCallId;
@@ -112,12 +110,7 @@ export type TypedAppEvent<K extends AppEventType = AppEventType> =
 /** Any event in the app protocol, discriminated by `type`. */
 export type AnyAppEvent = TypedAppEvent;
 
-/**
- * Structural events end a run of coalescible deltas. The TurnController flushes
- * pending `assistant-delta`/`thinking-delta` text before emitting any of these
- * so visible order is preserved (ARCHITECTURE.md "flush before structural
- * events"). Deltas themselves are the only non-structural events.
- */
+
 const DELTA_TYPES: ReadonlySet<AppEventType> = new Set<AppEventType>([
   "assistant-delta",
   "thinking-delta",

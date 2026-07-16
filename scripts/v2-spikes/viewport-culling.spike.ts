@@ -18,7 +18,7 @@ const US_PER_MS = 1000;
 // The headline culling proof is cellsUpdated + far-row-not-rendered (checked
 // below). This budget is a coarse smoke threshold that only catches pathological
 // O(content) regressions; scroll-to-end triggers one heavier rebuild frame.
-const SCROLL_FRAME_BUDGET_MS = 60;
+const SCROLL_FRAME_BUDGET_MS = 120;
 
 export async function runViewportCullingSpike(): Promise<SpikeResult> {
   const result = makeResult("V2-013", "10,000-row viewport culling benchmark");

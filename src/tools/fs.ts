@@ -1,3 +1,4 @@
+import { lstatSync, readlinkSync, realpathSync } from "node:fs";
 import { open, readdir, readFile, writeFile, unlink, rm, rename, mkdir, stat } from "node:fs/promises";
 import { join, dirname, basename, relative, resolve } from "node:path";
 import { createHash } from "node:crypto";
@@ -8,9 +9,15 @@ import { getConfig } from "../store/config.js";
 import { isSecretPath } from "../safety/patterns.js";
 import { safeCwd } from "../os/cwd.js";
 import {
+  getActiveProjectRoot,
   remapAgentCwdWrite,
   resolveToolPath,
 } from "../agent/project-root.js";
+import {
+  buildFileChange,
+  formatUnifiedPreview,
+  type FileChange,
+} from "./file-diff.js";
 
 /** Compact integrity footer so the model trusts a write without re-reading. */
 function describeWrite(path: string, content: string, verb: string): string {
@@ -66,19 +73,9 @@ function ensureNotSecret(resolved: string): void {
 }
 
 /**
- * Decide whether a given absolute path falls inside any approved sandbox
- * root. Roots are the configured `sandboxRoots`, the current working
- * directory, and (for read operations only) optionally the user's home
- * directory.
- *
- * `mode` flips two things:
- *   - "read"  → home directory is included as an implicit root (so the
- *               agent can still inspect dotfiles by name without each one
- *               needing to be added to sandboxRoots), but the secret-path
- *               blocklist still applies on top.
- *   - "write" → home directory is NOT included unless explicitly added to
- *               sandboxRoots, so a runaway agent can't drop files all over
- *               $HOME.
+ * Decide whether a path falls inside configured sandbox roots / cwd / home.
+ * Used for UX (outside-cwd confirm) and optional sandboxReads opt-in.
+ * Writes are not hard-blocked by sandbox — outside cwd always prompts instead.
  */
 export function pathInsideSandbox(
   resolvedPath: string,
@@ -87,11 +84,9 @@ export function pathInsideSandbox(
   const roots = [
     ...getConfig().sandboxRoots.map((root) => resolve(expandHome(root))),
     safeCwd(),
-    tmpdir(), // ALWAYS allow system temporary folder for both reads and writes
+    tmpdir(),
   ];
   if (mode === "read") {
-    // For reads we also accept the user's home (so dotfiles are inspectable
-    // by name, modulo the secret-path blocklist).
     roots.push(homedir());
   }
   return roots.some((root) => {
@@ -102,6 +97,75 @@ export function pathInsideSandbox(
   });
 }
 
+/** True when target is under root (or equal). */
+function isUnderRoot(root: string, target: string): boolean {
+  const rel = relative(resolve(root), resolve(target));
+  return rel === "" || (!rel.startsWith("..") && !resolve(rel).startsWith(".."));
+}
+
+/**
+ * Canonicalize an existing target or its nearest existing ancestor. This
+ * resolves directory and leaf symlinks even when the final file does not yet
+ * exist, so lexical `project/link/file` paths cannot escape a trusted root.
+ * Returning undefined is conservative: callers must require confirmation.
+ */
+function canonicalizeForContainment(path: string): string | undefined {
+  let cursor = resolve(path);
+  let suffix: string[] = [];
+  const visited = new Set<string>();
+
+  while (true) {
+    if (visited.has(cursor)) return undefined;
+    visited.add(cursor);
+    try {
+      const entry = lstatSync(cursor);
+      if (entry.isSymbolicLink()) {
+        const linked = resolve(dirname(cursor), readlinkSync(cursor));
+        cursor = resolve(linked, ...suffix);
+        suffix = [];
+        continue;
+      }
+      const canonical = realpathSync(cursor);
+      return resolve(canonical, ...suffix);
+    } catch {
+      const parent = dirname(cursor);
+      if (parent === cursor) return undefined;
+      suffix.unshift(basename(cursor));
+      cursor = parent;
+    }
+  }
+}
+
+/**
+ * True when a write should require an explicit confirm even under allow-all:
+ * outside the working directory and active project root, but not system temp /
+ * scratch (agent scratch lives under tmpdir and must not spam confirmations).
+ */
+export function isOutsideWorkingDirectory(resolvedPath: string): boolean {
+  const target = canonicalizeForContainment(resolvedPath);
+  if (!target) return true;
+  const cwd = canonicalizeForContainment(safeCwd());
+  if (cwd && isUnderRoot(cwd, target)) return false;
+  const projectRoot = getActiveProjectRoot();
+  const canonicalProject = projectRoot
+    ? canonicalizeForContainment(projectRoot)
+    : undefined;
+  // A scaffolded/discovered project can intentionally live outside the CLAI
+  // process cwd (for example ~/Desktop/bloging-app). Once that root is pinned,
+  // writes inside it are part of the active user-approved workspace and should
+  // honor allow-all instead of prompting for every file. Siblings and deletes
+  // remain protected by the runner's normal confirmation rules.
+  if (canonicalProject && isUnderRoot(canonicalProject, target)) return false;
+  const canonicalTmp = canonicalizeForContainment(tmpdir());
+  if (canonicalTmp && isUnderRoot(canonicalTmp, target)) return false;
+  return true;
+}
+
+/** Resolve a tool path for permission checks (tilde + project root). */
+export function resolveFsToolPath(path: string): string {
+  return resolvePath(path);
+}
+
 /** Throw with a useful message when a read/list/search escapes the sandbox. */
 function ensureReadAllowed(
   resolved: string,
@@ -109,8 +173,9 @@ function ensureReadAllowed(
   confirmed?: boolean,
 ): void {
   ensureNotSecret(resolved);
-  if (confirmed) return; // Bypass sandbox if explicitly confirmed by user
-  // Allow opt-out for users who deliberately want unrestricted reads.
+  if (confirmed) return;
+  // Unrestricted reads by default (sandboxReads=false). When enabled, still
+  // allow after user confirmation.
   if (getConfig().sandboxReads === false) return;
   if (!pathInsideSandbox(resolved, "read")) {
     throw new Error(
@@ -119,14 +184,14 @@ function ensureReadAllowed(
   }
 }
 
-/** Resolve + sandbox check for write operations. */
+/**
+ * Resolve + secret-path check for writes. Outside-cwd is not hard-blocked —
+ * the runner always asks for confirmation (even under allow-all).
+ */
 function ensureWriteAllowed(path: string, confirmed?: boolean): string {
   const resolved = resolvePath(path);
   ensureNotSecret(resolved);
-  if (confirmed) return resolved; // Bypass sandbox if explicitly confirmed by user
-  if (!pathInsideSandbox(resolved, "write")) {
-    throw new Error(`Write blocked — path is outside approved roots: ${path}`);
-  }
+  void confirmed;
   return resolved;
 }
 
@@ -143,58 +208,70 @@ export async function fsRead(
 ): Promise<ToolResult> {
   const resolved = resolvePath(path);
   ensureReadAllowed(resolved, path, options.confirmed);
+
+  // Directory → list contents (models often fs.read a folder by mistake).
+  try {
+    const st = await stat(resolved);
+    if (st.isDirectory()) {
+      const listed = await fsList(resolved, {
+        maxEntries: options.limit && options.limit > 0 ? options.limit : undefined,
+        confirmed: options.confirmed,
+      });
+      return {
+        ...listed,
+        output:
+          `Path is a directory (not a file): ${resolved}\n` +
+          `Listing contents (use fs.list for dirs, fs.read for files):\n\n` +
+          (listed.output ?? ""),
+      };
+    }
+    if (!st.isFile()) {
+      return {
+        ok: false,
+        output: `Not a regular file or directory: ${resolved}`,
+        exitCode: 1,
+      };
+    }
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    return { ok: false, output: msg, exitCode: 1 };
+  }
+
   const maxBytes = options.maxBytes ?? DEFAULT_READ_MAX_BYTES;
   const useLines =
     typeof options.offset === "number" || typeof options.limit === "number";
   if (useLines) {
     const offset = Math.max(1, options.offset ?? 1);
     const limit = options.limit && options.limit > 0 ? options.limit : 2000;
-    const handle = await open(resolved, "r");
-    try {
-      const stat = await handle.stat();
-      if (!stat.isFile()) {
-        return { ok: false, output: `Not a regular file: ${resolved}`, exitCode: 1 };
-      }
-      const full = await readFile(resolved, "utf8");
-      const lines = full.split(/\r?\n/);
-      const totalLines = lines.length;
-      const startIdx = Math.min(offset - 1, totalLines);
-      const endIdx = Math.min(startIdx + limit, totalLines);
-      const slice = lines.slice(startIdx, endIdx);
-      const numbered = slice.map((line, i) => `${startIdx + i + 1}: ${line}`);
-      const shown = endIdx - startIdx;
-      const hasMore = endIdx < totalLines;
-      const prefix =
-        startIdx > 0 ? `[lines ${startIdx + 1}-${endIdx} of ${totalLines}]\n` : "";
-      const suffix = hasMore
-        ? `\n... (${totalLines - endIdx} more line(s); call fs.read with offset=${endIdx + 1} to continue)`
-        : "";
-      return {
-        ok: true,
-        output: `${prefix}${numbered.join("\n")}${suffix}`,
-        truncated: hasMore,
-      };
-    } finally {
-      await handle.close().catch(() => undefined);
-    }
+    const full = await readFile(resolved, "utf8");
+    const lines = full.split(/\r?\n/);
+    const totalLines = lines.length;
+    const startIdx = Math.min(offset - 1, totalLines);
+    const endIdx = Math.min(startIdx + limit, totalLines);
+    const slice = lines.slice(startIdx, endIdx);
+    const numbered = slice.map((line, i) => `${startIdx + i + 1}: ${line}`);
+    const hasMore = endIdx < totalLines;
+    const prefix =
+      startIdx > 0 ? `[lines ${startIdx + 1}-${endIdx} of ${totalLines}]\n` : "";
+    const suffix = hasMore
+      ? `\n... (${totalLines - endIdx} more line(s); call fs.read with offset=${endIdx + 1} to continue)`
+      : "";
+    return {
+      ok: true,
+      output: `${prefix}${numbered.join("\n")}${suffix}`,
+      truncated: hasMore,
+    };
   }
   const handle = await open(resolved, "r");
   try {
-    const stat = await handle.stat();
-    if (!stat.isFile()) {
-      return {
-        ok: false,
-        output: `Not a regular file: ${resolved}`,
-        exitCode: 1,
-      };
-    }
-    const cap = Math.min(stat.size, maxBytes);
+    const st = await handle.stat();
+    const cap = Math.min(st.size, maxBytes);
     const buffer = Buffer.alloc(cap);
     const { bytesRead } = await handle.read(buffer, 0, cap, 0);
-    const truncated = stat.size > maxBytes;
+    const truncated = st.size > maxBytes;
     const text = buffer.subarray(0, bytesRead).toString("utf8");
     const suffix = truncated
-      ? `\n... (truncated at ${maxBytes.toLocaleString()} bytes of ${stat.size.toLocaleString()} — the file is larger than the read cap; call fs.read with offset=1 and limit=N to page through it in line ranges instead of re-reading the whole file)`
+      ? `\n... (truncated at ${maxBytes.toLocaleString()} bytes of ${st.size.toLocaleString()} — the file is larger than the read cap; call fs.read with offset=1 and limit=N to page through it in line ranges instead of re-reading the whole file)`
       : "";
     return {
       ok: true,
@@ -216,9 +293,28 @@ export async function fsWrite(
   // fresh project just works — the agent should not have to chain a separate
   // mkdir before every file write. This was the most common failure: ENOENT
   // on a path whose parent dir did not exist yet.
+  let before = "";
+  let existed = false;
+  try {
+    before = await readFile(resolved, "utf8");
+    existed = true;
+  } catch (error: any) {
+    if (error?.code !== "ENOENT") throw error;
+  }
   await mkdir(dirname(resolved), { recursive: true });
   await writeFile(resolved, content, "utf8");
-  return { ok: true, output: describeWrite(resolved, content, "Wrote") };
+  const change = buildFileChange({
+    path: resolved,
+    before,
+    after: content,
+    kind: existed ? "overwrite" : "create",
+  });
+  const verb = existed ? "Wrote" : "Created";
+  return {
+    ok: true,
+    output: describeWrite(resolved, content, verb),
+    fileChanges: [change],
+  };
 }
 
 /** Atomically replace an inclusive, 1-indexed line range in an existing file. */
@@ -258,9 +354,16 @@ export async function fsReplaceLines(
     content === ""
       ? `Deleted lines ${startLine}-${endLine} in`
       : `Replaced lines ${startLine}-${endLine} in`;
+  const change = buildFileChange({
+    path: resolved,
+    before: original,
+    after: next,
+    kind: "edit",
+  });
   return {
     ok: true,
     output: describeWrite(resolved, next, verb),
+    fileChanges: [change],
   };
 }
 
@@ -303,6 +406,7 @@ export async function fsWriteMany(
 
   const written: string[] = [];
   const failures: string[] = [];
+  const changes: FileChange[] = [];
   for (const file of files) {
     if (
       !file ||
@@ -318,6 +422,14 @@ export async function fsWriteMany(
     }
     try {
       const resolved = ensureWriteAllowed(file.path, options.confirmed);
+      let before = "";
+      let existed = false;
+      try {
+        before = await readFile(resolved, "utf8");
+        existed = true;
+      } catch (error: any) {
+        if (error?.code !== "ENOENT") throw error;
+      }
       await mkdir(dirname(resolved), { recursive: true });
       await writeFile(resolved, file.content, "utf8");
       const bytes = Buffer.byteLength(file.content, "utf8");
@@ -328,6 +440,14 @@ export async function fsWriteMany(
         .digest("hex")
         .slice(0, 12);
       written.push(`${resolved} (bytes=${bytes} lines=${nLines} sha256_12=${sha})`);
+      changes.push(
+        buildFileChange({
+          path: resolved,
+          before,
+          after: file.content,
+          kind: existed ? "overwrite" : "create",
+        }),
+      );
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
       failures.push(`${file.path}: ${msg}`);
@@ -349,6 +469,7 @@ export async function fsWriteMany(
     ok: failures.length === 0,
     output: lines.join("\n"),
     exitCode: failures.length === 0 ? 0 : 1,
+    ...(changes.length > 0 ? { fileChanges: changes } : {}),
   };
 }
 
@@ -359,22 +480,43 @@ export async function fsList(
   const resolved = resolvePath(path);
   ensureReadAllowed(resolved, path, options.confirmed);
   const maxEntries = options.maxEntries ?? DEFAULT_LIST_MAX_ENTRIES;
-  const entries = await readdir(resolved, { withFileTypes: true });
-  const truncated = entries.length > maxEntries;
-  const visible = truncated ? entries.slice(0, maxEntries) : entries;
-  const lines = visible.map(
-    (entry) => `${entry.isDirectory() ? "dir " : "file"} ${entry.name}`,
-  );
-  if (truncated) {
-    lines.push(
-      `... (${(entries.length - maxEntries).toLocaleString()} entries omitted of ${entries.length.toLocaleString()})`,
+  try {
+    const entries = await readdir(resolved, { withFileTypes: true });
+    const truncated = entries.length > maxEntries;
+    const visible = truncated ? entries.slice(0, maxEntries) : entries;
+    const lines = visible.map(
+      (entry) => `${entry.isDirectory() ? "dir " : "file"} ${entry.name}`,
     );
+    if (truncated) {
+      lines.push(
+        `... (${(entries.length - maxEntries).toLocaleString()} entries omitted of ${entries.length.toLocaleString()})`,
+      );
+    }
+    return {
+      ok: true,
+      output: lines.join("\n") || `(empty directory) ${resolved}`,
+      truncated,
+    };
+  } catch (error: unknown) {
+    const err = error as { code?: string; message?: string };
+    // Missing path is a valid existence observation for scaffold/preflight —
+    // not a hard tool failure that blocks task.done or loop-guard retries.
+    if (err?.code === "ENOENT" || err?.code === "ENOTDIR") {
+      return {
+        ok: true,
+        output:
+          `path does not exist: ${resolved}\n` +
+          `Safe to create/scaffold here. Do not treat this as a tool failure.`,
+        exitCode: 0,
+      };
+    }
+    const msg = error instanceof Error ? error.message : String(error);
+    return {
+      ok: false,
+      output: `fs.list failed: ${msg}`,
+      exitCode: 1,
+    };
   }
-  return {
-    ok: true,
-    output: lines.join("\n"),
-    truncated,
-  };
 }
 
 export async function fsSearch(
@@ -463,9 +605,17 @@ export async function fsEdit(
     throw error;
   }
 
+  const change = buildFileChange({
+    path: resolved,
+    before: content,
+    after: updated,
+    kind: "edit",
+  });
+  const preview = formatUnifiedPreview(change, { maxLines: 24 });
   return {
     ok: true,
-    output: `Replaced ${count} occurrence(s) in ${resolved}.`,
+    output: `Replaced ${count} occurrence(s) in ${resolved}.\n${preview}`,
+    fileChanges: [change],
   };
 }
 
@@ -480,12 +630,43 @@ export async function fsDelete(
 ): Promise<ToolResult> {
   const resolved = ensureWriteAllowed(path, options.confirmed);
   try {
+    // Snapshot text content for diff UI when deleting a single small file.
+    let before = "";
+    let canDiff = false;
+    if (!recursive) {
+      try {
+        const st = await stat(resolved);
+        if (st.isFile() && st.size <= 200_000) {
+          before = await readFile(resolved, "utf8");
+          canDiff = true;
+        }
+      } catch {
+        /* ignore — delete may still succeed or fail below */
+      }
+    }
     if (recursive) {
       await rm(resolved, { recursive: true, force: false });
       return { ok: true, output: `Deleted (recursive): ${resolved}` };
     }
     await unlink(resolved);
-    return { ok: true, output: `Deleted: ${resolved}` };
+    const change = canDiff
+      ? buildFileChange({
+          path: resolved,
+          before,
+          after: "",
+          kind: "delete",
+        })
+      : buildFileChange({
+          path: resolved,
+          before: "",
+          after: "",
+          kind: "delete",
+        });
+    return {
+      ok: true,
+      output: `Deleted: ${resolved}`,
+      fileChanges: [change],
+    };
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
     return { ok: false, output: `Delete failed: ${msg}`, exitCode: 1 };
@@ -537,9 +718,16 @@ export async function fsAppend(
     // File does not exist: create missing parent directories and write content
     await mkdir(dirname(resolved), { recursive: true });
     await writeFile(resolved, content, "utf8");
+    const change = buildFileChange({
+      path: resolved,
+      before: "",
+      after: content,
+      kind: "create",
+    });
     return {
       ok: true,
       output: describeWrite(resolved, content, "Created"),
+      fileChanges: [change],
     };
   }
 
@@ -575,10 +763,17 @@ export async function fsAppend(
   }
 
   const st = await stat(resolved).catch(() => undefined);
+  const change = buildFileChange({
+    path: resolved,
+    before: original,
+    after: next,
+    kind: "append",
+  });
   return {
     ok: true,
     output:
       describeWrite(resolved, next, `Appended (${position}) to`) +
       `\n  prior_bytes=${priorBytes} after_bytes=${st?.size ?? Buffer.byteLength(next, "utf8")}`,
+    fileChanges: [change],
   };
 }

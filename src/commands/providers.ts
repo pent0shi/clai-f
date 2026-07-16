@@ -69,9 +69,7 @@ export async function setProviderKey(
   keyArg: string | undefined,
   options: SetKeyOptions,
 ): Promise<void> {
-  // Search-provider ids (`brave`, `tavily`, `duckduckgo`) are stored in
-  // the `search:` namespace (Requirement 3.1). Dispatch before the LLM
-  // path so the matching helper handles the keyless DuckDuckGo no-op.
+  
   if (
     providerValue === "brave" ||
     providerValue === "tavily" ||

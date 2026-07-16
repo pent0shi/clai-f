@@ -11,7 +11,7 @@
 //   - renderer teardown runs without throwing (never corrupts the terminal).
 //
 // Run: bun run scripts/v2-spikes/shell-render.spike.tsx
-import { createElement } from "react";
+import { act, createElement } from "react";
 import { testRender } from "@opentui/react/test-utils";
 import type {
   AgentPort,
@@ -78,7 +78,20 @@ export async function runShellRenderSpike(): Promise<SpikeResult> {
     check(result, "wide frame has no Composer chrome title", !wide.includes("Composer"));
     check(result, "wide frame shows intro model card", wide.includes("model"));
     check(result, "wide frame shows intro welcome", wide.includes("Welcome to clai"));
-    check(result, "wide frame shows mode badge", wide.includes("AGENT MODE"));
+    check(result, "wide frame shows unified mode/activity footer", wide.includes("AGENT MODE"));
+    const removedGuidance = ["build", "run", "verify"].join(" · ");
+    check(result, "wide frame omits verbose agent guidance", !wide.includes(removedGuidance));
+    await act(async () => {
+      services.session.setMode("plan");
+      await Promise.resolve();
+    });
+    await setup.flush();
+    const planMode = setup.captureCharFrame();
+    check(
+      result,
+      "composer mode updates live without a second guidance row",
+      planMode.includes("PLAN MODE") && !planMode.includes("research · design · review"),
+    );
     check(result, "wide frame shows provider on intro card", wide.includes("groq"));
     check(result, "wide frame no longer shows empty placeholder", !wide.includes("No messages yet"));
     check(

@@ -19,6 +19,8 @@ import { createCompositionRoot } from "./composition-root.js";
 import { RendererLifecycle, type RendererHandle } from "./lifecycle.js";
 import { createOsc52ClipboardPort } from "./osc52-clipboard.js";
 import { createPagerExportPort } from "./pager-export.js";
+import { patchOpenTuiTextContent } from "./patch-opentui-text.js";
+import { setAllowInteractiveStdinInherit } from "../../tools/shell.js";
 
 export interface StartTuiV2Options {
   readonly mode?: Mode | undefined;
@@ -30,6 +32,11 @@ export interface StartTuiV2Options {
 export async function startTuiV2(
   options: StartTuiV2Options = {},
 ): Promise<void> {
+  // Must run before any <text content=…> mounts — null content crashes OpenTUI.
+  patchOpenTuiTextContent();
+  // Never let sudo/ssh steal stdin — that freezes the TUI (Password: under
+  // composer, Esc/Ctrl+C/clicks dead). Elevation uses the secret modal + -S.
+  setAllowInteractiveStdinInherit(false);
   // OpenTUI native drag-select is enabled. Interactive chrome (prompts/tools/
   // composer) sets selectable={false}; response/thinking body stays selectable.
   // Copy-on-release is wired in TranscriptView via useNativeSelectionCopy.

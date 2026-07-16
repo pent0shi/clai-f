@@ -29,14 +29,87 @@ const ALLOWED_METHODS = new Set([
  */
 export { isBlockedAddress };
 
-async function resolveHost(host: string): Promise<string | undefined> {
-  if (net.isIP(host)) return host;
+async function resolveHosts(host: string): Promise<string[]> {
+  if (net.isIP(host)) return [host];
   try {
-    const result = await lookup(host);
-    return result.address;
+    const results = await lookup(host, { all: true });
+    return Array.from(new Set(results.map((result) => result.address)));
   } catch {
-    return undefined;
+    return [];
   }
+}
+
+/** True for loopback hostnames / IPs (local dev servers). */
+export function isLoopbackHost(hostname: string): boolean {
+  const h = hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  if (
+    h === "localhost" ||
+    h === "localhost.localdomain" ||
+    h === "ip6-localhost" ||
+    h === "ip6-loopback" ||
+    h === "127.0.0.1" ||
+    h === "::1" ||
+    h === "0:0:0:0:0:0:0:1"
+  ) {
+    return true;
+  }
+  // 127.0.0.0/8
+  if (/^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(h)) return true;
+  return false;
+}
+
+/**
+ * Vite/macOS often listens on only one of IPv4/IPv6. Browser "localhost"
+ * works dual-stack; a single-address probe can false-fail. Return ordered
+ * candidates: original host first, then the other loopback form(s).
+ */
+export function loopbackUrlCandidates(url: string): string[] {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return [url];
+  }
+  const host = parsed.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  if (!isLoopbackHost(host)) return [url];
+
+  const out: string[] = [];
+  const push = (hostname: string): void => {
+    try {
+      const u = new URL(parsed.toString());
+      // WHATWG URL: assign bare IPv6 without brackets.
+      u.hostname = hostname === "[::1]" ? "::1" : hostname;
+      const s = u.toString();
+      if (!out.includes(s)) out.push(s);
+    } catch {
+      /* skip invalid candidate */
+    }
+  };
+
+  // Prefer the caller's host first (browser-compatible localhost).
+  push(host === "[::1]" ? "::1" : host);
+  if (host === "localhost" || host === "localhost.localdomain") {
+    push("127.0.0.1");
+    push("::1");
+  } else if (host === "127.0.0.1" || /^127\./.test(host)) {
+    push("localhost");
+    push("::1");
+  } else if (host === "::1" || host === "0:0:0:0:0:0:0:1") {
+    push("127.0.0.1");
+    push("localhost");
+  }
+  return out.length > 0 ? out : [url];
+}
+
+function isConnectionRefusedError(error: unknown): boolean {
+  const msg = error instanceof Error ? error.message : String(error);
+  return (
+    /\bECONNREFUSED\b/i.test(msg) ||
+    /\bconnect\s+ECONNREFUSED\b/i.test(msg) ||
+    /\bfetch failed\b/i.test(msg) ||
+    /\bother side closed\b/i.test(msg) ||
+    /\bsocket hang up\b/i.test(msg)
+  );
 }
 
 interface FetchOptions {
@@ -47,6 +120,7 @@ interface FetchOptions {
   iOwnThis?: boolean | undefined;
   retries?: number | undefined;
   signal?: AbortSignal | undefined;
+  authorizeHop?: ((url: string, resolvedAddresses: string[]) => Promise<{ allowed: boolean; reason: string }> | { allowed: boolean; reason: string }) | undefined;
 }
 
 export async function httpFetch(
@@ -77,22 +151,32 @@ export async function httpFetch(
     };
   }
 
-  // SSRF guard: refuse loopback/private/link-local/metadata destinations
-  // unless the caller explicitly attested ownership of the target.
-  const hostname = target.hostname.replace(/^\[|\]$/g, "");
-  const literalBlocked = isBlockedAddress(hostname);
-  let resolvedBlocked = false;
-  if (!literalBlocked) {
-    const resolved = await resolveHost(hostname);
-    resolvedBlocked = Boolean(resolved && isBlockedAddress(resolved));
-  }
-  if ((literalBlocked || resolvedBlocked) && !options.iOwnThis) {
-    return {
-      ok: false,
-      output: `Refusing to fetch private/loopback/metadata address ${hostname}. Pass iOwnThis=true to override.`,
-      exitCode: 1,
-    };
-  }
+  const startHost = target.hostname.replace(/^\[|\]$/g, "");
+  const ownedLoopback = Boolean(options.iOwnThis && isLoopbackHost(startHost));
+
+  // SSRF and engagement-policy checks run for the initial destination and
+  // every redirect hop. Owned loopback (local app verify) skips engagement
+  // hop checks — a leftover pentest scope must not block http://localhost:5173.
+  const authorizeDestination = async (destination: URL): Promise<string | undefined> => {
+    const hostname = destination.hostname.replace(/^\[|\]$/g, "");
+    const resolvedAddresses = await resolveHosts(hostname);
+    const blocked = isBlockedAddress(hostname) || resolvedAddresses.some(isBlockedAddress);
+    const destLoopback = isLoopbackHost(hostname);
+    if (blocked && !options.iOwnThis) {
+      return `Refusing to fetch private/loopback/metadata address ${hostname}. Pass iOwnThis=true to override.`;
+    }
+    // Owned local-dev probes are never subject to remote engagement scope.
+    if (options.iOwnThis && destLoopback) {
+      return undefined;
+    }
+    if (options.authorizeHop) {
+      const decision = await options.authorizeHop(destination.toString(), resolvedAddresses);
+      if (!decision.allowed) return `Blocked network destination ${destination.toString()}: ${decision.reason}`;
+    }
+    return undefined;
+  };
+  const initialDenial = await authorizeDestination(target);
+  if (initialDenial) return { ok: false, output: initialDenial, exitCode: 1 };
 
   const headers = new Headers(options.headers);
   if (!headers.has("user-agent")) {
@@ -111,64 +195,123 @@ export async function httpFetch(
   const init: RequestInit = {
     method,
     headers,
-    redirect: "follow",
+    redirect: "manual",
   };
   if (options.body !== undefined && method !== "GET" && method !== "HEAD") {
     init.body = options.body;
   }
 
+  // Local dev: try localhost / 127.0.0.1 / ::1 until one accepts (Vite dual-stack).
+  const urlCandidates =
+    ownedLoopback && (method === "GET" || method === "HEAD")
+      ? loopbackUrlCandidates(url)
+      : [url];
+
   let response: Response | undefined;
   let attempts = 0;
   let lastNetworkError: unknown;
-  const retryLimit =
+  let usedUrl = url;
+  // Extra retries for local probes (server often not ready on first tick).
+  const baseRetries =
     method === "GET" || method === "HEAD"
       ? clampRetries(options.retries ?? DEFAULT_RETRIES)
       : 0;
+  const retryLimit = ownedLoopback
+    ? Math.max(baseRetries, 4)
+    : baseRetries;
+
   try {
-    for (;;) {
-      attempts += 1;
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 15000);
-      const onParentAbort = () => controller.abort();
-      if (options.signal) {
-        if (options.signal.aborted) {
-          throw options.signal.reason ?? new Error("Aborted");
-        }
-        options.signal.addEventListener("abort", onParentAbort);
-      }
-      try {
-        response = await fetch(url, {
-          ...init,
-          signal: controller.signal,
-        });
-        if (
-          attempts <= retryLimit &&
-          RETRY_STATUSES.has(response.status)
-        ) {
-          await drainResponse(response);
-          await sleep(retryDelayMs(attempts));
-          continue;
-        }
-        break;
-      } catch (error) {
-        lastNetworkError = error;
-        const isTimeout = error instanceof Error && error.name === "AbortError" && !options.signal?.aborted;
-        const errMsg = isTimeout ? "Request timed out after 15s" : (error instanceof Error ? error.message : String(error));
-        if (attempts > retryLimit || options.signal?.aborted) {
-          throw new Error(errMsg);
-        }
-        await sleep(retryDelayMs(attempts));
-      } finally {
-        clearTimeout(timer);
+    candidateLoop: for (let ci = 0; ci < urlCandidates.length; ci += 1) {
+      const candidateUrl = urlCandidates[ci]!;
+      usedUrl = candidateUrl;
+      // Fresh attempt counter per candidate, but keep total for the message.
+      let localAttempts = 0;
+      for (;;) {
+        attempts += 1;
+        localAttempts += 1;
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 15000);
+        const onParentAbort = () => controller.abort();
         if (options.signal) {
-          options.signal.removeEventListener("abort", onParentAbort);
+          if (options.signal.aborted) {
+            throw options.signal.reason ?? new Error("Aborted");
+          }
+          options.signal.addEventListener("abort", onParentAbort);
+        }
+        try {
+          let requestUrl = candidateUrl;
+          let redirects = 0;
+          for (;;) {
+            response = await fetch(requestUrl, {
+              ...init,
+              signal: controller.signal,
+            });
+            const location = response.headers.get("location");
+            if (!(response.status >= 300 && response.status < 400 && location)) break;
+            if (redirects >= 10) throw new Error("Too many redirects (maximum 10)");
+            const next = new URL(location, requestUrl);
+            const denial = await authorizeDestination(next);
+            if (denial) throw new Error(denial);
+            await drainResponse(response);
+            requestUrl = next.toString();
+            redirects += 1;
+          }
+          if (
+            localAttempts <= retryLimit &&
+            RETRY_STATUSES.has(response.status)
+          ) {
+            await drainResponse(response);
+            await sleep(retryDelayMs(localAttempts));
+            continue;
+          }
+          // Success for this candidate
+          break candidateLoop;
+        } catch (error) {
+          lastNetworkError = error;
+          const isTimeout =
+            error instanceof Error &&
+            error.name === "AbortError" &&
+            !options.signal?.aborted;
+          const errMsg = isTimeout
+            ? "Request timed out after 15s"
+            : error instanceof Error
+              ? error.message
+              : String(error);
+          if (options.signal?.aborted) {
+            throw new Error(errMsg);
+          }
+          // Connection refused on loopback → try next address or retry.
+          if (ownedLoopback && isConnectionRefusedError(error)) {
+            if (localAttempts <= retryLimit) {
+              await sleep(Math.min(400 * localAttempts, 1500));
+              continue;
+            }
+            // Exhausted retries for this host — try next loopback candidate.
+            if (ci + 1 < urlCandidates.length) {
+              break; // next candidate
+            }
+            throw new Error(errMsg);
+          }
+          if (localAttempts > retryLimit) {
+            throw new Error(errMsg);
+          }
+          await sleep(retryDelayMs(localAttempts));
+        } finally {
+          clearTimeout(timer);
+          if (options.signal) {
+            options.signal.removeEventListener("abort", onParentAbort);
+          }
         }
       }
     }
   } catch (error) {
+    const tried =
+      urlCandidates.length > 1
+        ? ` (tried ${urlCandidates.join(" → ")})`
+        : "";
     return {
       ok: false,
-      output: `Network error after ${attempts} attempt${attempts === 1 ? "" : "s"}: ${error instanceof Error ? error.message : String(error)}`,
+      output: `Network error after ${attempts} attempt${attempts === 1 ? "" : "s"}${tried}: ${error instanceof Error ? error.message : String(error)}`,
       exitCode: 1,
     };
   }
@@ -179,7 +322,6 @@ export async function httpFetch(
       exitCode: 1,
     };
   }
-
   const limit = options.maxBytes ?? DEFAULT_MAX_BYTES;
   const decoder = new TextDecoder("utf-8", { fatal: false });
   let collected = "";
@@ -236,9 +378,11 @@ export async function httpFetch(
     method !== "HEAD" && !isBinary && contentType.toLowerCase().includes("html")
       ? toReadableText(collected)
       : "";
+  const finalUrl = response.url || usedUrl;
   const meta = {
     requestedUrl: url,
-    finalUrl: response.url || url,
+    finalUrl,
+    probedUrl: usedUrl !== url ? usedUrl : undefined,
     status: response.status,
     statusText: response.statusText,
     ok: response.ok,
@@ -260,8 +404,8 @@ export async function httpFetch(
           : undefined,
   };
   const evidence = [
-    `${response.status} ${response.statusText} ${response.url || url}`,
-    `attempts=${attempts} bytes=${bytesRead}${truncated ? ` truncated@${limit}` : ""}`,
+    `${response.status} ${response.statusText} ${finalUrl}`,
+    `attempts=${attempts} bytes=${bytesRead}${truncated ? ` truncated@${limit}` : ""}${usedUrl !== url ? ` via=${usedUrl}` : ""}`,
     "",
     "Metadata:",
     JSON.stringify(meta, null, 2),

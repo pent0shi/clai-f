@@ -10,6 +10,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { TextAttributes } from "@opentui/core";
 import type { SessionController } from "../../../app/controllers/session-controller.js";
+import type { Mode } from "../../../types.js";
 import type { Theme } from "../../rendering/theme.js";
 import { useSessionState } from "../../state/use-session-state.js";
 import {
@@ -20,9 +21,11 @@ import {
 
 export interface StatusLineProps {
   readonly session: SessionController;
+  readonly mode: Mode;
   readonly theme: Theme;
   readonly activity: string | undefined;
   readonly width: number;
+  readonly hasActivePlan: boolean;
   readonly planVisible: boolean;
   readonly thinkingExpanded?: boolean | undefined;
   readonly outputExpanded?: boolean | undefined;
@@ -35,6 +38,20 @@ export interface StatusLineProps {
 }
 
 const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"] as const;
+
+export interface ModeIndicatorPresentation {
+  readonly label: string;
+  readonly description: string;
+}
+
+export function modeIndicatorPresentation(mode: Mode): ModeIndicatorPresentation {
+  return { label: mode.toUpperCase(), description: "" };
+}
+
+export function tasksToggleLabel(visible: boolean, compact = false): string {
+  if (compact) return visible ? "HIDE TASKS" : "SHOW TASKS";
+  return visible ? "Ctrl+H · HIDE TASKS" : "Ctrl+H · SHOW TASKS";
+}
 
 function clip(value: string, max: number): string {
   if (max <= 1) return "…";
@@ -166,12 +183,27 @@ function ClickableHint(props: {
   );
 }
 
+function ModeBadge(props: { mode: Mode; theme: Theme }): ReactNode {
+  const { mode, theme } = props;
+  const label = modeIndicatorPresentation(mode).label;
+  const bg = mode === "plan" ? theme.mode : mode === "ask" ? theme.chipIndigo : theme.chipTeal;
+  return (
+    <text
+      selectable={false}
+      content={` ${label} MODE `}
+      style={{ fg: theme.white, bg, attributes: TextAttributes.BOLD }}
+    />
+  );
+}
+
 export function StatusLine(props: StatusLineProps): ReactNode {
   const {
     session,
+    mode,
     theme,
     activity,
     width,
+    hasActivePlan,
     planVisible,
     thinkingExpanded = false,
     outputExpanded = false,
@@ -240,6 +272,8 @@ export function StatusLine(props: StatusLineProps): ReactNode {
         }}
       >
         <box style={{ flexDirection: "row", alignItems: "center", flexShrink: 1 }}>
+          <ModeBadge mode={mode} theme={theme} />
+          <text selectable={false} content="  " />
           <text
             selectable={false}
             content={`${SPINNER_FRAMES[frame]} `}
@@ -252,6 +286,17 @@ export function StatusLine(props: StatusLineProps): ReactNode {
           />
         </box>
         <box style={{ flexDirection: "row", alignItems: "center", flexShrink: 0 }}>
+          {hasActivePlan || planVisible ? (
+            <>
+              <ClickableHint
+                label={tasksToggleLabel(planVisible, compact)}
+                active={planVisible}
+                theme={theme}
+                onClick={onTogglePlan}
+              />
+              <text selectable={false} content="  " />
+            </>
+          ) : null}
           {queued > 0 ? (
             <text
               selectable={false}
@@ -300,7 +345,13 @@ export function StatusLine(props: StatusLineProps): ReactNode {
           justifyContent: "center",
         }}
       >
-        <text selectable={false} content="/:commands" style={{ fg: theme.muted }} />
+        <ModeBadge mode={mode} theme={theme} />
+        {width >= 42 ? (
+          <>
+            {sep(theme)}
+            <text selectable={false} content="/:commands" style={{ fg: theme.muted }} />
+          </>
+        ) : null}
         {!compact ? (
           <>
             {sep(theme)}
@@ -319,11 +370,11 @@ export function StatusLine(props: StatusLineProps): ReactNode {
             />
           </>
         ) : null}
-        {width >= 72 ? (
+        {hasActivePlan || planVisible ? (
           <>
             {sep(theme)}
             <ClickableHint
-              label={planVisible ? "Ctrl+H:plan on" : "Ctrl+H:plan"}
+              label={tasksToggleLabel(planVisible, width < 72)}
               active={planVisible}
               theme={theme}
               onClick={onTogglePlan}

@@ -7,9 +7,12 @@ on:
       - main
       - "ui/**"
 
+permissions:
+  contents: read
+
 jobs:
   node:
-    name: Node semantic suite
+    name: Node 20 semantic suite
     runs-on: ubuntu-latest
     env:
       CLAI_CONFIG_DIR: ${{ runner.temp }}/clai/config
@@ -24,15 +27,70 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run typecheck
-      - run: npm test
+      - run: npm test -- --reporter=dot
+      - run: npm run build
+      - run: npm run prompt-budget
+      - run: npm run release:verify
+      - name: Upload redacted local diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: node-failure-artifacts
+          path: |
+            ${{ runner.temp }}/clai/logs
+            ${{ runner.temp }}/clai/artifacts
+          if-no-files-found: ignore
+          retention-days: 7
 
-  bun-v2-placeholder:
-    name: Bun v2 placeholder
+  bun-opentui:
+    name: Bun 1.3.14 OpenTUI conformance
     runs-on: ubuntu-latest
+    env:
+      CLAI_CONFIG_DIR: ${{ runner.temp }}/clai/config
+      CLAI_DATA_DIR: ${{ runner.temp }}/clai/data
+      CLAI_ARTIFACT_DIR: ${{ runner.temp }}/clai/artifacts
+      CLAI_LOG_DIR: ${{ runner.temp }}/clai/logs
     steps:
       - uses: actions/checkout@v5
       - uses: oven-sh/setup-bun@v3
         with:
-          bun-version: latest
+          bun-version: 1.3.14
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
       - run: bun --version
-      - run: test ! -d src/tui-v2 || bun --version
+      - run: bun run test:bun
+      - name: Upload redacted local diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: bun-opentui-failure-artifacts
+          path: |
+            ${{ runner.temp }}/clai/logs
+            ${{ runner.temp }}/clai/artifacts
+          if-no-files-found: ignore
+          retention-days: 7
+
+  process-platforms:
+    name: Process and privilege (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      CLAI_DATA_DIR: ${{ runner.temp }}/clai/data
+      CLAI_ARTIFACT_DIR: ${{ runner.temp }}/clai/artifacts
+      CLAI_LOG_DIR: ${{ runner.temp }}/clai/logs
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npx vitest run test/privilege-boundary.test.ts --reporter=dot
+      - if: runner.os != 'Windows'
+        run: npx vitest run test/jobs-durable.test.ts --reporter=dot

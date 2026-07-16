@@ -6,12 +6,18 @@ import type { PersistencePort } from "../../../src/app/ports/persistence-port.js
 import type { SessionPlan } from "../../../src/store/plan.js";
 import { createCompositionRoot } from "../../../src/tui-v2/bootstrap/composition-root.js";
 import { detectCapabilities } from "../../../src/tui-v2/bootstrap/capabilities.js";
+import { createTurnOutcome } from "../../../src/agent/turn-outcome.js";
 import {
+  beginPlanSuggestion,
+  clearAwaitingPlanSuggestion,
+  consumePlanSuggestionInput,
   discardPlan,
   IMPLEMENT_PROMPT,
   implementPlan,
+  isAwaitingPlanSuggestion,
   promptPlanApprovalIfNeeded,
 } from "../../../src/tui-v2/app/plan-lifecycle.js";
+import { shouldBlockPlanModeMutate } from "../../../src/agent/plan-decision.js";
 
 function plan(overrides: Partial<SessionPlan> = {}): SessionPlan {
   return {
@@ -50,7 +56,7 @@ function fakeAgent(calls: string[]): AgentPort {
   return {
     async runTurn(request) {
       calls.push(request.prompt);
-      return "";
+      return createTurnOutcome({ status: "succeeded", answer: "", steps: 0, remainingCriteria: [] });
     },
   };
 }
@@ -97,15 +103,17 @@ describe("plan lifecycle (PLAN-004, F-021/023, V2-070)", () => {
     expect(calls).toEqual([IMPLEMENT_PROMPT]);
   });
 
-  it("implementPlan approves, sets session flag, and submits the implement prompt", async () => {
+  it("implementPlan approves, switches to agent, and submits the implement prompt", async () => {
     const calls: string[] = [];
     const services = build(calls);
+    services.session.setMode("plan");
     seedDraft(services);
 
     await implementPlan(services);
 
     expect(services.plan.current()?.status).toBe("approved");
     expect(services.session.isPlanApproved()).toBe(true);
+    expect(services.session.getState().mode).toBe("agent");
     expect(calls).toEqual([IMPLEMENT_PROMPT]);
   });
 
@@ -123,14 +131,16 @@ describe("plan lifecycle (PLAN-004, F-021/023, V2-070)", () => {
   it("promptPlanApprovalIfNeeded implements on Y", async () => {
     const calls: string[] = [];
     const services = build(calls);
+    services.session.setMode("plan");
     seedDraft(services);
 
     const pending = promptPlanApprovalIfNeeded(services);
     expect(services.overlay.getState().kind).toBe("confirm");
-    services.overlay.answerConfirm(true);
+    services.overlay.answerPlanConfirm("implement");
     await pending;
 
     expect(services.plan.current()?.status).toBe("approved");
+    expect(services.session.getState().mode).toBe("agent");
     expect(calls).toEqual([IMPLEMENT_PROMPT]);
   });
 
@@ -139,10 +149,47 @@ describe("plan lifecycle (PLAN-004, F-021/023, V2-070)", () => {
     seedDraft(services);
 
     const pending = promptPlanApprovalIfNeeded(services);
-    services.overlay.answerConfirm(false);
+    services.overlay.answerPlanConfirm("discard");
     await pending;
 
     expect(services.plan.current()).toBeUndefined();
+  });
+
+  it("promptPlanApprovalIfNeeded suggest does not implement or discard", async () => {
+    const calls: string[] = [];
+    const services = build(calls);
+    seedDraft(services);
+    clearAwaitingPlanSuggestion();
+
+    const pending = promptPlanApprovalIfNeeded(services);
+    services.overlay.answerPlanConfirm("suggest");
+    await pending;
+
+    expect(services.plan.current()?.status).toBe("draft");
+    expect(services.session.isPlanApproved()).toBe(false);
+    expect(calls).toEqual([]);
+    expect(isAwaitingPlanSuggestion()).toBe(true);
+
+    const revision = consumePlanSuggestionInput(
+      services,
+      "add a dark mode task and use bun",
+    );
+    expect(revision?.modelPrompt).toMatch(/Plan revision request/);
+    expect(revision?.modelPrompt).toMatch(/add a dark mode task and use bun/);
+    expect(revision?.displayPrompt).toBe("add a dark mode task and use bun");
+    expect(isAwaitingPlanSuggestion()).toBe(false);
+  });
+
+  it("promptPlanApprovalIfNeeded dismiss leaves draft pending", async () => {
+    const services = build();
+    seedDraft(services);
+
+    const pending = promptPlanApprovalIfNeeded(services);
+    services.overlay.answerPlanConfirm("dismiss");
+    await pending;
+
+    expect(services.plan.current()?.status).toBe("draft");
+    expect(services.session.isPlanApproved()).toBe(false);
   });
 
   it("skips the prompt when already approved or no draft tasks", async () => {
@@ -164,5 +211,22 @@ describe("plan lifecycle (PLAN-004, F-021/023, V2-070)", () => {
     await services.session.submit("hello");
     expect(listener).toHaveBeenCalledOnce();
     expect(listener.mock.calls[0]?.[0]).toMatchObject({ status: "completed" });
+  });
+
+  it("shouldBlockPlanModeMutate only while unapproved", () => {
+    expect(shouldBlockPlanModeMutate(true, false)).toBe(true);
+    expect(shouldBlockPlanModeMutate(true, true)).toBe(false);
+    expect(shouldBlockPlanModeMutate(false, false)).toBe(false);
+  });
+
+  it("beginPlanSuggestion arms free-text capture without approving", () => {
+    const services = build();
+    seedDraft(services);
+    clearAwaitingPlanSuggestion();
+    beginPlanSuggestion(services);
+    expect(isAwaitingPlanSuggestion()).toBe(true);
+    expect(services.session.isPlanApproved()).toBe(false);
+    expect(services.plan.current()?.status).toBe("draft");
+    clearAwaitingPlanSuggestion();
   });
 });

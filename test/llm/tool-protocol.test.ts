@@ -153,7 +153,11 @@ describe("tool-protocol helpers", () => {
     expect(isTextOnlyModel("ollama", "tiny")).toBe(false);
   });
 
-  it("synthetic ids are unique-ish", () => {
-    expect(syntheticToolCallId(0)).toMatch(/^call_0_/);
+  it("synthetic ids remain unique within the same millisecond", () => {
+    const first = syntheticToolCallId(0);
+    const second = syntheticToolCallId(0);
+    expect(first).toMatch(/^call_0_/);
+    expect(second).toMatch(/^call_0_/);
+    expect(second).not.toBe(first);
   });
 });

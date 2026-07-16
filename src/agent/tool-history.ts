@@ -176,3 +176,51 @@ export function expandKeepStartForToolPairs(
   }
   return Math.max(0, start);
 }
+
+/**
+ * Validate native assistant/tool groups immediately before provider dispatch.
+ * Every tool result must belong to the currently open assistant group, ids are
+ * unique, and no non-tool message may begin until the whole group is closed.
+ */
+export function validateToolProtocol(messages: readonly ChatMessage[]): string[] {
+  const issues: string[] = [];
+  const seenIds = new Set<string>();
+  let pending = new Set<string>();
+
+  for (let index = 0; index < messages.length; index += 1) {
+    const message = messages[index]!;
+    if (message.role === "assistant" && message.toolCalls?.length) {
+      if (pending.size > 0) {
+        issues.push(`message ${index}: new assistant tool group before results for ${[...pending].join(", ")}`);
+      }
+      pending = new Set<string>();
+      for (const call of message.toolCalls) {
+        if (!call.id) issues.push(`message ${index}: tool call has no id`);
+        if (seenIds.has(call.id)) issues.push(`message ${index}: duplicate tool call id ${call.id}`);
+        seenIds.add(call.id);
+        pending.add(call.id);
+      }
+      continue;
+    }
+    if (message.role === "tool") {
+      const id = message.toolCallId ?? "";
+      if (!id || !pending.has(id)) {
+        issues.push(`message ${index}: orphan tool result${id ? ` ${id}` : ""}`);
+      } else {
+        pending.delete(id);
+      }
+      continue;
+    }
+    if (pending.size > 0) {
+      issues.push(`message ${index}: non-tool message before results for ${[...pending].join(", ")}`);
+      pending.clear();
+    }
+  }
+  if (pending.size > 0) issues.push(`end of history: missing results for ${[...pending].join(", ")}`);
+  return issues;
+}
+
+export function assertValidToolProtocol(messages: readonly ChatMessage[]): void {
+  const issues = validateToolProtocol(messages);
+  if (issues.length > 0) throw new Error(`invalid native tool protocol: ${issues.join("; ")}`);
+}

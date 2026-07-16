@@ -6,15 +6,8 @@ import { getConfig, updateConfig } from "../store/config.js";
 
 const REPO = "pentoshi007/clai";
 
-/**
- * Resolve the running version from the installed package.json so the banner,
- * `--version`, and the update checker always report the ACTUAL installed
- * build — never a hardcoded constant that drifts after `npm i -g`. Walks up
- * from this module to find the nearest package.json (works in dev via tsx and
- * in the compiled dist layout). Falls back to a baked constant only if the
- * file can't be read.
- */
-const FALLBACK_VERSION = "3.6.0";
+
+const FALLBACK_VERSION = "3.7.0";
 
 function resolvePackageVersion(): string {
   try {

@@ -9,6 +9,7 @@ import {
   planProgress,
   clearAllPlans,
   tasksFromTitles,
+  patchPlanMeta,
 } from "../src/store/plan.js";
 
 // CLAI_PLAN_FILE is set by the vitest env? We rely on VITEST_WORKER_ID which
@@ -46,6 +47,26 @@ describe("plan store", () => {
     expect(loaded?.goal).toBe("recon");
     expect(loaded?.kind).toBe("pentest");
     expect(loaded?.tasks).toHaveLength(2);
+  });
+
+  it("persists plan meta (project root / package manager)", async () => {
+    const plan = createPlan({
+      sessionId: "s-meta",
+      goal: "todo app",
+      detail: "vite",
+      taskTitles: ["scaffold", "implement", "run"],
+      kind: "coding",
+      meta: { projectRoot: "/tmp/todo-app", packageManager: "npm" },
+    });
+    await savePlan(plan);
+    const loaded = await loadPlan("s-meta");
+    expect(loaded?.meta?.projectRoot).toBe("/tmp/todo-app");
+    expect(loaded?.meta?.packageManager).toBe("npm");
+    patchPlanMeta(loaded!, { devCommand: "npm run dev" });
+    await savePlan(loaded!);
+    const again = await loadPlan("s-meta");
+    expect(again?.meta?.devCommand).toBe("npm run dev");
+    expect(again?.tasks).toHaveLength(3);
   });
 
   it("keeps plans session-scoped", async () => {

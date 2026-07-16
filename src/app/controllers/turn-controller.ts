@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { AgentEvent } from "../../agent/events.js";
+import { renderTurnOutcome, type TurnOutcome } from "../../agent/turn-outcome.js";
 import type { ChatMessage } from "../../types.js";
 import { isAbortError, type SessionPolicy } from "../../agent/session-policy.js";
 import { asTurnId, type AnyAppEvent, type TurnId } from "../events/app-event.js";
@@ -12,7 +13,12 @@ import type { SecretPort } from "../ports/secret-port.js";
 import type { Disposable } from "./disposable.js";
 
 export type TurnResult =
-  | { readonly status: "completed"; readonly turnId: TurnId; readonly finalAnswer: string }
+  | {
+      readonly status: "completed";
+      readonly turnId: TurnId;
+      readonly outcome: TurnOutcome;
+      readonly finalAnswer: string;
+    }
   | { readonly status: "aborted"; readonly turnId: TurnId }
   | { readonly status: "error"; readonly turnId: TurnId; readonly error: Error };
 
@@ -68,12 +74,7 @@ class DeltaCoalescer {
 
 const defaultMintTurnId = (): TurnId => asTurnId(`turn-${randomUUID()}`);
 
-/**
- * Owns one turn's execution: mints the turn id, owns the AbortController, wires
- * the agent's events through delta coalescing and the AppEvent adapter, and
- * resolves a discriminated result. Abort is a distinct result, never an error
- * (REL, ARCHITECTURE.md).
- */
+
 export class TurnController implements Disposable {
   private ac: AbortController | undefined;
   private active = false;
@@ -117,7 +118,7 @@ export class TurnController implements Disposable {
     }
 
     try {
-      const finalAnswer = await this.deps.agent.runTurn(request, {
+      const outcome = await this.deps.agent.runTurn(request, {
         onEvent: (event) => coalescer.push(event),
         onMessages: options.onMessages,
         signal: ac.signal,
@@ -126,7 +127,12 @@ export class TurnController implements Disposable {
         session: options.session,
       });
       coalescer.flush();
-      return { status: "completed", turnId, finalAnswer };
+      return {
+        status: "completed",
+        turnId,
+        outcome,
+        finalAnswer: renderTurnOutcome(outcome),
+      };
     } catch (error) {
       coalescer.flush();
       if (isAbortError(error, ac.signal)) return { status: "aborted", turnId };

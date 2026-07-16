@@ -77,11 +77,7 @@ function statusCodeHint(status: number): string {
 export async function readJson<T>(response: Response): Promise<T> {
   const text = await readBodyCapped(response, MAX_JSON_RESPONSE_BYTES);
   if (!response.ok) {
-    // Try to extract a useful message from the body. Some providers (NVIDIA
-    // NIM, Groq) wrap errors in `{ error: { message } }`, others (Anthropic)
-    // use `{ error: { type, message } }`, and AgentRouter-style proxies
-    // sometimes return `{ detail }` or a bare string. Cover the common
-    // shapes so users see a helpful message instead of just "HTTP 400".
+   
     let detail = "";
     try {
       const body = JSON.parse(text) as Record<string, unknown>;
@@ -144,9 +140,7 @@ async function readBodyCapped(
 ): Promise<string> {
   const reader = response.body?.getReader();
   if (!reader) {
-    // Some shapes (eg synthetic Response in tests) don't expose a reader.
-    // Fall back to text() but still slice the result so callers see the
-    // same cap downstream.
+    
     const text = await response.text();
     return text.length > maxBytes ? text.slice(0, maxBytes) : text;
   }
@@ -188,18 +182,7 @@ async function readBodyCapped(
 /** Default no-byte watchdog for provider streams. */
 export const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 30_000;
 
-/**
- * Shared SSE/JSONL stream reader. Wraps a fetch response body in:
- *  - an idle watchdog (default 30s, configurable per call) that aborts
- *    when no bytes arrive,
- *  - a hard total-byte cap (default 16MB) so a runaway provider can't
- *    grow our memory unbounded,
- *  - a caller-provided abort signal.
- *
- * Yields lines as they arrive. Caller is responsible for parsing JSON /
- * SSE `data:` framing. Cleans up timers and reader locks on every exit
- * path so callers don't have to.
- */
+
 export interface StreamLineReaderOptions {
   signal?: AbortSignal | undefined;
   idleTimeoutMs?: number | undefined;
@@ -209,12 +192,7 @@ export interface StreamLineReaderOptions {
   onActivity?: (() => void) | undefined;
 }
 
-/**
- * Read one chunk without allowing a wedged ReadableStream implementation to
- * hide a caller abort. `reader.cancel()` is best-effort: some sockets do not
- * settle an already-pending `read()` promptly, so the abort signal also races
- * the read and rejects the awaiting request immediately.
- */
+
 function readWithAbort(
   reader: ReadableStreamDefaultReader<Uint8Array>,
   signal: AbortSignal,
@@ -279,9 +257,7 @@ export async function* readStreamLines(
   const decoder = new TextDecoder();
   let buffer = "";
   let bytesRead = 0;
-  // Cancel the reader when either the idle watchdog or the caller signal
-  // fires. ReadableStream.read() doesn't honor an external AbortSignal, so
-  // we have to actively cancel the reader for the loop below to unblock.
+  
   const cancelReaderOnAbort = (): void => {
     reader.cancel().catch(() => undefined);
   };
@@ -339,8 +315,7 @@ export async function* readStreamLines(
     if (idleTimer) clearTimeout(idleTimer);
     options.signal?.removeEventListener("abort", onCallerAbort);
     idleController.signal.removeEventListener("abort", cancelReaderOnAbort);
-    // Do not await cancellation here. A wedged transport can leave
-    // `reader.cancel()` pending too; the caller's abort must still return.
+    
     void reader.cancel().catch(() => undefined);
     try {
       reader.releaseLock();
@@ -395,10 +370,7 @@ export type ReasoningStyle =
   | "openrouter"
   | "none";
 
-// NVIDIA NIM models exposed at integrate.api.nvidia.com use family-specific
-// chat-template variables. Sending the wrong variable to a model that does
-// not recognise it can leave the upstream renderer in a broken state and
-// stream zero tokens — so we route per-family rather than firing every key.
+
 export type NvidiaReasoningKind =
   | "kimi-thinking" // Kimi K2.6 — reasoning is on by default; `thinking:false` disables it
   | "deepseek-v4" // DeepSeek V4 — `thinking` plus V4's none/high reasoning effort
@@ -464,9 +436,7 @@ export function buildReasoningPayload(
         return { reasoning_effort: enabled ? "default" : "none" };
       }
       if (/openai\/gpt-oss-(?:20b|120b)/.test(m)) {
-        // GPT-OSS cannot disable reasoning effort, but it can hide reasoning
-        // from the response. Retrying an empty visible answer must not silently
-        // fall back to the provider's medium default effort.
+        
         return enabled
           ? { reasoning_effort: clampEffort(effort), include_reasoning: true }
           : { reasoning_effort: "low", include_reasoning: false };
@@ -570,11 +540,7 @@ function buildChatBody(options: {
     options.reasoningStyle ?? "none",
     options.model,
   );
-  // Reasoning models often spend most of their budget on the hidden
-  // <think> stream before emitting any visible answer. If the caller
-  // didn't pin a maxTokens, give the model enough headroom (8K when
-  // thinking is on, 2K otherwise — keep small for fast non-reasoning
-  // paths so kimi-k2.6 etc. respond instantly).
+  
   const reasoningOn = Boolean(options.reasoning?.enabled);
   // Kimchi exposes this model as `minimax-m3`; NVIDIA uses the longer
   // `minimaxai/minimax-m3` ID. Both require the same sampling settings.
@@ -736,11 +702,7 @@ export async function openAiCompatibleStream(options: {
     | undefined;
   /** Abort a stream that produces no bytes for this long. Default 30s. */
   idleTimeoutMs?: number | undefined;
-  /**
-   * Allow a slower cold start before the first SSE byte. Once streaming has
-   * begun, `idleTimeoutMs` takes over so a wedged connection still aborts
-   * promptly. Defaults to the regular idle timeout.
-   */
+  
   initialIdleTimeoutMs?: number | undefined;
 }): Promise<OpenAiCompatibleResult> {
   // Combine the caller's abort signal with an idle watchdog so a stuck
@@ -750,9 +712,7 @@ export async function openAiCompatibleStream(options: {
   const idleController = new AbortController();
   let idleTimer: NodeJS.Timeout | undefined;
   let idleFired = false;
-  // Some gateways send SSE comments/heartbeats while their upstream model is
-  // wedged. Those bytes only prove the socket is open, not that a model is
-  // making progress, so they must not postpone the watchdog indefinitely.
+  
   let sawStreamProgress = false;
   let activeIdleTimeoutMs = initialIdleTimeoutMs;
   const resetIdleTimer = (): void => {
@@ -791,10 +751,7 @@ export async function openAiCompatibleStream(options: {
       signal: idleController.signal,
       headers: {
         "content-type": "application/json",
-        // NIM and many OpenAI-compatible gateways start buffering SSE
-        // server-side when this header is absent. Always advertise it
-        // for stream=true requests so the upstream pushes tokens as
-        // soon as they're generated instead of accumulating a chunk.
+    
         accept: "text/event-stream",
         authorization: `Bearer ${options.apiKey}`,
         ...options.headers,
@@ -960,9 +917,7 @@ export async function openAiCompatibleStream(options: {
                 ? "hit the max_tokens limit while still thinking"
                 : "completed after reasoning without a visible answer"
               : "completed without a visible answer";
-            // Do not return a reasoning-only completion to the agent. It
-            // would poison recovery history and cause no-op retry loops.
-            // Router-level fallback can now try a healthy provider instead.
+            
             throw new ProviderError(
               `${options.provider} ${cause}.`,
             );
@@ -1026,8 +981,7 @@ export async function openAiCompatibleStream(options: {
               const canonical = wire
                 ? (fromWireName(wire) ?? wire)
                 : undefined;
-              // Fire when name first known; also when large arg payloads grow
-              // past 4KB so the UI can show "receiving args…".
+              
               const largeArgTick =
                 !accInfo.nameBecameKnown &&
                 accInfo.argumentsBytes > 0 &&
@@ -1075,12 +1029,7 @@ export async function openAiCompatibleStream(options: {
     };
   } catch (error) {
     cleanup();
-    // reader.cancel() returns a promise that rejects when the underlying
-    // stream is already errored (eg from the same abort that triggered
-    // this catch). Swallow it so it never escalates to an unhandled
-    // rejection that kills the whole REPL.
-    // Do not await cancellation here. Some stalled sockets never settle the
-    // pending cancel promise, and waiting for it would negate the abort race.
+    
     void reader.cancel().catch(() => undefined);
     try {
       reader.releaseLock();

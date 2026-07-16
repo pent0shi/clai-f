@@ -1,8 +1,8 @@
-import { mkdir, readdir, rename, stat, appendFile, rm, chown } from 'node:fs/promises';
+import { mkdir, readdir, rename, stat, appendFile, readFile, writeFile, rm, chown } from 'node:fs/promises';
 import { fixOwner, handlePermissionError } from '../os/permissions.js';
 
 import { existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { redactSecrets } from '../llm/provider.js';
 import { getArtifactDir, getLogsDirRoot } from './paths.js';
 
@@ -76,4 +76,50 @@ export async function clearArtifacts(): Promise<{ removed: number }> {
     }
   }
   return { removed };
+}
+
+const diagnosticKeyAllowed = (key: string): boolean =>
+  /(?:id|ids|status|state|reason|level|phase|capability|allowed|ok|exitCode|signal|bytes|count|duration|freshness|revision|version)$/i.test(key);
+
+function diagnosticMetadata(value: unknown): unknown {
+  if (Array.isArray(value)) return value.slice(0, 100).map(diagnosticMetadata);
+  if (!value || typeof value !== "object") return value;
+  const output: Record<string, unknown> = {};
+  for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+    if (diagnosticKeyAllowed(key)) output[key] = diagnosticMetadata(child);
+  }
+  return output;
+}
+
+/** Export local, metadata-only diagnostics. User prompts, project code, commands, and tool output are excluded by default. */
+export async function exportDiagnostics(destination: string): Promise<{ path: string; events: number }> {
+  const entries = (await readdir(logsDir).catch(() => []))
+    .filter((name) => name.startsWith("clai-") && name.includes(".log"))
+    .sort()
+    .slice(-5);
+  const events: Array<{ at?: string; event?: string; payload?: unknown }> = [];
+  for (const entry of entries) {
+    const text = await readFile(join(logsDir, entry), "utf8").catch(() => "");
+    for (const line of text.split("\n")) {
+      if (!line.trim()) continue;
+      try {
+        const parsed = JSON.parse(line) as { at?: string; event?: string; payload?: unknown };
+        const row: { at?: string; event?: string; payload?: unknown } = {};
+        if (typeof parsed.at === "string") row.at = parsed.at;
+        if (typeof parsed.event === "string") row.event = parsed.event;
+        if (parsed.payload !== undefined) row.payload = diagnosticMetadata(parsed.payload);
+        events.push(row);
+      } catch { /* Ignore partial/corrupt log lines. */ }
+    }
+  }
+  const report = redactSecrets(JSON.stringify({
+    schemaVersion: 1,
+    generatedAt: new Date().toISOString(),
+    runtime: { node: process.version, platform: process.platform, arch: process.arch },
+    privacy: "metadata-only; prompts, code, commands, secrets, and tool output omitted",
+    events: events.slice(-10_000),
+  }, null, 2));
+  await mkdir(dirname(destination), { recursive: true });
+  await writeFile(destination, `${report}\n`, { mode: 0o600 });
+  return { path: destination, events: Math.min(events.length, 10_000) };
 }

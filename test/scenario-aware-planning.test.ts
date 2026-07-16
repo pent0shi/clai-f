@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   pentestWorkflowDirective,
+  narrowNmapOperationDirective,
   buildWorkflowDirective,
   looksLikePentestTask,
 } from "../src/agent/tool-call-parser.js";
@@ -39,9 +40,6 @@ describe("pentestWorkflowDirective", () => {
 
   it("permits recon tools before a plan exists", () => {
     const directive = pentestWorkflowDirective();
-    // The directive must explicitly enumerate the read-only recon tools
-    // that are allowed to run before plan.create, so the model does not
-    // stall waiting for an approval gate on a recon-only call.
     expect(directive).toContain("whois.lookup");
     expect(directive).toContain("dns.lookup");
     expect(directive).toContain("net.context");
@@ -55,7 +53,18 @@ describe("pentestWorkflowDirective", () => {
     const directive = pentestWorkflowDirective();
     expect(directive.toLowerCase()).toContain("scope");
     expect(directive.toLowerCase()).toContain("out-of-scope");
-    expect(directive.toLowerCase()).toContain("flag");
+    expect(directive.toLowerCase()).toMatch(/flag/);
+  });
+});
+
+describe("narrowNmapOperationDirective", () => {
+  it("requires one scan and forbids automatic pentest expansion", () => {
+    const directive = narrowNmapOperationDirective();
+    expect(directive).toMatch(/net\.scan exactly once/i);
+    expect(directive).toMatch(/Do NOT call plan\.create/i);
+    expect(directive).toMatch(/WHOIS, DNS, HTTP/i);
+    expect(directive).toMatch(/backgroundJob\.id/i);
+    expect(directive).toMatch(/Stop after reporting/i);
   });
 });
 
@@ -88,9 +97,9 @@ describe("renderAgentSystemPrompt — pentest planning guidance", () => {
     expect(prompt.toLowerCase()).toContain("recon");
     expect(prompt.toLowerCase()).toContain("finding");
     expect(prompt.toLowerCase()).toContain("incremental");
-    // The PENTEST METHODOLOGY section now leads with a recon-before-plan rule.
+    // The PENTEST METHODOLOGY section leads with recon-before-plan.
     expect(prompt).toContain("RECON BEFORE PLAN");
-    expect(prompt).toContain("MANDATORY RESPONSE SHAPES");
+    expect(prompt).toMatch(/RECON RESPONSE|ANALYSIS \+ PLAN RESPONSE|standalone plan\.create/i);
   });
 });
 
@@ -102,5 +111,7 @@ describe("buildWorkflowDirective — stack-agnostic explore/continue guidance", 
     expect(directive).toMatch(/CONTINUE an existing project|NEVER re-scaffold/i);
     expect(directive).toMatch(/Operation cancelled/i);
     expect(directive).toMatch(/stack-agnostic/i);
+    expect(directive).toMatch(/durable plan/i);
+    expect(directive).toMatch(/do NOT repeatedly relist the parent/i);
   });
 });

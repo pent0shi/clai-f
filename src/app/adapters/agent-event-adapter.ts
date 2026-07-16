@@ -11,16 +11,17 @@ import type { OutputSpool } from "../events/event-buffer.js";
 import type { EventSequencer } from "../events/sequencer.js";
 
 const STEP_STATUS = /^step (\d+)$/;
+const QUIET_META_TOOLS = new Set(["plan.create", "task.update"]);
 
-/**
- * Translates the legacy `AgentEvent` stream (the agent's unchanged emitter
- * contract) into versioned `AppEvent` envelopes (V2-021). Pure translation: it
- * mints no side effects beyond appending tool output to the injected spool and
- * emitting envelopes. Given the same input events, id factory, and clock it
- * produces byte-identical output, which the replay contract test relies on.
- */
+type BufferedMetaTool = {
+  name: string;
+  argsDisplay: string;
+  outputRef?: ReturnType<OutputSpool["append"]> | undefined;
+};
+
 export class AgentEventAdapter {
   private turnId: TurnId | undefined;
+  private readonly bufferedMetaTools = new Map<string, BufferedMetaTool>();
 
   constructor(
     private readonly sequencer: EventSequencer,
@@ -30,13 +31,19 @@ export class AgentEventAdapter {
 
   /** Bind subsequent events to a turn; pass undefined for session-level events. */
   setTurn(turnId: TurnId | undefined): void {
+    if (this.turnId !== turnId) this.bufferedMetaTools.clear();
     this.turnId = turnId;
   }
 
   ingest(event: AgentEvent): void {
     switch (event.type) {
       case "turn-start":
-        this.push("turn-started", { prompt: event.prompt });
+        this.push("turn-started", {
+          prompt: event.prompt,
+          ...(event.displayPrompt !== undefined
+            ? { displayPrompt: event.displayPrompt }
+            : {}),
+        });
         return;
       case "status": {
         const match = STEP_STATUS.exec(event.text);
@@ -67,42 +74,74 @@ export class AgentEventAdapter {
       case "notice":
         this.push("notice", { level: event.level, text: event.text });
         return;
-      case "tool-call":
+      case "tool-call": {
+        const toolCallId = this.toolCallId(event.id);
+        if (QUIET_META_TOOLS.has(event.name)) {
+          this.bufferedMetaTools.set(toolCallId, {
+            name: event.name,
+            argsDisplay: event.argsDisplay,
+          });
+          return;
+        }
         this.push("tool-call", {
-          toolCallId: this.toolCallId(event.id),
+          toolCallId,
           name: event.name,
           argsDisplay: event.argsDisplay,
         });
         return;
-      case "tool-start":
+      }
+      case "tool-start": {
+        const toolCallId = this.toolCallId(event.id);
+        if (this.bufferedMetaTools.has(toolCallId)) return;
         this.push("tool-started", {
-          toolCallId: this.toolCallId(event.id),
+          toolCallId,
         });
         return;
+      }
       case "tool-output": {
         const id = this.toolCallId(event.id);
         const ref = event.replace
           ? this.spool.replace(id, event.chunk)
           : this.spool.append(id, event.chunk);
+        const buffered = this.bufferedMetaTools.get(id);
+        if (buffered) {
+          buffered.outputRef = ref;
+          return;
+        }
         this.push("tool-output", { ref });
         return;
       }
-      case "tool-result":
+      case "tool-result": {
+        const toolCallId = this.toolCallId(event.id);
+        const buffered = this.bufferedMetaTools.get(toolCallId);
+        if (buffered) {
+          if (event.ok) {
+            this.bufferedMetaTools.delete(toolCallId);
+            return;
+          }
+          this.flushBufferedMetaTool(toolCallId, buffered);
+        }
         this.push("tool-result", {
-          toolCallId: this.toolCallId(event.id),
+          toolCallId,
           ok: event.ok,
           exitCode: event.exitCode,
           summary: event.summary,
           artifactPath: event.artifactPath,
+          ...(event.fileChanges ? { fileChanges: event.fileChanges } : {}),
         });
         return;
-      case "tool-blocked":
+      }
+      case "tool-blocked": {
+        const toolCallId = this.toolCallId(event.id);
+        const buffered = this.bufferedMetaTools.get(toolCallId);
+        if (buffered) this.flushBufferedMetaTool(toolCallId, buffered);
         this.push("tool-blocked", {
-          toolCallId: this.toolCallId(event.id),
+          toolCallId,
           name: event.name,
           reason: event.reason,
         });
         return;
+      }
       case "plan-update":
         this.push("plan-updated", {
           planId: asPlanId(event.plan.sessionId),
@@ -144,22 +183,30 @@ export class AgentEventAdapter {
     }
   }
 
+  private flushBufferedMetaTool(
+    toolCallId: ReturnType<typeof asToolCallId>,
+    buffered: BufferedMetaTool,
+  ): void {
+    this.push("tool-call", {
+      toolCallId,
+      name: buffered.name,
+      argsDisplay: buffered.argsDisplay,
+    });
+    if (buffered.outputRef) {
+      this.push("tool-output", { ref: buffered.outputRef });
+    }
+    this.bufferedMetaTools.delete(toolCallId);
+  }
+
   private push<K extends AppEventType>(
     type: K,
     payload: AppEventPayloads[K],
   ): void {
-    // `build` returns a correctly typed AppEvent<K, ...>, but TypeScript cannot
-    // prove a generic member is assignable to the distributive `AnyAppEvent`
-    // union; the narrowing is sound because K ranges over the same keys.
+    
     this.emit(this.sequencer.build(type, payload, this.turnId) as AnyAppEvent);
   }
 
-  /**
-   * Legacy agents restart their display counter at `tool-1` for every turn.
-   * It is only locally unique, while the transcript and output spool retain a
-   * whole session. Namespace it at the application boundary so tool rows and
-   * output stay correlated without ever reusing a semantic document id.
-   */
+  
   private toolCallId(sourceId: string) {
     return asToolCallId(this.turnId ? `${this.turnId}:${sourceId}` : sourceId);
   }

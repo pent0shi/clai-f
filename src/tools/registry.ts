@@ -35,6 +35,7 @@ import {
   parsePortSpec,
   parseLegacyFlags,
   profileToNmapArgs,
+  nmapScanNeedsPrivilege,
   type ScanProfile,
 } from "./validate.js";
 import { getNetworkContext } from "./network-context.js";
@@ -44,9 +45,19 @@ import { wordlistFind } from "./wordlists.js";
 import { jobManager } from "./jobs.js";
 import { looksLongRunning } from "./command-intent.js";
 import { packageBinaryName } from "./package-binary.js";
-import { runNmapScan } from "./nmap-runner.js";
+import { resolveNmapTimeoutPolicy, runNmapScan } from "./nmap-runner.js";
+import { compareAuthorizationContexts, discoverWebSurface, enumerateApi } from "./pentest-workflows.js";
 import { type ToolRunOptions, type ToolHandler } from "./tool-types.js";
 import { fromWireName, sanitizeToolName } from "../llm/tool-protocol.js";
+import {
+  prepareElevatedBackgroundCommand,
+  preparePrivilegedBackgroundArgv,
+  tryRunElevatedWithoutTty,
+} from "./elevated-shell.js";
+import {
+  getAllowInteractiveStdinInherit,
+  looksInteractiveStdin,
+} from "./shell.js";
 
 export type { ToolRunOptions, ToolHandler };
 
@@ -102,6 +113,53 @@ function optionalBoolean(
   return typeof value === "boolean" ? value : undefined;
 }
 
+export interface ScanResourceEstimate {
+  profile: "standard" | "deep" | "full";
+  estimatedSeconds: number;
+  timeoutMs: number;
+  durableRecommended: boolean;
+}
+
+export function estimateScanResources(argv: readonly string[]): ScanResourceEstimate {
+  const policy = resolveNmapTimeoutPolicy(argv, {});
+  const estimatedSeconds = policy.depth === "full" ? 1_800 : policy.depth === "deep" ? 600 : 120;
+  return {
+    profile: policy.depth,
+    estimatedSeconds,
+    timeoutMs: policy.timeoutMs,
+    durableRecommended: policy.depth !== "standard",
+  };
+}
+
+/** nmap argv for pentest.recon — ports configurable (default top-100). */
+export function buildPentestReconNmapArgv(
+  args: Record<string, unknown>,
+  host: string,
+): string[] {
+  const argv = ["-sS", "-sV"];
+  const full = args.full === true || args.full === "true";
+  const ports =
+    typeof args.ports === "string" && args.ports.trim()
+      ? args.ports.trim()
+      : undefined;
+  let topPorts: number | undefined;
+  if (typeof args.topPorts === "number" && Number.isFinite(args.topPorts)) {
+    topPorts = Math.max(1, Math.min(65535, Math.floor(args.topPorts)));
+  } else if (typeof args.topPorts === "string" && /^\d+$/.test(args.topPorts)) {
+    topPorts = Math.max(1, Math.min(65535, Number(args.topPorts)));
+  }
+  if (full) {
+    argv.push("-p-");
+  } else if (ports) {
+    const spec = parsePortSpec(ports);
+    argv.push("-p", spec);
+  } else {
+    argv.push("--top-ports", String(topPorts ?? 100));
+  }
+  argv.push(host);
+  return argv;
+}
+
 function optionalResponseMode(
   args: Record<string, unknown>,
   key: string,
@@ -129,9 +187,16 @@ export const toolRegistry: Record<string, ToolHandler> = {
     // The model is still encouraged to use shell.start directly; this just
     // catches the common mistake of using shell.exec for a server.
     if (looksLongRunning(command)) {
-      const job = await jobManager.startJob(command, {
-        cwd: optionalString(args, "cwd"),
+      const elevated = await prepareElevatedBackgroundCommand(command, {
+        signal: options?.signal,
+        onOutput: options?.onOutput,
+        requestSecret: options?.requestSecret,
       });
+      if (elevated && !elevated.prepared) return elevated.result;
+      const job = await jobManager.startJob(
+        elevated?.prepared ? elevated.spec : command,
+        { cwd: optionalString(args, "cwd") },
+      );
       if (job.ok) {
         return {
           ...job,
@@ -151,12 +216,38 @@ export const toolRegistry: Record<string, ToolHandler> = {
     const timeoutMs =
       explicitTimeout ??
       (isLongQuietInstallOrScaffoldCommand(command) ? 900_000 : undefined);
+
+    // Password tools must never steal the TTY in OpenTUI (freezes Esc/clicks).
+    // Prefer secure modal + sudo -S; otherwise refuse interactive elevation.
+    if (looksInteractiveStdin(command)) {
+      const elevated = await tryRunElevatedWithoutTty(command, {
+        cwd: optionalString(args, "cwd"),
+        timeoutMs,
+        signal: options?.signal,
+        onOutput: options?.onOutput,
+        requestSecret: options?.requestSecret,
+      });
+      if (elevated) return elevated;
+      if (!getAllowInteractiveStdinInherit()) {
+        return {
+          ok: false,
+          exitCode: 1,
+          output:
+            "This command needs an interactive password prompt, which would freeze the TUI. " +
+            "Use a simple `sudo <command>` so clai can open the secure password modal, " +
+            "or run without elevation (e.g. nmap -sT).",
+        };
+      }
+    }
+
     return shellExec({
       command,
       cwd: optionalString(args, "cwd"),
       timeoutMs,
       signal: options?.signal,
       onOutput: options?.onOutput,
+      // Explicit: never inherit unless classic REPL policy allows it.
+      interactiveStdin: getAllowInteractiveStdinInherit() ? "auto" : false,
     });
   },
   async "fs.read"(args, options) {
@@ -262,6 +353,27 @@ export const toolRegistry: Record<string, ToolHandler> = {
     const argv: string[] = [];
     if (ports) argv.push("-p", ports);
     argv.push(...profileArgs, ...legacyArgs, host.value);
+    const estimate = estimateScanResources(argv);
+    const durable = args.background === true || estimate.durableRecommended;
+    if (durable) {
+      const prepared = nmapScanNeedsPrivilege(argv)
+        ? await preparePrivilegedBackgroundArgv("nmap", argv, {
+            signal: options?.signal,
+            onOutput: options?.onOutput,
+            requestSecret: options?.requestSecret,
+            title: "Administrator access for nmap",
+            prompt:
+              "Enter your password for the nmap raw-socket scan. It is sent only to sudo stdin and is never stored. Esc cancels.",
+          })
+        : { prepared: true as const, spec: { command: "nmap", argv: [...argv] } };
+      if (!prepared.prepared) return prepared.result;
+      return jobManager.startJob(prepared.spec, {
+        name: `nmap-${estimate.profile}-${host.value}`,
+        profile: estimate.profile,
+        estimatedSeconds: estimate.estimatedSeconds,
+        ...(options?.engagementAuthorization ? { authorization: options.engagementAuthorization } : {}),
+      });
+    }
     return runNmapScan(argv, options);
   },
   async "http.fetch"(args, options) {
@@ -271,14 +383,44 @@ export const toolRegistry: Record<string, ToolHandler> = {
       !Array.isArray(args.headers)
         ? (args.headers as Record<string, string>)
         : undefined;
-    return httpFetch(requireString(args, "url"), {
+    const url = requireString(args, "url");
+    const method = (optionalString(args, "method") ?? "GET").toUpperCase();
+    // Local app verify: loopback GET/HEAD is the owner's own process — auto-own
+    // so models are not stuck without iOwnThis. Mutating methods and non-loopback
+    // private/metadata addresses still require explicit ownership.
+    let iOwnThis = args.iOwnThis === true || args.own === true;
+    // Keep the caller's host (localhost). httpFetch dual-stacks 127.0.0.1/::1
+    // on connection failure — rewriting to 127.0.0.1 alone broke Vite on
+    // IPv6-only macOS binds while the browser still worked.
+    if (!iOwnThis && (method === "GET" || method === "HEAD")) {
+      try {
+        const parsed = new URL(url);
+        const host = parsed.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+        if (
+          host === "localhost" ||
+          host === "127.0.0.1" ||
+          host === "::1" ||
+          host === "localhost.localdomain" ||
+          host === "ip6-localhost" ||
+          /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host)
+        ) {
+          iOwnThis = true;
+        }
+      } catch {
+        /* invalid URL handled inside httpFetch */
+      }
+    }
+    return httpFetch(url, {
       method: optionalString(args, "method"),
       body: optionalString(args, "body"),
       headers,
       maxBytes: optionalNumber(args, "maxBytes"),
-      iOwnThis: args.iOwnThis === true || args.own === true,
+      iOwnThis,
       retries: optionalNumber(args, "retries"),
       signal: options?.signal,
+      // Never attach engagement hop checks for owned loopback — leftover
+      // pentest scope must not fail local app verify.
+      authorizeHop: iOwnThis ? undefined : options?.authorizeNetworkHop,
     });
   },
   async "web.search"(args, options) {
@@ -404,13 +546,10 @@ export const toolRegistry: Record<string, ToolHandler> = {
   },
   async "pentest.recon"(args, options) {
     const host = parseHost(requireString(args, "target"));
-    // Per-step opt-in flags so callers can ask for ONLY the recon they
-    // need. When no flags are supplied the legacy behavior runs (all
-    // three steps), preserving backwards compatibility for prompts that
-    // expect a full sweep.
     const wantWhois = args.whois !== false;
     const wantDns = args.dns !== false;
     const wantNmap = args.nmap !== false;
+    const nmapArgv = buildPentestReconNmapArgv(args, host.value);
     const allSteps: Array<{
       key: "whois" | "dns" | "nmap";
       command: string;
@@ -425,11 +564,7 @@ export const toolRegistry: Record<string, ToolHandler> = {
       {
         key: "nmap",
         command: "nmap",
-        // -sS = stealth SYN scan (the professional default). It needs raw
-        // sockets, so runNmapScan wraps it in sudo / elevation and falls
-        // back to an unprivileged TCP connect scan (-sT) when privilege
-        // can't be obtained.
-        argv: ["-sS", "-sV", "--top-ports", "100", host.value],
+        argv: nmapArgv,
       },
     ];
     const steps = allSteps.filter((step) => {
@@ -474,51 +609,70 @@ export const toolRegistry: Record<string, ToolHandler> = {
     let anyOk = false;
     const userAborted = (): boolean => Boolean(options?.signal?.aborted);
 
-    for (const step of steps) {
-      if (userAborted()) break;
+    const runStep = async (step: (typeof steps)[number]): Promise<{ key: string; display: string; result: ToolResult }> => {
       const display = `${step.command} ${step.argv.join(" ")}`;
-      transcript.push(`$ ${display}`);
-      // Announce each sub-step so users see progress through long recons.
       options?.onOutput?.(`\n$ ${display}\n`, "stdout");
-      // Heartbeat so the outer 60s stall watchdog doesn't kill a quiet whois.
       const beat = setInterval(() => {
         options?.onOutput?.(`[recon] ${step.key} still running…\n`, "stdout");
       }, 5_000);
       (beat as unknown as { unref?: () => void }).unref?.();
-      // Per-step caps: whois often hangs; nmap needs longer; dns is quick.
-      const stepTimeoutMs =
-        step.key === "whois" ? 20_000 : step.key === "dns" ? 30_000 : 180_000;
-      let result: ToolResult;
       try {
-        result =
-          step.key === "nmap"
-            ? await runNmapScan(step.argv, options)
-            : await spawnArgv({
-                command: step.command,
-                argv: step.argv,
-                timeoutMs: stepTimeoutMs,
-                signal: options?.signal,
-                onOutput: options?.onOutput,
-              });
+        if (step.key === "nmap") {
+          const estimate = estimateScanResources(step.argv);
+          if (estimate.durableRecommended || args.background === true) {
+            const prepared = nmapScanNeedsPrivilege(step.argv)
+              ? await preparePrivilegedBackgroundArgv("nmap", step.argv, {
+                  signal: options?.signal,
+                  onOutput: options?.onOutput,
+                  requestSecret: options?.requestSecret,
+                  title: "Administrator access for nmap",
+                  prompt:
+                    "Enter your password for the durable nmap raw-socket scan. It is sent only to sudo stdin and is never stored. Esc cancels.",
+                })
+              : { prepared: true as const, spec: { command: "nmap", argv: [...step.argv] } };
+            const result = prepared.prepared
+              ? await jobManager.startJob(prepared.spec, {
+                  name: `recon-${estimate.profile}-${host.value}`,
+                  profile: estimate.profile,
+                  estimatedSeconds: estimate.estimatedSeconds,
+                  ...(options?.engagementAuthorization ? { authorization: options.engagementAuthorization } : {}),
+                })
+              : prepared.result;
+            return { key: step.key, display, result };
+          }
+          return { key: step.key, display, result: await runNmapScan(step.argv, options) };
+        }
+        const timeoutMs = step.key === "whois" ? 20_000 : 30_000;
+        return {
+          key: step.key,
+          display,
+          result: await spawnArgv({
+            command: step.command,
+            argv: step.argv,
+            timeoutMs,
+            signal: options?.signal,
+            onOutput: options?.onOutput,
+          }),
+        };
       } catch (error) {
-        const msg = error instanceof Error ? error.message : String(error);
-        result = {
-          ok: false,
-          output: `${step.key} error: ${msg}`,
-          exitCode: 1,
+        return {
+          key: step.key,
+          display,
+          result: { ok: false, output: `${step.key} error: ${error instanceof Error ? error.message : String(error)}`, exitCode: 1 },
         };
       } finally {
         clearInterval(beat);
       }
-      // Continue remaining steps even if whois/dns fails — never cancel
-      // sibling top-level tools just because whois hung.
+    };
+
+    // Passive WHOIS/DNS and the selected scan run independently. Deep/full
+    // scans return a durable job receipt immediately while passive results
+    // continue to completion in this foreground turn.
+    const completed = await Promise.all(steps.map(runStep));
+    for (const { display, result } of completed) {
+      transcript.push(`$ ${display}`, result.output);
+      outputs.push(result.output);
       if (result.ok) anyOk = true;
-      const body = result.ok
-        ? result.output
-        : `${result.output || `${step.key} failed`}${result.exitCode !== undefined ? ` (exit ${result.exitCode})` : ""}`;
-      outputs.push(body);
-      transcript.push(body);
-      if (userAborted()) break;
     }
 
     if (artifactPath) {
@@ -530,17 +684,52 @@ export const toolRegistry: Record<string, ToolHandler> = {
       }
     }
 
-    // Soft-success when any step worked and the user didn't cancel. Partial
-    // whois failure still returns useful dns/nmap output to the model.
+    // Passive successes remain useful evidence, but a requested nmap step
+    // that failed authentication or never started must make the composite
+    // operation fail rather than disguising it as a successful recon.
     const aborted = userAborted();
+    const nmapResult = completed.find((entry) => entry.key === "nmap")?.result;
+    const requestedScanFailed = wantNmap && Boolean(nmapResult && !nmapResult.ok);
+    const backgroundJob = completed.find((entry) => entry.result.backgroundJob)?.result.backgroundJob;
+    const output = outputs.join("\n\n");
     return {
-      ok: aborted ? false : anyOk || outputs.length > 0,
+      ok: !aborted && anyOk && !requestedScanFailed,
       output: aborted
-        ? `${outputs.join("\n\n")}\n\nCommand aborted.`.trim()
-        : outputs.join("\n\n"),
-      exitCode: aborted ? 130 : anyOk ? 0 : 1,
+        ? `${output}\n\nCommand aborted.`.trim()
+        : requestedScanFailed
+          ? `${output}\n\nThe requested nmap scan failed or was not started; passive recon results above are partial only.`.trim()
+          : output,
+      exitCode: aborted ? 130 : anyOk && !requestedScanFailed ? 0 : 1,
       ...(artifactPath ? { outputPath: artifactPath } : {}),
+      ...(backgroundJob ? { backgroundJob } : {}),
     };
+  },
+  async "pentest.webDiscover"(args, options) {
+    const paths = Array.isArray(args.paths) ? args.paths.filter((value): value is string => typeof value === "string") : [];
+    return discoverWebSurface(requireString(args, "baseUrl"), paths, options);
+  },
+  async "pentest.apiEnumerate"(args, options) {
+    return enumerateApi(requireString(args, "specUrl"), options);
+  },
+  async "pentest.authCompare"(args, options) {
+    const contexts = Array.isArray(args.contexts)
+      ? args.contexts.filter((value): value is { label: string; headers: Record<string, string> } => {
+          if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+          const candidate = value as Record<string, unknown>;
+          return typeof candidate.label === "string" && Boolean(candidate.headers) && typeof candidate.headers === "object" && !Array.isArray(candidate.headers);
+        })
+      : [];
+    return compareAuthorizationContexts(requireString(args, "url"), contexts, options);
+  },
+  async "pentest.scanStatus"(args) {
+    const offset = optionalNumber(args, "offset");
+    const bytes = optionalNumber(args, "bytes");
+    const stream = optionalString(args, "stream") as "stdout" | "stderr" | "combined" | undefined;
+    return jobManager.tailJob(requireString(args, "id"), {
+      ...(offset !== undefined ? { offset } : {}),
+      ...(bytes !== undefined ? { bytes } : {}),
+      ...(stream !== undefined ? { stream } : {}),
+    });
   },
   async "tool.batch"(args, options) {
     return runToolBatch(args, options);
@@ -577,9 +766,15 @@ export const toolRegistry: Record<string, ToolHandler> = {
   async "pdf.read"(args, options) {
     return pdfRead(args, options);
   },
-  async "shell.start"(args) {
+  async "shell.start"(args, options) {
     const command = requireString(args, "command");
-    return jobManager.startJob(command, {
+    const elevated = await prepareElevatedBackgroundCommand(command, {
+      signal: options?.signal,
+      onOutput: options?.onOutput,
+      requestSecret: options?.requestSecret,
+    });
+    if (elevated && !elevated.prepared) return elevated.result;
+    return jobManager.startJob(elevated?.prepared ? elevated.spec : command, {
       cwd: optionalString(args, "cwd"),
       name: optionalString(args, "name"),
     });

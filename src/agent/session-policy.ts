@@ -35,11 +35,87 @@ const PRE_APPROVAL_ALLOWED_TOOLS = new Set<string>([
   "fs.search",
   "sysinfo",
   "tool.batch",
+  "tool.check",
   "net.context",
+  "web.search",
+  "web.fetch",
+  "dns.lookup",
+  "whois.lookup",
+  "http.fetch",
+  "net.scan",
+  "pentest.recon",
+  "wordlist.find",
+  "image.ocr",
+  "pdf.read",
+  "shell.jobs",
+  "shell.tail",
+]);
+
+/**
+ * Plan mode: gather freely (recon, scans, enum, research, tool installs).
+ * Block only project mutation and clear active exploitation — put those in
+ * the plan as post-accept tasks.
+ */
+const PLAN_MODE_BLOCKED_TOOLS = new Set<string>([
+  "fs.write",
+  "fs.writeMany",
+  "fs.edit",
+  "fs.append",
+  "fs.replaceLines",
+  "fs.delete",
 ]);
 
 export function isPreApprovalAllowedTool(name: string): boolean {
   return PRE_APPROVAL_ALLOWED_TOOLS.has(name);
+}
+
+/** True when the tool is allowed in plan mode (gather-only). */
+export function isPlanModeAllowedTool(name: string): boolean {
+  if (PLAN_MODE_BLOCKED_TOOLS.has(name)) return false;
+  return true;
+}
+
+/**
+ * Shell commands blocked in plan mode: project scaffold/mutate and active
+ * exploit/C2. Recon, enum, fuzz, long nmap, installs of scanners are allowed.
+ */
+export function isPlanModeAllowedShellCommand(command: string): boolean {
+  const c = command.trim();
+  if (!c) return false;
+  if (
+    /\b(npm\s+create|npx\s+(?:--yes\s+)?create-|yarn\s+create|pnpm\s+create|bun\s+create|cargo\s+new|rails\s+new|poetry\s+new|flutter\s+create|django-admin\s+startproject|composer\s+create-project|npm\s+init\s+vite|create-next-app|create-react-app)\b/i.test(
+      c,
+    )
+  ) {
+    return false;
+  }
+  if (
+    /\b(fs\.write|tee\s+>|>>\s*\/|cat\s*>\s*|printf\s+.*>\s*)/i.test(c) &&
+    !/\b(tee\s+\/tmp|tee\s+\$\{?TMP|>>\s*\/tmp|\/var\/folders)\b/i.test(c)
+  ) {
+    // Writing into user project trees is blocked; tmp artifact writes OK.
+    if (!/\b(\/tmp|TMPDIR|scratch|\.clai\/outputs)\b/i.test(c)) {
+      return false;
+    }
+  }
+  if (
+    /\b(msfconsole|msfvenom|metasploit|exploit\/|use\s+exploit|revshell|reverse\s+shell|nc\s+-[el].*\d|ncat\s+-[el]|bash\s+-i\s+>&\s*\/dev\/tcp)\b/i.test(
+      c,
+    )
+  ) {
+    return false;
+  }
+  if (
+    /\b(sqlmap\b.*(?:--os-shell|--os-pwn|--sql-shell|--crawl)|hydra\s+.+\s+-l\s|medusa\s+.*-M\s)\b/i.test(
+      c,
+    )
+  ) {
+    return false;
+  }
+  if (/\brm\s+(-[a-zA-Z]*f|-[a-zA-Z]*r).*(\/|~)/i.test(c)) {
+    return false;
+  }
+  return true;
 }
 
 /**

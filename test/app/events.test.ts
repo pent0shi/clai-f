@@ -184,6 +184,49 @@ describe("V2-021 AgentEventAdapter", () => {
     expect(spool.tail(asToolCallId("turn-2:tool-1"))).toBe("second");
   });
 
+  it("hides successful plan/task commands while keeping plan projection events", () => {
+    const out = collectFrom([
+      { type: "tool-call", id: "plan-1", name: "plan.create", argsDisplay: "blog app" },
+      { type: "tool-start", id: "plan-1" },
+      { type: "tool-output", id: "plan-1", chunk: "created" },
+      { type: "plan-update", plan },
+      { type: "tool-result", id: "plan-1", ok: true, summary: "created", exitCode: 0 },
+      { type: "tool-call", id: "task-1", name: "task.update", argsDisplay: "t1 done" },
+      { type: "tool-result", id: "task-1", ok: true, summary: "updated", exitCode: 0 },
+    ]);
+
+    expect(out.map((event) => event.type)).toEqual(["plan-updated"]);
+  });
+
+  it("shows failed task commands with their buffered output", () => {
+    const out = collectFrom([
+      { type: "tool-call", id: "task-1", name: "task.update", argsDisplay: "t1 done" },
+      { type: "tool-start", id: "task-1" },
+      { type: "tool-output", id: "task-1", chunk: "missing evidence" },
+      { type: "tool-result", id: "task-1", ok: false, summary: "cannot mark done", exitCode: 1 },
+    ]);
+
+    expect(out.map((event) => event.type)).toEqual([
+      "tool-call",
+      "tool-output",
+      "tool-result",
+    ]);
+    expect(out[0]?.type === "tool-call" && out[0].payload.name).toBe("task.update");
+  });
+
+  it("shows blocked plan commands instead of silently dropping them", () => {
+    const out = collectFrom([
+      { type: "tool-call", id: "plan-1", name: "plan.create", argsDisplay: "blocked plan" },
+      { type: "tool-start", id: "plan-1" },
+      { type: "tool-blocked", id: "plan-1", name: "plan.create", reason: "policy denied" },
+    ]);
+
+    expect(out.map((event) => event.type)).toEqual([
+      "tool-call",
+      "tool-blocked",
+    ]);
+  });
+
   it("produces byte-identical output on replay with a deterministic id factory", () => {
     const first = collectFrom(scriptedAgentEvents, "run-");
     const second = collectFrom(scriptedAgentEvents, "run-");

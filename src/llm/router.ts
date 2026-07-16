@@ -71,10 +71,7 @@ function isTransientNetworkError(error: unknown): boolean {
 }
 
 function isRetriableError(error: unknown): boolean {
-  // The stream watchdog has already waited long enough for useful model
-  // output. Retrying it six times turns one stalled provider call into a
-  // multi-minute frozen-looking TUI, so fail promptly (or use configured
-  // provider fallback) instead.
+  
   const message = error instanceof Error ? error.message : String(error);
   if (/stream stalled|request timed out before any response/i.test(message)) {
     return false;
@@ -106,8 +103,7 @@ function summarizeProviderError(error: unknown): string {
     return "Model is rate limited (429). Try another provider/model or switch to a paid plan.";
   }
   const message = error instanceof Error ? error.message : String(error);
-  // Collapse newlines and excess whitespace. Keep the full message in the
-  // main chat so users can see the provider's actual error details.
+ 
   return message.replace(/\s+/g, " ").trim();
 }
 
@@ -130,9 +126,7 @@ function formatFailures(failures: ProviderFailure[]): string {
 
 function shouldStopFallback(error: unknown): boolean {
   if (error instanceof ProviderError) {
-    // A 413 can be a free-tier input/TPM ceiling rather than an invalid
-    // request. Let configured fallback providers try a smaller/roomier
-    // request path instead of treating it as a credential or body error.
+   
     return [401, 403, 404, 422, 429].includes(error.status ?? 0);
   }
   const message = error instanceof Error ? error.message : String(error);
@@ -169,12 +163,7 @@ const fallbackOrder: ProviderId[] = [
   "qwen-cloud",
 ];
 
-/**
- * Build the fallback chain, optionally filtering paid-cloud providers when
- * `freeOnly` is enabled. The user's explicitly requested provider is always
- * tried first regardless of category — flipping freeOnly never strands an
- * explicit `clai --provider openai` request.
- */
+
 export function buildFallbackChain(
   requested: ProviderId,
   freeOnly: boolean,

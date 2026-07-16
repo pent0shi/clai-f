@@ -108,6 +108,9 @@ export function extractProjectRootFromPlan(
   plan: SessionPlan | undefined,
 ): string | undefined {
   if (!plan) return undefined;
+  if (plan.meta?.projectRoot?.trim()) {
+    return resolve(plan.meta.projectRoot.trim());
+  }
   return extractProjectRootFromText(
     plan.goal,
     plan.detail,

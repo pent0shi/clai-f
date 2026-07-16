@@ -107,4 +107,21 @@ describe("LoopGuard", () => {
     expect(planResult.block).toBe(false);
     expect(planResult.reason).toBeUndefined();
   });
+
+  it("allows one fs.list retry after successful scaffold work", () => {
+    const guard = new LoopGuard();
+    const listArgs = { path: "/Users/me/Desktop/blogging-app" };
+    guard.recordAttempt(0, "fs.list", listArgs, false);
+    // Without intervening success, still blocked
+    expect(guard.shouldBlock("fs.list", listArgs).block).toBe(true);
+    // Scaffold/create success invalidates or allows retry
+    guard.recordAttempt(
+      1,
+      "shell.exec",
+      { command: 'mkdir -p "/Users/me/Desktop/blogging-app" && npm create vite@latest .' },
+      true,
+    );
+    const retry = guard.shouldBlock("fs.list", listArgs);
+    expect(retry.block).toBe(false);
+  });
 });

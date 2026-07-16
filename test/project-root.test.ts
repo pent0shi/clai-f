@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { mkdtempSync, mkdirSync, rmSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import {
@@ -11,6 +12,7 @@ import {
   setActiveProjectRoot,
 } from "../src/agent/project-root.js";
 import { safeCwd } from "../src/os/cwd.js";
+import { isOutsideWorkingDirectory } from "../src/tools/fs.js";
 
 describe("project root sticky paths", () => {
   afterEach(() => {
@@ -51,6 +53,35 @@ describe("project root sticky paths", () => {
   it("set/get active root", () => {
     setActiveProjectRoot("/tmp/my-app");
     expect(getActiveProjectRoot()).toBe("/tmp/my-app");
+  });
+
+  it("treats the pinned project as trusted for allow-all write decisions", () => {
+    const project = join(homedir(), "Desktop", "bloging-app");
+    setActiveProjectRoot(project);
+
+    expect(isOutsideWorkingDirectory(join(project, "src", "App.tsx"))).toBe(false);
+    expect(
+      isOutsideWorkingDirectory(join(homedir(), "Desktop", "unrelated-app", "App.tsx")),
+    ).toBe(true);
+  });
+
+  it("forces confirmation when an in-project symlink escapes the project root", () => {
+    const base = mkdtempSync(join(homedir(), "clai-project-root-test-"));
+    const project = join(base, "project");
+    const sibling = join(base, "sibling");
+    try {
+      mkdirSync(project);
+      mkdirSync(sibling);
+      symlinkSync(sibling, join(project, "linked-sibling"));
+      setActiveProjectRoot(project);
+
+      expect(
+        isOutsideWorkingDirectory(join(project, "linked-sibling", "config.ts")),
+      ).toBe(true);
+    } finally {
+      clearActiveProjectRoot();
+      rmSync(base, { recursive: true, force: true });
+    }
   });
 
   it("does not pin bare Desktop as sticky root", () => {
