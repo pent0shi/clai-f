@@ -10,7 +10,12 @@ import {
   rename,
 } from "node:fs/promises";
 import { join } from "node:path";
-import type { ChatMessage, ToolCall, ToolResult } from "../types.js";
+import {
+  isInternalChatMessage,
+  type ChatMessage,
+  type ToolCall,
+  type ToolResult,
+} from "../types.js";
 import type { TranscriptItem } from "../tui/state.js";
 import { redactSecrets } from "../llm/provider.js";
 import { getConfig } from "./config.js";
@@ -532,9 +537,11 @@ export async function saveSession(
   transcript?: TranscriptItem[] | undefined,
   contextUsage?: PersistedContextUsage | undefined,
 ): Promise<HistoryRecord> {
-  // Auto-derive a readable name from the first user message if none provided
+  // Auto-derive a readable name from the first real user message if none provided
   if (!name) {
-    const firstUser = messages.find((m) => m.role === "user");
+    const firstUser = messages.find(
+      (m) => m.role === "user" && !isInternalChatMessage(m),
+    );
     if (firstUser) {
       const preview = firstUser.content.slice(0, 60).replace(/\n/g, " ").trim();
       name = preview + (firstUser.content.length > 60 ? "…" : "");
@@ -591,7 +598,9 @@ export async function upsertSession(
   contextUsage?: PersistedContextUsage | undefined,
 ): Promise<HistoryRecord> {
   const existing = await getSession(id);
-  const firstUser = messages.find((m) => m.role === "user");
+  const firstUser = messages.find(
+    (m) => m.role === "user" && !isInternalChatMessage(m),
+  );
   const derivedName = firstUser
     ? firstUser.content.slice(0, 60).replace(/\n/g, " ").trim() + (firstUser.content.length > 60 ? "…" : "")
     : undefined;

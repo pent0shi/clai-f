@@ -30,12 +30,12 @@ import {
   PasteRegistry,
   type PastePlaceholderEntry,
 } from "./paste-placeholder.js";
-import { PasteChipRow } from "../components/composer/paste-chip.js";
 import { resolveCompletionMenu, type CompletionMenu } from "./completion.js";
 import { buildComposerTextareaOverrides } from "./textarea-keybindings.js";
 import { composerActionPort } from "./composer-action-port.js";
 import { notify } from "../notify.js";
 import { CompletionMenuView } from "../components/completion/completion-menu.js";
+import { PasteChipRow } from "../components/composer/paste-chip.js";
 import { useOverlayState } from "../state/use-overlay.js";
 import { useSessionState } from "../state/use-session-state.js";
 import { clipComposerMeta, formatComposerMeta } from "./composer-meta.js";
@@ -45,18 +45,33 @@ import {
   countComposerVisualLines,
   resolveComposerTextRows,
 } from "./composer-height.js";
-import { tryScrollComposerDraft } from "./composer-wheel.js";
+import {
+  composerDraftOverflows,
+  composerOwnsWheel,
+  measureComposerLines,
+  wheelChatDelta,
+} from "./composer-wheel.js";
+import { disableNativeTextareaScroll } from "./disable-native-textarea-scroll.js";
 
 export interface ComposerEditorProps {
   readonly services: AppServices;
   readonly theme: Theme;
   readonly width: number;
-  /** Max editable text rows (grows from 1 up to this cap). */
+  /**
+   * Maximum editable text rows (not including the rounded border).
+   * The box starts at 1 row and grows with content up to this cap.
+   */
   readonly height: number;
+  /** The command window gets denser on tall terminals, never a one-row list. */
   readonly maxSuggestions?: number | undefined;
+  /** Mirrors the legacy composer hint while a turn is active. */
   readonly running?: boolean | undefined;
+  /** Visual region focus from the shell (Tab cycle). */
   readonly focused: boolean;
-  /** Edit-queue seed; `token` must change each re-apply. */
+  /**
+   * When set (e.g. Edit on a queued prompt), replace the input with this
+   * draft. `token` must change each time so the same text can be re-applied.
+   */
   readonly seedDraft?: { readonly token: number; readonly text: string } | undefined;
 }
 
@@ -67,13 +82,17 @@ export function ComposerEditor(props: ComposerEditorProps): ReactNode {
   const editorRef = useRef<TextareaRenderable>(null);
   const promptHistory = useRef(new PromptHistory());
   const pasteRegistry = useRef(new PasteRegistry());
+  /** Trackpad-as-arrows: count rapid ↑/↓ so we scroll chat instead of history. */
   const arrowBurst = useRef({ count: 0, lastAt: 0 });
   const [menu, setMenu] = useState<CompletionMenu>({ kind: "none" });
   const [selected, setSelected] = useState(0);
   const [acceptedSlash, setAcceptedSlash] = useState<string | undefined>(undefined);
+  /** Visual rows of current prompt — drives grow-with-content height. */
   const [contentRows, setContentRows] = useState(1);
   const [pasteChips, setPasteChips] = useState<PastePlaceholderEntry[]>([]);
-  // Refs keep OpenTUI key handlers off stale menu state after focus reclaim.
+  // Refs mirror React state so OpenTUI key handlers never see a stale menu
+  // after @ completion or focus reclaim (the intermittent "arrows dead / /
+  // menu missing" failure mode).
   const menuRef = useRef(menu);
   const selectedRef = useRef(selected);
   const acceptedSlashRef = useRef(acceptedSlash);
@@ -93,22 +112,34 @@ export function ComposerEditor(props: ComposerEditorProps): ReactNode {
     cfg.permissions ?? "default",
   );
 
-  // Own the keyboard only when the shell says the composer is focused and no
-  // overlay is open. Always blur when we don't own input — otherwise the
-  // textarea keeps focus and touchpad/↑↓ walk prompt history instead of
-  // scrolling the chat.
   const shouldOwnKeyboard = overlay.kind === "none" && props.focused;
   useEffect(() => {
     if (shouldOwnKeyboard) editorRef.current?.focus();
     else editorRef.current?.blur();
   }, [shouldOwnKeyboard]);
 
-  // Status-line ^X chip (and any other chrome) clears via this port.
+  // While the composer is dim (chat owns focus), kill *only* native draft
+  // wheel so chat can scroll alone under the pointer. When focused, leave
+  // OpenTUI fully native (smooth viewport scroll, click-to-caret, select).
+  useEffect(() => {
+    if (shouldOwnKeyboard) return;
+    let restore = disableNativeTextareaScroll(editorRef.current);
+    const frame = requestAnimationFrame(() => {
+      restore();
+      restore = disableNativeTextareaScroll(editorRef.current);
+    });
+    return () => {
+      cancelAnimationFrame(frame);
+      restore();
+    };
+  }, [shouldOwnKeyboard]);
+
   useEffect(() => {
     return composerActionPort.registerClear(() => {
       const editor = editorRef.current;
       if (!editor) return;
       editor.clear();
+      pasteRegistry.current.clear();
       promptHistory.current.reset();
       menuRef.current = { kind: "none" };
       menuKindRef.current = "none";
@@ -116,12 +147,12 @@ export function ComposerEditor(props: ComposerEditorProps): ReactNode {
       setMenu({ kind: "none" });
       setAcceptedSlash(undefined);
       setContentRows(1);
+      setPasteChips([]);
       services.focus.focusRegion("composer");
       editor.focus();
     });
   }, [services.focus]);
 
-  // Pull a draft from the queue "Edit" action into the input.
   const lastSeedToken = useRef<number | undefined>(undefined);
   useEffect(() => {
     const seed = props.seedDraft;
@@ -238,7 +269,7 @@ export function ComposerEditor(props: ComposerEditorProps): ReactNode {
     });
   }
 
-  /** Grow/shrink input with newlines/wrap; refresh paste chips. */
+  /** Grow/shrink the input box with newlines and soft-wrap (classic parity). */
   function syncContentRows(): void {
     const editor = editorRef.current;
     if (!editor) {
@@ -246,6 +277,7 @@ export function ComposerEditor(props: ComposerEditorProps): ReactNode {
       setPasteChips([]);
       return;
     }
+    // Prompt "❯ " (2) + horizontal padding (2) leave this for wrapped text.
     const wrapWidth = Math.max(10, props.width - 4);
     setContentRows(countComposerVisualLines(editor.plainText, wrapWidth));
     setPasteChips(pasteRegistry.current.activeIn(editor.plainText));
@@ -484,37 +516,34 @@ export function ComposerEditor(props: ComposerEditorProps): ReactNode {
   }
 
   /**
-   * Wheel over the composer must never also move the chat when the draft is
-   * multi-line (expanded paste / Shift+Enter). Always stopPropagation so the
-   * app-root handler cannot double-scroll the transcript behind us.
+   * Wheel policy — prefer native OpenTUI textarea, never dual-scroll:
+   * - Focused + multi-line/overflow: stop bubble only; native handleScroll
+   *   runs after listeners (smooth viewport). Stay focused/lit.
+   * - Focused + single-line, or unfocused: scroll chat, release focus.
+   *   Native draft wheel is off only while unfocused (see effect above).
    */
   function onComposerWheel(event: MouseEvent): void {
     if (!event.scroll || overlay.kind !== "none") return;
-    event.preventDefault();
-    event.stopPropagation();
-    const { direction, delta } = event.scroll;
     const editor = editorRef.current;
     const visible = resolveComposerTextRows(contentRows, props.height);
 
-    // Keep keyboard focus on the composer while interacting with the draft.
-    if (editor && shouldOwnKeyboard) {
+    if (shouldOwnKeyboard && editor) {
+      const lines = measureComposerLines(editor, contentRows);
       if (
-        tryScrollComposerDraft(editor, {
-          contentLines: contentRows,
-          visibleRows: visible,
-          direction,
-          delta,
-        })
+        composerOwnsWheel(lines) ||
+        composerDraftOverflows(lines, visible)
       ) {
+        // Native EditBuffer scrolls the draft. Block chat dual-scroll only.
+        event.stopPropagation();
         return;
       }
     }
 
-    // Single-line / empty draft only: forward wheel to chat deliberately.
+    event.preventDefault();
+    event.stopPropagation();
     services.focus.focusRegion("transcript");
     editor?.blur();
-    const step = Math.max(1, delta || 1) * 3;
-    const dy = direction === "up" ? -step : direction === "down" ? step : 0;
+    const dy = wheelChatDelta(event.scroll.direction, event.scroll.delta);
     if (dy !== 0) transcriptScrollPort.scrollBy(dy);
   }
 
@@ -597,16 +626,15 @@ export function ComposerEditor(props: ComposerEditorProps): ReactNode {
       services.overlay.openJobs();
       return;
     }
-    // Clear draft: ^X. Ctrl+U is delete-to-line-start in the textarea (and
-    // macOS Cmd+Backspace often arrives as Ctrl+U). Only when the draft is
-    // empty does ^U jump the chat to top — never while the user is editing.
+    // Clear draft: ^X. Ctrl+U deletes the line in the textarea (Cmd+Backspace
+    // often arrives as Ctrl+U). Empty draft → jump chat to top.
     if (chord === "ctrl+u") {
       if (editor.plainText.length === 0) {
         key.preventDefault();
         transcriptScrollPort.scrollToTop();
         notify(services, "Chat · top · ^U", { key: "scroll", durationMs: 1200 });
       }
-      // Non-empty: let OpenTUI handle delete-to-line-start (do not preventDefault).
+      // Non-empty: let OpenTUI handle line kill (do not preventDefault).
       return;
     }
     if (chord === "ctrl+x") {
@@ -682,10 +710,14 @@ export function ComposerEditor(props: ComposerEditorProps): ReactNode {
   }
 
   function onKeyDown(key: KeyEvent): void {
+    // Only handle when the composer actually owns input — never steal from
+    // transcript scroll by force-focusing on every key event. (Menu keys are
+    // also routed from the global useKeyboard when focus glitches.)
     if (!shouldOwnKeyboard && menuKindRef.current === "none") return;
     handleMenuOrComposerKey(key);
   }
 
+  // Re-measure soft-wrap rows when the terminal width changes.
   useEffect(() => {
     syncContentRows();
     // eslint-disable-next-line react-hooks/exhaustive-deps -- width-only reflow
@@ -695,6 +727,8 @@ export function ComposerEditor(props: ComposerEditorProps): ReactNode {
   const textRows = resolveComposerTextRows(contentRows, props.height);
   const boxHeight = textRows + 2;
   const metaShown = clipComposerMeta(metaLabel, inputWidth);
+  // Focused: bright aqua. Blurred: muted so focus shift is obvious.
+  const chromeFg = shouldOwnKeyboard ? theme.inputBorder : theme.muted;
 
   function hoverCompletion(index: number): void {
     selectedRef.current = index;
@@ -708,9 +742,12 @@ export function ComposerEditor(props: ComposerEditorProps): ReactNode {
     editorRef.current?.focus();
     const current = menuRef.current;
     if (current.kind === "none") return;
-    if (current.kind === "mention" && current.items[index]?.isDir) {
-      acceptSuggestion({ index, drillDir: true });
-      return;
+    if (current.kind === "mention") {
+      const item = current.items[index];
+      if (item?.isDir) {
+        acceptSuggestion({ index, drillDir: true });
+        return;
+      }
     }
     acceptSuggestion({ index });
   }
@@ -737,19 +774,18 @@ export function ComposerEditor(props: ComposerEditorProps): ReactNode {
       />
       <box
         border
-        borderStyle="rounded"
-        // Provider · model · permissions on the top border (right-aligned).
+        borderStyle="heavy"
         {...(metaShown
           ? {
               title: ` ${metaShown} `,
               titleAlignment: "right" as const,
-              titleColor: theme.muted,
+              titleColor: shouldOwnKeyboard ? theme.muted : theme.chip,
             }
           : {})}
         style={{
           height: boxHeight,
           width: "100%",
-          borderColor: theme.inputBorder,
+          borderColor: chromeFg,
           backgroundColor: theme.statusBackground,
           paddingLeft: 1,
           paddingRight: 1,
@@ -764,16 +800,20 @@ export function ComposerEditor(props: ComposerEditorProps): ReactNode {
         <text
           content="❯ "
           style={{
-            fg: theme.inputBorder,
+            fg: chromeFg,
             width: 2,
             flexShrink: 0,
-            attributes: TextAttributes.BOLD,
+            attributes: shouldOwnKeyboard
+              ? TextAttributes.BOLD
+              : TextAttributes.DIM,
           }}
         />
         <textarea
           ref={editorRef}
           focused={shouldOwnKeyboard}
-          selectable={false}
+          // OpenTUI places the caret via selection (updateCursor on mouse
+          // down). selectable={false} kills click-to-position entirely.
+          selectable
           placeholder={
             props.running
               ? "type to queue a message…"
@@ -782,7 +822,7 @@ export function ComposerEditor(props: ComposerEditorProps): ReactNode {
           placeholderColor={theme.muted}
           textColor={theme.foreground}
           backgroundColor={theme.statusBackground}
-          cursorColor={theme.inputBorder}
+          cursorColor={chromeFg}
           keyBindings={textareaKeyBindings}
           wrapMode="word"
           onSubmit={submit}
@@ -792,6 +832,10 @@ export function ComposerEditor(props: ComposerEditorProps): ReactNode {
           }}
           onCursorChange={refreshMenu}
           onKeyDown={onKeyDown}
+          onMouseDown={() => {
+            services.focus.focusRegion("composer");
+            editorRef.current?.focus();
+          }}
           style={{ flexGrow: 1, height: textRows }}
         />
       </box>

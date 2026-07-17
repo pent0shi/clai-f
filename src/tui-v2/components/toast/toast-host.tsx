@@ -2,9 +2,9 @@
 /**
  * Notification toasts — top-right stack.
  *
- * Thick (heavy) amber border matching the YOU badge plate. Outer shell draws
- * only the frame on the app background; inner box holds the whitish surface so
- * fill never paints outside the border characters.
+ * Heavy aqua frame (composer `inputBorder`) + yellowish prompt-boundary text
+ * (`userBorder`). Outer shell draws only the frame on the app background;
+ * inner box holds the whitish surface so fill never paints outside the border.
  */
 
 import type { ReactNode } from "react";
@@ -43,16 +43,16 @@ function toastSurface(theme: Theme): string {
   return isDark ? TOAST_SURFACE_DARK : TOAST_SURFACE_LIGHT;
 }
 
-function levelGlyph(level: ToastLevel): { glyph: string; fg: string } {
+function levelGlyph(level: ToastLevel): string {
   switch (level) {
     case "success":
-      return { glyph: "✓", fg: "#4ADE80" };
+      return "✓";
     case "warn":
-      return { glyph: "!", fg: "#FACC15" };
+      return "!";
     case "error":
-      return { glyph: "✗", fg: "#F87171" };
+      return "✗";
     default:
-      return { glyph: "·", fg: "#F8FAFC" };
+      return "·";
   }
 }
 
@@ -64,11 +64,11 @@ function ToastPill(props: {
   width: number;
 }): ReactNode {
   const { item, theme, top, left, width } = props;
-  const { glyph, fg: glyphFg } = levelGlyph(item.level);
   const surface = toastSurface(theme);
-  // Border = YOU badge plate (prompt bg).
-  const border = theme.prompt;
-  const label = `${glyph}  ${item.message}`;
+  // Aqua chrome (composer) + yellowish user-prompt boundary text.
+  const border = theme.inputBorder;
+  const textFg = theme.userBorder;
+  const label = `${levelGlyph(item.level)}  ${item.message}`;
 
   return (
     // Outer: heavy frame only. Background matches the app so no whitish
@@ -110,7 +110,7 @@ function ToastPill(props: {
           selectable={false}
           content={label}
           style={{
-            fg: glyphFg,
+            fg: textFg,
             attributes: TextAttributes.BOLD,
           }}
         />

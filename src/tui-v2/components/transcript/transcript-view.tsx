@@ -170,6 +170,7 @@ export function TranscriptView(props: TranscriptViewProps): ReactNode {
     if (event.button !== 0) return;
     if (event.defaultPrevented) return;
     services.focus.focusRegion("transcript");
+    // Claim chat focus so composer chrome dims and draft wheel is disabled.
     // Selecting = leave sticky follow so content can scroll with the drag.
     followBottom.current = false;
   }

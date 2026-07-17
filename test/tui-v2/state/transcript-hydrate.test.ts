@@ -72,6 +72,31 @@ describe("hydrateFromMessages", () => {
     expect(kinds).toEqual(["user", "assistant"]);
   });
 
+  it("hides internal recovery user prompts from the chat UI", () => {
+    const { state } = hydrateFromMessages([
+      { role: "user", content: "fix the bug" },
+      {
+        role: "user",
+        content:
+          "You diagnosed an error and described the fix but called NO tool. Apply the fix now.",
+        internal: true,
+      },
+      {
+        role: "user",
+        content:
+          "You diagnosed an error and described the fix but called NO tool. Legacy without flag.",
+      },
+      { role: "assistant", content: "Fixed." },
+    ]);
+    const texts = state.order.map((id) => {
+      const item = state.byId.get(id)!;
+      return item.kind === "user" || item.kind === "assistant"
+        ? (item as { text: string }).text
+        : item.kind;
+    });
+    expect(texts).toEqual(["fix the bug", "Fixed."]);
+  });
+
   it("reconstructs tool cards from assistant toolCalls + role:tool results", () => {
     const { state, toolOutputs } = hydrateFromMessages([
       { role: "user", content: "list files" },

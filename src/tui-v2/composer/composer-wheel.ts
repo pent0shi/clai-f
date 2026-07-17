@@ -91,14 +91,12 @@ export function tryScrollComposerDraft(
   },
 ): boolean {
   const lines = measureComposerLines(editor, opts.contentLines);
-  // Any multi-line draft keeps wheel off the chat (expanded paste, Shift+Enter).
   if (!composerOwnsWheel(lines) && !composerDraftOverflows(lines, opts.visibleRows)) {
     return false;
   }
 
   const steps = Math.max(1, opts.delta ?? 1) * 3;
 
-  // Prefer viewport scroll when content is taller than the visible box.
   if (composerDraftOverflows(lines, opts.visibleRows)) {
     try {
       const view = editor.editorView;
@@ -123,7 +121,6 @@ export function tryScrollComposerDraft(
     }
   }
 
-  // Cursor motion always moves the editor viewport with the caret.
   if (opts.direction === "up") {
     for (let i = 0; i < steps; i++) editor.moveCursorUp();
     return true;
@@ -132,6 +129,37 @@ export function tryScrollComposerDraft(
     for (let i = 0; i < steps; i++) editor.moveCursorDown();
     return true;
   }
-  // Multi-line but unknown direction — still consume so chat stays put.
   return true;
+}
+
+/** Wheel delta → transcript scroll steps (shared by composer + app). */
+export function wheelChatDelta(
+  direction: "up" | "down" | string,
+  delta?: number,
+): number {
+  const step = Math.max(1, delta ?? 1) * 3;
+  if (direction === "up") return -step;
+  if (direction === "down") return step;
+  return 0;
+}
+
+/**
+ * Resolve composer wheel: "draft" | "chat" | "none".
+ * Unfocused composer never scrolls the draft (avoids dual scroll with chat).
+ */
+export function resolveComposerWheelTarget(opts: {
+  readonly composerFocused: boolean;
+  readonly editor: ComposerWheelEditor | null | undefined;
+  readonly contentLines: number;
+  readonly visibleRows: number;
+}): "draft" | "chat" {
+  if (!opts.composerFocused || !opts.editor) return "chat";
+  const lines = measureComposerLines(opts.editor, opts.contentLines);
+  if (
+    composerOwnsWheel(lines) ||
+    composerDraftOverflows(lines, opts.visibleRows)
+  ) {
+    return "draft";
+  }
+  return "chat";
 }

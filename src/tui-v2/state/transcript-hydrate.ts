@@ -6,7 +6,7 @@
  * restores prompts, tools, and assistant text — not just a notice.
  */
 
-import type { ChatMessage } from "../../types.js";
+import { isInternalChatMessage, type ChatMessage } from "../../types.js";
 import type { TranscriptItem as ClassicTranscriptItem } from "../../tui/state.js";
 import { asToolCallId, type ToolCallId } from "../../app/events/app-event.js";
 import { formatToolArgs } from "../../agent/tool-call-parser.js";
@@ -367,6 +367,8 @@ export function hydrateFromMessages(messages: readonly ChatMessage[]): HydrateRe
     if (message.role === "system" || message.role === "tool") continue;
 
     if (message.role === "user") {
+      // Recovery / governor nudges stay model-only — never a YOU bubble.
+      if (isInternalChatMessage(message)) continue;
       sequence += 1;
       const id = `hist-user-${sequence}`;
       const item: UserItem = {

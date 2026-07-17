@@ -4,13 +4,14 @@
  *
  * OpenTUI's `TextareaRenderable` already implements move/select/word/delete/
  * undo semantics (INPUT-004/005) — this module only overrides the small set
- * of chords where the library default is backwards for a submit-on-Enter
- * composer (its default binds bare Enter to "newline" and Alt+Enter to
- * "submit"), plus macOS line-delete chords that conflict with chat scroll.
- * Everything else passes through untouched. The shape here mirrors
- * `@opentui/core`'s `KeyBinding<TextareaAction>` structurally without
- * importing it, keeping this module renderer-independent; the renderer glue
- * casts it at the one place it is consumed.
+ * of chords where the library default is wrong for a submit-on-Enter
+ * composer, plus explicit word vs line kill chords:
+ *
+ *   Option/Alt + Backspace/Delete  → delete one word
+ *   Cmd (Mac) / Ctrl (Win) + Backspace/Delete → delete whole line
+ *
+ * Terminals report modifiers inconsistently: Option is usually `meta`, Cmd
+ * is usually `super` (and sometimes arrives as Ctrl+U for Backspace).
  */
 
 export type TextareaActionName =
@@ -18,7 +19,9 @@ export type TextareaActionName =
   | "newline"
   | "delete-to-line-start"
   | "delete-to-line-end"
-  | "delete-line";
+  | "delete-line"
+  | "delete-word-backward"
+  | "delete-word-forward";
 
 export interface TextareaKeyBindingLike {
   readonly name: string;
@@ -42,32 +45,30 @@ export function buildComposerTextareaOverrides(): TextareaKeyBindingLike[] {
     overrides.push({ name, ctrl: true, action: "newline" });
   }
 
-  // Line kill: readline Ctrl+U and macOS Cmd+Backspace/Delete.
-  // OpenTUI defaults map meta+backspace → delete-word-backward; override to
-  // delete-to-line-start so Cmd+Backspace matches macOS text fields. Explicit
-  // ctrl+u keeps delete-to-line-start even if library defaults change.
-  // (Chat jump-to-top is NOT bound globally on ctrl+u — see keymap.ts.)
-  overrides.push({ name: "u", ctrl: true, action: "delete-to-line-start" });
+  // ── Word kill: Option/Alt (+Backspace/Delete)
+  // On macOS terminals, Option almost always arrives as `meta`.
   overrides.push({
     name: "backspace",
     meta: true,
-    action: "delete-to-line-start",
-  });
-  overrides.push({
-    name: "backspace",
-    super: true,
-    action: "delete-to-line-start",
+    action: "delete-word-backward",
   });
   overrides.push({
     name: "delete",
     meta: true,
-    action: "delete-to-line-end",
+    action: "delete-word-forward",
   });
-  overrides.push({
-    name: "delete",
-    super: true,
-    action: "delete-to-line-end",
-  });
+
+  // ── Full line kill: Cmd (super) and Ctrl (Windows / some terminals)
+  // OpenTUI default maps ctrl+backspace → word; override to whole line.
+  overrides.push({ name: "backspace", super: true, action: "delete-line" });
+  overrides.push({ name: "delete", super: true, action: "delete-line" });
+  overrides.push({ name: "backspace", ctrl: true, action: "delete-line" });
+  overrides.push({ name: "delete", ctrl: true, action: "delete-line" });
+
+  // readline Ctrl+U and many terminals' Cmd+Backspace → Ctrl+U encoding.
+  overrides.push({ name: "u", ctrl: true, action: "delete-line" });
+  // Ctrl+K keeps "kill to end of line" (readline) for power users.
+  overrides.push({ name: "k", ctrl: true, action: "delete-to-line-end" });
 
   return overrides;
 }

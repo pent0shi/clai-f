@@ -25,8 +25,9 @@ describe("formatShortcutsReference", () => {
     expect(body).toMatch(/Ctrl\+T/);
     expect(body).toMatch(/Ctrl\+O/);
     expect(body).toMatch(/Ctrl\+D/);
-    // Line-delete guidance for macOS Cmd+Backspace
-    expect(body).toMatch(/Delete to start of line/i);
+    // Word + full-line kill guidance for Option vs Cmd/Ctrl
+    expect(body).toMatch(/Delete previous word/i);
+    expect(body).toMatch(/Delete the whole line/i);
     expect(body).toMatch(/\/shortcuts/);
   });
 });

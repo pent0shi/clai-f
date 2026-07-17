@@ -54,9 +54,10 @@ export const STATUS_HEIGHT = 1;
 /**
  * Cap on editable composer text rows (not including border chrome).
  * Grows with Shift+Enter / wrap up to this; classic could take most of the
- * terminal — 16 keeps multi-line usable without eating the transcript.
+ * terminal — ~18 (~10% over the prior 16) keeps multi-line usable without
+ * eating the transcript.
  */
-export const COMPOSER_MAX_HEIGHT = 16;
+export const COMPOSER_MAX_HEIGHT = 18;
 export const COMPOSER_MIN_HEIGHT = 1;
 /** Single editable line by default (classic Ink). Grows only if content needs it. */
 export const COMPOSER_PREFERRED_HEIGHT = 1;

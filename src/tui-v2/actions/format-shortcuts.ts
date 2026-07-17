@@ -148,17 +148,21 @@ function escapeCell(text: string): string {
 
 const COMPOSER_TEXTAREA_NOTES: readonly { chord: string; label: string }[] = [
   {
+    chord: "Option/Alt+Backspace",
+    label: "Delete previous word",
+  },
+  {
+    chord: "Option/Alt+Delete",
+    label: "Delete next word",
+  },
+  {
+    chord: "Cmd (Mac) / Ctrl (Win)+Backspace or Delete",
+    label: "Delete the whole line",
+  },
+  {
     chord: "Ctrl+U",
     label:
-      "Delete to start of line (macOS Cmd+Backspace often arrives as Ctrl+U). Empty draft → jump chat to top",
-  },
-  {
-    chord: "Cmd/Meta+Backspace",
-    label: "Delete to start of line",
-  },
-  {
-    chord: "Cmd/Meta+Delete",
-    label: "Delete to end of line",
+      "Delete the whole line (macOS Cmd+Backspace often arrives as Ctrl+U). Empty draft → jump chat to top",
   },
   {
     chord: "Ctrl+A / Ctrl+E",

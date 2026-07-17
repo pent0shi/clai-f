@@ -71,6 +71,22 @@ export interface ChatMessage {
   name?: string | undefined;
   /** For role "tool": whether the tool succeeded (Anthropic is_error). */
   ok?: boolean | undefined;
+  /**
+   * Model-only recovery / governor nudge. Kept in API history so the agent
+   * continues correctly, but never rendered as a YOU bubble or WARN notice
+   * in the chat transcript.
+   */
+  internal?: boolean | undefined;
+}
+
+/** True for system-injected recovery prompts that must stay out of the chat UI. */
+export function isInternalChatMessage(message: ChatMessage): boolean {
+  if (message.internal) return true;
+  if (message.role !== "user") return false;
+  // Legacy recovery texts that predate the `internal` flag.
+  return /^(?:You diagnosed an error and described the fix|You wrote a message but called NO tool|You described (?:an action|work|security work)|You claimed a search\/fetch|You wrote the plan as prose|INCOMPLETE: the user asked for a working product feature|This is a local app build: do not stop|The local HTTP probe failed|You have not finished the approved plan|Coverage looks thin \(ports|You are in plan mode and tried to finish without a durable plan)\b/i.test(
+    message.content.trim(),
+  );
 }
 
 /** Tool choice for native function calling (canonical names). */

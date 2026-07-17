@@ -231,6 +231,15 @@ export function reducer(state: TuiState, action: TuiAction): TuiState {
       }
       const items = action.messages.flatMap<TranscriptItem>((message) => {
         if (message.role === "user") {
+          // Model-only recovery prompts must not become YOU bubbles.
+          if ((message as { internal?: boolean }).internal) return [];
+          if (
+            /^(?:You diagnosed an error and described the fix|You wrote a message but called NO tool)\b/i.test(
+              message.content.trim(),
+            )
+          ) {
+            return [];
+          }
           return [{ kind: "user" as const, id: nextId("history-user"), text: message.content, done: true }];
         }
         if (message.role === "assistant") {

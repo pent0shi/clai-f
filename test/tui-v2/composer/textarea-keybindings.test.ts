@@ -38,34 +38,47 @@ describe("buildComposerTextareaOverrides", () => {
     expect(overrides.some((o) => o.name === "j" && o.ctrl)).toBe(false);
   });
 
-  it("binds Ctrl+U and Cmd/Meta+Backspace to delete-to-line-start", () => {
-    expect(overrides).toContainEqual({
-      name: "u",
-      ctrl: true,
-      action: "delete-to-line-start",
-    });
+  it("binds Option/Alt (meta) + Backspace/Delete to word delete", () => {
     expect(overrides).toContainEqual({
       name: "backspace",
       meta: true,
-      action: "delete-to-line-start",
+      action: "delete-word-backward",
     });
     expect(overrides).toContainEqual({
-      name: "backspace",
-      super: true,
-      action: "delete-to-line-start",
+      name: "delete",
+      meta: true,
+      action: "delete-word-forward",
     });
   });
 
-  it("binds Cmd/Meta+Delete to delete-to-line-end", () => {
+  it("binds Cmd (super) + Backspace/Delete to delete the whole line", () => {
     expect(overrides).toContainEqual({
-      name: "delete",
-      meta: true,
-      action: "delete-to-line-end",
+      name: "backspace",
+      super: true,
+      action: "delete-line",
     });
     expect(overrides).toContainEqual({
       name: "delete",
       super: true,
-      action: "delete-to-line-end",
+      action: "delete-line",
+    });
+  });
+
+  it("binds Ctrl + Backspace/Delete/U to full-line kill (Windows + terminal Cmd)", () => {
+    expect(overrides).toContainEqual({
+      name: "backspace",
+      ctrl: true,
+      action: "delete-line",
+    });
+    expect(overrides).toContainEqual({
+      name: "delete",
+      ctrl: true,
+      action: "delete-line",
+    });
+    expect(overrides).toContainEqual({
+      name: "u",
+      ctrl: true,
+      action: "delete-line",
     });
   });
 });

@@ -300,15 +300,13 @@ export function App(): ReactNode {
   const composerFocused = overlay.kind === "none" && focusContext === "composer";
 
   /**
-   * Wheel/trackpad outside focused regions that own their own scroll (plan
-   * pane, composer multi-line draft, overlays) scrolls the chat.
-   * Plan/composer handlers stopPropagation; also skip by focus so a missed
-   * bubble never moves the transcript while the user is in those regions.
+   * Wheel outside focused regions that own their own scroll (plan pane)
+   * scrolls the chat. Composer forwards wheel to chat itself (classic).
    */
   function onAppWheel(event: MouseEvent): void {
     if (!event.scroll || overlay.kind !== "none") return;
-    // Plan owns its ScrollBox; composer owns draft wheel when focused.
-    if (focusContext === "plan" || focusContext === "composer") return;
+    // Plan owns its ScrollBox — never steal its wheel into chat.
+    if (focusContext === "plan") return;
     event.preventDefault();
     event.stopPropagation();
     services.focus.focusRegion("transcript");

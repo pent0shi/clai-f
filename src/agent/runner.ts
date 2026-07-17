@@ -892,8 +892,9 @@ export async function runAgentTurn(
     let refreshSessionState: (
       plan?: SessionPlan | null | undefined,
     ) => void = () => undefined;
+    /** Model-only nudge — never shown as a YOU bubble / WARN in the chat UI. */
     const recoveryUserMessage = (content: string): ChatMessage => {
-      const message: ChatMessage = { role: "user", content };
+      const message: ChatMessage = { role: "user", content, internal: true };
       if (options.images && options.images.length > 0) {
         // Some OpenAI-compatible gateways/models attend most strongly to the
         // latest user turn. Keep the image attached on recovery nudges so a
@@ -3617,11 +3618,6 @@ export async function runAgentTurn(
             }
             if (action) {
               consumeBudget(recovery, action.budgetKey);
-              writeNotice(
-                "warn",
-                action.notice,
-                chalk.yellow(`  ⚠ ${action.notice}\n`),
-              );
               pushAssistantHistory(assistantText.visible);
               messages.push(recoveryUserMessage(action.message));
               continue;
@@ -3640,13 +3636,8 @@ export async function runAgentTurn(
                 : " Reply with ONLY a fenced ```tool block for web.search now."),
             );
             consumeBudget(recovery, action.budgetKey);
-            writeNotice(
-              "info",
-              action.notice,
-              chalk.dim(`  ℹ ${action.notice}\n`),
-            );
             pushAssistantHistory(assistantText.visible);
-            messages.push({ role: "user", content: action.message });
+            messages.push(recoveryUserMessage(action.message));
             continue;
           }
 
@@ -3663,12 +3654,7 @@ export async function runAgentTurn(
               const action = recoveryForMissingPlan(toolsAttached);
               consumeBudget(recovery, action.budgetKey);
               pushAssistantHistory(assistantText.visible);
-              messages.push({ role: "user", content: action.message });
-              writeNotice(
-                "warn",
-                action.notice,
-                chalk.yellow(`  ⚠ ${action.notice}\n`),
-              );
+              messages.push(recoveryUserMessage(action.message));
               continue;
             }
           }
@@ -3687,12 +3673,7 @@ export async function runAgentTurn(
             const action = recoveryForMissingFeature(getActiveProjectRoot());
             consumeBudget(recovery, action.budgetKey);
             pushAssistantHistory(assistantText.visible);
-            messages.push({ role: "user", content: action.message });
-            writeNotice(
-              "warn",
-              action.notice,
-              chalk.yellow(`  ⚠ ${action.notice}\n`),
-            );
+            messages.push(recoveryUserMessage(action.message));
             continue;
           }
 
@@ -3735,12 +3716,7 @@ export async function runAgentTurn(
                 const action = recoveryForRuntimeVerify(getActiveProjectRoot());
                 consumeBudget(recovery, action.budgetKey);
                 pushAssistantHistory(assistantText.visible);
-                messages.push({ role: "user", content: action.message });
-                writeNotice(
-                  "warn",
-                  action.notice,
-                  chalk.yellow(`  ⚠ ${action.notice}\n`),
-                );
+                messages.push(recoveryUserMessage(action.message));
                 continue;
               }
             }
@@ -3758,12 +3734,7 @@ export async function runAgentTurn(
             const action = recoveryForFailedProbe();
             consumeBudget(recovery, action.budgetKey);
             pushAssistantHistory(assistantText.visible);
-            messages.push({ role: "user", content: action.message });
-            writeNotice(
-              "warn",
-              action.notice,
-              chalk.yellow(`  ⚠ ${action.notice}\n`),
-            );
+            messages.push(recoveryUserMessage(action.message));
             continue;
           }
 
@@ -3778,12 +3749,7 @@ export async function runAgentTurn(
             const action = recoveryForShallowPentest();
             consumeBudget(recovery, action.budgetKey);
             pushAssistantHistory(assistantText.visible);
-            messages.push({ role: "user", content: action.message });
-            writeNotice(
-              "warn",
-              action.notice,
-              chalk.yellow(`  ⚠ ${action.notice}\n`),
-            );
+            messages.push(recoveryUserMessage(action.message));
             continue;
           }
 
@@ -3806,13 +3772,8 @@ export async function runAgentTurn(
                 errorFix: errorFixNarration,
               });
               consumeBudget(recovery, action.budgetKey);
-              writeNotice(
-                "warn",
-                action.notice,
-                chalk.yellow(`  ⚠ ${action.notice}\n`),
-              );
               pushAssistantHistory(assistantText.visible);
-              messages.push({ role: "user", content: action.message });
+              messages.push(recoveryUserMessage(action.message));
               continue;
             }
           }

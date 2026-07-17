@@ -9,7 +9,9 @@ import {
   composerOwnsWheel,
   measureComposerLines,
   nextComposerScrollOffset,
+  resolveComposerWheelTarget,
   tryScrollComposerDraft,
+  wheelChatDelta,
 } from "../../../src/tui-v2/composer/composer-wheel.js";
 
 describe("countComposerVisualLines", () => {
@@ -124,6 +126,39 @@ describe("composer wheel / draft scroll", () => {
     ).toBe(true);
     expect(downs).toBe(3);
     expect(measureComposerLines(editor, 1)).toBe(5);
+  });
+
+  it("routes wheel by focus: unfocused never owns draft", () => {
+    const multi = {
+      lineCount: 10,
+      virtualLineCount: 10,
+      plainText: "a\n".repeat(10),
+      editorView: {
+        getViewport: () => ({ offsetY: 0, offsetX: 0, height: 5, width: 80 }),
+        getTotalVirtualLineCount: () => 10,
+        setViewport: () => {},
+      },
+      moveCursorUp: () => {},
+      moveCursorDown: () => {},
+    };
+    expect(
+      resolveComposerWheelTarget({
+        composerFocused: false,
+        editor: multi,
+        contentLines: 10,
+        visibleRows: 5,
+      }),
+    ).toBe("chat");
+    expect(
+      resolveComposerWheelTarget({
+        composerFocused: true,
+        editor: multi,
+        contentLines: 10,
+        visibleRows: 5,
+      }),
+    ).toBe("draft");
+    expect(wheelChatDelta("down", 1)).toBe(3);
+    expect(wheelChatDelta("up", 1)).toBe(-3);
   });
 
   it("scrolls overflowing draft viewport and leaves single-line to chat", () => {
