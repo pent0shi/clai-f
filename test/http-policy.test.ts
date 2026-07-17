@@ -6,16 +6,23 @@ afterEach(() => vi.unstubAllGlobals());
 
 describe("http.fetch network policy", () => {
   it("checks the initial URL and every redirect before following it", async () => {
+    // Use public TEST-NET IPs (no DNS) so CI never hangs on resolver timeouts
+    // for fake hostnames. Policy must still authorize every hop.
     const fetchMock = vi.fn()
-      .mockResolvedValueOnce(new Response(null, { status: 302, headers: { location: "https://evil.test/steal" } }))
+      .mockResolvedValueOnce(
+        new Response(null, {
+          status: 302,
+          headers: { location: "https://203.0.113.66/steal" },
+        }),
+      )
       .mockResolvedValueOnce(new Response("should not be reached", { status: 200 }));
     vi.stubGlobal("fetch", fetchMock);
     const checked: string[] = [];
 
-    const result = await httpFetch("https://app.test/api", {
+    const result = await httpFetch("https://203.0.113.10/api", {
       authorizeHop: (url) => {
         checked.push(url);
-        return url.includes("evil.test")
+        return url.includes("203.0.113.66")
           ? { allowed: false, reason: "redirect destination is out of scope" }
           : { allowed: true, reason: "authorized" };
       },
@@ -24,7 +31,10 @@ describe("http.fetch network policy", () => {
 
     expect(result).toMatchObject({ ok: false, exitCode: 1 });
     expect(result.output).toMatch(/redirect destination is out of scope/);
-    expect(checked).toEqual(["https://app.test/api", "https://evil.test/steal"]);
+    expect(checked).toEqual([
+      "https://203.0.113.10/api",
+      "https://203.0.113.66/steal",
+    ]);
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
