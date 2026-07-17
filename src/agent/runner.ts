@@ -881,7 +881,15 @@ export async function runAgentTurn(
         ],
       }).content;
     const fullSystemPrompt = composeCurrentSystemPrompt(nativeToolsActive);
-    const userMessage: ChatMessage = { role: "user", content: prompt };
+    // Backend-only directives (implement, displayPrompt=null) stay in model
+    // history but must never become a YOU bubble on live or /history hydrate.
+    const hideUserBubble =
+      options.displayPrompt === null || options.displayPrompt === "";
+    const userMessage: ChatMessage = {
+      role: "user",
+      content: prompt,
+      ...(hideUserBubble ? { internal: true } : {}),
+    };
     if (options.images && options.images.length > 0) {
       userMessage.images = options.images;
     }

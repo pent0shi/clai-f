@@ -73,12 +73,15 @@ function ToastPill(props: {
   const surface = toastSurface(theme);
   const border = theme.inputBorder;
   const textFg = theme.userBorder;
-  // Compact bold label — surface is on the outer box only (no text bg so
-  // fill never paints past border glyphs in OpenTUI).
   const label = `${levelGlyph(item.level)}  ${item.message}`;
   // Approximate “fade” with DIM when sliding in/out — always keep BOLD.
   const dim = visibility < 0.85;
 
+  // OpenTUI paints backgroundColor on EVERY cell of the box, including the
+  // border character cells. If surface is on the outer box, grey fills under
+  // the aqua glyphs and looks like a grey rect with an inset border.
+  // Outer = app background (invisible under border) + aqua frame.
+  // Inner = surface well; row + alignItems center vertically centers the label.
   return (
     <box
       border
@@ -91,26 +94,43 @@ function ToastPill(props: {
         height: TOAST_BOX_HEIGHT,
         zIndex: 1000,
         borderColor: border,
-        backgroundColor: surface,
-        flexDirection: "row",
-        alignItems: "center",
+        backgroundColor: theme.background,
+        flexDirection: "column",
         justifyContent: "center",
-        paddingLeft: 2,
-        paddingRight: 2,
+        alignItems: "stretch",
+        paddingLeft: 0,
+        paddingRight: 0,
         paddingTop: 0,
         paddingBottom: 0,
       }}
     >
-      <text
-        selectable={false}
-        content={label}
+      <box
         style={{
-          fg: textFg,
-          attributes: dim
-            ? TextAttributes.BOLD | TextAttributes.DIM
-            : TextAttributes.BOLD,
+          flexGrow: 1,
+          width: "100%",
+          minHeight: 1,
+          backgroundColor: surface,
+          flexDirection: "row",
+          // Vertical + horizontal center of the single label line.
+          alignItems: "center",
+          justifyContent: "center",
+          paddingLeft: 2,
+          paddingRight: 2,
         }}
-      />
+      >
+        <text
+          selectable={false}
+          content={label}
+          style={{
+            fg: textFg,
+            bg: surface,
+            height: 1,
+            attributes: dim
+              ? TextAttributes.BOLD | TextAttributes.DIM
+              : TextAttributes.BOLD,
+          }}
+        />
+      </box>
     </box>
   );
 }

@@ -83,9 +83,13 @@ export interface ChatMessage {
 export function isInternalChatMessage(message: ChatMessage): boolean {
   if (message.internal) return true;
   if (message.role !== "user") return false;
+  const text = message.content.trim();
+  // Implement / plan-accept directives injected by the UI (not typed by user).
+  if (/^Plan approved\.\s+Execute\b/i.test(text)) return true;
+  if (/^Plan revision request from the user\b/i.test(text)) return true;
   // Legacy recovery texts that predate the `internal` flag.
   return /^(?:You diagnosed an error and described the fix|You wrote a message but called NO tool|You described (?:an action|work|security work)|You claimed a search\/fetch|You wrote the plan as prose|INCOMPLETE: the user asked for a working product feature|This is a local app build: do not stop|The local HTTP probe failed|You have not finished the approved plan|Coverage looks thin \(ports|You are in plan mode and tried to finish without a durable plan)\b/i.test(
-    message.content.trim(),
+    text,
   );
 }
 

@@ -9,6 +9,7 @@
 import { isInternalChatMessage, type ChatMessage } from "../../types.js";
 import type { TranscriptItem as ClassicTranscriptItem } from "../../tui/state.js";
 import { asToolCallId, type ToolCallId } from "../../app/events/app-event.js";
+import { shouldHideQuietMetaToolInChat } from "../../app/adapters/quiet-meta-tools.js";
 import { formatToolArgs } from "../../agent/tool-call-parser.js";
 import {
   buildFileChange,
@@ -98,6 +99,10 @@ export function hydrateFromClassicTranscript(
       case "tool": {
         const toolCallId = asToolCallId(id);
         const status = mapToolStatus(raw.status);
+        const name = raw.name ?? "tool";
+        const chatStatus = status === "running" ? "ok" : status;
+        // Successful plan/task meta tools are Tasks-pane only (not chat).
+        if (shouldHideQuietMetaToolInChat(name, chatStatus)) break;
         const output = typeof raw.output === "string" ? raw.output : "";
         if (output) toolOutputs.set(toolCallId, output);
         const rawChanges = (raw as { fileChanges?: unknown }).fileChanges;
@@ -105,9 +110,9 @@ export function hydrateFromClassicTranscript(
           ...base,
           kind: "tool",
           toolCallId,
-          name: raw.name ?? "tool",
+          name,
           argsDisplay: raw.argsDisplay ?? "",
-          status: status === "running" ? "ok" : status,
+          status: chatStatus,
           exitCode: raw.exitCode,
           summary: raw.summary,
           artifactPath: raw.artifactPath,
@@ -411,6 +416,9 @@ export function hydrateFromMessages(messages: readonly ChatMessage[]): HydrateRe
       if (output) toolOutputs.set(toolCallId, output);
       const ok = result?.ok !== false;
       const toolName = call.name || result?.name || "tool";
+      const status: ToolStatus = result ? (ok ? "ok" : "failed") : "ok";
+      // Successful plan/task bookkeeping belongs in the Tasks pane only.
+      if (shouldHideQuietMetaToolInChat(toolName, status)) continue;
       const callArgs = (call.args ?? {}) as Record<string, unknown>;
       const fileChanges = fileChangesFromToolArgs(toolName, callArgs);
       const item: ToolItem = {
@@ -422,7 +430,7 @@ export function hydrateFromMessages(messages: readonly ChatMessage[]): HydrateRe
         toolCallId,
         name: toolName,
         argsDisplay: argsDisplayFromToolCall(toolName, callArgs),
-        status: result ? (ok ? "ok" : "failed") : "ok",
+        status,
         exitCode: result ? (ok ? 0 : 1) : undefined,
         summary: undefined,
         artifactPath: undefined,

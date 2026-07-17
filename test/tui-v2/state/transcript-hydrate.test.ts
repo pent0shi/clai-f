@@ -97,6 +97,43 @@ describe("hydrateFromMessages", () => {
     expect(texts).toEqual(["fix the bug", "Fixed."]);
   });
 
+  it("hides implement directives and successful plan.create from chat hydrate", () => {
+    const { state } = hydrateFromMessages([
+      { role: "user", content: "recon example.com" },
+      {
+        role: "assistant",
+        content: "Planning.",
+        toolCalls: [
+          {
+            id: "p1",
+            name: "plan.create",
+            args: { goal: "big plan", tasks: ["t1"] },
+          },
+        ],
+      },
+      {
+        role: "tool",
+        toolCallId: "p1",
+        name: "plan.create",
+        content: "Plan saved",
+        ok: true,
+      },
+      {
+        role: "user",
+        content:
+          "Plan approved. Execute the engagement tasks. Work through pending tasks.",
+      },
+      { role: "assistant", content: "Starting t1." },
+    ]);
+    const kinds = state.order.map((id) => state.byId.get(id)!.kind);
+    expect(kinds).toEqual(["user", "assistant", "assistant"]);
+    const userTexts = state.order
+      .map((id) => state.byId.get(id)!)
+      .filter((i) => i.kind === "user")
+      .map((i) => (i as { text: string }).text);
+    expect(userTexts).toEqual(["recon example.com"]);
+  });
+
   it("reconstructs tool cards from assistant toolCalls + role:tool results", () => {
     const { state, toolOutputs } = hydrateFromMessages([
       { role: "user", content: "list files" },

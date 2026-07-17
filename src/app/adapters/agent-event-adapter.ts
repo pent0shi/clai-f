@@ -9,9 +9,9 @@ import {
 } from "../events/app-event.js";
 import type { OutputSpool } from "../events/event-buffer.js";
 import type { EventSequencer } from "../events/sequencer.js";
+import { isQuietMetaTool } from "./quiet-meta-tools.js";
 
 const STEP_STATUS = /^step (\d+)$/;
-const QUIET_META_TOOLS = new Set(["plan.create", "task.update"]);
 
 type BufferedMetaTool = {
   name: string;
@@ -85,7 +85,7 @@ export class AgentEventAdapter {
         return;
       case "tool-call": {
         const toolCallId = this.toolCallId(event.id);
-        if (QUIET_META_TOOLS.has(event.name)) {
+        if (isQuietMetaTool(event.name)) {
           this.bufferedMetaTools.set(toolCallId, {
             name: event.name,
             argsDisplay: event.argsDisplay,

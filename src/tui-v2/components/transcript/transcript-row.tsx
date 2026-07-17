@@ -18,6 +18,7 @@ import {
   type TranscriptState,
 } from "../../state/transcript-types.js";
 import type { Theme } from "../../rendering/theme.js";
+import { shouldHideQuietMetaToolInChat } from "../../../app/adapters/quiet-meta-tools.js";
 import { UserMessage } from "./user-message.js";
 import { AssistantMessage } from "./assistant-message.js";
 import { ThinkingBlock } from "./thinking-block.js";
@@ -83,13 +84,9 @@ export function TranscriptRow(props: {
       );
       break;
     case "tool": {
-      // task.update spam — only show failures in the main chat.
-      // (The Tasks pane still reflects every successful update.)
-      if (
-        item.name === "task.update" &&
-        item.status !== "failed" &&
-        item.status !== "blocked"
-      ) {
+      // plan.create / task.update success is Tasks-pane only — hide from chat
+      // so huge plan payloads never flood the transcript. Failures still show.
+      if (shouldHideQuietMetaToolInChat(item.name, item.status)) {
         return null;
       }
       body = (
