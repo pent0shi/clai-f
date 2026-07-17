@@ -68,14 +68,22 @@ export function handleThink(services: AppServices): void {
 
 export function handleContext(services: AppServices): void {
   const { messages, tokens } = services.session.estimateContext();
-  // Same chars/3.3 heuristic + budget the agent loop uses for auto-compact.
-  const budget = AUTO_COMPACT_TOKEN_BUDGET;
-  const pct = budget > 0 ? Math.min(100, Math.round((tokens / budget) * 100)) : 0;
+  const snap = services.session.getState().contextUsage;
+  const window = snap?.contextLimit ?? AUTO_COMPACT_TOKEN_BUDGET;
+  const pct =
+    window > 0 ? Math.min(100, Math.round((tokens / window) * 100)) : 0;
+  const exact = snap?.exact === true;
+  const label = exact ? "tokens" : "~tokens (estimate)";
+  const sessionBits =
+    snap && (snap.sessionPromptTokens > 0 || snap.sessionCompletionTokens > 0)
+      ? ` · session in ${snap.sessionPromptTokens.toLocaleString()} / out ${snap.sessionCompletionTokens.toLocaleString()}`
+      : "";
   notice(
     services,
     "info",
-    `context: ${messages} messages · ~${tokens.toLocaleString()} tokens` +
-      ` (~${pct}% of auto-compact budget ${budget.toLocaleString()})`,
+    `context: ${messages} messages · ${tokens.toLocaleString()} ${label}` +
+      ` (${pct}% of ${window.toLocaleString()} window)` +
+      sessionBits,
   );
 }
 

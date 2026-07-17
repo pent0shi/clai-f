@@ -11,6 +11,10 @@ import { useEffect, useState, type ReactNode } from "react";
 import { TextAttributes } from "@opentui/core";
 import type { SessionController } from "../../../app/controllers/session-controller.js";
 import type { Mode } from "../../../types.js";
+import {
+  formatContextChip,
+  type ContextUsageSnapshot,
+} from "../../../llm/token-usage.js";
 import type { Theme } from "../../rendering/theme.js";
 import { useSessionState } from "../../state/use-session-state.js";
 import {
@@ -80,6 +84,33 @@ function formatActivity(activity: string | undefined, elapsedSec: number): strin
     base = `⏳ ${base}`;
   }
   return `${base} · ${elapsedSec}s`;
+}
+
+/** Pick full or compact context chip for terminal width. */
+function contextChipForWidth(
+  usage: ContextUsageSnapshot | undefined,
+  width: number,
+): string | undefined {
+  if (!usage) return undefined;
+  return formatContextChip(usage, { compact: width < 56 });
+}
+
+function ContextChip(props: {
+  chip: string;
+  theme: Theme;
+  exact: boolean;
+}): ReactNode {
+  const { chip, theme, exact } = props;
+  return (
+    <text
+      selectable={false}
+      content={chip}
+      style={{
+        fg: exact ? theme.cyan : theme.muted,
+        attributes: exact ? TextAttributes.BOLD : TextAttributes.DIM,
+      }}
+    />
+  );
 }
 
 function sep(theme: Theme): ReactNode {
@@ -257,7 +288,10 @@ export function StatusLine(props: StatusLineProps): ReactNode {
     const activityText = state.compacting
       ? `compacting conversation · ${elapsed}s`
       : formatActivity(activity, elapsed);
-    const activityMax = Math.max(14, width - (compact ? 28 : 40));
+    const ctxChip = contextChipForWidth(state.contextUsage, width);
+    // Reserve room for mode badge + spinner + ctx chip + Esc:cancel.
+    const ctxReserve = ctxChip ? ctxChip.length + 4 : 0;
+    const activityMax = Math.max(12, width - (compact ? 28 : 40) - ctxReserve);
     return (
       <box
         style={{
@@ -284,6 +318,17 @@ export function StatusLine(props: StatusLineProps): ReactNode {
             content={clip(activityText, activityMax)}
             style={{ fg: theme.activity }}
           />
+          {/* Context tokens sit adjacent to activity · elapsed while running. */}
+          {ctxChip ? (
+            <>
+              <text selectable={false} content="  ·  " style={{ fg: theme.muted }} />
+              <ContextChip
+                chip={ctxChip}
+                theme={theme}
+                exact={state.contextUsage?.exact === true}
+              />
+            </>
+          ) : null}
         </box>
         <box style={{ flexDirection: "row", alignItems: "center", flexShrink: 0 }}>
           {hasActivePlan || planVisible ? (
@@ -319,8 +364,9 @@ export function StatusLine(props: StatusLineProps): ReactNode {
     );
   }
 
-  // Idle: centered chips; scroll ▲/▼ flush right.
+  // Idle: centered chips; context tokens left of scroll badges on the right.
   // Three columns (flexGrow left + center + flexGrow right) keep the middle true-center.
+  const idleCtx = contextChipForWidth(state.contextUsage, width);
   return (
     <box
       style={{
@@ -393,7 +439,7 @@ export function StatusLine(props: StatusLineProps): ReactNode {
         ) : null}
       </box>
 
-      {/* Right: scroll remainder badges */}
+      {/* Right: context usage chip + scroll remainder badges */}
       <box
         style={{
           flexGrow: 1,
@@ -404,6 +450,18 @@ export function StatusLine(props: StatusLineProps): ReactNode {
           alignItems: "center",
         }}
       >
+        {idleCtx ? (
+          <>
+            <ContextChip
+              chip={idleCtx}
+              theme={theme}
+              exact={state.contextUsage?.exact === true}
+            />
+            {(scrollMetrics.linesAbove > 0 || scrollMetrics.linesBelow > 0) ? (
+              <text selectable={false} content="  " />
+            ) : null}
+          </>
+        ) : null}
         <ScrollRemainderBadges theme={theme} metrics={scrollMetrics} />
       </box>
     </box>

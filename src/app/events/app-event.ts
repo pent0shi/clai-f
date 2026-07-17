@@ -97,6 +97,13 @@ export interface AppEventPayloads {
     readonly beforeTokens: number;
     readonly afterTokens: number;
   };
+  "token-usage": {
+    readonly promptTokens: number;
+    readonly completionTokens: number;
+    readonly totalTokens: number;
+    readonly exact: boolean;
+    readonly model?: string | undefined;
+  };
   "turn-ended": { readonly finalAnswer: string; readonly steps: number };
   "turn-aborted": Record<string, never>;
   "turn-error": { readonly message: string };

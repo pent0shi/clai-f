@@ -119,9 +119,22 @@ export function createCompositionRoot(
   // The transcript store and plan controller observe every event
   // unconditionally; the recorder/external sink split below is unrelated to
   // that (it is only about where raw AppEvents surface for tests/consumers).
+  // Late-bound: session is constructed below; usage recording closes over it.
+  let sessionRef: SessionController | undefined;
   const emit = (event: AnyAppEvent): void => {
     transcript.dispatch(event);
     plan.observe(event);
+    if (event.type === "token-usage" && sessionRef) {
+      sessionRef.recordTokenUsage(
+        {
+          promptTokens: event.payload.promptTokens,
+          completionTokens: event.payload.completionTokens,
+          totalTokens: event.payload.totalTokens,
+          exact: event.payload.exact,
+        },
+        event.payload.model,
+      );
+    }
     if (externalEmit) externalEmit(event);
     else recorded.push(event);
   };
@@ -145,8 +158,6 @@ export function createCompositionRoot(
     copyOnRelease: options.copyOnRelease ?? false,
   });
 
-  // Late-bound: session is constructed below; snapshot closes over it.
-  let sessionRef: SessionController | undefined;
   const session = new SessionController({
     agent: ports.agent,
     persistence: ports.persistence,

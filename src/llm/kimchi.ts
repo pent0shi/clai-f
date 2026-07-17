@@ -8,6 +8,7 @@ import {
   openAiCompatibleComplete,
   openAiCompatiblePing,
   openAiCompatibleStream,
+  toCompletionResult,
   readJson,
 } from "./http.js";
 
@@ -74,13 +75,7 @@ export const kimchiProvider: LlmProvider = {
       toolChoice: request.toolChoice,
       parallelToolCalls: request.parallelToolCalls,
     });
-    return {
-      text: payload.text,
-      provider: "kimchi",
-      model,
-      ...(payload.toolCalls?.length ? { toolCalls: payload.toolCalls } : {}),
-      ...(payload.finishReason ? { finishReason: payload.finishReason } : {}),
-    };
+    return toCompletionResult("kimchi", model, payload);
   },
   async stream(
     request: CompletionRequest,
@@ -106,12 +101,6 @@ export const kimchiProvider: LlmProvider = {
       toolChoice: request.toolChoice,
       parallelToolCalls: request.parallelToolCalls,
     });
-    return {
-      text: payload.text,
-      provider: "kimchi",
-      model,
-      ...(payload.toolCalls?.length ? { toolCalls: payload.toolCalls } : {}),
-      ...(payload.finishReason ? { finishReason: payload.finishReason } : {}),
-    };
+    return toCompletionResult("kimchi", model, payload);
   },
 };

@@ -17,6 +17,8 @@ import {
   parseAnthropicToolUseBlocks,
   toAnthropicToolMessages,
 } from "./adapters/anthropic-tools.js";
+import { parseAnthropicUsage } from "./token-usage.js";
+import type { TokenUsage } from "../types.js";
 
 const baseUrl = "https://api.anthropic.com/v1";
 const anthropicVersion = "2023-06-01";
@@ -106,6 +108,7 @@ export const anthropicProvider: LlmProvider = {
         input?: unknown;
       }>;
       stop_reason?: string;
+      usage?: unknown;
     }>(response);
     const parsed = parseAnthropicToolUseBlocks(data.content);
     if (!parsed.text && parsed.toolCalls.length === 0) {
@@ -114,6 +117,7 @@ export const anthropicProvider: LlmProvider = {
     const final = parsed.thinkingText
       ? `<think>${parsed.thinkingText}</think>${parsed.text}`
       : parsed.text;
+    const usage = parseAnthropicUsage(data.usage);
     return {
       text: final,
       provider: "anthropic",
@@ -127,6 +131,7 @@ export const anthropicProvider: LlmProvider = {
         : parsed.toolCalls.length
           ? { finishReason: "tool_calls" }
           : {}),
+      ...(usage ? { usage } : {}),
     };
   },
   async stream(
@@ -156,6 +161,7 @@ export const anthropicProvider: LlmProvider = {
     let inThinking = false;
     const streamState = createAnthropicToolStreamState();
     let stopReason: string | undefined;
+    let streamUsage: TokenUsage | undefined;
 
     const enterThinking = (): void => {
       if (inThinking) return;
@@ -181,6 +187,8 @@ export const anthropicProvider: LlmProvider = {
         const parsed = JSON.parse(payload) as {
           type?: string;
           index?: number;
+          usage?: unknown;
+          message?: { usage?: unknown };
           content_block?: {
             type?: string;
             id?: string;
@@ -196,8 +204,29 @@ export const anthropicProvider: LlmProvider = {
             stop_reason?: string;
           };
         };
-        if (parsed.type === "message_delta" && parsed.delta?.stop_reason) {
-          stopReason = parsed.delta.stop_reason;
+        // message_start carries input tokens; message_delta carries output.
+        if (parsed.type === "message_start" && parsed.message?.usage) {
+          streamUsage = parseAnthropicUsage(parsed.message.usage) ?? streamUsage;
+        }
+        if (parsed.type === "message_delta") {
+          if (parsed.delta?.stop_reason) {
+            stopReason = parsed.delta.stop_reason;
+          }
+          if (parsed.usage) {
+            const out = parseAnthropicUsage(parsed.usage);
+            if (out) {
+              streamUsage = {
+                promptTokens: streamUsage?.promptTokens ?? out.promptTokens,
+                completionTokens:
+                  out.completionTokens || (streamUsage?.completionTokens ?? 0),
+                totalTokens:
+                  (streamUsage?.promptTokens ?? out.promptTokens) +
+                  (out.completionTokens ||
+                    (streamUsage?.completionTokens ?? 0)),
+                exact: true,
+              };
+            }
+          }
         }
         if (
           parsed.type === "content_block_start" ||
@@ -250,6 +279,7 @@ export const anthropicProvider: LlmProvider = {
         : finalized.toolCalls.length
           ? { finishReason: "tool_calls" }
           : {}),
+      ...(streamUsage ? { usage: streamUsage } : {}),
     };
   },
 };

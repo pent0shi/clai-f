@@ -12,6 +12,7 @@ import {
 import {
   openAiCompatibleComplete,
   openAiCompatibleStream,
+  toCompletionResult,
   readJson,
   readStreamLines,
 } from "./http.js";
@@ -105,13 +106,7 @@ export const mantleProvider: LlmProvider = {
         toolChoice: request.toolChoice,
         parallelToolCalls: request.parallelToolCalls,
       });
-      return {
-        text: payload.text,
-        provider: "aws-mantle",
-        model,
-        ...(payload.toolCalls?.length ? { toolCalls: payload.toolCalls } : {}),
-        ...(payload.finishReason ? { finishReason: payload.finishReason } : {}),
-      };
+      return toCompletionResult("aws-mantle", model, payload);
     }
     const system = request.messages.find(
       (message) => message.role === "system",
@@ -204,13 +199,7 @@ export const mantleProvider: LlmProvider = {
         toolChoice: request.toolChoice,
         parallelToolCalls: request.parallelToolCalls,
       });
-      return {
-        text: payload.text,
-        provider: "aws-mantle",
-        model,
-        ...(payload.toolCalls?.length ? { toolCalls: payload.toolCalls } : {}),
-        ...(payload.finishReason ? { finishReason: payload.finishReason } : {}),
-      };
+      return toCompletionResult("aws-mantle", model, payload);
     }
     const system = request.messages.find(
       (message) => message.role === "system",

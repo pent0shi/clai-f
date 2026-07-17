@@ -2991,6 +2991,13 @@ export async function runAgentTurn(
         }
         provider = completion.provider;
         model = completion.model;
+        if (completion.usage) {
+          emit({
+            type: "token-usage",
+            usage: completion.usage,
+            model: completion.model,
+          });
+        }
         deltaParser?.finish();
         // Sticky text-only may have flipped dialect during stream retry.
         ({ dialect: toolDialect, native: nativeToolsActive } =

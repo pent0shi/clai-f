@@ -10,6 +10,8 @@ import {
   toOllamaToolMessages,
   toOllamaTools,
 } from "./adapters/ollama-tools.js";
+import { parseOllamaUsage } from "./token-usage.js";
+import type { TokenUsage } from "../types.js";
 
 function base(auth: ProviderAuth): string {
   return (auth.baseUrl ?? auth.apiKey ?? "http://localhost:11434").replace(
@@ -59,18 +61,25 @@ export const ollamaProvider: LlmProvider = {
           };
         }>;
       };
+      prompt_eval_count?: number;
+      eval_count?: number;
     }>(response);
     const toolCalls = parseOllamaToolCalls(data.message?.tool_calls);
     const text = data.message?.content?.trim() ?? "";
     if (!text && toolCalls.length === 0) {
       throw new Error("Ollama returned no completion text");
     }
+    const usage = parseOllamaUsage({
+      prompt_eval_count: data.prompt_eval_count,
+      eval_count: data.eval_count,
+    });
     return {
       text,
       provider: "ollama",
       model,
       ...(toolCalls.length ? { toolCalls } : {}),
       ...(toolCalls.length ? { finishReason: "tool_calls" } : {}),
+      ...(usage ? { usage } : {}),
     };
   },
   async stream(
@@ -102,6 +111,7 @@ export const ollamaProvider: LlmProvider = {
     }
     let full = "";
     let toolCalls = parseOllamaToolCalls(undefined);
+    let streamUsage: TokenUsage | undefined;
 
     for await (const line of readStreamLines(response, {
       signal: request.signal,
@@ -121,6 +131,8 @@ export const ollamaProvider: LlmProvider = {
             }>;
           };
           done?: boolean;
+          prompt_eval_count?: number;
+          eval_count?: number;
         };
         const token = parsed.message?.content;
         if (token) {
@@ -131,12 +143,18 @@ export const ollamaProvider: LlmProvider = {
           toolCalls = parseOllamaToolCalls(parsed.message.tool_calls);
         }
         if (parsed.done) {
+          streamUsage =
+            parseOllamaUsage({
+              prompt_eval_count: parsed.prompt_eval_count,
+              eval_count: parsed.eval_count,
+            }) ?? streamUsage;
           return {
             text: full,
             provider: "ollama",
             model,
             ...(toolCalls.length ? { toolCalls } : {}),
             ...(toolCalls.length ? { finishReason: "tool_calls" } : {}),
+            ...(streamUsage ? { usage: streamUsage } : {}),
           };
         }
       } catch {
@@ -149,6 +167,7 @@ export const ollamaProvider: LlmProvider = {
       model,
       ...(toolCalls.length ? { toolCalls } : {}),
       ...(toolCalls.length ? { finishReason: "tool_calls" } : {}),
+      ...(streamUsage ? { usage: streamUsage } : {}),
     };
   },
 };

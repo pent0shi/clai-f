@@ -8,6 +8,7 @@ import {
   openAiCompatibleComplete,
   openAiCompatiblePing,
   openAiCompatibleStream,
+  toCompletionResult,
   readJson,
 } from "./http.js";
 
@@ -72,13 +73,7 @@ export const qwenCloudProvider: LlmProvider = {
       toolChoice: request.toolChoice,
       parallelToolCalls: request.parallelToolCalls,
     });
-    return {
-      text: payload.text,
-      provider: "qwen-cloud",
-      model,
-      ...(payload.toolCalls?.length ? { toolCalls: payload.toolCalls } : {}),
-      ...(payload.finishReason ? { finishReason: payload.finishReason } : {}),
-    };
+    return toCompletionResult("qwen-cloud", model, payload);
   },
   async stream(
     request: CompletionRequest,
@@ -104,12 +99,6 @@ export const qwenCloudProvider: LlmProvider = {
       toolChoice: request.toolChoice,
       parallelToolCalls: request.parallelToolCalls,
     });
-    return {
-      text: payload.text,
-      provider: "qwen-cloud",
-      model,
-      ...(payload.toolCalls?.length ? { toolCalls: payload.toolCalls } : {}),
-      ...(payload.finishReason ? { finishReason: payload.finishReason } : {}),
-    };
+    return toCompletionResult("qwen-cloud", model, payload);
   },
 };

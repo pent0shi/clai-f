@@ -3,6 +3,7 @@ import type {
   CompletionRequest,
   CompletionResult,
   ReasoningPreference,
+  TokenUsage,
 } from "../types.js";
 import {
   defaultModels,
@@ -16,6 +17,7 @@ import {
   toGeminiToolContents,
 } from "./adapters/gemini-tools.js";
 import { fromWireName } from "./tool-protocol.js";
+import { parseGeminiUsage } from "./token-usage.js";
 
 type GeminiPart =
   | { text: string }
@@ -178,6 +180,7 @@ export const geminiProvider: LlmProvider = {
         };
         finishReason?: string;
       }>;
+      usageMetadata?: unknown;
     }>(response);
     const parts = data.candidates?.[0]?.content?.parts ?? [];
     const thought = parts
@@ -192,6 +195,7 @@ export const geminiProvider: LlmProvider = {
     const final = thought
       ? `<think>${thought}</think>${parsed.text}`
       : parsed.text;
+    const usage = parseGeminiUsage(data.usageMetadata);
     return {
       text: final,
       provider: "gemini",
@@ -202,6 +206,7 @@ export const geminiProvider: LlmProvider = {
         : parsed.toolCalls.length
           ? { finishReason: "tool_calls" }
           : {}),
+      ...(usage ? { usage } : {}),
     };
   },
   async stream(
@@ -239,6 +244,7 @@ export const geminiProvider: LlmProvider = {
       };
     }> = [];
     let finishReason: string | undefined;
+    let streamUsage: TokenUsage | undefined;
 
     const enterThought = (): void => {
       if (inThought) return;
@@ -262,6 +268,7 @@ export const geminiProvider: LlmProvider = {
       if (payload === "[DONE]") break;
       try {
         const parsed = JSON.parse(payload) as {
+          usageMetadata?: unknown;
           candidates?: Array<{
             finishReason?: string;
             content?: {
@@ -277,6 +284,8 @@ export const geminiProvider: LlmProvider = {
             };
           }>;
         };
+        const u = parseGeminiUsage(parsed.usageMetadata);
+        if (u) streamUsage = u;
         const candidate = parsed.candidates?.[0];
         if (candidate?.finishReason) finishReason = candidate.finishReason;
         const parts = candidate?.content?.parts ?? [];
@@ -332,6 +341,7 @@ export const geminiProvider: LlmProvider = {
         : toolParsed.toolCalls.length
           ? { finishReason: "tool_calls" }
           : {}),
+      ...(streamUsage ? { usage: streamUsage } : {}),
     };
   },
 };

@@ -8,6 +8,7 @@ import {
   openAiCompatibleComplete,
   openAiCompatiblePing,
   openAiCompatibleStream,
+  toCompletionResult,
   readJson,
 } from "./http.js";
 
@@ -81,13 +82,7 @@ export const agentrouterProvider: LlmProvider = {
       toolChoice: request.toolChoice,
       parallelToolCalls: request.parallelToolCalls,
     });
-    return {
-      text: payload.text,
-      provider: "agentrouter",
-      model,
-      ...(payload.toolCalls?.length ? { toolCalls: payload.toolCalls } : {}),
-      ...(payload.finishReason ? { finishReason: payload.finishReason } : {}),
-    };
+    return toCompletionResult("agentrouter", model, payload);
   },
   async stream(
     request: CompletionRequest,
@@ -117,12 +112,6 @@ export const agentrouterProvider: LlmProvider = {
       toolChoice: request.toolChoice,
       parallelToolCalls: request.parallelToolCalls,
     });
-    return {
-      text: payload.text,
-      provider: "agentrouter",
-      model,
-      ...(payload.toolCalls?.length ? { toolCalls: payload.toolCalls } : {}),
-      ...(payload.finishReason ? { finishReason: payload.finishReason } : {}),
-    };
+    return toCompletionResult("agentrouter", model, payload);
   },
 };

@@ -8,6 +8,7 @@ import {
   openAiCompatibleComplete,
   openAiCompatiblePing,
   openAiCompatibleStream,
+  toCompletionResult,
   readJson,
 } from "./http.js";
 
@@ -77,13 +78,7 @@ export const bynaraProvider: LlmProvider = {
       toolChoice: request.toolChoice,
       parallelToolCalls: request.parallelToolCalls,
     });
-    return {
-      text: payload.text,
-      provider: "bynara",
-      model,
-      ...(payload.toolCalls?.length ? { toolCalls: payload.toolCalls } : {}),
-      ...(payload.finishReason ? { finishReason: payload.finishReason } : {}),
-    };
+    return toCompletionResult("bynara", model, payload);
   },
   async stream(
     request: CompletionRequest,
@@ -112,12 +107,6 @@ export const bynaraProvider: LlmProvider = {
       toolChoice: request.toolChoice,
       parallelToolCalls: request.parallelToolCalls,
     });
-    return {
-      text: payload.text,
-      provider: "bynara",
-      model,
-      ...(payload.toolCalls?.length ? { toolCalls: payload.toolCalls } : {}),
-      ...(payload.finishReason ? { finishReason: payload.finishReason } : {}),
-    };
+    return toCompletionResult("bynara", model, payload);
   },
 };

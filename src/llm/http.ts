@@ -3,6 +3,7 @@ import type {
   NativeToolCall,
   ReasoningPreference,
   ProviderId,
+  TokenUsage,
   ToolChoice,
   ToolDefinition,
 } from "../types.js";
@@ -17,6 +18,7 @@ import {
   openAiToolBodyFields,
   toOpenAiToolMessages,
 } from "./adapters/openai-tools.js";
+import { parseOpenAiUsage } from "./token-usage.js";
 
 export class ProviderError extends Error {
   constructor(
@@ -350,6 +352,23 @@ export interface OpenAiCompatibleResult {
   text: string;
   toolCalls?: NativeToolCall[] | undefined;
   finishReason?: string | undefined;
+  usage?: TokenUsage | undefined;
+}
+
+/** Map shared OpenAI-compatible payload → CompletionResult (includes usage). */
+export function toCompletionResult(
+  provider: ProviderId,
+  model: string,
+  payload: OpenAiCompatibleResult,
+): import("../types.js").CompletionResult {
+  return {
+    text: payload.text,
+    provider,
+    model,
+    ...(payload.toolCalls?.length ? { toolCalls: payload.toolCalls } : {}),
+    ...(payload.finishReason ? { finishReason: payload.finishReason } : {}),
+    ...(payload.usage ? { usage: payload.usage } : {}),
+  };
 }
 
 export function toOpenAiMessages(
@@ -579,6 +598,11 @@ function buildChatBody(options: {
   if (isMinimaxM3) {
     body.top_p = 0.95;
   }
+  // OpenAI + many OpenAI-compatible gateways attach usage on the final SSE
+  // chunk when this is set (non-stream responses always include usage).
+  if (options.stream) {
+    body.stream_options = { include_usage: true };
+  }
   return JSON.stringify(body);
 }
 
@@ -650,6 +674,7 @@ export async function openAiCompatibleComplete(options: {
         }>;
       };
     }>;
+    usage?: unknown;
   };
   try {
     data = await readJson(response);
@@ -680,6 +705,7 @@ export async function openAiCompatibleComplete(options: {
     reasoning && reasoning.trim()
       ? `<think>${reasoning}</think>${text}`
       : text;
+  const usage = parseOpenAiUsage(data.usage);
   return {
     text: full,
     ...(toolCalls.length ? { toolCalls } : {}),
@@ -688,6 +714,7 @@ export async function openAiCompatibleComplete(options: {
       : toolCalls.length
         ? { finishReason: "tool_calls" }
         : {}),
+    ...(usage ? { usage } : {}),
   };
 }
 
@@ -828,6 +855,7 @@ export async function openAiCompatibleStream(options: {
       id?: string;
       requestId?: string;
       status?: string;
+      usage?: unknown;
       choices?: Array<{
         finish_reason?: string;
         message?: {
@@ -859,6 +887,7 @@ export async function openAiCompatibleStream(options: {
       reasoning && reasoning.trim()
         ? `<think>${reasoning}</think>${text}`
         : text;
+    const jsonUsage = parseOpenAiUsage(data.usage);
     if (full.trim() || toolCalls.length > 0) {
       if (full.trim()) options.onToken(full);
       return {
@@ -869,6 +898,7 @@ export async function openAiCompatibleStream(options: {
           : toolCalls.length
             ? { finishReason: "tool_calls" }
             : {}),
+        ...(jsonUsage ? { usage: jsonUsage } : {}),
       };
     }
     throw new ProviderError(
@@ -886,6 +916,7 @@ export async function openAiCompatibleStream(options: {
   let reasoningSeen = "";
   let inReasoning = false;
   let finishReason: string | undefined;
+  let streamUsage: TokenUsage | undefined;
   const toolCallState = new Map<
     number,
     { id?: string; name?: string; arguments: string }
@@ -958,10 +989,12 @@ export async function openAiCompatibleStream(options: {
               : toolCalls.length
                 ? { finishReason: "tool_calls" }
                 : {}),
+            ...(streamUsage ? { usage: streamUsage } : {}),
           };
         }
         try {
           const parsed = JSON.parse(payload) as {
+            usage?: unknown;
             choices?: Array<{
               finish_reason?: string;
               delta?: {
@@ -978,10 +1011,13 @@ export async function openAiCompatibleStream(options: {
               };
             }>;
           };
+          const chunkUsage = parseOpenAiUsage(parsed.usage);
+          if (chunkUsage) streamUsage = chunkUsage;
           const choice = parsed.choices?.[0];
           // Reset only for an actual completion event. Blank SSE heartbeats
           // and comments otherwise keep a frozen request alive forever.
-          if (choice?.delta || choice?.finish_reason) {
+          // Usage-only final chunks (stream_options.include_usage) also count.
+          if (choice?.delta || choice?.finish_reason || chunkUsage) {
             sawStreamProgress = true;
             resetIdleTimer();
           }
@@ -1054,6 +1090,7 @@ export async function openAiCompatibleStream(options: {
         : toolCalls.length
           ? { finishReason: "tool_calls" }
           : {}),
+      ...(streamUsage ? { usage: streamUsage } : {}),
     };
   } catch (error) {
     cleanup();

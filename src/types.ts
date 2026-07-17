@@ -122,6 +122,15 @@ export interface CompletionRequest {
   onToolCallDelta?: ((delta: ToolCallStreamDelta) => void) | undefined;
 }
 
+/** Provider-reported or estimated token counts for one completion. */
+export interface TokenUsage {
+  readonly promptTokens: number;
+  readonly completionTokens: number;
+  readonly totalTokens: number;
+  /** true when values came from the provider API. */
+  readonly exact: boolean;
+}
+
 export interface CompletionResult {
   text: string;
   provider: ProviderId;
@@ -130,6 +139,8 @@ export interface CompletionResult {
   finishReason?: "stop" | "tool_calls" | "length" | "error" | string | undefined;
   /** Optional raw assistant payload for perfect replay (e.g. Anthropic blocks). */
   rawAssistantMessage?: unknown | undefined;
+  /** Exact usage when the provider reported it; omit when unknown. */
+  usage?: TokenUsage | undefined;
 }
 
 export interface ProviderStatus {

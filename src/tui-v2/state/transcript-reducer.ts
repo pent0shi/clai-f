@@ -406,6 +406,8 @@ export function applyAppEvent(state: TranscriptState, event: AnyAppEvent): Trans
 
     case "plan-updated":
     case "confirm-requested":
+    case "token-usage":
+      // SessionController records usage; transcript does not need a card.
       return withSeq;
 
     default: {

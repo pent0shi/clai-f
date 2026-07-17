@@ -1,9 +1,16 @@
-import type { ChatMessage, Mode, ProviderId } from "../../types.js";
+import type { ChatMessage, Mode, ProviderId, TokenUsage } from "../../types.js";
 import {
   compactMessagesWithSummary,
   estimateMessagesTokens,
   type CompactResult,
 } from "../../agent/context-manager.js";
+import {
+  applyUsageToSnapshot,
+  formatContextChip,
+  modelContextWindow,
+  snapshotFromEstimate,
+  type ContextUsageSnapshot,
+} from "../../llm/token-usage.js";
 import { createSessionPolicy, type SessionPolicy } from "../../agent/session-policy.js";
 import { resolveTurnInput } from "../../attachments/service.js";
 import { generateSessionTitle } from "../../agent/session-title.js";
@@ -42,6 +49,13 @@ export interface SessionState {
   readonly queued: readonly string[];
   /** AI-generated (or last known) display name for this session. */
   readonly title: string | undefined;
+  /**
+   * Live context / token usage for the status strip under the composer.
+   * `exact` is true when the last prompt size came from the provider API.
+   */
+  readonly contextUsage: ContextUsageSnapshot | undefined;
+  /** Preformatted chip, e.g. `ctx 12,450/128k` or `~ctx 12k/128k`. */
+  readonly contextChip: string | undefined;
 }
 
 export type NoticeLevel = "info" | "warn";
@@ -112,6 +126,8 @@ export class SessionController implements Disposable {
   private lastAutosaveAt = 0;
   private autosaveInFlight = false;
   private static readonly AUTOSAVE_MIN_MS = 15_000;
+  /** Last known context / session token totals for the status strip. */
+  private contextUsage: ContextUsageSnapshot | undefined;
 
   constructor(private readonly deps: SessionControllerDeps) {
     this.sessionIdValue = asSessionId(deps.sessionId ?? mintSessionId());
@@ -140,6 +156,7 @@ export class SessionController implements Disposable {
   }
 
   getState(): SessionState {
+    const contextUsage = this.resolveContextUsage();
     return {
       sessionId: this.sessionIdValue,
       mode: this.mode,
@@ -150,7 +167,47 @@ export class SessionController implements Disposable {
       historyLength: this.history.length,
       queued: [...this.queue],
       title: this.sessionTitle,
+      contextUsage,
+      contextChip: contextUsage
+        ? formatContextChip(contextUsage, { compact: false })
+        : undefined,
     };
+  }
+
+  /**
+   * Prefer last API prompt_tokens as context fill (exact); otherwise estimate
+   * from current history so the footer always has a number.
+   */
+  private resolveContextUsage(): ContextUsageSnapshot | undefined {
+    const limit = modelContextWindow(this.model, this.provider);
+    if (this.contextUsage?.exact && this.contextUsage.contextTokens > 0) {
+      return { ...this.contextUsage, contextLimit: limit };
+    }
+    if (this.history.length === 0 && !this.contextUsage) return undefined;
+    return snapshotFromEstimate(
+      this.history,
+      this.model,
+      this.provider,
+      this.contextUsage,
+    );
+  }
+
+  /** Record provider-reported usage (from agent token-usage events). */
+  recordTokenUsage(usage: TokenUsage, model?: string): void {
+    const limit = modelContextWindow(model ?? this.model, this.provider);
+    this.contextUsage = applyUsageToSnapshot(this.contextUsage, usage, limit);
+    if (model) this.model = model;
+    this.notifyState();
+  }
+
+  /** After history loads, estimate fill until the next API usage report. */
+  private refreshEstimatedContext(): void {
+    this.contextUsage = snapshotFromEstimate(
+      this.history,
+      this.model,
+      this.provider,
+      undefined,
+    );
   }
 
   get messages(): readonly ChatMessage[] {
@@ -199,6 +256,9 @@ export class SessionController implements Disposable {
     this.sessionTitle = options.title;
     this.titledAtUserCount = messages.filter((m) => m.role === "user").length;
     this.titleInFlight = false;
+    // Resumed history has no API usage yet — estimate fill until next call.
+    this.contextUsage = undefined;
+    this.refreshEstimatedContext();
     if (options.sessionId) {
       this.sessionIdValue = asSessionId(options.sessionId);
       this.sequencer.rebind(this.sessionIdValue);
@@ -236,6 +296,7 @@ export class SessionController implements Disposable {
     this.sessionTitle = undefined;
     this.titledAtUserCount = 0;
     this.titleInFlight = false;
+    this.contextUsage = undefined;
     this.spool.clear();
     if (options.mintNewId) {
       this.sessionIdValue = asSessionId(mintSessionId());
@@ -391,9 +452,10 @@ export class SessionController implements Disposable {
   }
 
   estimateContext(): { messages: number; tokens: number } {
+    const snap = this.resolveContextUsage();
     return {
       messages: this.history.length,
-      tokens: estimateMessagesTokens(this.history),
+      tokens: snap?.contextTokens ?? estimateMessagesTokens(this.history),
     };
   }
 

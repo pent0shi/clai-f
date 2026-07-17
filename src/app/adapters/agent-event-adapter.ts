@@ -53,6 +53,15 @@ export class AgentEventAdapter {
         });
         return;
       }
+      case "token-usage":
+        this.push("token-usage", {
+          promptTokens: event.usage.promptTokens,
+          completionTokens: event.usage.completionTokens,
+          totalTokens: event.usage.totalTokens,
+          exact: event.usage.exact,
+          ...(event.model !== undefined ? { model: event.model } : {}),
+        });
+        return;
       case "thinking-delta":
         this.push("thinking-delta", { text: event.text });
         return;

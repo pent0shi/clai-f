@@ -8,6 +8,7 @@ import {
   openAiCompatibleComplete,
   openAiCompatiblePing,
   openAiCompatibleStream,
+  toCompletionResult,
   readJson,
 } from "./http.js";
 
@@ -113,13 +114,7 @@ export const nvidiaProvider: LlmProvider = {
       toolChoice: request.toolChoice,
       parallelToolCalls: request.parallelToolCalls,
     });
-    return {
-      text: payload.text,
-      provider: "nvidia",
-      model,
-      ...(payload.toolCalls?.length ? { toolCalls: payload.toolCalls } : {}),
-      ...(payload.finishReason ? { finishReason: payload.finishReason } : {}),
-    };
+    return toCompletionResult("nvidia", model, payload);
   },
   async stream(
     request: CompletionRequest,
@@ -148,12 +143,6 @@ export const nvidiaProvider: LlmProvider = {
       toolChoice: request.toolChoice,
       parallelToolCalls: request.parallelToolCalls,
     });
-    return {
-      text: payload.text,
-      provider: "nvidia",
-      model,
-      ...(payload.toolCalls?.length ? { toolCalls: payload.toolCalls } : {}),
-      ...(payload.finishReason ? { finishReason: payload.finishReason } : {}),
-    };
+    return toCompletionResult("nvidia", model, payload);
   },
 };
