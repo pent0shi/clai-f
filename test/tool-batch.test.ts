@@ -99,16 +99,44 @@ describe("phase 12 — tool.batch", () => {
   });
 
   it("allows net.scan / pentest.recon in batch (read-only recon)", async () => {
-    // Empty/invalid targets fail at the tool, not at the batch gate.
+    // Gate only — never run a real nmap/WHOIS/DNS scan here. Full recon on
+    // 127.0.0.1 exceeds the 5s vitest default on Windows/linux-arm CI.
     for (const name of ["net.scan", "pentest.recon"] as const) {
       expect(BATCH_SAFE_TOOLS.has(name)).toBe(true);
-      await expect(
-        runToolCall({
-          name: "tool.batch",
-          args: { calls: [{ name, args: { target: "127.0.0.1" } }] },
-        }),
-      ).resolves.toMatchObject({ ok: expect.any(Boolean) });
     }
+    // Batch classifier must not refuse these as nested/confirm-only tools.
+    const decision = classifyToolCall({
+      name: "tool.batch",
+      args: {
+        calls: [
+          { name: "net.scan", args: { target: "127.0.0.1" } },
+          { name: "pentest.recon", args: { target: "127.0.0.1" } },
+        ],
+      },
+    });
+    expect(decision.level).toBe("safe");
+
+    // Exercise the batch runner with a no-op recon (all steps off → fast fail
+    // at the tool, not a hang). Confirms the batch path invokes the handler.
+    const result = await runToolCall({
+      name: "tool.batch",
+      args: {
+        calls: [
+          {
+            name: "pentest.recon",
+            args: {
+              target: "127.0.0.1",
+              whois: false,
+              dns: false,
+              nmap: false,
+            },
+          },
+        ],
+      },
+    });
+    expect(result).toMatchObject({ ok: expect.any(Boolean) });
+    expect(result.output).toMatch(/pentest\.recon/);
+    expect(result.output).toMatch(/no steps requested/i);
   });
 
   it("refuses nested tool.batch and plan tools", async () => {
