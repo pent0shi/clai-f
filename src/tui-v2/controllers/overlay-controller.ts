@@ -44,6 +44,12 @@ export interface SecretRequestView {
   readonly prompt: string;
 }
 
+/** Multi-row engagement scope editor (/scope). */
+export interface ScopeEditorRequest {
+  /** Existing authorized targets (pre-fill). */
+  readonly initialTargets: readonly string[];
+}
+
 export interface PromptActionsRequest {
   readonly prompt: string;
   readonly onResend: () => void;
@@ -63,6 +69,12 @@ export type OverlayState =
       readonly planResolve?: ((result: PlanConfirmResult) => void) | undefined;
     }
   | { readonly kind: "secret"; readonly request: SecretRequestView; readonly resolve: (value: string | undefined) => void }
+  | {
+      readonly kind: "scope-editor";
+      readonly request: ScopeEditorRequest;
+      /** undefined = cancel; [] = clear/disable; non-empty = save targets. */
+      readonly resolve: (targets: string[] | undefined) => void;
+    }
   | { readonly kind: "prompt-actions"; readonly request: PromptActionsRequest }
   | {
       readonly kind: "pager";
@@ -202,6 +214,29 @@ export class OverlayController {
       const opened = this.open({ kind: "secret", request, resolve }, "secret");
       if (!opened) resolve(undefined);
     });
+  }
+
+  /**
+   * Multi-input scope editor. Resolves:
+   * - `undefined` cancel / overlay busy
+   * - `[]` clear (scoping disabled)
+   * - non-empty string[] save those targets
+   */
+  openScopeEditor(request: ScopeEditorRequest): Promise<string[] | undefined> {
+    return new Promise((resolve) => {
+      const opened = this.open(
+        { kind: "scope-editor", request, resolve },
+        "modal",
+      );
+      if (!opened) resolve(undefined);
+    });
+  }
+
+  answerScope(targets: string[] | undefined): void {
+    if (this.state.kind !== "scope-editor") return;
+    const { resolve } = this.state;
+    this.forceClose();
+    resolve(targets);
   }
 
   answerConfirm(ok: boolean): void {

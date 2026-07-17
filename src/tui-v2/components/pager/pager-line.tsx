@@ -118,7 +118,13 @@ export function PagerLine(props: {
     const body = line.length > 0 ? line : " ";
     if (!hasQuery && styled) {
       return (
-        <text id={`pager-line-${index}`} content={styled} selectable />
+        // Pre-wrapped by renderMarkdown — no second wrap (would clip styles).
+        <text
+          id={`pager-line-${index}`}
+          content={styled}
+          selectable
+          wrapMode="none"
+        />
       );
     }
     const isMatchLine =
@@ -130,6 +136,7 @@ export function PagerLine(props: {
         id={`pager-line-${index}`}
         content={body}
         selectable
+        wrapMode="none"
         style={{
           fg: isActiveLine ? theme.background : theme.foreground,
           ...(isActiveLine

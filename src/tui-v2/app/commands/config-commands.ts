@@ -67,22 +67,22 @@ export async function handleScope(
   services: AppServices,
   invocation: CommandInvocation,
 ): Promise<void> {
-  const [sub = "show", ...parts] = invocation.args.split(/\s+/).filter(Boolean);
+  const trimmed = invocation.args.trim();
+  const [sub = "", ...parts] = trimmed.split(/\s+/).filter(Boolean);
+
+  // Bare `/scope` or `/scope edit` → multi-input modal.
+  const openEditor =
+    !sub ||
+    sub === "edit" ||
+    sub === "ui" ||
+    (sub === "show" && parts.length === 0) ||
+    (sub === "list" && parts.length === 0) ||
+    (sub === "ls" && parts.length === 0);
+
   try {
     if (["clear", "reset", "off"].includes(sub)) {
       await clearScope();
-      notice(services, "info", "engagement scope cleared");
-      return;
-    }
-    if (sub === "show" || sub === "list" || sub === "ls") {
-      const scope = await loadScope();
-      notice(
-        services,
-        "info",
-        scope
-          ? `scope: ${scope.name ?? "unnamed"} · ${scope.authorizedTargets.join(", ")}`
-          : "no engagement scope configured",
-      );
+      notice(services, "info", "engagement scope cleared · scoping disabled");
       return;
     }
     if (sub === "add") {
@@ -108,7 +108,41 @@ export async function handleScope(
       notice(services, "info", `scope created · ${targets.join(", ")}`);
       return;
     }
-    notice(services, "warn", "usage: /scope [show|clear|new <targets>|add <targets>]");
+
+    if (openEditor) {
+      const current = await loadScope();
+      const initial = current?.authorizedTargets ?? [];
+      const result = await services.overlay.openScopeEditor({
+        initialTargets: initial,
+      });
+      if (result === undefined) {
+        // Cancelled or another overlay was open.
+        return;
+      }
+      if (result.length === 0) {
+        await clearScope();
+        notice(services, "info", "engagement scope cleared · scoping disabled");
+        return;
+      }
+      // Replace list: clear then add (normalizes hostnames / URLs).
+      await clearScope();
+      const scope = await addScopeTargets(result, {
+        name: current?.name,
+        createdAt: current?.createdAt,
+      });
+      notice(
+        services,
+        "info",
+        `scope saved · ${scope.authorizedTargets.join(", ")}`,
+      );
+      return;
+    }
+
+    notice(
+      services,
+      "warn",
+      "usage: /scope  ·  /scope add <targets>  ·  /scope new <targets>  ·  /scope clear",
+    );
   } catch (error) {
     notice(services, "warn", error instanceof Error ? error.message : String(error));
   }

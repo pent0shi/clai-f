@@ -2,12 +2,32 @@ import { describe, expect, it } from "vitest";
 import {
   looksLikeMarkdown,
   preparePagerDisplay,
+  stripPagerLineGutters,
 } from "../../../src/tui-v2/rendering/pager-markdown.js";
 import { formatShortcutsReference } from "../../../src/tui-v2/actions/format-shortcuts.js";
 import { formatCommandHelpMarkdown } from "../../../src/tui-v2/rendering/format-help.js";
 import { renderMarkdown } from "../../../src/ui/markdown.js";
 import { stripAnsiSequences } from "../../../src/tui-v2/rendering/sanitize-display.js";
 import { findPagerMatches } from "../../../src/tui-v2/state/pager-search.js";
+
+describe("stripPagerLineGutters", () => {
+  it("removes file-modal line numbers so markdown can render", () => {
+    const raw = [
+      "  1 │ # Title",
+      "  2 │ ",
+      "  3 │ **bold** text",
+      " 12 │ | a | b |",
+    ].join("\n");
+    expect(stripPagerLineGutters(raw)).toBe(
+      ["# Title", "", "**bold** text", "| a | b |"].join("\n"),
+    );
+  });
+
+  it("leaves non-guttered bodies alone", () => {
+    const body = "# Compacted\n\n- item one\n";
+    expect(stripPagerLineGutters(body)).toBe(body);
+  });
+});
 
 describe("looksLikeMarkdown", () => {
   it("accepts structured docs", () => {

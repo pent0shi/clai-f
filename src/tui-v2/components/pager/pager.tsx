@@ -32,6 +32,7 @@ import {
 } from "../../rendering/syntax-highlight.js";
 import {
   preparePagerDisplay,
+  stripPagerLineGutters,
   type PagerMarkdownMode,
 } from "../../rendering/pager-markdown.js";
 import {
@@ -103,14 +104,22 @@ export function Pager(props: PagerProps): ReactNode {
   // Meta/footer rows (with their padding) — exact column budget for padChromeRow.
   const chromeCols = Math.max(20, contentCols - 4);
 
-  // f → force markdown render; r → plain raw text (incl. .md / tool dumps).
+  // f → strip line-number gutters + force markdown.
+  // r → always the original body (never the post-markdown plain extract).
   const display = useMemo(() => {
-    const mode: PagerMarkdownMode =
-      viewMode === "formatted" ? "force" : "plain";
+    if (viewMode === "formatted") {
+      const clean = stripPagerLineGutters(displayBody);
+      return preparePagerDisplay({
+        body: clean,
+        width: contentCols,
+        mode: "force",
+        defaultFg: theme.foreground,
+      });
+    }
     return preparePagerDisplay({
       body: displayBody,
       width: contentCols,
-      mode,
+      mode: "plain",
       defaultFg: theme.foreground,
     });
   }, [displayBody, contentCols, viewMode, theme.foreground]);
@@ -119,18 +128,21 @@ export function Pager(props: PagerProps): ReactNode {
     () => display.lines.map((l) => l.plain),
     [display.lines],
   );
-  const pathForHighlight = highlightPath ?? title;
+  // Syntax gutters only for raw file/diff viewers — never for markdown format.
+  const pathForHighlight =
+    viewMode === "raw" && highlightPath ? highlightPath : title;
+  const useDiffGutters =
+    viewMode === "raw" && Boolean(highlightPath) && display.mode === "plain";
   // Search haystack:
-  // - markdown: full plain lines (never strip "│" as a diff gutter — that
-  //   blanked help/shortcuts and broke match offsets)
-  // - file-diff dumps: code-only so gutters are not matched
+  // - markdown: full plain lines (never strip "│" as a diff gutter)
+  // - raw file-diff: code only so gutters are not matched
   const searchLines = useMemo(() => {
-    if (display.mode === "markdown") return lines;
+    if (display.mode === "markdown" || !useDiffGutters) return lines;
     return lines.map((line) => {
       const p = parseDiffLine(line);
       return p ? p.code : line;
     });
-  }, [lines, display.mode]);
+  }, [lines, display.mode, useDiffGutters]);
   const [searchOpen, setSearchOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [matchIndex, setMatchIndex] = useState(-1);
@@ -654,12 +666,12 @@ export function Pager(props: PagerProps): ReactNode {
           marginBottom: 0,
           paddingLeft: 1,
           paddingRight: 1,
-          // File-diff modals stay dense; generic tool output keeps a little air.
-          paddingTop: highlightPath ? 0 : 1,
+          // File-diff modals stay dense; format / plain keep a little air.
+          paddingTop: useDiffGutters ? 0 : 1,
         }}
         onMouseScroll={() => refreshScrollHint()}
       >
-        {!highlightPath ? (
+        {!useDiffGutters ? (
           <text content=" " style={{ height: 1 }} />
         ) : null}
         {lines.flatMap((line, index) => {
@@ -671,14 +683,14 @@ export function Pager(props: PagerProps): ReactNode {
           if (isMd) {
             return [
               <PagerLine
-                key={`${index}-0`}
+                key={`md-${index}-0`}
                 line={line}
                 index={index}
                 theme={theme}
                 matches={matches}
                 activeMatchIndex={matchIndex}
                 hasQuery={hasQuery}
-                highlightPath={pathForHighlight}
+                highlightPath=""
                 carry={syntaxCarry}
                 styled={row?.styled}
                 markdownMode
@@ -686,8 +698,9 @@ export function Pager(props: PagerProps): ReactNode {
             ];
           }
 
-          // Don't wrap gutters into mid-line chunks — wrap code only when diff.
-          const parsed = parseDiffLine(line);
+          // Diff gutters only in raw file-viewer mode — never eat compacted
+          // / help text that happens to contain " │ ".
+          const parsed = useDiffGutters ? parseDiffLine(line) : null;
           if (parsed) {
             // Soft-wrap code only; keep internal mark so parseDiffLine still
             // knows add/del tone. PagerLine does not paint +/-.
@@ -739,7 +752,7 @@ export function Pager(props: PagerProps): ReactNode {
             />
           ));
         })}
-        {!highlightPath ? (
+        {!useDiffGutters ? (
           <text content=" " style={{ height: 1 }} />
         ) : null}
       </scrollbox>

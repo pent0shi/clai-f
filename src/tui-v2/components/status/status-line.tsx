@@ -376,7 +376,7 @@ export function StatusLine(props: StatusLineProps): ReactNode {
       density === "xs"
         ? undefined
         : state.compacting
-          ? `compact · ${elapsed}s`
+          ? `compacting · ${elapsed}s`
           : formatActivity(activity, elapsed, activityMax);
 
     return (
@@ -431,16 +431,6 @@ export function StatusLine(props: StatusLineProps): ReactNode {
                 onClick={() => {
                   if (session.getState().running) session.abort();
                 }}
-              />
-            </>
-          ) : null}
-          {state.compacting && density !== "xs" ? (
-            <>
-              <text selectable={false} content=" " />
-              <text
-                selectable={false}
-                content="COMPACT"
-                style={{ fg: theme.mode, flexShrink: 0 }}
               />
             </>
           ) : null}

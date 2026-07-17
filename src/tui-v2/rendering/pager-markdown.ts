@@ -34,6 +34,27 @@ export interface PreparePagerDisplayOptions {
 }
 
 /**
+ * Strip file-diff / modal line gutters (`  12 │ ` / `     │ ± `) so format
+ * mode can render real markdown instead of gutter-polluted source.
+ * Leaves non-guttered lines unchanged (help, compact cards, tool dumps).
+ */
+export function stripPagerLineGutters(body: string): string {
+  if (!body) return body;
+  return body
+    .split("\n")
+    .map((line) => {
+      // formatModalPlainText: `<lineno> │ [+/-/ ]body`
+      const withMark = /^(?:[\d ]{0,8}) │ ([+\-−] )?(.*)$/.exec(line);
+      if (withMark) {
+        // Diff marks stay only in raw view; format wants pure file text.
+        return withMark[2] ?? "";
+      }
+      return line;
+    })
+    .join("\n");
+}
+
+/**
  * Conservative detector: only claim "markdown" when structure is clear.
  * Avoids mangling paths_with_underscores and shell output with * globs.
  */

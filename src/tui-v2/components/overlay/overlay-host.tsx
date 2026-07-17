@@ -18,6 +18,7 @@ import { Picker } from "../picker/picker.js";
 import { ConfirmModal } from "../modal/confirm-modal.js";
 import { PromptActionsModal } from "../modal/prompt-actions-modal.js";
 import { SecretModal } from "../modal/secret-modal.js";
+import { ScopeModal } from "../modal/scope-modal.js";
 import { Pager } from "../pager/pager.js";
 import { JobsPanel } from "../jobs/jobs-panel.js";
 
@@ -34,7 +35,7 @@ export interface OverlayHostProps {
 }
 
 function isDockedKind(kind: string): boolean {
-  return kind === "confirm" || kind === "secret";
+  return kind === "confirm" || kind === "secret" || kind === "scope-editor";
 }
 
 export function OverlayHost(props: OverlayHostProps): ReactNode {
@@ -66,6 +67,14 @@ export function OverlayHost(props: OverlayHostProps): ReactNode {
         ) : null}
         {state.kind === "secret" ? (
           <SecretModal
+            services={services}
+            theme={theme}
+            request={state.request}
+            docked
+          />
+        ) : null}
+        {state.kind === "scope-editor" ? (
+          <ScopeModal
             services={services}
             theme={theme}
             request={state.request}

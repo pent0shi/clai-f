@@ -25,11 +25,15 @@ function notice(services: AppServices, level: "info" | "warn", text: string): vo
 function flash(
   services: AppServices,
   text: string,
-  opts: { key?: string; level?: "info" | "success" | "warn" } = {},
+  opts: {
+    key?: string;
+    level?: "info" | "success" | "warn";
+    durationMs?: number;
+  } = {},
 ): void {
   notify(services, text, {
     level: opts.level ?? "info",
-    durationMs: 1600,
+    durationMs: opts.durationMs ?? 1600,
     ...(opts.key ? { key: opts.key } : {}),
   });
 }
@@ -122,7 +126,7 @@ export async function handleCompact(services: AppServices): Promise<void> {
     return;
   }
 
-  notice(services, "info", "compacting conversation…");
+  // Status line already shows "compacting · Ns" — no transcript notice spam.
   try {
     // Classic-style structured transcript (prompts, tools+outputs, answers,
     // prior compacted memory from the last card onward). Combined with model
@@ -140,13 +144,11 @@ export async function handleCompact(services: AppServices): Promise<void> {
     const freed = Math.max(0, result.beforeTokens - result.afterTokens);
     const pct =
       result.beforeTokens > 0 ? Math.round((freed / result.beforeTokens) * 100) : 0;
-    // The `compacted` AppEvent already appends the ✦ Compacted context card.
-    notice(
+    // Compacted card is already in the transcript; short toast only (no notice row).
+    flash(
       services,
-      "info",
-      `context compacted — earlier turns summarized into a memory · ` +
-        `freed ~${freed.toLocaleString()} tokens (${pct}% smaller, ` +
-        `~${result.beforeTokens.toLocaleString()} → ~${result.afterTokens.toLocaleString()} est.)`,
+      `compacted · −${pct}% · ~${result.beforeTokens.toLocaleString()}→~${result.afterTokens.toLocaleString()} (−${freed.toLocaleString()} tok)`,
+      { key: "compact", durationMs: 2200 },
     );
   } catch (error) {
     if (error instanceof Error && error.name === "AbortError") {
