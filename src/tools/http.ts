@@ -29,12 +29,25 @@ const ALLOWED_METHODS = new Set([
  */
 export { isBlockedAddress };
 
+/** Cap DNS so policy checks never hang CI / slow resolvers on fake hosts. */
+const DNS_LOOKUP_TIMEOUT_MS = 1500;
+
 async function resolveHosts(host: string): Promise<string[]> {
   if (net.isIP(host)) return [host];
   try {
-    const results = await lookup(host, { all: true });
+    const results = await Promise.race([
+      lookup(host, { all: true }),
+      new Promise<never>((_, reject) => {
+        setTimeout(
+          () => reject(new Error("DNS lookup timed out")),
+          DNS_LOOKUP_TIMEOUT_MS,
+        );
+      }),
+    ]);
     return Array.from(new Set(results.map((result) => result.address)));
   } catch {
+    // NXDOMAIN, timeout, or resolver failure — treat as unresolved (not blocked
+    // by IP class alone; authorizeHop still sees the empty list).
     return [];
   }
 }
