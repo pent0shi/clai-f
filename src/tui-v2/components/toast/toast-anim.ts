@@ -12,9 +12,8 @@ import { easeInCubic, easeOutCubic } from "../../motion/ease.js";
 export { easeInCubic, easeOutCubic } from "../../motion/ease.js";
 
 /**
- * Outer box height (includes border rows) — keep in sync with host.
- * 3 = top border + one content row + bottom border.
- * Surface lives on the INNER well only so grey never paints under border cells.
+ * Toast chip height — keep in sync with host.
+ * 3 rows: padding + bold label row + padding (roomier “larger text” feel).
  */
 export const TOAST_BOX_HEIGHT = 3;
 

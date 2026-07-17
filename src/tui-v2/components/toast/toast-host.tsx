@@ -2,8 +2,8 @@
 /**
  * Notification toasts — top-center, slide in / hold / slide out.
  *
- * Heavy aqua frame + yellowish prompt-boundary text. Motion is discrete row
- * steps (terminal); ease curves + 30fps tick keep it feeling smooth.
+ * Solid message-chip style (no border): intro "AGENT MODE" plate (`theme.mode`)
+ * with white bold text. Roomier height + full message (no visual truncation).
  */
 
 import { useEffect, useState, type ReactNode } from "react";
@@ -27,25 +27,14 @@ export interface ToastHostProps {
   readonly termHeight: number;
 }
 
-/** Soft elevated surface — slight whitish shade on near-black. */
-const TOAST_SURFACE_DARK = "#1c2028";
-const TOAST_SURFACE_LIGHT = "#f4f5f7";
-
 /** Vertical gap between stacked toasts at rest. */
 const TOAST_STACK_GAP = 1;
 
 /** Animation repaint interval (~30 fps). */
 const TICK_MS = 33;
 
-function toastSurface(theme: Theme): string {
-  const bg = theme.background.toLowerCase();
-  const isDark =
-    bg.startsWith("#0") ||
-    bg.startsWith("#1") ||
-    bg === "#0b0e14" ||
-    bg === "#11151c";
-  return isDark ? TOAST_SURFACE_DARK : TOAST_SURFACE_LIGHT;
-}
+/** Horizontal padding spaces each side of the label (larger readable chip). */
+const H_PAD = 3;
 
 function levelGlyph(level: ToastLevel): string {
   switch (level) {
@@ -60,6 +49,12 @@ function levelGlyph(level: ToastLevel): string {
   }
 }
 
+/** Full label with side padding — never clips the message body. */
+export function toastLabel(level: ToastLevel, message: string): string {
+  const pad = " ".repeat(H_PAD);
+  return `${pad}${levelGlyph(level)}  ${message}${pad}`;
+}
+
 function ToastPill(props: {
   item: ToastItem;
   theme: Theme;
@@ -70,22 +65,20 @@ function ToastPill(props: {
 }): ReactNode {
   const { item, theme, top, left, width, visibility } = props;
   if (visibility <= 0.02) return null;
-  const surface = toastSurface(theme);
-  const border = theme.inputBorder;
-  const textFg = theme.userBorder;
-  const label = `${levelGlyph(item.level)}  ${item.message}`;
-  // Approximate “fade” with DIM when sliding in/out — always keep BOLD.
-  const dim = visibility < 0.85;
 
-  // OpenTUI paints backgroundColor on EVERY cell of the box, including the
-  // border character cells. If surface is on the outer box, grey fills under
-  // the aqua glyphs and looks like a grey rect with an inset border.
-  // Outer = app background (invisible under border) + aqua frame.
-  // Inner = surface well; row + alignItems center vertically centers the label.
+  // Same plate as intro "AGENT MODE" badge; white bold label.
+  const plate = theme.mode;
+  const textFg = theme.white;
+  const label = toastLabel(item.level, item.message);
+  const dim = visibility < 0.85;
+  const attrs = dim
+    ? TextAttributes.BOLD | TextAttributes.DIM
+    : TextAttributes.BOLD;
+  // Vertical pad rows so the label sits centered in a taller chip.
+  const blank = " ".repeat(Math.max(1, width));
+
   return (
     <box
-      border
-      borderStyle="rounded"
       style={{
         position: "absolute",
         top,
@@ -93,8 +86,7 @@ function ToastPill(props: {
         width,
         height: TOAST_BOX_HEIGHT,
         zIndex: 1000,
-        borderColor: border,
-        backgroundColor: theme.background,
+        backgroundColor: plate,
         flexDirection: "column",
         justifyContent: "center",
         alignItems: "stretch",
@@ -104,33 +96,27 @@ function ToastPill(props: {
         paddingBottom: 0,
       }}
     >
-      <box
+      <text
+        selectable={false}
+        content={blank}
+        style={{ fg: plate, bg: plate, height: 1, width }}
+      />
+      <text
+        selectable={false}
+        content={label.padEnd(width).slice(0, width)}
         style={{
-          flexGrow: 1,
-          width: "100%",
-          minHeight: 1,
-          backgroundColor: surface,
-          flexDirection: "row",
-          // Vertical + horizontal center of the single label line.
-          alignItems: "center",
-          justifyContent: "center",
-          paddingLeft: 2,
-          paddingRight: 2,
+          fg: textFg,
+          bg: plate,
+          height: 1,
+          width,
+          attributes: attrs,
         }}
-      >
-        <text
-          selectable={false}
-          content={label}
-          style={{
-            fg: textFg,
-            bg: surface,
-            height: 1,
-            attributes: dim
-              ? TextAttributes.BOLD | TextAttributes.DIM
-              : TextAttributes.BOLD,
-          }}
-        />
-      </box>
+      />
+      <text
+        selectable={false}
+        content={blank}
+        style={{ fg: plate, bg: plate, height: 1, width }}
+      />
     </box>
   );
 }
@@ -140,7 +126,6 @@ export function ToastHost(props: ToastHostProps): ReactNode {
   const items = useToastState(toast);
   const [now, setNow] = useState(() => Date.now());
 
-  // Drive enter/hold/exit motion while any toast is alive.
   useEffect(() => {
     if (items.length === 0) return;
     const id = setInterval(() => setNow(Date.now()), TICK_MS);
@@ -150,9 +135,8 @@ export function ToastHost(props: ToastHostProps): ReactNode {
 
   if (items.length === 0) return null;
 
-  // Wide enough for full messages (up to controller cap); slightly compact.
-  const maxWidth = Math.min(64, Math.max(32, Math.floor(termWidth * 0.58)));
-  // Newest on top of stack (drawn first in reverse so later paint on top).
+  // Wide enough for full messages; leave small terminal margins only.
+  const maxWidth = Math.max(24, Math.min(termWidth - 4, termWidth));
   const ordered = [...items].reverse();
   const maxStack = Math.max(
     1,
@@ -163,20 +147,15 @@ export function ToastHost(props: ToastHostProps): ReactNode {
   return (
     <>
       {visible.map((item, index) => {
-        // +8 for glyph, spaces, and border/pad — prefer full message width.
-        const toastWidth = Math.min(
-          maxWidth,
-          Math.max(32, item.message.length + 8),
-        );
-        // Top-center horizontally.
+        const label = toastLabel(item.level, item.message);
+        // Size chip to the full label — do not shrink/truncate for maxWidth
+        // unless the terminal is narrower than the text (then use full width).
+        const toastWidth = Math.min(maxWidth, Math.max(label.length, 16));
         const left = Math.max(0, Math.floor((termWidth - toastWidth) / 2));
         const anim = toastAnimAt(now - item.createdAt, item.durationMs);
         if (anim.phase === "gone") return null;
-        // Stack older toasts below the primary (rest) slot.
-        const stackOffset =
-          index * (TOAST_BOX_HEIGHT + TOAST_STACK_GAP);
+        const stackOffset = index * (TOAST_BOX_HEIGHT + TOAST_STACK_GAP);
         const top = anim.top + stackOffset;
-        // Skip if fully above the viewport after stack offset.
         if (top + TOAST_BOX_HEIGHT < 0) return null;
         return (
           <ToastPill

@@ -41,8 +41,11 @@ export const TOAST_ENTER_MS = 200;
 export const TOAST_EXIT_MS = 200;
 
 const MAX_VISIBLE_TOASTS = 3;
-/** Soft cap only — avoid multi-KB spam; long status lines should still fit. */
-export const MAX_TOAST_MESSAGE_CHARS = 160;
+/**
+ * Safety cap only (pathological multi-KB dumps). Normal status lines are not
+ * truncated for display — host sizes the chip to the full message.
+ */
+export const MAX_TOAST_MESSAGE_CHARS = 400;
 const MAX_MESSAGE_CHARS = MAX_TOAST_MESSAGE_CHARS;
 
 export function toastTotalLifetimeMs(holdMs: number): number {
