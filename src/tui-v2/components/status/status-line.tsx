@@ -213,6 +213,7 @@ function ScrollRemainderBadges(props: {
 /**
  * Compact chip that expands on hover.
  * Idle: short chord (`^T`). Hover: full action (`show thinking`).
+ * `accent`: cyan emphasis for primary actions (Esc · cancel while running).
  */
 function ClickableHint(props: {
   /** Short label when not hovered (e.g. `^T`). */
@@ -222,21 +223,27 @@ function ClickableHint(props: {
   readonly active: boolean;
   readonly theme: Theme;
   readonly onClick?: (() => void) | undefined;
+  /** Cyan/bold when idle — used for cancel while agent is running. */
+  readonly accent?: boolean | undefined;
 }): ReactNode {
-  const { short, expand, active, theme, onClick } = props;
+  const { short, expand, active, theme, onClick, accent = false } = props;
   const [hovered, setHovered] = useState(false);
   const full = expand ?? short;
   // Hover always shows the expanded phrase (with padding so the chip reads).
-  const content = hovered ? ` ${full} ` : short;
+  const content = hovered ? ` ${full} ` : accent ? ` ${short} ` : short;
 
   const fg = hovered
     ? theme.white
-    : active
+    : active || accent
       ? theme.cyan
       : theme.muted;
-  const bg = hovered ? theme.selection : theme.background;
+  const bg = hovered
+    ? theme.selection
+    : accent
+      ? theme.chip
+      : theme.background;
   const attributes =
-    hovered || active ? TextAttributes.BOLD : TextAttributes.NONE;
+    hovered || active || accent ? TextAttributes.BOLD : TextAttributes.NONE;
 
   return (
     <box
@@ -359,14 +366,14 @@ export function StatusLine(props: StatusLineProps): ReactNode {
 
   // ── Running / compacting ──────────────────────────────────────────────
   if (busy) {
-    // xs: MODE · spinner · tok · ▲▼
-    // sm+: MODE · spinner · activity · tok · ^H · Esc · ▲▼
+    // Left:  MODE · spinner · activity·timer · Esc:cancel · ^H · queue
+    // Right: tokens · ▲▼  (never sandwich Esc between tokens and scroll)
     const activityMax =
       density === "xs"
         ? 0
         : density === "sm"
-          ? Math.max(8, width - 36)
-          : Math.max(12, width - 48);
+          ? Math.max(8, width - 40)
+          : Math.max(12, width - 52);
     const activityText =
       density === "xs"
         ? undefined
@@ -409,17 +416,55 @@ export function StatusLine(props: StatusLineProps): ReactNode {
               style={{ fg: theme.activity, flexShrink: 1 }}
             />
           ) : null}
-          {ctxChip ? (
+          {/* Esc:cancel sits after the timer — clickable abort, never in the right rail */}
+          {density !== "xs" && !state.compacting ? (
             <>
               <text
                 selectable={false}
-                content={density === "xs" ? " " : " · "}
-                style={{ fg: theme.muted, flexShrink: 0 }}
+                content=" "
+                style={{ flexShrink: 0 }}
               />
-              <ContextChip
-                chip={ctxChip}
+              <ClickableHint
+                short={density === "sm" ? "Esc" : "Esc · cancel"}
+                expand="cancel turn"
+                active={false}
                 theme={theme}
-                exact={state.contextUsage?.exact === true}
+                accent
+                onClick={() => {
+                  if (session.getState().running) session.abort();
+                }}
+              />
+            </>
+          ) : null}
+          {state.compacting && density !== "xs" ? (
+            <>
+              <text selectable={false} content=" " />
+              <text
+                selectable={false}
+                content="COMPACT"
+                style={{ fg: theme.mode, flexShrink: 0 }}
+              />
+            </>
+          ) : null}
+          {showTasks ? (
+            <>
+              <text selectable={false} content=" " />
+              <ClickableHint
+                short={tasksToggleLabel(planVisible, density)}
+                expand={planVisible ? "hide tasks" : "show tasks"}
+                active={planVisible}
+                theme={theme}
+                onClick={onTogglePlan}
+              />
+            </>
+          ) : null}
+          {queued > 0 && density !== "xs" ? (
+            <>
+              <text selectable={false} content=" " />
+              <text
+                selectable={false}
+                content={`${queued}q`}
+                style={{ fg: theme.mode, flexShrink: 0 }}
               />
             </>
           ) : null}
@@ -429,41 +474,17 @@ export function StatusLine(props: StatusLineProps): ReactNode {
             flexDirection: "row",
             alignItems: "center",
             flexShrink: 0,
+            justifyContent: "flex-end",
           }}
         >
-          {showTasks ? (
+          {ctxChip ? (
             <>
-              <ClickableHint
-                short={tasksToggleLabel(planVisible, density)}
-                expand={planVisible ? "hide tasks" : "show tasks"}
-                active={planVisible}
+              <ContextChip
+                chip={ctxChip}
                 theme={theme}
-                onClick={onTogglePlan}
+                exact={state.contextUsage?.exact === true}
               />
-              <text selectable={false} content=" " />
             </>
-          ) : null}
-          {queued > 0 && density !== "xs" ? (
-            <text
-              selectable={false}
-              content={`${queued}q `}
-              style={{ fg: theme.mode }}
-            />
-          ) : null}
-          {density !== "xs" ? (
-            state.compacting ? (
-              <text
-                selectable={false}
-                content="COMPACT"
-                style={{ fg: theme.mode }}
-              />
-            ) : (
-              <text
-                selectable={false}
-                content={density === "sm" ? "Esc" : "Esc:cancel"}
-                style={{ fg: theme.muted }}
-              />
-            )
           ) : null}
           <ScrollRemainderBadges
             theme={theme}

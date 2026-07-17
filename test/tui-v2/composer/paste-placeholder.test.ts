@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   PasteRegistry,
   isLargePaste,
+  pasteChipLabel,
+  pastePreviewLines,
 } from "../../../src/tui-v2/composer/paste-placeholder.js";
 
 describe("isLargePaste", () => {
@@ -24,13 +26,26 @@ describe("isLargePaste", () => {
   });
 });
 
+describe("pasteChipLabel / pastePreviewLines", () => {
+  it("labels multi-line pastes for the blue chip", () => {
+    expect(pasteChipLabel(10, 100)).toBe("10 lines pasted");
+    expect(pasteChipLabel(1, 50)).toBe("50 chars pasted");
+  });
+
+  it("previews the first two lines for hover", () => {
+    const preview = pastePreviewLines("alpha\nbeta\ngamma\ndelta", 2);
+    expect(preview).toEqual(["alpha", "beta"]);
+  });
+});
+
 describe("PasteRegistry", () => {
   it("registers a placeholder with line/char stats", () => {
     const registry = new PasteRegistry();
     const entry = registry.register("a\nb\nc");
     expect(entry.lines).toBe(3);
     expect(entry.chars).toBe(5);
-    expect(entry.token).toContain("+3 lines");
+    expect(entry.label).toBe("3 lines pasted");
+    expect(entry.token).toContain("3 lines pasted");
   });
 
   it("assigns increasing ids across registrations", () => {
@@ -52,6 +67,24 @@ describe("PasteRegistry", () => {
     const buffer = `before ${entry.token} after`;
     expect(registry.expand(buffer)).toBe(
       "before the real pasted content after",
+    );
+  });
+
+  it("expands a single paste on double-click", () => {
+    const registry = new PasteRegistry();
+    const a = registry.register("AAA");
+    const b = registry.register("BBB");
+    const buffer = `${a.token} mid ${b.token}`;
+    expect(registry.expandOne(buffer, a.id)).toBe(`AAA mid ${b.token}`);
+  });
+
+  it("lists only pastes still present in the buffer", () => {
+    const registry = new PasteRegistry();
+    const a = registry.register("AAA");
+    const b = registry.register("BBB");
+    expect(registry.activeIn(a.token).map((e) => e.id)).toEqual([a.id]);
+    expect(registry.activeIn(`${a.token} ${b.token}`).map((e) => e.id)).toEqual(
+      [a.id, b.id],
     );
   });
 

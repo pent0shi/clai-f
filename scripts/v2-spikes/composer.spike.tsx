@@ -154,7 +154,11 @@ export async function runComposerSpike(): Promise<SpikeResult> {
     await keys.pasteBracketedText(bigPaste);
     await setup.flush();
     const pastedFrame = setup.captureCharFrame();
-    check(result, "large paste collapses to a placeholder", pastedFrame.includes("Pasted text"));
+    check(
+      result,
+      "large paste collapses to a placeholder",
+      pastedFrame.includes("lines pasted") || pastedFrame.includes("Pasted text"),
+    );
     check(result, "large paste does not inline all 20 lines", !pastedFrame.includes("pasted line 19"));
 
     keys.pressKey("u", { ctrl: true });

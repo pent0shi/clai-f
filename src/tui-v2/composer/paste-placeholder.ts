@@ -6,6 +6,9 @@
  * registry and swapped back in at submit time. Because the placeholder is
  * inserted with one `insertText` call, it is one undo step — undoing it
  * removes the whole paste, not one character at a time.
+ *
+ * The composer also renders a blue chip above the input for each active
+ * paste (hover preview + double-click expand).
  */
 
 const DEFAULT_LINE_THRESHOLD = 8;
@@ -26,12 +29,31 @@ export function isLargePaste(text: string, thresholds: PasteThresholds = {}): bo
   return countLines(text) > lineLimit || text.length > charLimit;
 }
 
+/** First N non-empty-friendly lines for hover preview. */
+export function pastePreviewLines(text: string, maxLines = 2): string[] {
+  const lines = text.split("\n");
+  return lines.slice(0, Math.max(1, maxLines)).map((line) => {
+    const clipped = line.length > 72 ? `${line.slice(0, 71)}…` : line;
+    return clipped.length === 0 ? " " : clipped;
+  });
+}
+
+/** Blue chip label: "10 lines pasted" / "1 line pasted". */
+export function pasteChipLabel(lines: number, chars: number): string {
+  if (lines > 1) return `${lines} lines pasted`;
+  if (chars > 0) return `${chars} chars pasted`;
+  return "pasted";
+}
+
 export interface PastePlaceholderEntry {
   readonly id: number;
+  /** Token inserted into the textarea (kept short for editing). */
   readonly token: string;
   readonly text: string;
   readonly lines: number;
   readonly chars: number;
+  /** Human chip label (blue). */
+  readonly label: string;
 }
 
 /**
@@ -45,12 +67,14 @@ export class PasteRegistry {
   register(text: string): PastePlaceholderEntry {
     const id = this.nextId++;
     const lines = countLines(text);
+    const chars = text.length;
     const entry: PastePlaceholderEntry = {
       id,
-      token: `[Pasted text #${id} +${lines} lines]`,
+      token: `[${pasteChipLabel(lines, chars)} #${id}]`,
       text,
       lines,
-      chars: text.length,
+      chars,
+      label: pasteChipLabel(lines, chars),
     };
     this.entries.set(id, entry);
     return entry;
@@ -58,6 +82,15 @@ export class PasteRegistry {
 
   resolve(id: number): PastePlaceholderEntry | undefined {
     return this.entries.get(id);
+  }
+
+  /** Entries whose token still appears in the composer buffer. */
+  activeIn(value: string): PastePlaceholderEntry[] {
+    const out: PastePlaceholderEntry[] = [];
+    for (const entry of this.entries.values()) {
+      if (value.includes(entry.token)) out.push(entry);
+    }
+    return out;
   }
 
   clear(): void {
@@ -71,5 +104,12 @@ export class PasteRegistry {
       result = result.split(entry.token).join(entry.text);
     }
     return result;
+  }
+
+  /** Expand a single paste id (double-click chip). */
+  expandOne(value: string, id: number): string {
+    const entry = this.entries.get(id);
+    if (!entry) return value;
+    return value.split(entry.token).join(entry.text);
   }
 }

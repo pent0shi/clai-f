@@ -4,6 +4,11 @@ import {
   maxComposerTextRows,
   resolveComposerTextRows,
 } from "../../../src/tui-v2/composer/composer-height.js";
+import {
+  composerDraftOverflows,
+  nextComposerScrollOffset,
+  tryScrollComposerDraft,
+} from "../../../src/tui-v2/composer/composer-wheel.js";
 
 describe("countComposerVisualLines", () => {
   it("returns 1 for empty input", () => {
@@ -36,6 +41,84 @@ describe("resolveComposerTextRows", () => {
 
   it("never drops below minRows", () => {
     expect(resolveComposerTextRows(0, 8)).toBe(1);
+  });
+});
+
+describe("composer wheel / draft scroll", () => {
+  it("detects when the draft is taller than the visible textarea", () => {
+    expect(composerDraftOverflows(20, 12)).toBe(true);
+    expect(composerDraftOverflows(8, 12)).toBe(false);
+    expect(composerDraftOverflows(12, 12)).toBe(false);
+  });
+
+  it("scrolls the draft viewport without overflowing bounds", () => {
+    expect(
+      nextComposerScrollOffset({
+        offsetY: 0,
+        viewportHeight: 10,
+        totalLines: 40,
+        direction: "down",
+        delta: 1,
+      }),
+    ).toBe(3);
+    expect(
+      nextComposerScrollOffset({
+        offsetY: 5,
+        viewportHeight: 10,
+        totalLines: 40,
+        direction: "up",
+        delta: 1,
+      }),
+    ).toBe(2);
+    expect(
+      nextComposerScrollOffset({
+        offsetY: 28,
+        viewportHeight: 10,
+        totalLines: 40,
+        direction: "down",
+        delta: 5,
+      }),
+    ).toBe(30);
+    expect(
+      nextComposerScrollOffset({
+        offsetY: 0,
+        viewportHeight: 10,
+        totalLines: 8,
+        direction: "down",
+      }),
+    ).toBeUndefined();
+  });
+
+  it("consumes wheel only when the draft overflows", () => {
+    let setY: number | undefined;
+    const editor = {
+      virtualLineCount: 40,
+      editorView: {
+        getViewport: () => ({ offsetY: 0, offsetX: 0, height: 10, width: 80 }),
+        getTotalVirtualLineCount: () => 40,
+        setViewport: (_x: number, y: number) => {
+          setY = y;
+        },
+      },
+      moveCursorUp: () => {},
+      moveCursorDown: () => {},
+    };
+    expect(
+      tryScrollComposerDraft(editor, {
+        contentLines: 40,
+        visibleRows: 10,
+        direction: "down",
+        delta: 1,
+      }),
+    ).toBe(true);
+    expect(setY).toBe(3);
+    expect(
+      tryScrollComposerDraft(editor, {
+        contentLines: 5,
+        visibleRows: 10,
+        direction: "down",
+      }),
+    ).toBe(false);
   });
 });
 

@@ -178,4 +178,26 @@ describe("fileToolTitle + formatToolArgs", () => {
       formatToolArgs({ name: "fs.delete", args: { path: "/a.ts" } }),
     ).toBe("/a.ts");
   });
+
+  it("shows line range on fs.read when filters are set", () => {
+    expect(
+      formatToolArgs({
+        name: "fs.read",
+        args: { path: "/tmp/PostForm.jsx", offset: 1, limit: 10 },
+      }),
+    ).toBe("/tmp/PostForm.jsx  lines 1–10");
+    expect(
+      formatToolArgs({
+        name: "fs.read",
+        args: { path: "/tmp/x.ts", startLine: 20, endLine: 35 },
+      }),
+    ).toBe("/tmp/x.ts  lines 20–35");
+    expect(
+      formatToolArgs({
+        name: "fs.read",
+        args: { path: "/tmp/full.ts" },
+      }),
+    ).toBe("/tmp/full.ts");
+  });
 });
+

@@ -1217,6 +1217,45 @@ export function textBeforeToolCall(text: string): string {
   return text.trim();
 }
 
+/** Compact line window for fs.read card headers, e.g. "11–20" or "1–10". */
+export function formatFsReadLineRange(
+  args: Record<string, unknown> | undefined,
+): string | undefined {
+  if (!args) return undefined;
+  const startRaw =
+    typeof args.startLine === "number"
+      ? args.startLine
+      : typeof args.offset === "number"
+        ? args.offset
+        : undefined;
+  const endRaw = typeof args.endLine === "number" ? args.endLine : undefined;
+  const limitRaw = typeof args.limit === "number" ? args.limit : undefined;
+  const start =
+    typeof startRaw === "number" && Number.isFinite(startRaw)
+      ? Math.max(1, Math.floor(startRaw) || 1)
+      : undefined;
+  const end =
+    typeof endRaw === "number" && Number.isFinite(endRaw)
+      ? Math.floor(endRaw)
+      : undefined;
+  const limit =
+    typeof limitRaw === "number" && Number.isFinite(limitRaw) && limitRaw > 0
+      ? Math.floor(limitRaw)
+      : undefined;
+
+  if (start !== undefined && end !== undefined && end >= start) {
+    return start === end ? `${start}` : `${start}–${end}`;
+  }
+  if (start !== undefined && limit !== undefined) {
+    const last = start + limit - 1;
+    return start === last ? `${start}` : `${start}–${last}`;
+  }
+  if (start !== undefined) return `${start}+`;
+  if (end !== undefined && end >= 1) return `1–${end}`;
+  if (limit !== undefined) return `1–${limit}`;
+  return undefined;
+}
+
 export function formatToolArgs(call: ToolCall): string {
   if (call.name === "shell.exec") return String(call.args.command ?? "");
   if (call.name === "net.scan")
@@ -1225,8 +1264,12 @@ export function formatToolArgs(call: ToolCall): string {
   if (call.name === "dns.lookup")
     return `${call.args.target ?? ""}${call.args.record ? ` ${call.args.record}` : " A"}`;
   if (call.name === "whois.lookup") return String(call.args.target ?? "");
+  if (call.name === "fs.read") {
+    const path = String(call.args.path ?? "");
+    const range = formatFsReadLineRange(call.args);
+    return range ? `${path}  lines ${range}` : path;
+  }
   if (
-    call.name === "fs.read" ||
     call.name === "fs.write" ||
     call.name === "fs.append" ||
     call.name === "fs.edit" ||
@@ -1459,13 +1502,23 @@ const ACTION_NARRATION_RE =
   /\b(?:let me|let's|i'?ll|i will|i'?m going to|i am going to|i need to|i should|i'?m about to|going to|now i'?ll|first[,]?\s*i'?ll|we need to|we should|we'?ll|we will|we'?re going to)\s+(?:now\s+|first\s+|quickly\s+|just\s+|go\s+ahead\s+and\s+)?(?:explore|list|read|fetch|browse|check|inspect|examine|look|create|run|start|write|build|add|scaffold|set\s*up|setup|install|initialize|init|generate|make|review|open|find|search|verify|update|edit|modify|fix|implement|gather|assess|scan|audit|retry|restart)\b/i;
 
 /**
+ * Past-tense / verification language: the model already applied a fix and is
+ * summarizing. Must NOT re-trigger "error diagnosed but not fixed".
+ */
+const ERROR_FIX_ALREADY_DONE_RE =
+  /\b(?:i(?:'?ve| have)\s+(?:already\s+)?(?:fixed|applied|added|patched|updated|changed|edited)|(?:already|now)\s+(?:fixed|applied|working)|fix(?:ed)?\s+(?:is\s+)?(?:in\s+place|applied|verified|complete)|(?:is\s+)?now\s+fixed|no longer (?:errors?|fails?|broken)|should now work|hmr (?:update|applied|reloaded)|build (?:successful|passed|succeeded)|verification complete|fix verified|successfully (?:fixed|applied|patched)|the (?:app|page|site) (?:should )?(?:now )?(?:work|load)s?)\b/i;
+
+/**
  * Model diagnosed a concrete failure (build/runtime/HTTP) and implies a fix
- * but emitted no tool call — must not end the turn.
+ * but has not yet applied it — must not end the turn on diagnosis alone.
+ * Returns false for post-fix summaries ("I've fixed…", "build passed").
  */
 export function looksLikeErrorDiagnosisWithFixIntent(text: string): boolean {
   const t = text.trim();
   if (t.length < 20 || t.length > 2_000) return false;
   if (t.includes("```tool")) return false;
+  // Already applied / verified — do not force another tool loop.
+  if (ERROR_FIX_ALREADY_DONE_RE.test(t)) return false;
   const sawError =
     /\b(?:error|exception|failed|failure|crash(?:ed)?|500|502|503|404|ECONNREFUSED|cannot\s+find|is\s+not\s+defined|use client|server component|module not found|syntaxerror|typeerror|build failed|internal server error)\b/i.test(
       t,

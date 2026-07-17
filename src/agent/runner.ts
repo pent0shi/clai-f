@@ -1204,6 +1204,8 @@ export async function runAgentTurn(
     const maxIterations = Math.max(210, computeMaxIterations(stepBudget));
 
     let productiveSteps = 0;
+    /** Successful file mutation this turn — kills false "error diagnosed but not fixed". */
+    let sawSuccessfulMutation = false;
     let step = -1;
     let nextToolEventId = 0;
     const alreadyPrintedIds = new Set<string>();
@@ -3556,7 +3558,12 @@ export async function runAgentTurn(
             (buildLikeTurn || pentestLikeTurn) &&
             !activePlan &&
             looksLikePlanNarration(cleaned);
-          const errorFixNarration = looksLikeErrorDiagnosisWithFixIntent(cleaned);
+          // Only force "diagnosed but not fixed" when the model is still
+          // narrating a fix without having applied one this turn. Post-fix
+          // summaries ("I've fixed…", build passed) must never re-enter.
+          const errorFixNarration =
+            !sawSuccessfulMutation &&
+            looksLikeErrorDiagnosisWithFixIntent(cleaned);
 
           const shouldRetryBeforeFinalizing =
             productiveSteps === 0 ||
@@ -3564,6 +3571,7 @@ export async function runAgentTurn(
             (session.planApproved.value &&
               planHasOpenWorkNow &&
               (narratedAction || errorFixNarration)) ||
+            // errorFix only when no mutation yet (gate is in errorFixNarration)
             (session.planApproved.value && errorFixNarration) ||
             (buildLikeTurn && errorFixNarration);
           if (
@@ -4084,6 +4092,28 @@ export async function runAgentTurn(
           malformedFenceRetries = 0;
           bareToolJsonRetries = 0;
 
+          if (
+            res.ok &&
+            (res.call.name === "fs.edit" ||
+              res.call.name === "fs.write" ||
+              res.call.name === "fs.writeMany" ||
+              res.call.name === "fs.replaceLines" ||
+              res.call.name === "fs.append")
+          ) {
+            // Mutation landed — post-fix summaries must not re-force tools.
+            sawSuccessfulMutation = true;
+          }
+          // A fresh failed localhost probe re-opens the diagnosis→fix gate.
+          if (
+            (res.call.name === "http.fetch" ||
+              res.call.name === "web.fetch" ||
+              res.call.name === "shell.exec") &&
+            localHttpProbeIsFailure(
+              res.result.output ?? res.contextOutput ?? "",
+            )
+          ) {
+            sawSuccessfulMutation = false;
+          }
           if (res.ok && isEvidenceWorkTool(res.call.name)) {
             recovery.prematureComplete = 0;
             recovery.actionIntent = 0;

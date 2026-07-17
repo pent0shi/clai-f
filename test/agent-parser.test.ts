@@ -417,6 +417,25 @@ describe("fresh web-search guard", () => {
     ).toBe(false);
   });
 
+  it("does not re-trigger after the fix was already applied", () => {
+    expect(
+      looksLikeErrorDiagnosisWithFixIntent(
+        "I've already fixed the Link is not defined error by adding the import. HMR applied.",
+      ),
+    ).toBe(false);
+    expect(
+      looksLikeErrorDiagnosisWithFixIntent(
+        "Fixed! The error was a missing import. Build successful — no errors.",
+      ),
+    ).toBe(false);
+    expect(
+      looksLikeErrorDiagnosisWithFixIntent(
+        "Verification complete. The ReferenceError is now fixed and the app should now work.",
+      ),
+    ).toBe(false);
+  });
+
+
   it("classifies local HTTP probe success vs failure from tool output", () => {
     expect(
       localHttpProbeIsFailure(
