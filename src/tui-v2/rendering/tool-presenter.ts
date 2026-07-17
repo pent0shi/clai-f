@@ -44,6 +44,27 @@ export interface ToolPresentation {
   readonly isFileDiff: boolean;
 }
 
+/** Pull a display path / "N file(s)" out of argsDisplay even when it is JSON. */
+function pathFromArgsDisplay(
+  toolName: string,
+  argsDisplay: string | undefined,
+): string {
+  const raw = (argsDisplay ?? "").trim();
+  if (!raw) return "";
+  if (!raw.startsWith("{")) return raw;
+  try {
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    if (typeof parsed.path === "string" && parsed.path) return parsed.path;
+    if (Array.isArray(parsed.files)) {
+      const n = parsed.files.length;
+      return n > 0 ? `${n} file(s)` : "files";
+    }
+  } catch {
+    // fall through
+  }
+  return toolName === "fs.writeMany" ? "files" : "";
+}
+
 export function presentTool(item: ToolItem): ToolPresentation {
   const fileDiff =
     isFileMutationTool(item.name) ||
@@ -60,30 +81,28 @@ export function presentTool(item: ToolItem): ToolPresentation {
 
   if (fileDiff) {
     const kind = item.fileChanges?.[0]?.kind as FileChangeKind | undefined;
-    const pathOrDisplay =
-      item.fileChanges?.[0]?.path ??
-      item.argsDisplay ??
-      "";
+    // Prefer structured file list for multi-write; never use raw JSON args.
+    let pathOrDisplay = "";
+    if (item.name === "fs.writeMany" && item.fileChanges?.length) {
+      pathOrDisplay = `${item.fileChanges.length} file(s)`;
+    } else if (item.fileChanges?.[0]?.path) {
+      pathOrDisplay = item.fileChanges[0].path;
+    } else {
+      pathOrDisplay = pathFromArgsDisplay(item.name, item.argsDisplay);
+      if (!pathOrDisplay) {
+        pathOrDisplay =
+          item.name === "fs.writeMany" ? "files" : item.name.replace(/^fs\./, "");
+      }
+    }
     const titled = fileToolTitle(item.name, item.status, pathOrDisplay, kind);
     name = titled.title;
-    pathLine = titled.pathLine ?? item.fileChanges?.[0]?.path;
-    // Never dump oldText/newText JSON under a file mutation card.
-    if (
-      item.name === "fs.edit" ||
-      item.name === "fs.replaceLines" ||
-      item.name === "fs.delete" ||
-      item.name === "fs.write" ||
-      item.name === "fs.append" ||
-      item.fileChanges
-    ) {
-      argsLabel = undefined;
-      argsDisplay = undefined;
-    }
-    if (item.name === "fs.writeMany" && item.argsDisplay) {
-      // Title already carries summary; skip duplicate input line.
-      argsLabel = undefined;
-      argsDisplay = undefined;
-    }
+    pathLine =
+      item.name === "fs.writeMany"
+        ? undefined
+        : titled.pathLine ?? item.fileChanges?.[0]?.path;
+    // Never dump oldText/newText / multi-file JSON under a file mutation card.
+    argsLabel = undefined;
+    argsDisplay = undefined;
   }
 
   let detail: string | undefined;
@@ -95,10 +114,16 @@ export function presentTool(item: ToolItem): ToolPresentation {
       detail = short;
     }
   }
-  const statusLabel =
-    item.exitCode !== undefined
-      ? `${STATUS_LABEL[item.status]} (exit ${item.exitCode})`
-      : STATUS_LABEL[item.status];
+  // Keep the badge short so "done (exit 0)" never overflows the card border.
+  // Non-zero exit is still shown; success exit is implied by green "done".
+  let statusLabel = STATUS_LABEL[item.status];
+  if (
+    item.exitCode !== undefined &&
+    item.exitCode !== 0 &&
+    (item.status === "failed" || item.status === "ok")
+  ) {
+    statusLabel = `${statusLabel} · ${item.exitCode}`;
+  }
   return {
     glyph: STATUS_GLYPH[item.status],
     statusLabel,
@@ -109,6 +134,17 @@ export function presentTool(item: ToolItem): ToolPresentation {
     pathLine,
     isFileDiff: Boolean(item.fileChanges && item.fileChanges.length > 0),
   };
+}
+
+/** Basename + create/overwrite marker for writeMany list rows. */
+export function writeManyFileLabel(change: {
+  readonly path: string;
+  readonly kind: string;
+}): string {
+  const base = change.path.split(/[/\\]/).pop() || change.path;
+  const mark =
+    change.kind === "create" ? "+" : change.kind === "overwrite" ? "~" : "·";
+  return `${mark} ${base}`;
 }
 
 export interface OutputPresentation {

@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile, chown } from "node:fs/promises";
+import { mkdir, readFile, writeFile, stat } from "node:fs/promises";
 import { fixOwner, handlePermissionError, safeExists } from "../os/permissions.js";
 
 import { dirname, join } from "node:path";
@@ -29,20 +29,37 @@ export interface EngagementScope {
 
 let cached: EngagementScope | undefined;
 let cacheLoaded = false;
+/** File mtime (ms) of the last successful load — detect mid-session `clai scope add`. */
+let cachedMtimeMs = 0;
 
 export async function loadScope(): Promise<EngagementScope | undefined> {
-  if (cacheLoaded) return cached;
-  cacheLoaded = true;
-  if (!(await safeExists(scopeFile))) return undefined;
   try {
+    if (!(await safeExists(scopeFile))) {
+      cached = undefined;
+      cacheLoaded = true;
+      cachedMtimeMs = 0;
+      return undefined;
+    }
+    const st = await stat(scopeFile);
+    const mtime = st.mtimeMs;
+    // Re-read when another process (shell `clai scope add`) updated the file.
+    if (cacheLoaded && mtime === cachedMtimeMs) {
+      return cached;
+    }
     const raw = await readFile(scopeFile, "utf8");
-    cached = JSON.parse(raw) as EngagementScope;
+    if (!raw.trim()) {
+      cached = undefined;
+    } else {
+      cached = JSON.parse(raw) as EngagementScope;
+    }
+    cacheLoaded = true;
+    cachedMtimeMs = mtime;
     return cached;
   } catch (err: any) {
     if (err && err.code === "EACCES") {
       handlePermissionError(err);
     }
-    return undefined;
+    return cached;
   }
 }
 
@@ -55,6 +72,12 @@ export async function saveScope(scope: EngagementScope): Promise<void> {
     await fixOwner(scopeFile);
     cached = scope;
     cacheLoaded = true;
+    try {
+      const st = await stat(scopeFile);
+      cachedMtimeMs = st.mtimeMs;
+    } catch {
+      cachedMtimeMs = Date.now();
+    }
   } catch (err: any) {
     handlePermissionError(err);
   }
@@ -129,6 +152,25 @@ export function getScopePath(): string {
 export function resetScopeCache(): void {
   cached = undefined;
   cacheLoaded = false;
+  cachedMtimeMs = 0;
+}
+
+/** Loopback aliases that all mean "this machine" for local app verify. */
+export function isLoopbackScopeTarget(target: string): boolean {
+  const n = normalizeScopeTarget(target);
+  if (!n) return false;
+  if (
+    n === "localhost" ||
+    n === "localhost.localdomain" ||
+    n === "ip6-localhost" ||
+    n === "ip6-loopback" ||
+    n === "127.0.0.1" ||
+    n === "::1" ||
+    n === "0:0:0:0:0:0:0:1"
+  ) {
+    return true;
+  }
+  return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(n);
 }
 
 function ipToNumber(ip: string): number {
@@ -166,6 +208,16 @@ export function targetInScope(target: string, scope: EngagementScope): boolean {
   if (!trimmed) return false;
   const excluded = (scope.excludedTargets ?? []).map(normalizeScopeTarget);
   if (excluded.some((entry) => matchEntry(trimmed, entry))) return false;
+  // localhost / 127.0.0.1 / ::1 are equivalent for local-dev authorization.
+  if (isLoopbackScopeTarget(trimmed)) {
+    if (
+      scope.authorizedTargets.some((entry) =>
+        isLoopbackScopeTarget(normalizeScopeTarget(entry)),
+      )
+    ) {
+      return true;
+    }
+  }
   return scope.authorizedTargets.some((entry) => matchEntry(trimmed, normalizeScopeTarget(entry)));
 }
 

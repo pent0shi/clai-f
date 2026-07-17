@@ -1,23 +1,24 @@
 /** @jsxImportSource @opentui/react */
 /**
- * Plan side pane — compact goal + status + scrollable tasks.
+ * Plan / tasks side pane — modern CLAI chrome.
  *
- * - No "PLAN" header (border title already says Plan)
- * - One progress line only (no bar + "completed · 8/8" duplication)
- * - Full text wrap for goal, titles, and notes — never "…" truncation
- * - Hidden scrollbar; wheel still scrolls the list
+ * Matches project theme: statusBackground panel, cyan/magenta accents,
+ * chip badges (like mode / YOU chrome), progress bar, card-like task rows
+ * with a left state rail. Full wrap — never ellipsize titles/notes.
  */
 
 import { useEffect, useRef, type ReactNode } from "react";
-import type { MouseEvent, ScrollBoxRenderable } from "@opentui/core";
+import { TextAttributes, type MouseEvent, type ScrollBoxRenderable } from "@opentui/core";
 import type { PlanTask, SessionPlan, TaskState } from "../../../store/plan.js";
 import type { Theme } from "../../rendering/theme.js";
 import type { AppServices } from "../../bootstrap/composition-root.js";
 import {
   activeTaskId,
-  progressView,
+  cleanTaskTitle,
+  planStatusChip,
   planStatusColor,
-  STATUS_LABEL,
+  progressBar,
+  progressView,
   TASK_GLYPH,
   taskStateColor,
   wrapPlanText,
@@ -34,6 +35,58 @@ export interface PlanViewProps {
 
 function tokenFg(theme: Theme, token: PlanColorToken): string {
   return theme[token];
+}
+
+/** Compact filled chip (mode-badge style). */
+function Chip(props: {
+  label: string;
+  fg: string;
+  bg: string;
+  theme: Theme;
+}): ReactNode {
+  const { label, fg, bg } = props;
+  return (
+    <text
+      content={` ${label} `}
+      style={{
+        fg,
+        bg,
+        height: 1,
+        flexShrink: 0,
+        attributes: TextAttributes.BOLD,
+      }}
+    />
+  );
+}
+
+/** Soft action chip (Implement / Discard). */
+function ActionChip(props: {
+  label: string;
+  fg: string;
+  bg: string;
+  onClick: () => void;
+}): ReactNode {
+  const { label, fg, bg, onClick } = props;
+  return (
+    <box
+      onMouseDown={(event: MouseEvent) => {
+        event.preventDefault();
+        event.stopPropagation();
+        onClick();
+      }}
+      style={{ flexShrink: 0 }}
+    >
+      <text
+        content={` ${label} `}
+        style={{
+          fg,
+          bg,
+          height: 1,
+          attributes: TextAttributes.BOLD,
+        }}
+      />
+    </box>
+  );
 }
 
 export function PlanView(props: PlanViewProps): ReactNode {
@@ -69,7 +122,6 @@ export function PlanView(props: PlanViewProps): ReactNode {
         onMouseScroll={trapWheel}
         onMouseDown={() => services.focus.focusRegion("plan")}
       >
-        {/* Centered empty state — vertical + horizontal middle of the pane. */}
         <box
           style={{
             flexDirection: "column",
@@ -79,10 +131,22 @@ export function PlanView(props: PlanViewProps): ReactNode {
             paddingRight: 1,
           }}
         >
-          <text content="No plan yet" style={{ fg: theme.muted, height: 1 }} />
+          <text
+            content="◇"
+            style={{ fg: theme.magenta, height: 1, attributes: TextAttributes.BOLD }}
+          />
           <text content=" " style={{ height: 1 }} />
           <text
-            content="Plan a multi-step task,"
+            content="No tasks yet"
+            style={{
+              fg: theme.foreground,
+              height: 1,
+              attributes: TextAttributes.BOLD,
+            }}
+          />
+          <text content=" " style={{ height: 1 }} />
+          <text
+            content="Plan a multi-step job,"
             style={{ fg: theme.muted, height: 1 }}
           />
           <text
@@ -91,7 +155,7 @@ export function PlanView(props: PlanViewProps): ReactNode {
           />
           <text content=" " style={{ height: 1 }} />
           <text
-            content="Ctrl+P · full detail"
+            content="Ctrl+H toggle  ·  Ctrl+P detail"
             style={{ fg: theme.cyan, height: 1 }}
           />
         </box>
@@ -101,9 +165,21 @@ export function PlanView(props: PlanViewProps): ReactNode {
 
   const progress = progressView(plan);
   const statusFg = tokenFg(theme, planStatusColor(plan.status));
+  const statusBg =
+    plan.status === "completed"
+      ? theme.diffAddBg
+      : plan.status === "in_progress" || plan.status === "approved"
+        ? theme.queued
+        : plan.status === "draft"
+          ? theme.chipTeal
+          : theme.chip;
   const goalLines = wrapPlanText(plan.goal, innerW);
-  // One line only: "completed · 8/8 complete" → just status + count once
-  const metaLine = `${STATUS_LABEL[plan.status]}  ·  ${progress.label}`;
+  const barWidth = Math.max(6, Math.min(14, innerW - 12));
+  const bar = progressBar(progress.done, progress.total, barWidth);
+  const countLabel =
+    progress.total === 0
+      ? "0 tasks"
+      : `${progress.done}/${progress.total}`;
 
   return (
     <box
@@ -117,6 +193,7 @@ export function PlanView(props: PlanViewProps): ReactNode {
       onMouseScroll={trapWheel}
       onMouseDown={() => services.focus.focusRegion("plan")}
     >
+      {/* ── Header: goal + status chip + progress ── */}
       <box
         style={{
           flexDirection: "column",
@@ -132,11 +209,72 @@ export function PlanView(props: PlanViewProps): ReactNode {
           <text
             key={`g-${i}`}
             content={line}
-            style={{ fg: theme.foreground, height: 1 }}
+            style={{
+              fg: theme.foreground,
+              height: 1,
+              attributes: i === 0 ? TextAttributes.BOLD : TextAttributes.NONE,
+            }}
           />
         ))}
+
         <text content=" " style={{ height: 1 }} />
-        <text content={metaLine} style={{ fg: statusFg, height: 1 }} />
+
+        {/* Status chip + kind */}
+        <box
+          style={{
+            flexDirection: "row",
+            width: "100%",
+            height: 1,
+            alignItems: "center",
+            flexShrink: 0,
+          }}
+        >
+          <Chip
+            label={planStatusChip(plan.status)}
+            fg={theme.white}
+            bg={statusBg}
+            theme={theme}
+          />
+          <text content="  " style={{ height: 1 }} />
+          <text
+            content={plan.kind || "general"}
+            style={{ fg: theme.muted, height: 1 }}
+          />
+        </box>
+
+        {/* Progress bar + fraction */}
+        <box
+          style={{
+            flexDirection: "row",
+            width: "100%",
+            height: 1,
+            marginTop: 1,
+            alignItems: "center",
+            flexShrink: 0,
+          }}
+        >
+          <text
+            content={bar}
+            style={{
+              fg:
+                progress.done === progress.total && progress.total > 0
+                  ? theme.success
+                  : theme.cyan,
+              height: 1,
+              flexShrink: 0,
+            }}
+          />
+          <text content="  " style={{ height: 1 }} />
+          <text
+            content={countLabel}
+            style={{
+              fg: statusFg,
+              height: 1,
+              attributes: TextAttributes.BOLD,
+            }}
+          />
+        </box>
+
         {plan.status === "draft" ? (
           <box
             style={{
@@ -145,24 +283,33 @@ export function PlanView(props: PlanViewProps): ReactNode {
               height: 1,
               marginTop: 1,
               flexShrink: 0,
+              alignItems: "center",
             }}
           >
-            <box onMouseDown={() => void implementPlan(services)}>
-              <text content="[Implement]" style={{ fg: theme.success, height: 1 }} />
-            </box>
+            <ActionChip
+              label="Implement"
+              fg={theme.white}
+              bg={theme.success}
+              onClick={() => void implementPlan(services)}
+            />
             <text content="  " style={{ height: 1 }} />
-            <box onMouseDown={() => void discardPlan(services)}>
-              <text content="[Discard]" style={{ fg: theme.muted, height: 1 }} />
-            </box>
+            <ActionChip
+              label="Discard"
+              fg={theme.foreground}
+              bg={theme.chip}
+              onClick={() => void discardPlan(services)}
+            />
           </box>
         ) : null}
-        {/* Boundary between goal/meta and the task list. */}
+
+        {/* Soft aqua rule — matches project chrome */}
         <text
           content={"─".repeat(Math.max(8, innerW))}
           style={{ fg: theme.border, height: 1, marginTop: 1 }}
         />
       </box>
 
+      {/* ── Task list ── */}
       <scrollbox
         ref={scrollRef}
         stickyScroll={false}
@@ -179,6 +326,7 @@ export function PlanView(props: PlanViewProps): ReactNode {
           backgroundColor: theme.statusBackground,
           paddingLeft: 1,
           paddingRight: 1,
+          paddingTop: 0,
         }}
       >
         {plan.tasks.map((task, index) => (
@@ -188,8 +336,7 @@ export function PlanView(props: PlanViewProps): ReactNode {
             theme={theme}
             width={innerW}
             active={task.id === activeId}
-            stripe={index % 2 === 1}
-            showDivider={index < plan.tasks.length - 1}
+            index={index}
           />
         ))}
         <text content=" " style={{ height: 1 }} />
@@ -198,33 +345,43 @@ export function PlanView(props: PlanViewProps): ReactNode {
   );
 }
 
+/**
+ * Task row: content-sized section, bg-only separation (no per-row borders).
+ * Full-height solid status rail (same width for green/yellow/red — never thin │).
+ * Title + note vertically centered in the row.
+ */
 function TaskRow(props: {
   task: PlanTask;
   theme: Theme;
   width: number;
   active: boolean;
-  /** Alternate row face for clearer entry boundaries. */
-  stripe: boolean;
-  /** Draw a rule under this row (all but the last task). */
-  showDivider: boolean;
+  index: number;
 }): ReactNode {
-  const { task, theme, width, active, stripe, showDivider } = props;
+  const { task, theme, width, active, index } = props;
   const state = task.state as TaskState;
-  const color = tokenFg(theme, taskStateColor(state));
-  const bg = active
-    ? theme.rowA
-    : stripe
-      ? theme.rowB
-      : theme.statusBackground;
+  const stateColor = tokenFg(theme, taskStateColor(state));
+  const titleColor =
+    state === "pending" || state === "skipped"
+      ? theme.foreground
+      : stateColor;
   const glyph = TASK_GLYPH[state] ?? "○";
-  // Wrap full title + note — never ellipsize (matches pager / Ctrl+P).
-  const bodyWidth = Math.max(8, width - 4);
-  const titleLines = wrapPlanText(task.title, bodyWidth);
+  // Stripe every other row; active/in_progress get a stronger plate.
+  // Distinctions are background only — no row borders.
+  const bg =
+    active || state === "in_progress"
+      ? theme.rowA
+      : index % 2 === 0
+        ? theme.rowB
+        : theme.statusBackground;
+  const title = cleanTaskTitle(task);
+  // Budget leaves room for rail (1) + padding + glyph.
+  const titleBudget = Math.max(8, width - 5);
+  const titleLines = wrapPlanText(title, titleBudget);
   const noteLines = task.note?.trim()
-    ? wrapPlanText(task.note.trim(), bodyWidth)
+    ? wrapPlanText(task.note.trim(), Math.max(8, width - 6))
     : [];
-  const first = `${glyph}  ${titleLines[0] ?? ""}`;
-  const rule = "─".repeat(Math.max(8, width));
+
+  const firstTitle = titleLines[0] ?? "";
 
   return (
     <box
@@ -237,40 +394,80 @@ function TaskRow(props: {
     >
       <box
         style={{
-          flexDirection: "column",
+          flexDirection: "row",
           width: "100%",
           flexShrink: 0,
+          // Content-sized height (title/note lines only).
+          alignItems: "stretch",
           backgroundColor: bg,
-          paddingTop: 0,
-          paddingBottom: 0,
         }}
       >
-        <text content={first} style={{ fg: color, bg, height: 1 }} />
-        {titleLines.slice(1).map((line, i) => (
-          <text
-            key={`t-${task.id}-${i}`}
-            content={`   ${line}`}
-            style={{ fg: color, bg, height: 1 }}
-          />
-        ))}
-        {noteLines.map((line, i) => (
-          <text
-            key={`n-${task.id}-${i}`}
-            content={`   ${line}`}
-            style={{ fg: theme.muted, bg, height: 1 }}
-          />
-        ))}
-      </box>
-      {showDivider ? (
-        <text
-          content={rule}
+        {/* Full-height status rail for THIS row only (equal width green/yellow). */}
+        <box
           style={{
-            fg: theme.border,
-            bg: theme.statusBackground,
-            height: 1,
+            width: 1,
+            flexShrink: 0,
+            alignSelf: "stretch",
+            backgroundColor: stateColor,
+            minHeight: 1,
           }}
         />
-      ) : null}
+        <box
+          style={{
+            flexDirection: "column",
+            flexGrow: 1,
+            flexShrink: 1,
+            minWidth: 0,
+            justifyContent: "center",
+            paddingLeft: 1,
+            paddingRight: 1,
+            paddingTop: 1,
+            paddingBottom: 1,
+            backgroundColor: bg,
+          }}
+        >
+          <text
+            content={`${glyph} ${firstTitle}`}
+            style={{
+              fg: titleColor,
+              bg,
+              height: 1,
+              attributes:
+                state === "in_progress" || active
+                  ? TextAttributes.BOLD
+                  : TextAttributes.NONE,
+            }}
+          />
+          {titleLines.slice(1).map((line, i) => (
+            <text
+              key={`t-${task.id}-${i}`}
+              content={`  ${line}`}
+              style={{
+                fg: titleColor,
+                bg,
+                height: 1,
+              }}
+            />
+          ))}
+          {noteLines.map((line, i) => (
+            <text
+              key={`n-${task.id}-${i}`}
+              content={line}
+              style={{
+                fg: theme.muted,
+                bg,
+                height: 1,
+                attributes: TextAttributes.DIM,
+              }}
+            />
+          ))}
+        </box>
+      </box>
+      {/* Pane-colored gap so status rails do not merge into one continuous line. */}
+      <text
+        content=" "
+        style={{ bg: theme.statusBackground, height: 1, width: "100%" }}
+      />
     </box>
   );
 }

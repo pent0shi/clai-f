@@ -38,6 +38,12 @@ export interface ToolItem {
   exitCode?: number | undefined;
   summary?: string | undefined;
   artifactPath?: string | undefined;
+  /**
+   * Structured file-diff payload for fs.write / edit / writeMany / ….
+   * Optional so older history rows still parse; when present, the TUI shows
+   * green/red hunks instead of the write receipt text.
+   */
+  fileChanges?: readonly import("../tools/file-diff.js").FileChange[] | undefined;
   done: boolean;
 }
 
@@ -107,7 +113,8 @@ export function serializeTranscriptForCompaction(items: TranscriptItem[]): strin
           item.artifactPath ? `FULL ARTIFACT: ${item.artifactPath}` : "",
         ].filter(Boolean).join("\n");
       case "notice":
-        return `SESSION EVENT (${item.level}): ${compactField(item.text)}`;
+        // UI chrome only (session resumed, Ctrl+C hint) — never model context.
+        return undefined;
       case "plan":
         return `PLAN/TASK STATE:\n${compactField(JSON.stringify(item.plan, null, 2))}`;
       case "compacted":

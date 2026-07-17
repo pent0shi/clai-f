@@ -22,6 +22,7 @@ function stateFrom(
         summary?: string;
         artifactPath?: string;
       }
+    | { kind: "notice"; id: string; level?: "info" | "warn"; text: string }
     | { kind: "compacted"; id: string; summary: string }
   >,
 ): TranscriptState {
@@ -67,6 +68,16 @@ function stateFrom(
         reason: undefined,
         outputBytes: 0,
         fileChanges: undefined,
+      });
+    } else if (raw.kind === "notice") {
+      byId.set(raw.id, {
+        id: raw.id,
+        sequence,
+        turnId: undefined,
+        timestamp: sequence,
+        kind: "notice",
+        level: raw.level ?? "info",
+        text: raw.text,
       });
     } else {
       byId.set(raw.id, {
@@ -125,6 +136,30 @@ describe("serializeTranscriptForCompaction", () => {
     expect(source).toContain("COMPACTED CONTEXT:\nEarlier: recon done");
     expect(source).toContain("continue exploit");
     expect(source).not.toContain("ancient");
+  });
+
+  it("never includes UI notices in model compaction source", () => {
+    const state = stateFrom([
+      { kind: "user", id: "u1", text: "build todo" },
+      {
+        kind: "notice",
+        id: "n1",
+        level: "info",
+        text: "session resumed · 98 items · 109 model messages",
+      },
+      {
+        kind: "notice",
+        id: "n2",
+        level: "info",
+        text: "Ctrl+C again to exit",
+      },
+      { kind: "assistant", id: "a1", text: "ok" },
+    ]);
+    const source = serializeTranscriptForCompaction(state);
+    expect(source).toContain("build todo");
+    expect(source).not.toContain("session resumed");
+    expect(source).not.toContain("Ctrl+C again");
+    expect(source).not.toContain("SESSION EVENT");
   });
 });
 

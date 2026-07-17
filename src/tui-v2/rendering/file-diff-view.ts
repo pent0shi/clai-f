@@ -12,7 +12,6 @@ import type {
 } from "../../tools/file-diff.js";
 import {
   buildModalLines,
-  changeVerb,
   formatUnifiedPreview,
 } from "../../tools/file-diff.js";
 import { getActiveProjectRoot } from "../../agent/project-root.js";
@@ -204,7 +203,16 @@ export function presentFileChangePreview(
   }
 
   if (change.truncated || used >= maxRows) {
-    const gap = `··· +${change.stats.added}/−${change.stats.removed} · click for full ···`;
+    // Prefer a concrete "+N more" when the card only showed a head of the file.
+    const totalTouched = Math.max(
+      change.stats.newLines,
+      change.stats.added + change.stats.removed,
+    );
+    const remaining = Math.max(0, totalTouched - used);
+    const gap =
+      remaining > 0
+        ? `··· +${remaining} more · click for full ···`
+        : `··· +${change.stats.added}/−${change.stats.removed} · click for full ···`;
     rows.push({
       tone: "gap",
       gutter: " ".repeat(width),
@@ -370,10 +378,12 @@ export function relativeDisplayPath(absPath: string): string {
   return absPath;
 }
 
-/** Compact one-line summary for a collapsed file-diff card. */
+/**
+ * Compact path line under the card title.
+ * Title already carries the verb ("Edited App.tsx") — do not repeat it here.
+ */
 export function collapsedFileChangeLabel(change: FileChange): string {
-  const verb = changeVerb(change.kind, "ok");
-  return `${verb}  ${relativeDisplayPath(change.path)}`;
+  return `file  ${relativeDisplayPath(change.path)}`;
 }
 
 /** Multi-file collapsed label. */
@@ -381,5 +391,5 @@ export function collapsedFileChangesLabel(changes: readonly FileChange[]): strin
   if (changes.length === 0) return "files";
   if (changes.length === 1) return collapsedFileChangeLabel(changes[0]!);
   const first = relativeDisplayPath(changes[0]!.path);
-  return `Wrote ${changes.length} files  ·  ${first}…`;
+  return `files  ${changes.length}  ·  ${first}…`;
 }

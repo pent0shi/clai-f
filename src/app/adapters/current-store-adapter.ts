@@ -11,11 +11,18 @@ export function createCurrentPersistencePort(): PersistencePort {
       const transcript = options?.transcript
         ? ([...options.transcript] as TranscriptItem[])
         : undefined;
+      const contextUsage = options?.contextUsage;
       if (options?.sessionId) {
-        await upsertSession(options.sessionId, list, options.name, transcript);
+        await upsertSession(
+          options.sessionId,
+          list,
+          options.name,
+          transcript,
+          contextUsage,
+        );
         return;
       }
-      await saveSession(list, options?.name, transcript);
+      await saveSession(list, options?.name, transcript, contextUsage);
     },
     loadPlan: (sessionId) => loadPlan(sessionId),
     savePlan: (plan) => savePlan(plan),

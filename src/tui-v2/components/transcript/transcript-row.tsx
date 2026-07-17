@@ -66,7 +66,16 @@ export function TranscriptRow(props: {
           onToggle={() => store.toggleItemOverride(item.id, state.expandThinkingGlobal)}
         />
       );
-    case "tool":
+    case "tool": {
+      // task.update spam — only show failures in the main chat.
+      // (The Tasks pane still reflects every successful update.)
+      if (
+        item.name === "task.update" &&
+        item.status !== "failed" &&
+        item.status !== "blocked"
+      ) {
+        return null;
+      }
       return (
         <ToolCard
           item={item}
@@ -83,6 +92,7 @@ export function TranscriptRow(props: {
           onExpandAllFileDiffs={() => store.setFileDiffsGlobal(true)}
         />
       );
+    }
     case "notice":
       return <NoticeRow item={item} theme={theme} />;
     case "compacted":

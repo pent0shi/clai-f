@@ -26,6 +26,7 @@ import {
   EMPTY_SCROLL_METRICS,
   publishTranscriptScrollMetrics,
   registerTranscriptAutoScroll,
+  registerTranscriptJumpHandlers,
   registerTranscriptScrollPort,
 } from "./transcript-scroll-port.js";
 import { useNativeSelectionCopy } from "./use-native-selection-copy.js";
@@ -265,6 +266,24 @@ export function TranscriptView(props: TranscriptViewProps): ReactNode {
     });
   }, []);
 
+  // g / G absolute jumps (also reachable from App when transcript is focused).
+  useEffect(() => {
+    return registerTranscriptJumpHandlers(
+      () => {
+        const sb = scrollRef.current;
+        if (!sb) return;
+        sb.scrollTo(0);
+        followBottom.current = false;
+        publishScrollRemainder(sb);
+      },
+      () => {
+        followBottom.current = true;
+        pinToBottom();
+        queueMicrotask(() => publishScrollRemainder(scrollRef.current));
+      },
+    );
+  }, []);
+
   // Publish ▲/▼ remaining-line metrics for the status strip under the input.
   // Poll lightly: OpenTUI ScrollBox has no scroll-event subscription.
   useEffect(() => {
@@ -407,11 +426,13 @@ export function TranscriptView(props: TranscriptViewProps): ReactNode {
         sb.scrollTo(next);
         followBottom.current = next >= max - 1;
         publishScrollRemainder(sb);
-      } else if (chord === "end") {
+      } else if (chord === "end" || chord === "ctrl+d") {
+        // ^D / End — absolute bottom of the chat.
         key.preventDefault();
         jumpToBottom();
         publishScrollRemainder(sb);
-      } else if (chord === "home") {
+      } else if (chord === "home" || chord === "ctrl+u") {
+        // ^U / Home — absolute top of the chat (intro card).
         key.preventDefault();
         sb.scrollTo(0);
         followBottom.current = false;

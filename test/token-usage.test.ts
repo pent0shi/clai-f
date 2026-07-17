@@ -60,7 +60,7 @@ describe("token-usage parsers", () => {
 });
 
 describe("token-usage format + context window", () => {
-  it("formats counts and context chips", () => {
+  it("formats counts and context chips (used only, no window total)", () => {
     expect(formatTokenCount(12450)).toBe("12,450");
     expect(formatTokenCount(128_000, true)).toBe("128k");
     expect(
@@ -72,7 +72,7 @@ describe("token-usage format + context window", () => {
         sessionCompletionTokens: 80,
         exact: true,
       }),
-    ).toBe("ctx 12,450/128k");
+    ).toBe("12,450 tok");
     expect(
       formatContextChip(
         {
@@ -85,7 +85,7 @@ describe("token-usage format + context window", () => {
         },
         { compact: true },
       ),
-    ).toMatch(/^~ctx /);
+    ).toBe("~12.4k tok");
   });
 
   it("resolves known model context windows", () => {

@@ -555,7 +555,8 @@ export function ComposerEditor(props: ComposerEditorProps): ReactNode {
       services.overlay.openJobs();
       return;
     }
-    if (chord === "ctrl+u") {
+    // Clear draft: ^X (Ctrl+U is jump-to-top of chat).
+    if (chord === "ctrl+x") {
       key.preventDefault();
       editor.clear();
       promptHistory.current.reset();
@@ -568,6 +569,7 @@ export function ComposerEditor(props: ComposerEditorProps): ReactNode {
       return;
     }
     // Page keys always scroll the chat (classic parity) — never history.
+    // ^U/^D scroll is handled globally in App so it works from any focus.
     if (chord === "pageup" || chord === "pagedown") {
       key.preventDefault();
       services.focus.focusRegion("transcript");

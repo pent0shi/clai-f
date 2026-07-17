@@ -3,9 +3,12 @@ import type { SessionPlan } from "../../../src/store/plan.js";
 import {
   activeTaskId,
   formatPlanPagerDocument,
+  planStatusChip,
+  progressBar,
   progressView,
   STATUS_LABEL,
   taskLabel,
+  taskStateColor,
   TASK_GLYPH,
 } from "../../../src/tui-v2/rendering/plan-view.js";
 
@@ -52,6 +55,23 @@ describe("plan-view rendering helpers (PLAN-001)", () => {
     for (const status of Object.keys(STATUS_LABEL) as Array<keyof typeof STATUS_LABEL>) {
       expect(STATUS_LABEL[status].length).toBeGreaterThan(0);
     }
+  });
+
+  it("maps task states to high-contrast color tokens", () => {
+    // Pending must not use washed muted slate; active keeps yellow; done bright green.
+    expect(taskStateColor("pending")).toBe("foreground");
+    expect(taskStateColor("in_progress")).toBe("activity");
+    expect(taskStateColor("done")).toBe("success");
+    expect(taskStateColor("failed")).toBe("diffDel");
+    expect(taskStateColor("skipped")).toBe("muted");
+  });
+
+  it("builds a compact progress bar and plan status chips", () => {
+    expect(progressBar(3, 8, 8)).toBe("███░░░░░");
+    expect(progressBar(0, 0, 6)).toBe("░░░░░░");
+    expect(progressBar(4, 4, 4)).toBe("████");
+    expect(planStatusChip("in_progress")).toBe("ACTIVE");
+    expect(planStatusChip("completed")).toBe("DONE");
   });
 
   it("finds the first pending/in-progress task as active (PLAN-002)", () => {

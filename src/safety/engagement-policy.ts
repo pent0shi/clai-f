@@ -1,6 +1,10 @@
 import type { EngagementScope } from "../store/scope.js";
 import type { ToolCall } from "../types.js";
-import { normalizeScopeTarget, targetInScope } from "../store/scope.js";
+import {
+  isLoopbackScopeTarget,
+  normalizeScopeTarget,
+  targetInScope,
+} from "../store/scope.js";
 
 export type ActionCapability =
   | "passive"
@@ -51,6 +55,18 @@ const pathAllowed = (path: string, scope: EngagementScope): boolean => {
   });
 };
 
+/**
+ * Local coding verify (curl/http.fetch to the machine's own loopback) must
+ * never be gated by a leftover remote pentest engagement scope.
+ * Read-only methods only — POST/PUT/etc. on loopback still go through policy.
+ */
+export function isLocalDevProbeAction(action: EngagementAction): boolean {
+  const host = normalizeScopeTarget(action.target) || action.target;
+  if (!isLoopbackScopeTarget(host)) return false;
+  const method = (action.method ?? "GET").toUpperCase();
+  return method === "GET" || method === "HEAD" || method === "OPTIONS";
+}
+
 export function evaluateEngagementAction(
   scope: EngagementScope | undefined,
   action: EngagementAction,
@@ -64,6 +80,23 @@ export function evaluateEngagementAction(
     capability: action.capability,
     phase: action.phase,
   });
+  // Always allow local-dev GET/HEAD/OPTIONS to loopback — coding sessions
+  // often have an unrelated remote scope still configured from a prior pentest.
+  // Exception: if DNS resolution escaped loopback (rebinding), fall through
+  // to normal scope checks on resolvedAddresses.
+  if (isLocalDevProbeAction(action)) {
+    const resolved = action.resolvedAddresses ?? [];
+    const escaped = resolved.some((addr) => !isLoopbackScopeTarget(addr));
+    if (!escaped) {
+      return {
+        allowed: true,
+        reason: "local loopback probe — engagement scope does not apply",
+        normalizedTarget: target || "localhost",
+        capability: action.capability,
+        phase: action.phase,
+      };
+    }
+  }
   if (!scope || !isScopeActiveAt(scope, now)) return deny("engagement scope is missing, empty, or outside its time window");
   if (!targetInScope(target, scope)) return deny(`target is excluded or not authorized: ${target}`);
   if (scope.allowedPhases?.length && !scope.allowedPhases.includes(action.phase)) {
@@ -191,6 +224,20 @@ export function engagementActionForToolCall(call: ToolCall): EngagementAction | 
   if (call.name === "http.fetch") {
     const url = typeof call.args.url === "string" ? call.args.url : "";
     if (!url) return undefined;
+    // Loopback GET/HEAD is local app verify — skip engagement action entirely
+    // so leftover remote scopes never block coding live-checks.
+    try {
+      const host = new URL(url).hostname;
+      const method = typeof call.args.method === "string" ? call.args.method : "GET";
+      if (
+        isLoopbackScopeTarget(host) &&
+        /^(?:GET|HEAD|OPTIONS)$/i.test(method)
+      ) {
+        return undefined;
+      }
+    } catch {
+      /* fall through to normal action */
+    }
     return actionFromUrl({
       url,
       method: typeof call.args.method === "string" ? call.args.method : "GET",
@@ -211,6 +258,18 @@ export function engagementActionForToolCall(call: ToolCall): EngagementAction | 
     .filter((candidate): candidate is string => Boolean(candidate));
   const host = url ? new URL(url).hostname : hostCandidates.at(-1);
   if (!host) return undefined;
+  const method =
+    /\bcurl\b[^\n]*\s-X\s+([A-Z]+)/i.exec(command)?.[1] ?? "GET";
+  // curl/wget/httpie to the machine's own loopback is local app verify — do not
+  // create an engagement action (remote scope must not block coding probes).
+  if (
+    isLoopbackScopeTarget(host) &&
+    /^(?:GET|HEAD|OPTIONS)$/i.test(method) &&
+    // Only skip when every host in the command is loopback (no mixed remote).
+    hostCandidates.every((h) => isLoopbackScopeTarget(h))
+  ) {
+    return undefined;
+  }
   const destructive = /\b(?:rm\s+-rf|mkfs|dd\s+if=|shutdown|reboot|drop\s+(?:database|table)|delete\s+from)\b/i.test(command);
   const persistence = /\b(?:crontab|launchctl|systemctl\s+enable|schtasks|authorized_keys|startup|persistence)\b/i.test(command);
   const exploitation = /\b(?:sqlmap|hydra|metasploit|msfconsole|exploit|payload|reverse.shell|csrf|xss|union\s+select)\b/i.test(command);
@@ -234,7 +293,7 @@ export function engagementActionForToolCall(call: ToolCall): EngagementAction | 
   return {
     target: host,
     ...(url ? { url, port: Number(new URL(url).port || (new URL(url).protocol === "https:" ? 443 : 80)), path: new URL(url).pathname } : {}),
-    method: /\bcurl\b[^\n]*\s-X\s+([A-Z]+)/i.exec(command)?.[1] ?? "GET",
+    method,
     phase,
     capability,
   };

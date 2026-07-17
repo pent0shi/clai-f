@@ -9,6 +9,12 @@
 import type { ChatMessage } from "../../types.js";
 import type { TranscriptItem as ClassicTranscriptItem } from "../../tui/state.js";
 import { asToolCallId, type ToolCallId } from "../../app/events/app-event.js";
+import { formatToolArgs } from "../../agent/tool-call-parser.js";
+import {
+  buildFileChange,
+  isFileMutationTool,
+  type FileChange,
+} from "../../tools/file-diff.js";
 import {
   EMPTY_TRANSCRIPT_STATE,
   type AssistantItem,
@@ -115,17 +121,10 @@ export function hydrateFromClassicTranscript(
         order.push(id);
         break;
       }
-      case "notice": {
-        const item: NoticeItem = {
-          ...base,
-          kind: "notice",
-          level: raw.level === "warn" ? "warn" : "info",
-          text: raw.text ?? "",
-        };
-        byId.set(id, item);
-        order.push(id);
+      case "notice":
+        // Ephemeral UI chrome only — never rehydrate into the conversation
+        // (would inflate item counts and reappear after every /history).
         break;
-      }
       case "compacted": {
         const item: CompactedItem = {
           ...base,
@@ -167,16 +166,178 @@ export function hydrateFromClassicTranscript(
 
 /**
  * Format tool args for a compact card label when restoring from model history.
+ * Prefer the same human labels live turns use (path / "N file(s)") — never dump
+ * full content JSON into the card header (that is what made history look broken).
  */
-function argsDisplayFromToolCall(args: Record<string, unknown> | undefined): string {
+function argsDisplayFromToolCall(
+  name: string,
+  args: Record<string, unknown> | undefined,
+): string {
   if (!args || typeof args !== "object") return "";
   try {
-    const json = JSON.stringify(args);
-    if (json.length <= 80) return json;
-    return `${json.slice(0, 77)}…`;
+    return formatToolArgs({ name, args });
   } catch {
-    return "";
+    try {
+      const json = JSON.stringify(args);
+      if (json.length <= 80) return json;
+      return `${json.slice(0, 77)}…`;
+    } catch {
+      return "";
+    }
   }
+}
+
+/**
+ * Rebuild structured file diffs from tool-call args so /history shows the same
+ * green/red hunks as the live session. Live turns attach `fileChanges` on
+ * tool-result; message-only history (or a re-save after a thin hydrate) often
+ * drops that payload while still keeping path/content in `toolCalls[].args`.
+ *
+ * Not a cwd issue — absolute paths in the snapshot still render; missing
+ * `fileChanges` is what forces the ugly receipt + JSON args UI.
+ */
+export function fileChangesFromToolArgs(
+  name: string,
+  args: Record<string, unknown> | undefined,
+): FileChange[] | undefined {
+  if (!args || !isFileMutationTool(name)) return undefined;
+  try {
+    if (name === "fs.write" || name === "fs.append") {
+      const path = String(args.path ?? "");
+      const content = String(args.content ?? "");
+      if (!path) return undefined;
+      return [
+        buildFileChange({
+          path,
+          before: "",
+          after: content,
+          kind: name === "fs.append" ? "append" : "create",
+        }),
+      ];
+    }
+    if (name === "fs.writeMany") {
+      const files = Array.isArray(args.files) ? args.files : [];
+      const changes: FileChange[] = [];
+      for (const entry of files) {
+        if (!entry || typeof entry !== "object") continue;
+        const rec = entry as Record<string, unknown>;
+        const path = String(rec.path ?? "");
+        const content = String(rec.content ?? "");
+        if (!path) continue;
+        changes.push(
+          buildFileChange({
+            path,
+            before: "",
+            after: content,
+            kind: "create",
+          }),
+        );
+      }
+      return changes.length > 0 ? changes : undefined;
+    }
+    if (name === "fs.edit" || name === "fs.replaceLines") {
+      const path = String(args.path ?? "");
+      if (!path) return undefined;
+      const oldText = String(args.oldText ?? args.old ?? "");
+      const newText = String(
+        args.newText ?? args.new ?? args.content ?? "",
+      );
+      // Snippet-level before/after still yields a useful green/red card when
+      // the full pre-image is not in history.
+      return [
+        buildFileChange({
+          path,
+          before: oldText,
+          after: newText,
+          kind: "edit",
+        }),
+      ];
+    }
+    if (name === "fs.delete") {
+      const path = String(args.path ?? "");
+      if (!path) return undefined;
+      return [
+        buildFileChange({
+          path,
+          before: "",
+          after: "",
+          kind: "delete",
+        }),
+      ];
+    }
+  } catch {
+    return undefined;
+  }
+  return undefined;
+}
+
+/** Count tool rows that still carry structured file diffs. */
+function countFileChangeTools(state: TranscriptState): number {
+  let n = 0;
+  for (const id of state.order) {
+    const item = state.byId.get(id);
+    if (
+      item?.kind === "tool" &&
+      item.fileChanges &&
+      item.fileChanges.length > 0
+    ) {
+      n += 1;
+    }
+  }
+  return n;
+}
+
+/**
+ * Copy reconstructed fileChanges (and clean argsDisplay) onto classic tools
+ * that lost their payload after a message-only re-save.
+ */
+function enrichToolsFromMessages(
+  classic: HydrateResult,
+  messages: readonly ChatMessage[],
+): HydrateResult {
+  const byCallId = new Map<
+    string,
+    { name: string; args: Record<string, unknown> }
+  >();
+  for (const message of messages) {
+    for (const call of message.toolCalls ?? []) {
+      if (!call.id) continue;
+      byCallId.set(call.id, {
+        name: call.name || "tool",
+        args: (call.args ?? {}) as Record<string, unknown>,
+      });
+    }
+  }
+  if (byCallId.size === 0) return classic;
+
+  let changed = false;
+  const byId = new Map(classic.state.byId);
+  for (const [id, item] of byId) {
+    if (item.kind !== "tool") continue;
+    if (item.fileChanges && item.fileChanges.length > 0) continue;
+    const call =
+      byCallId.get(String(item.toolCallId)) ?? byCallId.get(item.id);
+    if (!call) continue;
+    const fileChanges = fileChangesFromToolArgs(call.name, call.args);
+    if (!fileChanges?.length && !isFileMutationTool(call.name)) continue;
+    const argsDisplay =
+      item.argsDisplay &&
+      !item.argsDisplay.trimStart().startsWith("{")
+        ? item.argsDisplay
+        : argsDisplayFromToolCall(call.name, call.args);
+    byId.set(id, {
+      ...item,
+      name: item.name || call.name,
+      argsDisplay: argsDisplay || item.argsDisplay,
+      ...(fileChanges ? { fileChanges } : {}),
+    });
+    changed = true;
+  }
+  if (!changed) return classic;
+  return {
+    ...classic,
+    state: { ...classic.state, byId },
+  };
 }
 
 /**
@@ -247,6 +408,9 @@ export function hydrateFromMessages(messages: readonly ChatMessage[]): HydrateRe
       const output = result?.content ?? "";
       if (output) toolOutputs.set(toolCallId, output);
       const ok = result?.ok !== false;
+      const toolName = call.name || result?.name || "tool";
+      const callArgs = (call.args ?? {}) as Record<string, unknown>;
+      const fileChanges = fileChangesFromToolArgs(toolName, callArgs);
       const item: ToolItem = {
         id: String(toolCallId),
         sequence,
@@ -254,15 +418,15 @@ export function hydrateFromMessages(messages: readonly ChatMessage[]): HydrateRe
         timestamp: sequence,
         kind: "tool",
         toolCallId,
-        name: call.name || result?.name || "tool",
-        argsDisplay: argsDisplayFromToolCall(call.args),
+        name: toolName,
+        argsDisplay: argsDisplayFromToolCall(toolName, callArgs),
         status: result ? (ok ? "ok" : "failed") : "ok",
         exitCode: result ? (ok ? 0 : 1) : undefined,
         summary: undefined,
         artifactPath: undefined,
         reason: undefined,
         outputBytes: Buffer.byteLength(output, "utf8"),
-        fileChanges: undefined,
+        fileChanges,
       };
       byId.set(item.id, item);
       order.push(item.id);
@@ -304,6 +468,11 @@ export function transcriptLooksIncomplete(
 /**
  * Prefer the richer of classic visual transcript vs message-derived hydrate
  * so /history does not drop tools when only one representation survived.
+ *
+ * Classic is enriched with `fileChanges` rebuilt from message tool args when
+ * a prior message-only re-save wiped the structured diffs (common after
+ * resume). Prefer classic when it has more file-diff tools even if message
+ * tool count is slightly higher — otherwise green/red hunks disappear.
  */
 export function hydrateSessionVisual(
   transcript: readonly ClassicTranscriptItem[] | undefined,
@@ -313,16 +482,27 @@ export function hydrateSessionVisual(
   if (!transcript || transcript.length === 0) {
     return fromMessages;
   }
-  const fromClassic = hydrateFromClassicTranscript(transcript);
+  const fromClassic = enrichToolsFromMessages(
+    hydrateFromClassicTranscript(transcript),
+    messages,
+  );
   const classicToolCount = [...fromClassic.state.byId.values()].filter(
     (i) => i.kind === "tool",
   ).length;
   const messageToolCount = [...fromMessages.state.byId.values()].filter(
     (i) => i.kind === "tool",
   ).length;
+  const classicFc = countFileChangeTools(fromClassic.state);
+  const messageFc = countFileChangeTools(fromMessages.state);
+
+  // Prefer the side that still has structured file diffs for write/edit cards.
+  if (classicFc > messageFc) return fromClassic;
+  if (messageFc > classicFc && messageToolCount >= classicToolCount) {
+    return fromMessages;
+  }
   // Prefer the snapshot with more tool cards (real work); break ties with
-  // more total items, then classic (preserves thinking/notices).
-  if (messageToolCount > classicToolCount) return fromMessages;
+  // more total items, then classic (preserves thinking/notices + diffs).
+  if (messageToolCount > classicToolCount + 2) return fromMessages;
   if (fromMessages.state.order.length > fromClassic.state.order.length * 1.5) {
     return fromMessages;
   }
@@ -385,13 +565,9 @@ export function serializeForHistory(
         break;
       }
       case "notice":
-        out.push({
-          kind: "notice",
-          id: item.id,
-          level: item.level === "error" ? "warn" : item.level,
-          text: item.text,
-          done: true,
-        });
+        // Do not persist INFO/WARN banners to history.db — they are not
+        // conversation, must not enter model context, and must not count
+        // toward "N items" on resume.
         break;
       case "compacted":
         out.push({

@@ -2,7 +2,7 @@
 /**
  * Chrome under the composer.
  *
- * Idle: centered clickable chips (`/:commands`, Ctrl+T/O/H) with hover feedback.
+ * Idle: centered clickable chips (`/:commands`, ^T/^O/^H, ^U/^D) with hover.
  * Running: spinner + activity · Esc:cancel.
  * Scroll remainder badges (`▲ N` / `▼ N`) sit on the far right.
  */
@@ -33,11 +33,11 @@ export interface StatusLineProps {
   readonly planVisible: boolean;
   readonly thinkingExpanded?: boolean | undefined;
   readonly outputExpanded?: boolean | undefined;
-  /** Click Ctrl+T chip → toggle thinking. */
+  /** Click ^T chip → toggle thinking. */
   readonly onToggleThinking?: (() => void) | undefined;
-  /** Click Ctrl+O chip → toggle tool/compacted output. */
+  /** Click ^O chip → toggle tool/compacted output. */
   readonly onToggleOutput?: (() => void) | undefined;
-  /** Click Ctrl+H chip → toggle plan pane. */
+  /** Click ^H chip → toggle plan pane. */
   readonly onTogglePlan?: (() => void) | undefined;
 }
 
@@ -54,7 +54,7 @@ export function modeIndicatorPresentation(mode: Mode): ModeIndicatorPresentation
 
 export function tasksToggleLabel(visible: boolean, compact = false): string {
   if (compact) return visible ? "HIDE TASKS" : "SHOW TASKS";
-  return visible ? "Ctrl+H · HIDE TASKS" : "Ctrl+H · SHOW TASKS";
+  return visible ? "^H · HIDE TASKS" : "^H · SHOW TASKS";
 }
 
 function clip(value: string, max: number): string {
@@ -402,17 +402,23 @@ export function StatusLine(props: StatusLineProps): ReactNode {
           <>
             {sep(theme)}
             <ClickableHint
-              label={thinkingExpanded ? "Ctrl+T:thinking on" : "Ctrl+T:thinking"}
+              label={thinkingExpanded ? "^T thinking on" : "^T thinking"}
               active={thinkingExpanded}
               theme={theme}
               onClick={onToggleThinking}
             />
             {sep(theme)}
             <ClickableHint
-              label={outputExpanded ? "Ctrl+O:output on" : "Ctrl+O:output"}
+              label={outputExpanded ? "^O output on" : "^O output"}
               active={outputExpanded}
               theme={theme}
               onClick={onToggleOutput}
+            />
+            {sep(theme)}
+            <text
+              selectable={false}
+              content="^U top · ^D end · ^X clear"
+              style={{ fg: theme.muted }}
             />
           </>
         ) : null}

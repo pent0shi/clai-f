@@ -89,6 +89,23 @@ describe("ActionRouter", () => {
     expect(router.resolve("ctrl+r", "transcript")).toBe("transcript.search");
   });
 
+  it("resolves ^U/^D to chat top/bottom and ^X to clear (no g/G)", () => {
+    const router = new ActionRouter();
+    expect(router.resolve("ctrl+u", "composer")).toBe("transcript.top");
+    expect(router.resolve("ctrl+d", "composer")).toBe("transcript.bottom");
+    expect(router.resolve("ctrl+u", "transcript")).toBe("transcript.top");
+    expect(router.resolve("ctrl+d", "transcript")).toBe("transcript.bottom");
+    expect(router.resolve("ctrl+x", "composer")).toBe("editor.clear");
+    // No bare g/G bindings.
+    expect(router.resolve("g", "transcript")).toBeUndefined();
+    expect(router.resolve("shift+g", "transcript")).toBeUndefined();
+    expect(router.resolve("g", "pager")).toBeUndefined();
+    expect(router.resolve("shift+g", "pager")).toBeUndefined();
+    // Pager also uses ^U/^D for absolute ends.
+    expect(router.resolve("ctrl+u", "pager")).toBe("pager.top");
+    expect(router.resolve("ctrl+d", "pager")).toBe("pager.bottom");
+  });
+
   it("normalizes the incoming chord before lookup", () => {
     const router = new ActionRouter();
     expect(router.resolve("Shift+Enter", "composer")).toBe("editor.newline");

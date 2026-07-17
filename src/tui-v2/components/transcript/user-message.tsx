@@ -37,6 +37,7 @@ export function UserMessage(props: {
       <text
         selectable
         style={{
+          // White on darker amber plate; border stays lighter #f5b351.
           fg: theme.white,
           bg: theme.prompt,
           attributes: TextAttributes.BOLD,

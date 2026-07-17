@@ -444,11 +444,11 @@ export async function fsWriteMany(
     }
   }
 
+  // Clean multi-line receipt: one path per line (UI lists basenames; pager
+  // still has full paths). Avoid repeating the same dump twice in the spool.
   const lines: string[] = [];
   if (written.length > 0) {
-    lines.push(
-      `Wrote ${written.length} file(s) (trust receipts — do not re-read just to verify):`,
-    );
+    lines.push(`Wrote ${written.length} file(s):`);
     for (const p of written) lines.push(`  ${p}`);
   }
   if (failures.length > 0) {

@@ -9,10 +9,14 @@
  */
 
 import chalk from "chalk";
-import { renderWordmark, wordmarkWidth, WORDMARK_TOP_HEX } from "./wordmark.js";
+import { renderWordmark, wordmarkWidth } from "./wordmark.js";
 
-/** Card frame — same magenta as the top of the CLAI wordmark "I". */
-const cardBorder = chalk.hex(WORDMARK_TOP_HEX);
+/**
+ * Agent / intro card frame — electric aqua, same as composer + Tasks pane
+ * (`theme.inputBorder` #2EEBFF). Wordmark gradient stays multi-color inside.
+ */
+const CARD_BORDER_HEX = "#2EEBFF";
+const cardBorder = chalk.hex(CARD_BORDER_HEX);
 
 /** Truncate long text in the middle (avoids importing from tui/). */
 function truncateMiddle(text: string, maxWidth: number): string {

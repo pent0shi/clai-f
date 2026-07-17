@@ -138,6 +138,24 @@ export function transcriptItems(state: TranscriptState): TranscriptItem[] {
   return items;
 }
 
+/**
+ * UI chrome only — INFO/WARN banners ("session resumed", "Ctrl+C again to exit").
+ * Never model context, never history persistence, never conversation item counts.
+ */
+export function isUiOnlyTranscriptItem(item: TranscriptItem): boolean {
+  return item.kind === "notice";
+}
+
+/** Count conversation rows excluding ephemeral UI notices. */
+export function conversationItemCount(state: TranscriptState): number {
+  let n = 0;
+  for (const id of state.order) {
+    const item = state.byId.get(id);
+    if (item && !isUiOnlyTranscriptItem(item)) n += 1;
+  }
+  return n;
+}
+
 /** Plain text a search/export pass should scan for a given item. */
 export function itemSearchText(item: TranscriptItem): string {
   switch (item.kind) {

@@ -53,7 +53,7 @@ describe("transcript semantic extraction (V2-061)", () => {
 
     expect(text).toBe([
       "You:\nCHAT-USER-SENTINEL",
-      "Tool: fs.read sentinel.txt — done (exit 0)\nCHAT-TOOL-SENTINEL\n  artifact: /tmp/sentinel.txt",
+      "Tool: fs.read sentinel.txt — done\nCHAT-TOOL-SENTINEL\n  artifact: /tmp/sentinel.txt",
       "Assistant:\nCHAT-ASSISTANT-SENTINEL",
     ].join("\n\n"));
     expect(text.indexOf("CHAT-USER-SENTINEL")).toBeLessThan(text.indexOf("CHAT-TOOL-SENTINEL"));

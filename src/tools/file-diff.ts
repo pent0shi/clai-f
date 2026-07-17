@@ -591,13 +591,23 @@ export function fileToolTitle(
   const fullPath = path && path.includes("/") ? path : undefined;
 
   if (toolName === "fs.writeMany") {
+    // pathOrDisplay may be "3 file(s): a, b" from formatToolArgs, a count, or
+    // (legacy) raw JSON — never dump JSON into the title.
+    const countMatch = /^(\d+)\s*file/i.exec(path);
+    const count = countMatch ? Number(countMatch[1]) : 0;
+    const label =
+      count > 0
+        ? `${count} file${count === 1 ? "" : "s"}`
+        : path && !path.startsWith("{") && path.length < 80
+          ? path
+          : "files";
     if (status === "running" || status === "queued") {
-      return { title: `Writing ${path || "files"}`, pathLine: undefined };
+      return { title: `Writing ${label}`, pathLine: undefined };
     }
     if (status === "failed" || status === "blocked") {
-      return { title: `Write failed · ${path || "files"}`, pathLine: undefined };
+      return { title: `Write failed · ${label}`, pathLine: undefined };
     }
-    return { title: `Wrote ${path || "files"}`, pathLine: undefined };
+    return { title: `Wrote ${label}`, pathLine: undefined };
   }
 
   const inferred: FileChangeKind =

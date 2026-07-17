@@ -15,9 +15,8 @@
  * title (verb + relative path). Collapse-all applies to every file-diff card.
  */
 
-import { useState, type ReactNode } from "react";
+import { type ReactNode } from "react";
 import { TextAttributes } from "@opentui/core";
-import type { MouseEvent } from "@opentui/core";
 import type { OutputSpool } from "../../../app/events/event-buffer.js";
 import type { AppServices } from "../../bootstrap/composition-root.js";
 import type { ToolItem } from "../../state/transcript-types.js";
@@ -34,22 +33,20 @@ import {
 import { presentOutput, presentTool } from "../../rendering/tool-presenter.js";
 import { openToolOutputPager } from "../../rendering/open-tool-output.js";
 import {
-  collapsedFileChangesLabel,
-  presentFileChangePreview,
-  relativeDisplayPath,
-  rowBackground,
-  syntaxColor,
-} from "../../rendering/file-diff-view.js";
-import type { FileChange } from "../../../tools/file-diff.js";
+  isFileMutationTool,
+  type FileChange,
+} from "../../../tools/file-diff.js";
 import { LinkableText } from "./linkable-text.js";
 import { useClickWithoutDrag } from "./use-click-without-drag.js";
+import { DiffActionButton, FileDiffBody } from "./file-diff-card.js";
 
+/** Border / status accent: green ok · yellow running · red failed. */
 const STATUS_COLOR: Record<ToolItem["status"], keyof Theme> = {
   queued: "muted",
   running: "activity",
-  ok: "response",
-  failed: "mode",
-  blocked: "mode",
+  ok: "success",
+  failed: "diffDel",
+  blocked: "diffDel",
 };
 
 function OutputLines(props: {
@@ -58,15 +55,15 @@ function OutputLines(props: {
   gutterFg: string;
 }): ReactNode {
   const { lines, theme, gutterFg } = props;
-  // Tool/output body: CLAI wordmark magenta (same as task-pane border / logo "I").
-  const bodyFg = theme.magenta;
+  // Sky cyan body — readable on dark tool cards (theme.toolOutput).
+  const bodyFg = theme.toolOutput;
   return (
     <>
       {lines.map((line, i) => {
         const isGap = line.startsWith("···");
         return (
           // Selectable so drag-select includes tool output in the copy range.
-          <text key={i} selectable>
+          <text key={i} selectable style={{ height: 1 }}>
             <span style={{ fg: isGap ? theme.muted : gutterFg }}>{"│ "}</span>
             <span
               style={{
@@ -83,190 +80,6 @@ function OutputLines(props: {
   );
 }
 
-/**
- * Hover chip for collapse / collapse-all. Stops propagation so parent
- * header click does NOT open the file modal.
- */
-function DiffActionButton(props: {
-  label: string;
-  theme: Theme;
-  onClick: () => void;
-}): ReactNode {
-  const { label, theme, onClick } = props;
-  const [hovered, setHovered] = useState(false);
-  const fg = hovered ? theme.white : theme.muted;
-  const bg = hovered ? theme.selection : theme.statusBackground;
-  return (
-    <box
-      onMouseDown={(event: MouseEvent) => {
-        event.preventDefault();
-        event.stopPropagation();
-        onClick();
-      }}
-      onMouseUp={(event: MouseEvent) => {
-        event.preventDefault();
-        event.stopPropagation();
-      }}
-      onMouseOver={() => setHovered(true)}
-      onMouseOut={() => setHovered(false)}
-      style={{
-        flexDirection: "row",
-        alignItems: "center",
-        flexShrink: 0,
-        height: 1,
-        backgroundColor: bg,
-        marginLeft: 1,
-      }}
-    >
-      <text
-        selectable={false}
-        content={hovered ? ` ${label} ` : ` ${label} `}
-        style={{ fg, bg, attributes: hovered ? TextAttributes.BOLD : TextAttributes.NONE }}
-      />
-    </box>
-  );
-}
-
-/** One compact row: solid gutter · full-width code tint · height 1. */
-function DiffCodeRow(props: {
-  gutter: string;
-  spans: readonly { kind: import("../../rendering/syntax-highlight.js").SyntaxKind; text: string }[];
-  displayText: string;
-  tone: "context" | "add" | "del" | "gap" | "header";
-  theme: Theme;
-}): ReactNode {
-  const { gutter, spans, displayText, tone, theme } = props;
-  const bg = rowBackground(tone, theme);
-  const isGap = tone === "gap" || tone === "header";
-  const gutterFg = theme.diffGutter;
-  // Single-height row: solid "│" (not a box border — avoids dashed gaps).
-  return (
-    <box
-      style={{
-        flexDirection: "row",
-        width: "100%",
-        height: 1,
-        flexShrink: 0,
-      }}
-    >
-      <text selectable={false} style={{ height: 1 }}>
-        <span style={{ fg: gutterFg }}>{gutter}</span>
-        <span style={{ fg: gutterFg }}>{" │ "}</span>
-      </text>
-      <box
-        style={{
-          flexGrow: 1,
-          flexShrink: 1,
-          minWidth: 0,
-          height: 1,
-          ...(bg ? { backgroundColor: bg } : {}),
-        }}
-      >
-        <text
-          selectable={!isGap}
-          style={{
-            height: 1,
-            attributes: isGap ? TextAttributes.DIM : TextAttributes.NONE,
-          }}
-        >
-          {isGap ? (
-            <span style={{ fg: theme.muted }}>{displayText}</span>
-          ) : spans.length > 0 ? (
-            spans.map((sp, si) => (
-              <span key={si} style={{ fg: syntaxColor(sp.kind, theme) }}>
-                {sp.text}
-              </span>
-            ))
-          ) : (
-            <span style={{ fg: theme.foreground }}>{displayText || " "}</span>
-          )}
-        </text>
-      </box>
-    </box>
-  );
-}
-
-function FileDiffHunks(props: {
-  change: FileChange;
-  showPath: boolean;
-  theme: Theme;
-  onOpen: (change: FileChange) => void;
-}): ReactNode {
-  const { change, showPath, theme, onOpen } = props;
-  const rows = presentFileChangePreview(change);
-  const open = useClickWithoutDrag(() => onOpen(change));
-  return (
-    <box
-      style={{ flexDirection: "column", width: "100%" }}
-      onMouseDown={open.onMouseDown}
-      onMouseUp={open.onMouseUp}
-    >
-      {showPath ? (
-        <text
-          selectable={false}
-          style={{ height: 1, fg: theme.muted, attributes: TextAttributes.DIM }}
-        >
-          {relativeDisplayPath(change.path)}
-        </text>
-      ) : null}
-      {rows.map((row, ri) => (
-        <DiffCodeRow
-          key={ri}
-          gutter={row.gutter}
-          spans={row.spans}
-          displayText={row.displayText}
-          tone={row.tone}
-          theme={theme}
-        />
-      ))}
-    </box>
-  );
-}
-
-function FileDiffBody(props: {
-  changes: readonly FileChange[];
-  theme: Theme;
-  diffExpanded: boolean;
-  onOpen: (change: FileChange) => void;
-}): ReactNode {
-  const { changes, theme, diffExpanded, onOpen } = props;
-
-  const label = collapsedFileChangesLabel(changes);
-  const openPrimary = useClickWithoutDrag(() => {
-    if (changes[0]) onOpen(changes[0]!);
-  });
-
-  // Title row only — collapse buttons live beside the status "done" pill.
-  return (
-    <box style={{ flexDirection: "column", width: "100%", marginTop: 0 }}>
-      <box
-        style={{ flexDirection: "row", width: "100%", height: 1, flexShrink: 0 }}
-        onMouseDown={openPrimary.onMouseDown}
-        onMouseUp={openPrimary.onMouseUp}
-      >
-        <text
-          selectable
-          style={{ height: 1, fg: theme.foreground, attributes: TextAttributes.BOLD }}
-        >
-          {label}
-        </text>
-      </box>
-
-      {diffExpanded
-        ? changes.map((change, ci) => (
-            <FileDiffHunks
-              key={`${change.path}-${ci}`}
-              change={change}
-              showPath={changes.length > 1}
-              theme={theme}
-              onOpen={onOpen}
-            />
-          ))
-        : null}
-    </box>
-  );
-}
-
 function BatchSubCard(props: {
   section: BatchSection;
   theme: Theme;
@@ -276,7 +89,7 @@ function BatchSubCard(props: {
 }): ReactNode {
   const { section, theme, expanded, parentExpanded, onOpen } = props;
   const presented = presentBatchSection(section, expanded);
-  const borderFg = section.ok ? theme.response : theme.mode;
+  const borderFg = section.ok ? theme.success : theme.diffDel;
   const statusFg = borderFg;
 
   // Click (no drag) opens pager; drag-select copies output lines.
@@ -339,7 +152,7 @@ function BatchSubCard(props: {
             flexShrink: 1,
           }}
         >
-          <OutputLines lines={presented.lines} theme={theme} gutterFg={borderFg} />
+          <OutputLines lines={presented.lines} theme={theme} gutterFg={theme.toolOutput} />
         </box>
       ) : null}
 
@@ -382,6 +195,10 @@ export function ToolCard(props: {
   const tail = spool.tail(item.toolCallId);
   const spoolState = spool.state(item.toolCallId);
   const fileChanges = item.fileChanges;
+  const isWriteMany = item.name === "fs.writeMany";
+  // File mutations never show the spool receipt ("Tool fs.write result…") —
+  // that is what made history cards look broken when fileChanges was missing.
+  const isMutation = isFileMutationTool(item.name);
 
   const isBatchName = isBatchToolName(item.name);
   const batchSections =
@@ -395,8 +212,9 @@ export function ToolCard(props: {
       : { lines: [] as const, summary: "" };
   const isBatchLive = isBatchName && item.status === "running";
 
+  // write/edit/writeMany: structured body only — never receipt dumps.
   const { lines, hiddenAboveCount, truncatedNotice } =
-    isBatch || isBatchLive || isFileDiff
+    isBatch || isBatchLive || isFileDiff || isWriteMany || isMutation
       ? {
           lines: [] as string[],
           hiddenAboveCount: 0,
@@ -405,19 +223,21 @@ export function ToolCard(props: {
       : presentOutput(tail, spoolState, expanded, item.name);
 
   const statusFg = theme[STATUS_COLOR[item.status]];
-  const highlight =
-    item.status === "running"
-      ? theme.activity
-      : item.status === "queued"
-        ? theme.muted
-        : item.status === "ok"
-          ? theme.toolBorder
-          : theme.mode;
+  // Card boundary: green success · yellow running · red failure · muted queued.
+  const highlight = statusFg;
+  // Status chips: dark solid plates (bright colors stay on title/border only).
+  const statusBadgeBg =
+    item.status === "ok"
+      ? theme.successBg
+      : item.status === "failed" || item.status === "blocked"
+        ? theme.failedBg
+        : statusFg;
 
   const hasBody =
     isBatch ||
     isBatchLive ||
     isFileDiff ||
+    isWriteMany ||
     lines.length > 0 ||
     item.outputBytes > 0 ||
     Boolean(item.artifactPath);
@@ -456,7 +276,11 @@ export function ToolCard(props: {
 
   // Footer: shorter for file diffs (title already carries the path).
   let footerHint: string | undefined;
-  if (isFileDiff && item.status !== "running") {
+  if (isWriteMany && item.status !== "running") {
+    footerHint = fileDiffExpanded
+      ? `${fileChanges?.length ?? 0} file${fileChanges?.length === 1 ? "" : "s"} · click hunk · open file`
+      : `${fileChanges?.length ?? 0} file${fileChanges?.length === 1 ? "" : "s"} · expand for diffs · click for full`;
+  } else if (isFileDiff && !isWriteMany && item.status !== "running") {
     footerHint = fileDiffExpanded
       ? "click hunk · open file"
       : "click title · open file";
@@ -505,30 +329,52 @@ export function ToolCard(props: {
         paddingBottom: 0,
       }}
     >
-      {/* Header: name + status pill. Collapse chips sit beside "done" (file diffs only). */}
+      {/* Header: title (shrinks) + short status badge (never overflows border).
+          height:1 + no padding so no air gap before command/args line. */}
       <box
         style={{
           flexDirection: "row",
           width: "100%",
+          height: 1,
+          flexShrink: 0,
           paddingTop: 0,
           paddingBottom: 0,
+          marginTop: 0,
+          marginBottom: 0,
           alignItems: "center",
         }}
       >
         <box
-          style={{ flexDirection: "row", flexShrink: 0 }}
+          style={{
+            flexDirection: "row",
+            flexGrow: 1,
+            flexShrink: 1,
+            minWidth: 0,
+          }}
           onMouseDown={openFullClick.onMouseDown}
           onMouseUp={openFullClick.onMouseUp}
         >
-          <text selectable style={{ fg: statusFg, attributes: TextAttributes.BOLD }}>
-            {/* File diffs put the verb+path in the body title — avoid a second tall name. */}
-            {isFileDiff ? `${glyph}` : `${glyph} ${name}`}
-          </text>
-          <text content=" " selectable={false} />
-          <text selectable={false} style={{ fg: statusFg, bg: theme.chip, attributes: TextAttributes.BOLD }}>
-            {` ${statusLabel} `}
-          </text>
+          <text
+            selectable
+            content={`${glyph} ${name}`}
+            style={{
+              fg: statusFg,
+              attributes: TextAttributes.BOLD,
+              flexShrink: 1,
+            }}
+          />
         </box>
+        <text content=" " selectable={false} style={{ flexShrink: 0 }} />
+        <text
+          selectable={false}
+          content={` ${statusLabel} `}
+          style={{
+            fg: theme.white,
+            bg: statusBadgeBg,
+            attributes: TextAttributes.BOLD,
+            flexShrink: 0,
+          }}
+        />
         {isFileDiff ? (
           <>
             <DiffActionButton
@@ -558,10 +404,23 @@ export function ToolCard(props: {
       </box>
 
       {argsDisplay && argsLabel ? (
-        <box style={{ flexDirection: "row", width: "100%", marginTop: 0 }}>
-          <text selectable style={{ fg: theme.muted }}>{argsLabel}: </text>
-          {/* Aqua input/command text — stands out from muted labels + white output. */}
-          <text selectable style={{ fg: theme.cyan }}>{argsDisplay}</text>
+        <box
+          style={{
+            flexDirection: "row",
+            width: "100%",
+            marginTop: 0,
+            marginBottom: 0,
+            paddingTop: 0,
+            flexShrink: 0,
+          }}
+        >
+          <text selectable style={{ fg: theme.muted }}>
+            {argsLabel}:{" "}
+          </text>
+          {/* Input/command — composer aqua; OUTPUT body uses toolOutput sky. */}
+          <text selectable style={{ fg: theme.inputBorder }}>
+            {argsDisplay}
+          </text>
         </box>
       ) : null}
       {pathLine && !isFileDiff ? (
@@ -581,9 +440,9 @@ export function ToolCard(props: {
           {liveBatch.lines.map((line, i) => {
             const fg =
               line.tone === "ok"
-                ? theme.response
+                ? theme.success
                 : line.tone === "fail"
-                  ? theme.mode
+                  ? theme.diffDel
                   : line.tone === "running"
                     ? theme.activity
                     : theme.muted;
@@ -610,7 +469,7 @@ export function ToolCard(props: {
           ))
         : null}
 
-      {/* File mutation diffs — compact rows; chevron collapses to title. */}
+      {/* writeMany + single-file mutations: green/red hunk previews (not name-only lists). */}
       {!isBatch && !isBatchLive && isFileDiff && fileChanges ? (
         <box
           style={{
@@ -621,11 +480,19 @@ export function ToolCard(props: {
           }}
         >
           <FileDiffBody
-            changes={fileChanges}
+            changes={isWriteMany ? fileChanges.slice(0, 12) : fileChanges}
             theme={theme}
             diffExpanded={fileDiffExpanded}
+            multiFilePreview={isWriteMany}
             onOpen={openFileChange}
           />
+          {isWriteMany && fileChanges.length > 12 ? (
+            <text
+              selectable
+              content={` ··· +${fileChanges.length - 12} more files · click for full ···`}
+              style={{ fg: theme.muted, height: 1 }}
+            />
+          ) : null}
         </box>
       ) : null}
 
@@ -645,15 +512,23 @@ export function ToolCard(props: {
           onMouseDown={openFullClick.onMouseDown}
           onMouseUp={openFullClick.onMouseUp}
         >
-          <text selectable style={{ fg: theme.white, bg: theme.chipTeal, attributes: TextAttributes.BOLD }}>
+          <text
+            selectable
+            style={{
+              fg: theme.white,
+              bg: theme.chipTeal,
+              attributes: TextAttributes.BOLD,
+              height: 1,
+            }}
+          >
             {" OUTPUT "}
           </text>
-          <OutputLines lines={lines} theme={theme} gutterFg={theme.muted} />
+          <OutputLines lines={lines} theme={theme} gutterFg={theme.toolOutput} />
         </box>
       ) : null}
 
-      {/* Skip SAVED line for file diffs — path is already in the title. */}
-      {item.artifactPath && !isFileDiff ? (
+      {/* Skip SAVED line for file mutations — path is already in the title. */}
+      {item.artifactPath && !isFileDiff && !isMutation ? (
         <box style={{ flexDirection: "row", width: "100%", marginTop: 0 }}>
           <text selectable style={{ fg: theme.white, bg: theme.chipTeal, attributes: TextAttributes.BOLD }}>
             {" SAVED "}

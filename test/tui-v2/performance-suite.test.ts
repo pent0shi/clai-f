@@ -117,14 +117,28 @@ describe("V2-091 performance suite (Node pure paths)", () => {
   });
 
   it(`builds a ${TEN_K}-item semantic document within ${SEMANTIC_BUDGET_MS}ms`, () => {
-    const seq = sequencer();
-    let state: TranscriptState = EMPTY_TRANSCRIPT_STATE;
+    // Real conversation rows — UI notices are intentionally omitted from
+    // semantic export (not model/selection context).
+    const order: string[] = [];
+    const byId = new Map();
     for (let i = 0; i < TEN_K; i++) {
-      state = applyAppEvent(
-        state,
-        seq.build("notice", { level: "info", text: `n-${i}` }, undefined),
-      );
+      const id = `user-${i}`;
+      order.push(id);
+      byId.set(id, {
+        id,
+        sequence: i + 1,
+        turnId: undefined,
+        timestamp: i + 1,
+        kind: "user",
+        text: `user prompt ${i}`,
+      });
     }
+    const state: TranscriptState = {
+      ...EMPTY_TRANSCRIPT_STATE,
+      order,
+      byId,
+      lastSequence: TEN_K,
+    };
     const t0 = performance.now();
     const doc = extractTranscriptSemanticDocument(state, { thinking: "none" });
     const ms = performance.now() - t0;

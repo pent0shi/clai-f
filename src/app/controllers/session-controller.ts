@@ -54,7 +54,7 @@ export interface SessionState {
    * `exact` is true when the last prompt size came from the provider API.
    */
   readonly contextUsage: ContextUsageSnapshot | undefined;
-  /** Preformatted chip, e.g. `ctx 12,450/128k` or `~ctx 12k/128k`. */
+  /** Preformatted chip, e.g. `12,450 tok` or `~12.5k tok`. */
   readonly contextChip: string | undefined;
 }
 
@@ -244,7 +244,25 @@ export class SessionController implements Disposable {
    */
   loadHistory(
     messages: readonly ChatMessage[],
-    options: { sessionId?: string; title?: string | undefined } = {},
+    options: {
+      sessionId?: string;
+      title?: string | undefined;
+      /**
+       * Restored from history so the footer matches the live session count.
+       * Accepts partial snapshots (contextLimit optional).
+       */
+      contextUsage?:
+        | ContextUsageSnapshot
+        | {
+            contextTokens: number;
+            contextLimit?: number | undefined;
+            lastCompletionTokens?: number | undefined;
+            sessionPromptTokens?: number | undefined;
+            sessionCompletionTokens?: number | undefined;
+            exact: boolean;
+          }
+        | undefined;
+    } = {},
   ): void {
     if (this.turn.running) this.turn.abort();
     this.history = [...messages];
@@ -256,9 +274,28 @@ export class SessionController implements Disposable {
     this.sessionTitle = options.title;
     this.titledAtUserCount = messages.filter((m) => m.role === "user").length;
     this.titleInFlight = false;
-    // Resumed history has no API usage yet — estimate fill until next call.
-    this.contextUsage = undefined;
-    this.refreshEstimatedContext();
+    // Prefer the exact snapshot saved during the live turn; only estimate when
+    // older sessions have no usage payload (would otherwise drop 39k → ~11k).
+    if (
+      options.contextUsage &&
+      options.contextUsage.contextTokens > 0
+    ) {
+      const cu = options.contextUsage;
+      this.contextUsage = {
+        contextTokens: cu.contextTokens,
+        contextLimit:
+          typeof cu.contextLimit === "number" && cu.contextLimit > 0
+            ? cu.contextLimit
+            : modelContextWindow(this.model, this.provider),
+        lastCompletionTokens: cu.lastCompletionTokens ?? 0,
+        sessionPromptTokens: cu.sessionPromptTokens ?? 0,
+        sessionCompletionTokens: cu.sessionCompletionTokens ?? 0,
+        exact: cu.exact === true,
+      };
+    } else {
+      this.contextUsage = undefined;
+      this.refreshEstimatedContext();
+    }
     if (options.sessionId) {
       this.sessionIdValue = asSessionId(options.sessionId);
       this.sequencer.rebind(this.sessionIdValue);
@@ -405,10 +442,23 @@ export class SessionController implements Disposable {
     if (!this.history.some((m) => m.role === "user")) return;
     if (name) this.sessionTitle = name;
     const transcript = this.deps.getTranscriptSnapshot?.();
+    const snap = this.resolveContextUsage();
     await this.deps.persistence.saveSession(this.history, {
       sessionId: this.sessionIdValue,
       name: name ?? this.sessionTitle,
       transcript,
+      ...(snap && snap.contextTokens > 0
+        ? {
+            contextUsage: {
+              contextTokens: snap.contextTokens,
+              contextLimit: snap.contextLimit,
+              lastCompletionTokens: snap.lastCompletionTokens,
+              sessionPromptTokens: snap.sessionPromptTokens,
+              sessionCompletionTokens: snap.sessionCompletionTokens,
+              exact: snap.exact,
+            },
+          }
+        : {}),
     });
   }
 

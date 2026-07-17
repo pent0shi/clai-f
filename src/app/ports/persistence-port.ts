@@ -1,5 +1,6 @@
 import type { ChatMessage } from "../../types.js";
 import type { SessionPlan } from "../../store/plan.js";
+import type { PersistedContextUsage } from "../../store/history.js";
 import type { TranscriptItem } from "../../tui/state.js";
 
 export interface SaveSessionOptions {
@@ -9,6 +10,8 @@ export interface SaveSessionOptions {
   readonly name?: string | undefined;
   /** Classic-shaped visual transcript for full /history restore. */
   readonly transcript?: readonly TranscriptItem[] | undefined;
+  /** Token/context footer snapshot so /history resume matches the live count. */
+  readonly contextUsage?: PersistedContextUsage | undefined;
 }
 
 

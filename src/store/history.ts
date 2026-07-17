@@ -48,6 +48,16 @@ const MAX_HISTORY_BACKUPS = 12;
 // for users who already had a SQLite-backed history.
 const sqliteModuleName = "better-sqlite3";
 
+/** Persisted token/context footer snapshot (survives /history resume). */
+export interface PersistedContextUsage {
+  contextTokens: number;
+  contextLimit?: number | undefined;
+  lastCompletionTokens?: number | undefined;
+  sessionPromptTokens?: number | undefined;
+  sessionCompletionTokens?: number | undefined;
+  exact: boolean;
+}
+
 export interface HistoryRecord {
   id: string;
   name?: string | undefined;
@@ -60,6 +70,11 @@ export interface HistoryRecord {
    * they still restore as user/assistant summaries.
    */
   transcript?: TranscriptItem[] | undefined;
+  /**
+   * Last known context fill (prefer exact API usage). Without this, resume
+   * falls back to a cheap estimate that under-counts vs live turns.
+   */
+  contextUsage?: PersistedContextUsage | undefined;
 }
 
 export interface ToolCallRecord {
@@ -515,6 +530,7 @@ export async function saveSession(
   messages: ChatMessage[],
   name?: string | undefined,
   transcript?: TranscriptItem[] | undefined,
+  contextUsage?: PersistedContextUsage | undefined,
 ): Promise<HistoryRecord> {
   // Auto-derive a readable name from the first user message if none provided
   if (!name) {
@@ -534,6 +550,7 @@ export async function saveSession(
     cwd: safeCwd(),
     messages: scrubMessages(messages),
     transcript: scrubTranscript(transcript),
+    ...(contextUsage ? { contextUsage } : {}),
   };
 
   // Private mode: never persist chat content. Caller still gets a record
@@ -552,7 +569,11 @@ export async function saveSession(
       record.createdAt,
       record.updatedAt,
       record.cwd,
-      JSON.stringify({ messages: record.messages, transcript: record.transcript }),
+      JSON.stringify({
+        messages: record.messages,
+        transcript: record.transcript,
+        ...(contextUsage ? { contextUsage } : {}),
+      }),
     );
     await enforceSqliteRetention(db);
   } else {
@@ -567,6 +588,7 @@ export async function upsertSession(
   messages: ChatMessage[],
   name?: string | undefined,
   transcript?: TranscriptItem[] | undefined,
+  contextUsage?: PersistedContextUsage | undefined,
 ): Promise<HistoryRecord> {
   const existing = await getSession(id);
   const firstUser = messages.find((m) => m.role === "user");
@@ -582,6 +604,11 @@ export async function upsertSession(
     cwd: safeCwd(),
     messages: scrubMessages(messages),
     transcript: scrubTranscript(transcript),
+    ...(contextUsage
+      ? { contextUsage }
+      : existing?.contextUsage
+        ? { contextUsage: existing.contextUsage }
+        : {}),
   };
 
   if (getConfig().privateMode) return record;
@@ -596,7 +623,11 @@ export async function upsertSession(
       record.createdAt,
       record.updatedAt,
       record.cwd,
-      JSON.stringify({ messages: record.messages, transcript: record.transcript }),
+      JSON.stringify({
+        messages: record.messages,
+        transcript: record.transcript,
+        ...(record.contextUsage ? { contextUsage: record.contextUsage } : {}),
+      }),
     );
     await enforceSqliteRetention(db);
   } else {
@@ -681,7 +712,11 @@ function rowToSession(row: unknown): HistoryRecord {
   };
   const parsed = JSON.parse(data.messages_json) as
     | ChatMessage[]
-    | { messages?: ChatMessage[]; transcript?: TranscriptItem[] };
+    | {
+        messages?: ChatMessage[];
+        transcript?: TranscriptItem[];
+        contextUsage?: PersistedContextUsage;
+      };
   const messages = Array.isArray(parsed) ? parsed : parsed.messages ?? [];
   return {
     id: data.id,
@@ -691,6 +726,7 @@ function rowToSession(row: unknown): HistoryRecord {
     cwd: data.cwd,
     messages,
     transcript: Array.isArray(parsed) ? undefined : parsed.transcript,
+    contextUsage: Array.isArray(parsed) ? undefined : parsed.contextUsage,
   };
 }
 

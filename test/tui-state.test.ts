@@ -258,6 +258,22 @@ describe("TUI compaction transcript", () => {
     ]);
     expect(source).toContain("COMPACTED CONTEXT:\nPreviously did task X");
   });
+
+  it("omits UI notices from compaction source material", () => {
+    const source = serializeTranscriptForCompaction([
+      { kind: "user", id: "u", text: "hello", done: true },
+      {
+        kind: "notice",
+        id: "n",
+        level: "info",
+        text: "session resumed · 102 items · 109 model messages",
+        done: true,
+      },
+    ]);
+    expect(source).toContain("hello");
+    expect(source).not.toContain("session resumed");
+    expect(source).not.toContain("SESSION EVENT");
+  });
 });
 
 describe("TUI compaction reducer", () => {

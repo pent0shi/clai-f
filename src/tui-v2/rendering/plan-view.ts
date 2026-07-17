@@ -41,6 +41,10 @@ export const STATUS_LABEL: Record<PlanStatus, string> = {
   abandoned: "abandoned",
 };
 
+/**
+ * Theme keys used for plan/task pane text. Keep these high-contrast on the
+ * pane background (statusBackground) — avoid washed slate for body text.
+ */
 export type PlanColorToken =
   | "muted"
   | "foreground"
@@ -49,7 +53,9 @@ export type PlanColorToken =
   | "activity"
   | "cyan"
   | "magenta"
-  | "mode";
+  | "mode"
+  | "response"
+  | "diffDel";
 
 export function planStatusColor(status: PlanStatus): PlanColorToken {
   switch (status) {
@@ -67,6 +73,14 @@ export function planStatusColor(status: PlanStatus): PlanColorToken {
   }
 }
 
+/**
+ * Task row colors (tasks pane):
+ * - pending  → solid foreground (not light gray wash)
+ * - active   → yellow activity (already good)
+ * - done     → bright success green
+ * - failed   → red
+ * - skipped  → muted secondary
+ */
 export function taskStateColor(state: TaskState): PlanColorToken {
   switch (state) {
     case "done":
@@ -74,12 +88,12 @@ export function taskStateColor(state: TaskState): PlanColorToken {
     case "in_progress":
       return "activity";
     case "failed":
-      return "accent";
+      return "diffDel";
     case "skipped":
       return "muted";
     case "pending":
     default:
-      return "muted";
+      return "foreground";
   }
 }
 
@@ -88,6 +102,54 @@ export function progressView(plan: SessionPlan): PlanProgressView {
   if (total === 0) return { done: 0, total: 0, label: "no tasks" };
   if (done === total) return { done, total, label: `${done}/${total} complete` };
   return { done, total, label: `${done}/${total} tasks` };
+}
+
+/**
+ * Compact progress bar for the tasks pane header.
+ * Example (width=8, 3/8): `███░░░░░`
+ */
+export function progressBar(done: number, total: number, width: number): string {
+  const w = Math.max(4, Math.min(24, Math.floor(width)));
+  if (total <= 0) return "░".repeat(w);
+  const filled = Math.max(0, Math.min(w, Math.round((done / total) * w)));
+  return `${"█".repeat(filled)}${"░".repeat(w - filled)}`;
+}
+
+/** Short uppercase chip label for plan status (TASKS header). */
+export function planStatusChip(status: PlanStatus): string {
+  switch (status) {
+    case "draft":
+      return "DRAFT";
+    case "approved":
+      return "READY";
+    case "in_progress":
+      return "ACTIVE";
+    case "completed":
+      return "DONE";
+    case "abandoned":
+      return "DROPPED";
+    default: {
+      const _exhaustive: never = status;
+      return String(_exhaustive).toUpperCase() || "PLAN";
+    }
+  }
+}
+
+/** Short chip label for a task state. */
+export function taskStateChip(state: TaskState): string {
+  switch (state) {
+    case "in_progress":
+      return "ACTIVE";
+    case "done":
+      return "DONE";
+    case "failed":
+      return "FAIL";
+    case "skipped":
+      return "SKIP";
+    case "pending":
+    default:
+      return "TODO";
+  }
 }
 
 export function taskLabel(task: PlanTask): string {

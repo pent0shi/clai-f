@@ -48,7 +48,8 @@ describe("presentTool (CHAT-004)", () => {
         summary: "49.47.135.245\nFull output saved to: /tmp/x.txt",
       }),
     );
-    expect(p.statusLabel).toBe("done (exit 0)");
+    // Success badge stays short so it never overflows the card border.
+    expect(p.statusLabel).toBe("done");
     expect(p.detail).toBeUndefined();
   });
 
@@ -105,6 +106,25 @@ describe("presentTool (CHAT-004)", () => {
     expect(p.argsDisplay).toBeUndefined();
     expect(p.isFileDiff).toBe(true);
     expect(p.pathLine).toContain("App.css");
+  });
+
+  it("titles fs.write from JSON argsDisplay when fileChanges is missing", () => {
+    // History rows that lost structured diffs still must not show "Wrote write"
+    // or dump the content JSON under the card.
+    const p = presentTool(
+      toolItem({
+        name: "fs.write",
+        status: "ok",
+        argsDisplay: JSON.stringify({
+          path: "/Users/me/todo-app/src/main.tsx",
+          content: "import React from 'react'\n",
+        }),
+        fileChanges: undefined,
+      }),
+    );
+    expect(p.name).toBe("Wrote main.tsx");
+    expect(p.argsDisplay).toBeUndefined();
+    expect(p.isFileDiff).toBe(false);
   });
 });
 

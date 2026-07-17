@@ -35,6 +35,7 @@ import {
   recoverOrphanedHistory,
 } from "../../../store/history.js";
 import { relativeTime, shortCwd } from "../../../tui/text-format.js";
+import { conversationItemCount } from "../../state/transcript-types.js";
 import {
   hydrateSessionVisual,
   transcriptLooksIncomplete,
@@ -386,6 +387,9 @@ export async function handleHistory(services: AppServices): Promise<void> {
       services.session.loadHistory(session.messages, {
         sessionId: session.id,
         title: session.name,
+        ...(session.contextUsage
+          ? { contextUsage: session.contextUsage }
+          : {}),
       });
 
       // Prefer the richer of visual transcript vs model messages (tools often
@@ -412,7 +416,12 @@ export async function handleHistory(services: AppServices): Promise<void> {
         plan?.status === "approved" || plan?.status === "in_progress",
       );
 
-      const itemCount = hydrated.state.order.length;
+      // Notices are UI-only — exclude from item counts (and they are never
+      // model messages; session.messages is already the real LLM history).
+      const itemCount = conversationItemCount(hydrated.state);
+      const modelMsgCount = session.messages.filter(
+        (m) => m.role === "user" || m.role === "assistant" || m.role === "tool",
+      ).length;
       const titleBit = session.name ? ` · ${session.name}` : "";
       const planBit = plan
         ? ` · plan “${plan.goal.slice(0, 40)}${plan.goal.length > 40 ? "…" : ""}”`
@@ -430,7 +439,7 @@ export async function handleHistory(services: AppServices): Promise<void> {
           (session.transcript?.length ?? 0) < 8);
       services.session.notice(
         "info",
-        `session resumed${titleBit}${planBit} · ${itemCount} items · ${session.messages.length} model messages`,
+        `session resumed${titleBit}${planBit} · ${itemCount} items · ${modelMsgCount} model messages`,
       );
       if (incomplete) {
         services.session.notice(

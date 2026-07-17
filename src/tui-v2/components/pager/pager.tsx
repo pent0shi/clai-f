@@ -384,7 +384,10 @@ export function Pager(props: PagerProps): ReactNode {
     return () => { active = false; };
   }, [body, source]);
 
-  async function loadArtifactPage(offset: number): Promise<void> {
+  async function loadArtifactPage(
+    offset: number,
+    scroll: "top" | "bottom" = "top",
+  ): Promise<void> {
     if (!source || pageBusy) return;
     setPageBusy(true);
     try {
@@ -392,7 +395,16 @@ export function Pager(props: PagerProps): ReactNode {
       setArtifactPage(page);
       setDisplayBody(page.body || "(no output)");
       setMatchIndex(-1);
-      queueMicrotask(() => scrollRef.current?.scrollTo(0));
+      queueMicrotask(() => {
+        const box = scrollRef.current;
+        if (!box) return;
+        if (scroll === "bottom") {
+          const max = Math.max(0, box.scrollHeight - (box.viewport?.height ?? 0));
+          box.scrollTo(max);
+        } else {
+          box.scrollTo(0);
+        }
+      });
     } catch (error) {
       setExportError(error instanceof Error ? error.message : String(error));
     } finally {
@@ -598,15 +610,26 @@ export function Pager(props: PagerProps): ReactNode {
         scrollByRows(Math.max(1, Math.floor((sb?.viewport.height ?? 10) / 2)));
         break;
       case "pager.top":
-        if (source && artifactPage?.offset) void loadArtifactPage(0);
-        else sb?.scrollTo(0);
+        // g — absolute start (first artifact page + scroll top).
+        if (source && artifactPage?.offset) {
+          void loadArtifactPage(0, "top");
+        } else {
+          sb?.scrollTo(0);
+        }
         refreshScrollHint();
         break;
       case "pager.bottom":
+        // G — absolute end (last artifact page + scroll bottom).
         if (source && artifactPage && artifactPage.pageNumber < artifactPage.pageCount) {
-          void loadArtifactPage(Math.max(0, artifactPage.totalBytes - source.pageBytes));
+          void loadArtifactPage(
+            Math.max(0, artifactPage.totalBytes - source.pageBytes),
+            "bottom",
+          );
         } else {
-          sb?.scrollTo(sb.scrollHeight);
+          const max = sb
+            ? Math.max(0, sb.scrollHeight - (sb.viewport?.height ?? 0))
+            : 0;
+          sb?.scrollTo(max);
         }
         refreshScrollHint();
         break;

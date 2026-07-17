@@ -25,8 +25,21 @@ export interface Theme {
   readonly chip: string;
   /** Mode badge amber / RUNNING (legacy #B45309). */
   readonly mode: string;
-  /** Success / READY / allow-all green. */
+  /**
+   * Success / done / READY green — bright enough to read on dark panes
+   * (tasks list, toasts, confirmations). Not a dim forest green.
+   */
   readonly success: string;
+  /**
+   * Dark green plate for "done" status chips (white label on solid bg).
+   * Brighter `success` is for text/borders only — too light as a fill.
+   */
+  readonly successBg: string;
+  /**
+   * Dark red plate for "failed" / "blocked" status chips (white on solid bg).
+   * Brighter `diffDel` stays for text/borders.
+   */
+  readonly failedBg: string;
   /**
    * Wordmark top-of-"I" magenta (`WORDMARK_TOP_HEX` / chalk.magentaBright).
    * Used for plan/task pane border, agent-card frame, output accents.
@@ -48,8 +61,7 @@ export interface Theme {
   /** Indigo chip alternate for idle shortcuts. */
   readonly chipIndigo: string;
   /**
-   * Prompt / YOU badge background — same as the CTRL+O OUTPUT chip so user
-   * chrome and output chrome share one brand accent.
+   * Prompt / YOU badge background — warm amber (matches user bubble border).
    */
   readonly prompt: string;
   /** Thinking / reasoning text (violet). */
@@ -59,10 +71,12 @@ export interface Theme {
    * stronger than the `/` command menu border (`theme.border` #22D3EE).
    */
   readonly inputBorder: string;
-  /** User prompt bubble border — soft magenta. */
+  /** User prompt bubble border — warm amber. */
   readonly userBorder: string;
-  /** Tool output card border — blue from wordmark mid gradient. */
+  /** Tool card chrome accent (legacy mid-blue). */
   readonly toolBorder: string;
+  /** Tool OUTPUT body text (readable sky cyan). */
+  readonly toolOutput: string;
   /** Modal accent border. */
   readonly modalBorder: string;
   /** Added lines in file-diff cards / pager (green). */
@@ -107,7 +121,12 @@ const DARK_THEME: Theme = {
   rowB: "#0F172A",
   chip: "#334155",
   mode: "#B45309",
-  success: "#166534",
+  // Readable on #0b0e14 / statusBackground — was #166534 (too dark / washed).
+  success: "#4ADE80",
+  // Solid dark green for "done" badge fills (white text stays crisp).
+  successBg: "#166534",
+  // Solid dark red for "failed" badge fills.
+  failedBg: "#991B1B",
   // Top of CLAI wordmark "I" (magentaBright) — plan pane + agent card frame.
   magenta: "#FF55FF",
   cyan: "#67E8F9",
@@ -118,13 +137,16 @@ const DARK_THEME: Theme = {
   queued: "#854D0E",
   chipTeal: "#0E7490",
   chipIndigo: "#3730A3",
-  // Match CTRL+O OUTPUT chip bg for YOU / prompt chrome.
-  prompt: "#0E7490",
+  // YOU badge plate — darker amber so white "YOU" stays crisp.
+  prompt: "#B45309",
   thinking: "#A78BFA",
   // Stronger aqua than /command border (#22D3EE) — high-sat electric cyan.
   inputBorder: "#2EEBFF",
-  userBorder: "#0E7490",
+  // User prompt bubble border — lighter warm amber (distinct from YOU plate).
+  userBorder: "#f5b351",
   toolBorder: "#3B82F6",
+  // Tool OUTPUT body text — sky cyan (readable on dark panes).
+  toolOutput: "#7DD3FC",
   modalBorder: "#22D3EE",
   diffAdd: "#4ADE80",
   diffDel: "#F87171",
@@ -154,7 +176,11 @@ const LIGHT_THEME: Theme = {
   rowB: "#f8fafc",
   chip: "#e2e8f0",
   mode: "#B45309",
-  success: "#166534",
+  success: "#16A34A",
+  // Darker plate for "done" chips on light terminals.
+  successBg: "#14532d",
+  // Darker plate for "failed" chips on light terminals.
+  failedBg: "#7f1d1d",
   // Top of CLAI wordmark "I" (slightly deeper on light bg for contrast).
   magenta: "#D946EF",
   cyan: "#0891b2",
@@ -165,12 +191,16 @@ const LIGHT_THEME: Theme = {
   queued: "#854D0E",
   chipTeal: "#0e7490",
   chipIndigo: "#4338ca",
-  prompt: "#0e7490",
+  // YOU badge plate — deep amber.
+  prompt: "#b45309",
   thinking: "#7c3aed",
   // Stronger aqua than /command border (#0891B2) for light terminals.
   inputBorder: "#06B6D4",
-  userBorder: "#0e7490",
+  // User prompt bubble border — lighter warm amber.
+  userBorder: "#f5b351",
   toolBorder: "#2563eb",
+  // Tool OUTPUT body text — sky cyan.
+  toolOutput: "#0369a1",
   modalBorder: "#0891B2",
   diffAdd: "#15803d",
   diffDel: "#dc2626",

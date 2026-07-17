@@ -17,6 +17,10 @@
 export interface TranscriptScrollPort {
   /** Scroll the chat by `dy` rows (negative = up). Returns false if unmounted. */
   scrollBy(dy: number): boolean;
+  /** Jump to absolute top of the chat (intro card). */
+  scrollToTop(): boolean;
+  /** Jump to absolute bottom of the chat (latest message). */
+  scrollToBottom(): boolean;
   /** OpenTUI ScrollBox edge autoscroll while drag-selecting. */
   updateAutoScroll(x: number, y: number): void;
   stopAutoScroll(): void;
@@ -42,12 +46,15 @@ export const EMPTY_SCROLL_METRICS: ScrollMetrics = {
 };
 
 type Handler = (dy: number) => void;
+type JumpHandler = () => void;
 type AutoScrollHandler = {
   update(x: number, y: number): void;
   stop(): void;
 };
 
 let handler: Handler | undefined;
+let topHandler: JumpHandler | undefined;
+let bottomHandler: JumpHandler | undefined;
 let autoScroll: AutoScrollHandler | undefined;
 let metrics: ScrollMetrics = EMPTY_SCROLL_METRICS;
 const metricListeners = new Set<(m: ScrollMetrics) => void>();
@@ -75,6 +82,16 @@ export const transcriptScrollPort: TranscriptScrollPort = {
     handler(dy);
     return true;
   },
+  scrollToTop(): boolean {
+    if (!topHandler) return false;
+    topHandler();
+    return true;
+  },
+  scrollToBottom(): boolean {
+    if (!bottomHandler) return false;
+    bottomHandler();
+    return true;
+  },
   updateAutoScroll(x: number, y: number): void {
     autoScroll?.update(x, y);
   },
@@ -95,6 +112,19 @@ export function registerTranscriptScrollPort(next: Handler): () => void {
   handler = next;
   return () => {
     if (handler === next) handler = undefined;
+  };
+}
+
+/** Register absolute top/bottom jumps (g / G). */
+export function registerTranscriptJumpHandlers(
+  top: JumpHandler,
+  bottom: JumpHandler,
+): () => void {
+  topHandler = top;
+  bottomHandler = bottom;
+  return () => {
+    if (topHandler === top) topHandler = undefined;
+    if (bottomHandler === bottom) bottomHandler = undefined;
   };
 }
 

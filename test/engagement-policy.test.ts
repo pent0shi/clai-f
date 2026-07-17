@@ -86,4 +86,47 @@ describe("engagement target-aware policy matrix", () => {
     const expired = { ...scope, expiresAt: "2020-01-01T00:00:00Z" };
     expect(evaluateEngagementAction(expired, actionFromUrl({ url: "https://app.test/api" }), Date.parse("2026-01-01T00:00:00Z"))).toMatchObject({ allowed: false, reason: expect.stringMatching(/time window/) });
   });
+
+  it("never blocks local-dev loopback GET/HEAD even with a remote engagement scope", () => {
+    // Leftover pentest scope (remote targets only) must not block coding verify.
+    const remoteOnly: EngagementScope = {
+      authorizedTargets: ["evil-pentest.example"],
+      expiresAt: "2099-01-01T00:00:00.000Z",
+    };
+    expect(
+      evaluateEngagementAction(
+        remoteOnly,
+        actionFromUrl({ url: "http://localhost:5173/", method: "GET" }),
+      ),
+    ).toMatchObject({ allowed: true, reason: expect.stringMatching(/loopback|local/) });
+    expect(
+      evaluateEngagementAction(
+        remoteOnly,
+        actionFromUrl({ url: "http://127.0.0.1:3000/", method: "HEAD" }),
+      ).allowed,
+    ).toBe(true);
+    // No engagement action at all for loopback http.fetch / curl verify.
+    expect(
+      engagementActionForToolCall({
+        name: "http.fetch",
+        args: { url: "http://localhost:5173/" },
+      }),
+    ).toBeUndefined();
+    expect(
+      engagementActionForToolCall({
+        name: "shell.exec",
+        args: {
+          command:
+            'curl -s -o /dev/null -w "%{http_code}" http://localhost:5173/',
+        },
+      }),
+    ).toBeUndefined();
+    // Mutating loopback still goes through policy (not auto-skipped).
+    expect(
+      engagementActionForToolCall({
+        name: "http.fetch",
+        args: { url: "http://localhost:5173/api", method: "POST" },
+      }),
+    ).toMatchObject({ method: "POST", target: "localhost" });
+  });
 });

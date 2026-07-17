@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
+  cleanArgsLabel,
   formatToolPagerBody,
+  pathFromArgsDisplay,
   toolPagerTitle,
 } from "../../../src/tui-v2/rendering/open-tool-output.js";
 
@@ -62,5 +64,40 @@ describe("toolPagerTitle", () => {
     expect(title.length).toBeLessThan(70);
     expect(title.startsWith("web.search · ")).toBe(true);
     expect(title.endsWith("…")).toBe(true);
+  });
+
+  it("extracts path from JSON args instead of dumping JSON", () => {
+    const title = toolPagerTitle(
+      "fs.read",
+      JSON.stringify({
+        path: "/Users/me/todo-app/src/components/TodoForm.tsx",
+        offset: 55,
+      }),
+    );
+    expect(title).toContain("TodoForm.tsx");
+    expect(title).not.toContain("{");
+  });
+});
+
+describe("cleanArgsLabel / pathFromArgsDisplay", () => {
+  it("recovers path from truncated JSON history dumps", () => {
+    const truncated =
+      '{"path":"/Users/aniketpandey/Desktop/todo-app/src/components/TodoForm.tsx","o…';
+    expect(cleanArgsLabel("fs.read", truncated)).toContain("TodoForm.tsx");
+    expect(pathFromArgsDisplay(truncated)).toContain("TodoForm.tsx");
+  });
+
+  it("keeps the full shell command for pager body headers (no ellipsis)", () => {
+    const cmd = [
+      'echo "=== localhost ===" && curl -s -o /dev/null -w "HTTP %{http_code}\\n"',
+      "--max-time 5 http://localhost:5173/",
+      '&& echo "=== title ===" && curl -s http://localhost:5173/ | grep -i title',
+    ].join(" ");
+    expect(cleanArgsLabel("shell.exec", cmd)).toBe(cmd);
+    expect(cleanArgsLabel("shell.exec", cmd)).not.toContain("…");
+    // Short form only when maxLen is requested (border title).
+    const short = cleanArgsLabel("shell.exec", cmd, { maxLen: 48 });
+    expect(short.endsWith("…")).toBe(true);
+    expect(short.length).toBeLessThanOrEqual(48);
   });
 });

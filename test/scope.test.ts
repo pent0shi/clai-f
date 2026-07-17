@@ -67,6 +67,16 @@ describe("phase 10 — scope helpers", () => {
     expect(targetInScope("evil.com", scope)).toBe(false);
   });
 
+  it("treats localhost / 127.0.0.1 / ::1 as equivalent loopback for scope", () => {
+    const scope: EngagementScope = {
+      authorizedTargets: ["localhost"],
+    };
+    expect(targetInScope("localhost", scope)).toBe(true);
+    expect(targetInScope("127.0.0.1", scope)).toBe(true);
+    expect(targetInScope("::1", scope)).toBe(true);
+    expect(targetInScope("evil.com", scope)).toBe(false);
+  });
+
   it("targetInScope normalizes URLs and ports before matching", () => {
     const scope: EngagementScope = {
       authorizedTargets: ["example.com", "10.0.0.0/24"],

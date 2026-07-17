@@ -32,6 +32,8 @@ export function extractTranscriptSemanticDocument(
   const blocks = [] as Array<{ id: string; text: string }>;
 
   for (const item of transcriptItems(state)) {
+    // INFO/WARN banners are UI chrome only — never selection/export/model context.
+    if (item.kind === "notice") continue;
     if (item.kind === "thinking" && !includeThinking(state, item.id, thinking)) continue;
     blocks.push({ id: item.id, text: semanticTextForItem(item, options.toolOutput) });
   }
@@ -84,7 +86,9 @@ function semanticTextForItem(
         .join("\n");
     }
     case "notice":
-      return `[${item.level}] ${item.text}`;
+      // Unreachable via extractTranscriptSemanticDocument (skipped), but keep
+      // the switch exhaustive without leaking UI chrome into exports.
+      return "";
     case "compacted":
       return `[compacted context: ~${item.beforeTokens} -> ~${item.afterTokens} tokens]\n${item.summary}`;
     default: {

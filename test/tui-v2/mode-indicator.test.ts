@@ -3,8 +3,8 @@ import { modeIndicatorPresentation, tasksToggleLabel } from "../../src/tui-v2/co
 
 describe("composer mode indicator", () => {
   it("labels the active Tasks pane action for visible and hidden states", () => {
-    expect(tasksToggleLabel(true)).toBe("Ctrl+H · HIDE TASKS");
-    expect(tasksToggleLabel(false)).toBe("Ctrl+H · SHOW TASKS");
+    expect(tasksToggleLabel(true)).toBe("^H · HIDE TASKS");
+    expect(tasksToggleLabel(false)).toBe("^H · SHOW TASKS");
     expect(tasksToggleLabel(true, true)).toBe("HIDE TASKS");
     expect(tasksToggleLabel(false, true)).toBe("SHOW TASKS");
   });

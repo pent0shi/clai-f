@@ -224,6 +224,24 @@ export function App(): ReactNode {
         key.preventDefault();
         services.transcript.toggleOutputGlobal();
         break;
+      case "transcript.top":
+        // ^U — absolute start of the chat (works from composer).
+        key.preventDefault();
+        transcriptScrollPort.scrollToTop();
+        break;
+      case "transcript.bottom":
+        // ^D — absolute end of the chat (works from composer).
+        key.preventDefault();
+        transcriptScrollPort.scrollToBottom();
+        break;
+      case "transcript.page-up":
+        key.preventDefault();
+        transcriptScrollPort.scrollBy(-12);
+        break;
+      case "transcript.page-down":
+        key.preventDefault();
+        transcriptScrollPort.scrollBy(12);
+        break;
       case "focus.next-region":
         key.preventDefault();
         services.focus.cycleRegion(
@@ -359,13 +377,14 @@ export function App(): ReactNode {
           {layout.plan.placement === "split" ? (
             <box
               title=" Tasks "
+              titleColor={theme.inputBorder}
               border
               borderStyle="rounded"
               style={{
                 width: layout.plan.width,
                 height: "100%",
                 flexShrink: 0,
-                // Match composer input border so Tasks and input read as one chrome.
+                // Same electric aqua as the composer input border.
                 borderColor: theme.inputBorder,
                 backgroundColor: theme.statusBackground,
               }}
@@ -428,6 +447,7 @@ export function App(): ReactNode {
       {layout.plan.placement === "overlay" && planVisible ? (
         <box
           title=" Tasks "
+          titleColor={theme.inputBorder}
           border
           borderStyle="rounded"
           style={{
@@ -438,7 +458,7 @@ export function App(): ReactNode {
             right: horizontalPadding,
             width: planOverlayWidth(width),
             height: Math.max(12, Math.floor(height * 0.72)),
-            // Match composer input border so Tasks and input read as one chrome.
+            // Same electric aqua as the composer input border.
             borderColor: theme.inputBorder,
             backgroundColor: theme.statusBackground,
             zIndex: 50,

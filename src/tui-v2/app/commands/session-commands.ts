@@ -8,12 +8,12 @@ import { resolve } from "node:path";
 import { setDefaultMode, getConfig } from "../../../store/config.js";
 import { upsertSession, clearAllHistory } from "../../../store/history.js";
 import { safeCwd } from "../../../os/cwd.js";
-import { AUTO_COMPACT_TOKEN_BUDGET } from "../../../agent/context-manager.js";
 import { clearActiveProjectRoot } from "../../../agent/project-root.js";
 import type { CommandInvocation } from "../../../app/commands/command.js";
 import type { Mode } from "../../../types.js";
 import type { AppServices } from "../../bootstrap/composition-root.js";
 import { serializeTranscriptForCompaction } from "../../state/transcript-compaction.js";
+import { conversationItemCount } from "../../state/transcript-types.js";
 
 function notice(services: AppServices, level: "info" | "warn", text: string): void {
   services.session.notice(level, text);
@@ -69,11 +69,11 @@ export function handleThink(services: AppServices): void {
 export function handleContext(services: AppServices): void {
   const { messages, tokens } = services.session.estimateContext();
   const snap = services.session.getState().contextUsage;
-  const window = snap?.contextLimit ?? AUTO_COMPACT_TOKEN_BUDGET;
-  const pct =
-    window > 0 ? Math.min(100, Math.round((tokens / window) * 100)) : 0;
   const exact = snap?.exact === true;
-  const label = exact ? "tokens" : "~tokens (estimate)";
+  // Used tokens only — do not invent a model window (limits vary / are unknown).
+  const usedLabel = exact
+    ? `${tokens.toLocaleString()} tokens`
+    : `~${tokens.toLocaleString()} tokens (estimate)`;
   const sessionBits =
     snap && (snap.sessionPromptTokens > 0 || snap.sessionCompletionTokens > 0)
       ? ` · session in ${snap.sessionPromptTokens.toLocaleString()} / out ${snap.sessionCompletionTokens.toLocaleString()}`
@@ -81,9 +81,7 @@ export function handleContext(services: AppServices): void {
   notice(
     services,
     "info",
-    `context: ${messages} messages · ${tokens.toLocaleString()} ${label}` +
-      ` (${pct}% of ${window.toLocaleString()} window)` +
-      sessionBits,
+    `context: ${messages} messages · ${usedLabel}${sessionBits}`,
   );
 }
 
@@ -97,8 +95,9 @@ export async function handleCompact(services: AppServices): Promise<void> {
     return;
   }
   // Need either model history or a visual transcript to compact.
+  // Notices are UI-only and do not count as conversation material.
   const historyLen = services.session.messages.length;
-  const visualCount = services.transcript.getState().order.length;
+  const visualCount = conversationItemCount(services.transcript.getState());
   if (historyLen === 0 && visualCount === 0) {
     notice(services, "info", "nothing to compact yet — more conversation is needed");
     return;
