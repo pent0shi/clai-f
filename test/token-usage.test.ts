@@ -72,7 +72,7 @@ describe("token-usage format + context window", () => {
         sessionCompletionTokens: 80,
         exact: true,
       }),
-    ).toBe("12,450 tok");
+    ).toBe("ctx:12,450");
     expect(
       formatContextChip(
         {
@@ -85,7 +85,7 @@ describe("token-usage format + context window", () => {
         },
         { compact: true },
       ),
-    ).toBe("~12.4k tok");
+    ).toBe("ctx:~12.4k");
   });
 
   it("resolves known model context windows", () => {

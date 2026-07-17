@@ -87,6 +87,24 @@ describe("engagement target-aware policy matrix", () => {
     expect(evaluateEngagementAction(expired, actionFromUrl({ url: "https://app.test/api" }), Date.parse("2026-01-01T00:00:00Z"))).toMatchObject({ allowed: false, reason: expect.stringMatching(/time window/) });
   });
 
+  it("treats empty/missing scope as disabled (allows active recon)", () => {
+    expect(
+      evaluateEngagementAction(
+        undefined,
+        actionFromUrl({ url: "https://anywhere.test/" }),
+      ),
+    ).toMatchObject({
+      allowed: true,
+      reason: expect.stringMatching(/disabled|no authorized/i),
+    });
+    expect(
+      evaluateEngagementAction(
+        { authorizedTargets: [] },
+        actionFromUrl({ url: "https://anywhere.test/" }),
+      ).allowed,
+    ).toBe(true);
+  });
+
   it("never blocks local-dev loopback GET/HEAD even with a remote engagement scope", () => {
     // Leftover pentest scope (remote targets only) must not block coding verify.
     const remoteOnly: EngagementScope = {

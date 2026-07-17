@@ -143,6 +143,9 @@ export const defaultKeymap: readonly KeyBinding[] = [
   binding("ctrl+e", "pager.export-editor", "pager"),
   binding("e", "pager.export-editor", "pager"),
   binding("c", "pager.copy", "pager"),
+  // Markdown view toggle (tool dumps, .md files, mixed bodies).
+  binding("f", "pager.format", "pager"),
+  binding("r", "pager.raw", "pager"),
   binding("q", "pager.close", "pager"),
   binding("escape", "pager.close", "pager"),
 

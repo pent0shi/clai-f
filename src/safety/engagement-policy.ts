@@ -97,7 +97,21 @@ export function evaluateEngagementAction(
       };
     }
   }
-  if (!scope || !isScopeActiveAt(scope, now)) return deny("engagement scope is missing, empty, or outside its time window");
+  // Empty / missing scope = scoping disabled (opt-in via /scope). Only a
+  // non-empty authorizedTargets list restricts net.scan / active recon.
+  if (!scope || !scope.authorizedTargets?.length) {
+    return {
+      allowed: true,
+      reason: "engagement scope disabled (no authorized targets)",
+      normalizedTarget: target,
+      capability: action.capability,
+      phase: action.phase,
+    };
+  }
+  // Scope with targets but outside its time window stays closed.
+  if (!isScopeActiveAt(scope, now)) {
+    return deny("engagement scope is outside its time window");
+  }
   if (!targetInScope(target, scope)) return deny(`target is excluded or not authorized: ${target}`);
   if (scope.allowedPhases?.length && !scope.allowedPhases.includes(action.phase)) {
     return deny(`phase is not authorized: ${action.phase}`);

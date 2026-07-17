@@ -260,6 +260,189 @@ export function visibleWidth(str: string): number {
 
 type Token = { type: "space" | "ansi" | "char"; value: string; width: number };
 
+/** Active SGR style that must reopen on soft-wrap continuation lines. */
+interface SgrCarry {
+  bold: boolean;
+  dim: boolean;
+  italic: boolean;
+  underline: boolean;
+  /** Full CSI sequence for foreground (e.g. `\x1b[36m` or `\x1b[38;2;…m`). */
+  fg?: string | undefined;
+  bg?: string | undefined;
+}
+
+function emptySgr(): SgrCarry {
+  return {
+    bold: false,
+    dim: false,
+    italic: false,
+    underline: false,
+  };
+}
+
+function sgrOpen(state: SgrCarry): string {
+  let out = "";
+  if (state.bold) out += "\x1b[1m";
+  if (state.dim) out += "\x1b[2m";
+  if (state.italic) out += "\x1b[3m";
+  if (state.underline) out += "\x1b[4m";
+  if (state.fg) out += state.fg;
+  if (state.bg) out += state.bg;
+  return out;
+}
+
+function sgrHasStyle(state: SgrCarry): boolean {
+  return Boolean(
+    state.bold ||
+      state.dim ||
+      state.italic ||
+      state.underline ||
+      state.fg ||
+      state.bg,
+  );
+}
+
+/** Apply one CSI … m sequence into a mutable style carry. */
+function applySgrSequence(state: SgrCarry, sequence: string): void {
+  if (!sequence.startsWith("\x1b[") || !sequence.endsWith("m")) return;
+  const body = sequence.slice(2, -1);
+  if (body.length === 0) {
+    Object.assign(state, emptySgr());
+    return;
+  }
+  const parts = body.split(";").map((p) => Number(p));
+  let i = 0;
+  while (i < parts.length) {
+    const code = parts[i]!;
+    if (!Number.isFinite(code)) {
+      i += 1;
+      continue;
+    }
+    if (code === 0) {
+      Object.assign(state, emptySgr());
+      i += 1;
+      continue;
+    }
+    if (code === 1) {
+      state.bold = true;
+      i += 1;
+      continue;
+    }
+    if (code === 2) {
+      state.dim = true;
+      i += 1;
+      continue;
+    }
+    if (code === 3) {
+      state.italic = true;
+      i += 1;
+      continue;
+    }
+    if (code === 4) {
+      state.underline = true;
+      i += 1;
+      continue;
+    }
+    if (code === 22) {
+      state.bold = false;
+      state.dim = false;
+      i += 1;
+      continue;
+    }
+    if (code === 23) {
+      state.italic = false;
+      i += 1;
+      continue;
+    }
+    if (code === 24) {
+      state.underline = false;
+      i += 1;
+      continue;
+    }
+    if (code === 39) {
+      state.fg = undefined;
+      i += 1;
+      continue;
+    }
+    if (code === 49) {
+      state.bg = undefined;
+      i += 1;
+      continue;
+    }
+    // 256-color / truecolor FG
+    if (code === 38) {
+      const mode = parts[i + 1];
+      if (mode === 5 && parts[i + 2] !== undefined) {
+        state.fg = `\x1b[38;5;${parts[i + 2]}m`;
+        i += 3;
+        continue;
+      }
+      if (
+        mode === 2 &&
+        parts[i + 2] !== undefined &&
+        parts[i + 3] !== undefined &&
+        parts[i + 4] !== undefined
+      ) {
+        state.fg = `\x1b[38;2;${parts[i + 2]};${parts[i + 3]};${parts[i + 4]}m`;
+        i += 5;
+        continue;
+      }
+      i += 1;
+      continue;
+    }
+    // 256-color / truecolor BG
+    if (code === 48) {
+      const mode = parts[i + 1];
+      if (mode === 5 && parts[i + 2] !== undefined) {
+        state.bg = `\x1b[48;5;${parts[i + 2]}m`;
+        i += 3;
+        continue;
+      }
+      if (
+        mode === 2 &&
+        parts[i + 2] !== undefined &&
+        parts[i + 3] !== undefined &&
+        parts[i + 4] !== undefined
+      ) {
+        state.bg = `\x1b[48;2;${parts[i + 2]};${parts[i + 3]};${parts[i + 4]}m`;
+        i += 5;
+        continue;
+      }
+      i += 1;
+      continue;
+    }
+    if ((code >= 30 && code <= 37) || (code >= 90 && code <= 97)) {
+      state.fg = `\x1b[${code}m`;
+      i += 1;
+      continue;
+    }
+    if ((code >= 40 && code <= 47) || (code >= 100 && code <= 107)) {
+      state.bg = `\x1b[${code}m`;
+      i += 1;
+      continue;
+    }
+    i += 1;
+  }
+}
+
+/** Walk text and update style state for every SGR sequence found. */
+function applySgrInText(state: SgrCarry, text: string): void {
+  let i = 0;
+  while (i < text.length) {
+    if (text.startsWith("\x1b[", i)) {
+      const end = text.indexOf("m", i + 2);
+      if (end === -1) {
+        i += 1;
+        continue;
+      }
+      applySgrSequence(state, text.slice(i, end + 1));
+      i = end + 1;
+      continue;
+    }
+    i += 1;
+  }
+}
+
 function splitWord(
   tokens: Token[],
   maxWidth: number,
@@ -267,21 +450,28 @@ function splitWord(
   const segments: { text: string; visibleLength: number }[] = [];
   let currentSegmentText = "";
   let currentSegmentVisibleLength = 0;
+  const style = emptySgr();
 
   for (const token of tokens) {
     if (token.type === "ansi") {
       currentSegmentText += token.value;
+      applySgrSequence(style, token.value);
     } else {
       // type === "char" (may be a wide glyph worth 2 columns)
       if (
         currentSegmentVisibleLength > 0 &&
         currentSegmentVisibleLength + token.width > maxWidth
       ) {
+        // Close open styles on this segment; next segment reopens them.
+        const open = sgrOpen(style);
+        const closed = sgrHasStyle(style)
+          ? `${currentSegmentText}\x1b[0m`
+          : currentSegmentText;
         segments.push({
-          text: currentSegmentText,
+          text: closed,
           visibleLength: currentSegmentVisibleLength,
         });
-        currentSegmentText = "";
+        currentSegmentText = open;
         currentSegmentVisibleLength = 0;
       }
       currentSegmentText += token.value;
@@ -297,6 +487,11 @@ function splitWord(
   return segments;
 }
 
+/**
+ * Soft-wrap a line that may contain ANSI SGR styles.
+ * Continuation lines re-open any style still active at the break so cyan/bold
+ * etc. never fall back to the default body color mid-phrase.
+ */
 export function wrapAnsiLine(line: string, maxWidth: number): string[] {
   const visibleLength = visibleWidth(line);
   if (visibleLength <= maxWidth) return [line];
@@ -369,35 +564,50 @@ export function wrapAnsiLine(line: string, maxWidth: number): string[] {
   const lines: string[] = [];
   let currentLineText = "";
   let currentLineVisibleLength = 0;
+  const lineStyle = emptySgr();
+
+  const flushLine = (): void => {
+    const trimmed = currentLineText.replace(/\s+$/, "");
+    if (!trimmed && lines.length === 0) return;
+    // Close open styles so the next physical row starts clean, then reopen.
+    const closed =
+      sgrHasStyle(lineStyle) && !trimmed.endsWith("\x1b[0m")
+        ? `${trimmed}\x1b[0m`
+        : trimmed;
+    lines.push(closed || " ");
+  };
 
   for (const word of words) {
     if (/^\s+$/.test(word.text)) {
       if (currentLineVisibleLength > 0) {
         currentLineText += word.text;
         currentLineVisibleLength += word.visibleLength;
-      } else {
-        currentLineText = word.text;
-        currentLineVisibleLength = word.visibleLength;
+        applySgrInText(lineStyle, word.text);
       }
       continue;
     }
 
     if (currentLineVisibleLength === 0) {
-      currentLineText = word.text;
+      // Re-open styles active after the previous wrap break.
+      const reopen = sgrOpen(lineStyle);
+      currentLineText = reopen + word.text;
       currentLineVisibleLength = word.visibleLength;
+      applySgrInText(lineStyle, word.text);
     } else if (currentLineVisibleLength + word.visibleLength <= maxWidth) {
       currentLineText += word.text;
       currentLineVisibleLength += word.visibleLength;
+      applySgrInText(lineStyle, word.text);
     } else {
-      // Remove trailing spaces before pushing
-      const trimmedLine = currentLineText.replace(/\s+$/, "");
-      lines.push(trimmedLine);
-      currentLineText = word.text;
+      flushLine();
+      // lineStyle still holds the style at end of previous line — reopen it.
+      const reopen = sgrOpen(lineStyle);
+      currentLineText = reopen + word.text;
       currentLineVisibleLength = word.visibleLength;
+      applySgrInText(lineStyle, word.text);
     }
   }
-  if (currentLineVisibleLength > 0) {
-    lines.push(currentLineText.replace(/\s+$/, ""));
+  if (currentLineVisibleLength > 0 || currentLineText.length > 0) {
+    flushLine();
   }
 
   return lines.length > 0 ? lines : [line];

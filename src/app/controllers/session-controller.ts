@@ -200,6 +200,28 @@ export class SessionController implements Disposable {
     this.notifyState();
   }
 
+  /**
+   * After /compact or auto-compact: history was replaced with a short memory
+   * + recent turns. Drop stale exact prompt_tokens so the footer shows the
+   * live context size until the next API usage report.
+   */
+  noteContextCompacted(afterTokens?: number): void {
+    const limit = modelContextWindow(this.model, this.provider);
+    const estimated =
+      typeof afterTokens === "number" && afterTokens > 0
+        ? afterTokens
+        : estimateMessagesTokens(this.history);
+    this.contextUsage = {
+      contextTokens: estimated,
+      contextLimit: limit,
+      lastCompletionTokens: 0,
+      sessionPromptTokens: this.contextUsage?.sessionPromptTokens ?? 0,
+      sessionCompletionTokens: this.contextUsage?.sessionCompletionTokens ?? 0,
+      exact: false,
+    };
+    this.notifyState();
+  }
+
   /** After history loads, estimate fill until the next API usage report. */
   private refreshEstimatedContext(): void {
     this.contextUsage = snapshotFromEstimate(
@@ -407,6 +429,11 @@ export class SessionController implements Disposable {
         sessionTranscript,
       );
       this.history = result.messages;
+      // Stale pre-compact API prompt_tokens would keep showing e.g. 73k after
+      // the model history was replaced. Force the footer to the live estimate.
+      if (result.summarized) {
+        this.noteContextCompacted(result.afterTokens);
+      }
       this.notifyState();
       if (result.summarized && result.after !== result.before) {
         const memo =

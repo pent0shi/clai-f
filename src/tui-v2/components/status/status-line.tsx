@@ -118,25 +118,23 @@ function formatActivity(
 }
 
 /**
- * Token chip tiers:
- *  - xs: `12k` / `~12k`
- *  - sm: `12k tok`
- *  - md+: full formatContextChip
+ * Context chip tiers (session fill, not cumulative billing):
+ *  - xs: bare count (`12.4k` / `~12.4k`)
+ *  - sm+: `ctx:12.4k` / `ctx:~12.4k`
  */
 function contextChipForDensity(
   usage: ContextUsageSnapshot | undefined,
   density: StatusDensity,
 ): string | undefined {
   if (!usage) return undefined;
+  const chip = formatContextChip(usage, {
+    compact: density === "xs" || density === "sm" || density === "md",
+  });
   if (density === "xs") {
-    // Bare count — no "tok" unit (saves ~4 cols next to mode).
-    const raw = formatContextChip(usage, { compact: true });
-    return raw.replace(/\s*tok\s*$/i, "");
+    // Drop the `ctx:` prefix on the narrowest tier.
+    return chip.replace(/^ctx:/i, "");
   }
-  if (density === "sm") {
-    return formatContextChip(usage, { compact: true });
-  }
-  return formatContextChip(usage, { compact: density === "md" });
+  return chip;
 }
 
 function ContextChip(props: {

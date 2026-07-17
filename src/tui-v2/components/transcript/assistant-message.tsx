@@ -67,7 +67,14 @@ export function AssistantMessage(props: {
           {lines.map((content, i) => (
             // Body is selectable — drag to select, release copies (OSC 52).
             // Never pass null/undefined content — OpenTUI crashes on text.chunks.
-            <text key={i} content={content ?? " "} selectable />
+            // Pre-wrapped by renderMarkdownLines — disable OpenTUI re-wrap so
+            // mid-chunk styles (bold/cyan) never drop to default green on wrap.
+            <text
+              key={i}
+              content={content ?? " "}
+              selectable
+              wrapMode="none"
+            />
           ))}
         </box>
       ) : null}

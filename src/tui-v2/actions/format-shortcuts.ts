@@ -101,6 +101,8 @@ const ACTION_LABELS: Partial<Record<ActionId, string>> = {
   "pager.export-scrollback": "Export to scrollback",
   "pager.export-editor": "Open in editor",
   "pager.copy": "Copy pager body",
+  "pager.format": "Formatted markdown view",
+  "pager.raw": "Raw text view",
   "pager.close": "Close pager",
   "jobs.up": "Previous job",
   "jobs.down": "Next job",

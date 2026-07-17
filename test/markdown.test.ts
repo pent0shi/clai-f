@@ -188,6 +188,26 @@ describe("markdown extras", () => {
     expect(wrapped[2]).toBe("a".repeat(20));
   });
 
+  it("re-opens ANSI styles on soft-wrap continuation lines", () => {
+    // Chalk-style: open cyan after bold green, close only at the end.
+    const cyanOpen = "\x1b[36m";
+    const reset = "\x1b[0m";
+    const line =
+      `\x1b[1m\x1b[32mhello \x1b[39m\x1b[22m${cyanOpen}` +
+      "this is a very long cyan phrase that should wrap to the next line while staying cyan colored please" +
+      "\x1b[39m";
+    const wrapped = wrapAnsiLine(line, 40);
+    expect(wrapped.length).toBeGreaterThan(1);
+    // Every continuation after the first must re-open cyan (not fall back to default).
+    for (let i = 1; i < wrapped.length; i++) {
+      expect(wrapped[i]).toMatch(/^\x1b\[36m|\x1b\[36m/);
+    }
+    // Intermediate lines close cleanly so styles don't leak into the next row.
+    for (let i = 0; i < wrapped.length - 1; i++) {
+      expect(wrapped[i]).toContain(reset);
+    }
+  });
+
   it("renders list items formatted inside table cells", () => {
     const md =
       "| Key points |\n| --- |\n| * item one<br>- item two<br>1. item three |";

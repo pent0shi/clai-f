@@ -96,6 +96,10 @@ export const ACTION_IDS = [
   "pager.export-scrollback",
   "pager.export-editor",
   "pager.copy",
+  /** Render body as markdown (formatted). */
+  "pager.format",
+  /** Show body as plain/raw text. */
+  "pager.raw",
   "pager.close",
   // jobs
   "jobs.up",

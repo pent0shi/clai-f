@@ -49,11 +49,14 @@ export interface PagerProps {
   /** When set, syntax-highlight diff bodies using this path's language. */
   readonly highlightPath?: string | undefined;
   /**
-   * Markdown body rendering. Default `auto` (heuristic). Help/shortcuts/plan
-   * should pass `force`. Tool dumps stay plain unless they look like markdown.
+   * Initial markdown mode. Help/shortcuts/plan pass `force` (start formatted).
+   * Tool dumps default `auto` (start raw; press `f` for formatted, `r` for raw).
    */
   readonly markdown?: PagerMarkdownMode | undefined;
 }
+
+/** User-toggleable body view in the pager. */
+type PagerViewMode = "formatted" | "raw";
 
 const HIDDEN_SCROLLBARS = {
   visible: false,
@@ -62,15 +65,15 @@ const HIDDEN_SCROLLBARS = {
 
 /** Progressive help lines — always one row; never wrap into the line-count. */
 const PAGER_HELP_FULL =
-  "↑↓:scroll  ·  pg↑↓:page  ·  g/G:jump  ·  ^r:search  ·  n/N:next  ·  c:copy  ·  s:scrollback  ·  e:editor  ·  q/esc:close";
+  "↑↓:scroll  ·  pg↑↓:page  ·  ^r:search  ·  n/N:next  ·  f:format  ·  r:raw  ·  c:copy  ·  s:scrollback  ·  e:editor  ·  q/esc:close";
 const PAGER_HELP_MED =
-  "↑↓:scroll  ·  ^r:search  ·  n/N:next  ·  c:copy  ·  e:editor  ·  q/esc:close";
-const PAGER_HELP_SHORT = "↑↓:scroll  ·  ^r:search  ·  c:copy  ·  q/esc:close";
-const PAGER_HELP_MIN = "↑↓  ·  ^r  ·  q/esc:close";
+  "↑↓:scroll  ·  ^r:search  ·  f:format  ·  r:raw  ·  c:copy  ·  e:editor  ·  q/esc:close";
+const PAGER_HELP_SHORT = "↑↓  ·  ^r  ·  f:format  ·  r:raw  ·  c:copy  ·  q/esc:close";
+const PAGER_HELP_MIN = "↑↓  ·  f  ·  r  ·  q/esc:close";
 
 const PAGER_FOOTER_FULL =
-  "c:copy  ·  drag:select  ·  s/^s:scrollback  ·  e/^e:editor";
-const PAGER_FOOTER_SHORT = "c:copy  ·  s:scrollback  ·  e:editor";
+  "f:format  ·  r:raw  ·  c:copy  ·  drag:select  ·  s:scrollback  ·  e:editor";
+const PAGER_FOOTER_SHORT = "f:format  ·  r:raw  ·  c:copy  ·  s:scrollback  ·  e:editor";
 
 export { bodyOnlyForCopy } from "./pager-line.js";
 
@@ -89,6 +92,10 @@ export function Pager(props: PagerProps): ReactNode {
   const [displayBody, setDisplayBody] = useState(body);
   const [artifactPage, setArtifactPage] = useState<ArtifactPage | undefined>(undefined);
   const [pageBusy, setPageBusy] = useState(false);
+  // Help/plan start formatted; everything else starts raw — user presses f/r.
+  const [viewMode, setViewMode] = useState<PagerViewMode>(() =>
+    markdown === "force" ? "formatted" : "raw",
+  );
   // Conservative width: 96% box sits inside app chrome; overestimate caused
   // "11 lines" to paint past the rounded border after search.
   const pagerOuterCols = Math.max(40, Math.floor(termWidth * 0.96));
@@ -96,18 +103,17 @@ export function Pager(props: PagerProps): ReactNode {
   // Meta/footer rows (with their padding) — exact column budget for padChromeRow.
   const chromeCols = Math.max(20, contentCols - 4);
 
-  // Markdown (or plain) display lines — safe fallback inside preparePagerDisplay.
-  // Artifact/diff dumps with highlightPath stay plain so syntax + gutters win.
+  // f → force markdown render; r → plain raw text (incl. .md / tool dumps).
   const display = useMemo(() => {
     const mode: PagerMarkdownMode =
-      highlightPath || source ? "plain" : markdown;
+      viewMode === "formatted" ? "force" : "plain";
     return preparePagerDisplay({
       body: displayBody,
       width: contentCols,
       mode,
       defaultFg: theme.foreground,
     });
-  }, [displayBody, contentCols, markdown, highlightPath, source, theme.foreground]);
+  }, [displayBody, contentCols, viewMode, theme.foreground]);
 
   const lines = useMemo(
     () => display.lines.map((l) => l.plain),
@@ -437,6 +443,18 @@ export function Pager(props: PagerProps): ReactNode {
             },
           );
         break;
+      case "pager.format":
+        setViewMode("formatted");
+        setMatchIndex(-1);
+        flash("view: formatted (markdown)");
+        queueMicrotask(() => scrollRef.current?.scrollTo(0));
+        break;
+      case "pager.raw":
+        setViewMode("raw");
+        setMatchIndex(-1);
+        flash("view: raw");
+        queueMicrotask(() => scrollRef.current?.scrollTo(0));
+        break;
       case "pager.close":
         // First Esc clears an active search highlight; second closes the pager.
         if (hasQuery) {
@@ -498,13 +516,24 @@ export function Pager(props: PagerProps): ReactNode {
 
   const metaLine = padChromeRow(metaLeft, lineCountRight, chromeCols);
 
+  const viewLabel = viewMode === "formatted" ? "fmt" : "raw";
   const footerLeft = exportError
     ? `export failed: ${exportError}`
     : statusFlash
       ? statusFlash
       : hasQuery
         ? "n/N:next  ·  esc:clear-find  ·  q:close"
-        : PAGER_FOOTER_FULL;
+        : fitOneLine(
+            [
+              `f:format  ·  r:raw  ·  view:${viewLabel}  ·  c:copy  ·  s:scrollback  ·  e:editor`,
+              `f:format  ·  r:raw  ·  view:${viewLabel}  ·  c:copy  ·  e:editor`,
+              `f:format  ·  r:raw  ·  view:${viewLabel}  ·  c:copy`,
+              `f:fmt  ·  r:raw  ·  ${viewLabel}`,
+              PAGER_FOOTER_SHORT,
+              PAGER_FOOTER_FULL,
+            ],
+            Math.max(12, Math.floor(chromeCols * 0.78)),
+          );
   const footerLine = padChromeRow(footerLeft, scrollLabel, chromeCols);
 
   const filterHint = fitOneLine(

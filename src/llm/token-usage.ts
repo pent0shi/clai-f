@@ -221,8 +221,8 @@ export function formatTokenCount(n: number, compact = false): string {
 }
 
 /**
- * Footer chip: used tokens only (no window total — model limits are often wrong).
- * Exact: `12,450 tok` · estimated: `~12.5k tok` (compact when narrow).
+ * Footer chip: current session context fill (not cumulative session billing).
+ * Exact: `ctx:12,450` · estimated: `ctx:~12.5k` (compact when narrow).
  */
 export function formatContextChip(
   snapshot: ContextUsageSnapshot,
@@ -230,8 +230,7 @@ export function formatContextChip(
 ): string {
   const compact = opts?.compact ?? false;
   const used = formatTokenCount(snapshot.contextTokens, compact);
-  // Short unit: "tok" keeps the status line readable next to activity · elapsed.
-  return snapshot.exact ? `${used} tok` : `~${used} tok`;
+  return snapshot.exact ? `ctx:${used}` : `ctx:~${used}`;
 }
 
 /** Merge a new usage into session totals; prefer latest prompt as context fill. */
