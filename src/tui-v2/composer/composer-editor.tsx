@@ -8,7 +8,6 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
   decodePasteBytes,
   stripAnsiSequences,
-  TextAttributes,
   type KeyEvent,
   type MouseEvent,
   type TextareaRenderable,
@@ -35,6 +34,7 @@ import { buildComposerTextareaOverrides } from "./textarea-keybindings.js";
 import { composerActionPort } from "./composer-action-port.js";
 import { notify } from "../notify.js";
 import { CompletionMenuView } from "../components/completion/completion-menu.js";
+import { ComposerInputBox } from "../components/composer/composer-input-box.js";
 import { PasteChipRow } from "../components/composer/paste-chip.js";
 import { useOverlayState } from "../state/use-overlay.js";
 import { useSessionState } from "../state/use-session-state.js";
@@ -118,9 +118,7 @@ export function ComposerEditor(props: ComposerEditorProps): ReactNode {
     else editorRef.current?.blur();
   }, [shouldOwnKeyboard]);
 
-  // While the composer is dim (chat owns focus), kill *only* native draft
-  // wheel so chat can scroll alone under the pointer. When focused, leave
-  // OpenTUI fully native (smooth viewport scroll, click-to-caret, select).
+  // Dim only: suppress native draft wheel so chat scrolls alone under pointer.
   useEffect(() => {
     if (shouldOwnKeyboard) return;
     let restore = disableNativeTextareaScroll(editorRef.current);
@@ -515,30 +513,18 @@ export function ComposerEditor(props: ComposerEditorProps): ReactNode {
     }
   }
 
-  /**
-   * Wheel policy — prefer native OpenTUI textarea, never dual-scroll:
-   * - Focused + multi-line/overflow: stop bubble only; native handleScroll
-   *   runs after listeners (smooth viewport). Stay focused/lit.
-   * - Focused + single-line, or unfocused: scroll chat, release focus.
-   *   Native draft wheel is off only while unfocused (see effect above).
-   */
+  /** Focused multi-line → native draft; else chat (never dual-scroll). */
   function onComposerWheel(event: MouseEvent): void {
     if (!event.scroll || overlay.kind !== "none") return;
     const editor = editorRef.current;
     const visible = resolveComposerTextRows(contentRows, props.height);
-
     if (shouldOwnKeyboard && editor) {
       const lines = measureComposerLines(editor, contentRows);
-      if (
-        composerOwnsWheel(lines) ||
-        composerDraftOverflows(lines, visible)
-      ) {
-        // Native EditBuffer scrolls the draft. Block chat dual-scroll only.
+      if (composerOwnsWheel(lines) || composerDraftOverflows(lines, visible)) {
         event.stopPropagation();
         return;
       }
     }
-
     event.preventDefault();
     event.stopPropagation();
     services.focus.focusRegion("transcript");
@@ -730,24 +716,24 @@ export function ComposerEditor(props: ComposerEditorProps): ReactNode {
   // Focused: bright aqua. Blurred: muted so focus shift is obvious.
   const chromeFg = shouldOwnKeyboard ? theme.inputBorder : theme.muted;
 
-  function hoverCompletion(index: number): void {
-    selectedRef.current = index;
-    setSelected(index);
+  function focusComposer(): void {
     services.focus.focusRegion("composer");
     editorRef.current?.focus();
   }
 
+  function hoverCompletion(index: number): void {
+    selectedRef.current = index;
+    setSelected(index);
+    focusComposer();
+  }
+
   function activateCompletion(index: number): void {
-    services.focus.focusRegion("composer");
-    editorRef.current?.focus();
+    focusComposer();
     const current = menuRef.current;
     if (current.kind === "none") return;
-    if (current.kind === "mention") {
-      const item = current.items[index];
-      if (item?.isDir) {
-        acceptSuggestion({ index, drillDir: true });
-        return;
-      }
+    if (current.kind === "mention" && current.items[index]?.isDir) {
+      acceptSuggestion({ index, drillDir: true });
+      return;
     }
     acceptSuggestion({ index });
   }
@@ -772,73 +758,26 @@ export function ComposerEditor(props: ComposerEditorProps): ReactNode {
         width={inputWidth}
         onExpand={expandPasteChip}
       />
-      <box
-        border
-        borderStyle="heavy"
-        {...(metaShown
-          ? {
-              title: ` ${metaShown} `,
-              titleAlignment: "right" as const,
-              titleColor: shouldOwnKeyboard ? theme.muted : theme.chip,
-            }
-          : {})}
-        style={{
-          height: boxHeight,
-          width: "100%",
-          borderColor: chromeFg,
-          backgroundColor: theme.statusBackground,
-          paddingLeft: 1,
-          paddingRight: 1,
-          flexDirection: "row",
-        }}
-        onMouseDown={() => {
-          services.focus.focusRegion("composer");
-          editorRef.current?.focus();
-        }}
+      <ComposerInputBox
+        theme={theme}
+        editorRef={editorRef}
+        focused={shouldOwnKeyboard}
+        running={props.running}
+        textRows={textRows}
+        boxHeight={boxHeight}
+        metaShown={metaShown}
+        chromeFg={chromeFg}
+        keyBindings={textareaKeyBindings}
+        onMouseDown={focusComposer}
         onMouseScroll={onComposerWheel}
-      >
-        <text
-          content="❯ "
-          style={{
-            fg: chromeFg,
-            width: 2,
-            flexShrink: 0,
-            attributes: shouldOwnKeyboard
-              ? TextAttributes.BOLD
-              : TextAttributes.DIM,
-          }}
-        />
-        <textarea
-          ref={editorRef}
-          focused={shouldOwnKeyboard}
-          // OpenTUI places the caret via selection (updateCursor on mouse
-          // down). selectable={false} kills click-to-position entirely.
-          selectable
-          placeholder={
-            props.running
-              ? "type to queue a message…"
-              : `ask anything · @ file or folder · Shift+Enter newline`
-          }
-          placeholderColor={theme.muted}
-          textColor={theme.foreground}
-          backgroundColor={theme.statusBackground}
-          cursorColor={chromeFg}
-          keyBindings={textareaKeyBindings}
-          wrapMode="word"
-          onSubmit={submit}
-          onContentChange={() => {
-            refreshMenu();
-            syncContentRows();
-          }}
-          onCursorChange={refreshMenu}
-          onKeyDown={onKeyDown}
-          onMouseDown={() => {
-            services.focus.focusRegion("composer");
-            editorRef.current?.focus();
-          }}
-          style={{ flexGrow: 1, height: textRows }}
-        />
-      </box>
+        onSubmit={submit}
+        onContentChange={() => {
+          refreshMenu();
+          syncContentRows();
+        }}
+        onCursorChange={refreshMenu}
+        onKeyDown={onKeyDown}
+      />
     </box>
   );
 }

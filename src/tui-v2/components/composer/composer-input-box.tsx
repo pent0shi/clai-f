@@ -1,7 +1,7 @@
 /** @jsxImportSource @opentui/react */
 /**
  * Bordered multi-line input chrome for the composer.
- * Simple flex layout so mouse clicks land on the expected character.
+ * Uses native OpenTUI textarea (selectable click-to-caret + flex hit-tests).
  */
 
 import { type RefObject, type ReactNode } from "react";
@@ -18,7 +18,6 @@ export function ComposerInputBox(props: {
   readonly editorRef: RefObject<TextareaRenderable | null>;
   readonly focused: boolean;
   readonly running?: boolean | undefined;
-  readonly inputWidth: number;
   readonly textRows: number;
   readonly boxHeight: number;
   readonly metaShown: string;
@@ -36,7 +35,6 @@ export function ComposerInputBox(props: {
     editorRef,
     focused,
     running,
-    inputWidth,
     textRows,
     boxHeight,
     metaShown,
@@ -53,7 +51,6 @@ export function ComposerInputBox(props: {
   return (
     <box
       border
-      // Heavy = thicker frame so focus/blur is easy to read.
       borderStyle="heavy"
       {...(metaShown
         ? {
@@ -65,15 +62,11 @@ export function ComposerInputBox(props: {
       style={{
         height: boxHeight,
         width: "100%",
-        maxWidth: inputWidth,
-        // Clip long paste so content cannot tear the right border.
-        overflow: "hidden",
         borderColor: chromeFg,
         backgroundColor: theme.statusBackground,
         paddingLeft: 1,
         paddingRight: 1,
         flexDirection: "row",
-        flexShrink: 0,
       }}
       onMouseDown={onMouseDown}
       onMouseScroll={onMouseScroll}
@@ -90,8 +83,9 @@ export function ComposerInputBox(props: {
       <textarea
         ref={editorRef}
         focused={focused}
-        selectable={false}
-        showCursor={focused}
+        // OpenTUI places the caret via selection (updateCursor on mouse
+        // down). selectable={false} kills click-to-position entirely.
+        selectable
         placeholder={
           running
             ? "type to queue a message…"
@@ -107,8 +101,8 @@ export function ComposerInputBox(props: {
         onContentChange={onContentChange}
         onCursorChange={onCursorChange}
         onKeyDown={onKeyDown}
-        // Flex-only sizing — fixed width desyncs click hit-tests from the caret.
-        style={{ flexGrow: 1, flexShrink: 1, minWidth: 0, height: textRows }}
+        onMouseDown={onMouseDown}
+        style={{ flexGrow: 1, height: textRows }}
       />
     </box>
   );
