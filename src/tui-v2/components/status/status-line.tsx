@@ -1,10 +1,13 @@
 /** @jsxImportSource @opentui/react */
 /**
- * Chrome under the composer.
+ * Chrome under the composer — responsive density so chips never pile over
+ * the token count / scroll badges on the right.
  *
- * Idle: centered clickable chips (`/:commands`, ^T/^O/^U/^D/^X, ^H) with hover.
- * Running: spinner + activity · Esc:cancel.
- * Scroll remainder badges (`▲ N` / `▼ N`) sit on the far right.
+ * Density (by content width):
+ *  - xs  (<48):  MODE · tokens · ▲▼
+ *  - sm  (<68):  MODE · ^H · tokens · ▲▼  (+ spinner/activity when running)
+ *  - md  (<96):  MODE · core keys · ^H · tokens · ▲▼
+ *  - lg  (≥96):  full shortcut row
  */
 
 import { useEffect, useState, type ReactNode } from "react";
@@ -33,23 +36,26 @@ export interface StatusLineProps {
   readonly planVisible: boolean;
   readonly thinkingExpanded?: boolean | undefined;
   readonly outputExpanded?: boolean | undefined;
-  /** Click ^T chip → toggle thinking. */
   readonly onToggleThinking?: (() => void) | undefined;
-  /** Click ^O chip → toggle tool/compacted output. */
   readonly onToggleOutput?: (() => void) | undefined;
-  /** Click ^H chip → toggle plan pane. */
   readonly onTogglePlan?: (() => void) | undefined;
-  /** Click ^U chip → jump chat to top. */
   readonly onJumpTop?: (() => void) | undefined;
-  /** Click ^D chip → jump chat to bottom. */
   readonly onJumpBottom?: (() => void) | undefined;
-  /** Click ^X chip → clear composer draft. */
   readonly onClearDraft?: (() => void) | undefined;
-  /** Click /shortcuts chip → open keyboard reference. */
   readonly onOpenShortcuts?: (() => void) | undefined;
 }
 
 const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"] as const;
+
+export type StatusDensity = "xs" | "sm" | "md" | "lg";
+
+/** Map content width → chrome density. */
+export function statusDensityForWidth(width: number): StatusDensity {
+  if (width < 48) return "xs";
+  if (width < 68) return "sm";
+  if (width < 96) return "md";
+  return "lg";
+}
 
 export interface ModeIndicatorPresentation {
   readonly label: string;
@@ -60,9 +66,23 @@ export function modeIndicatorPresentation(mode: Mode): ModeIndicatorPresentation
   return { label: mode.toUpperCase(), description: "" };
 }
 
-export function tasksToggleLabel(visible: boolean, compact = false): string {
-  if (compact) return visible ? "HIDE TASKS" : "SHOW TASKS";
-  return visible ? "^H · HIDE TASKS" : "^H · SHOW TASKS";
+/**
+ * Tasks pane toggle label by density.
+ * - xs: hidden (caller skips chip)
+ * - sm: `^H`
+ * - md: `^H hide` / `^H show`
+ * - lg: `^H · hide` / `^H · show`
+ */
+export function tasksToggleLabel(
+  visible: boolean,
+  density: StatusDensity | boolean = "lg",
+): string {
+  // Back-compat: tests/callers that pass `compact: true` map to sm.
+  const d: StatusDensity =
+    typeof density === "boolean" ? (density ? "sm" : "lg") : density;
+  if (d === "xs" || d === "sm") return "^H";
+  if (d === "md") return visible ? "^H hide" : "^H show";
+  return visible ? "^H · hide" : "^H · show";
 }
 
 function clip(value: string, max: number): string {
@@ -72,10 +92,14 @@ function clip(value: string, max: number): string {
 }
 
 /** Collapse router/agent status noise into a single clean activity phrase. */
-function formatActivity(activity: string | undefined, elapsedSec: number): string {
-  let base = (activity ?? "waiting for model").replace(/\s+/g, " ").trim() || "working";
+function formatActivity(
+  activity: string | undefined,
+  elapsedSec: number,
+  maxLen: number,
+): string {
+  let base =
+    (activity ?? "waiting for model").replace(/\s+/g, " ").trim() || "working";
   base = base.replace(/^[⏳·•\s]+/, "").replace(/\n/g, " ").trim();
-  // Never show classic /output path spam or long paths in the footer.
   if (
     /\/output\b|open full output|Ctrl\+O or|full output saved|\.clai\/outputs/i.test(
       base,
@@ -83,10 +107,9 @@ function formatActivity(activity: string | undefined, elapsedSec: number): strin
   ) {
     base = "tool finished";
   }
-  // Keep activity short: first token path-ish (tool name) only when huge.
-  if (base.length > 48) {
+  if (base.length > maxLen) {
     const toolish = base.match(/^[\w.-]+/);
-    base = toolish ? toolish[0]! : `${base.slice(0, 45)}…`;
+    base = toolish ? toolish[0]! : `${base.slice(0, Math.max(0, maxLen - 1))}…`;
   }
   if (/rate limited|retrying in/i.test(base) && !base.startsWith("⏳")) {
     base = `⏳ ${base}`;
@@ -94,13 +117,26 @@ function formatActivity(activity: string | undefined, elapsedSec: number): strin
   return `${base} · ${elapsedSec}s`;
 }
 
-/** Pick full or compact context chip for terminal width. */
-function contextChipForWidth(
+/**
+ * Token chip tiers:
+ *  - xs: `12k` / `~12k`
+ *  - sm: `12k tok`
+ *  - md+: full formatContextChip
+ */
+function contextChipForDensity(
   usage: ContextUsageSnapshot | undefined,
-  width: number,
+  density: StatusDensity,
 ): string | undefined {
   if (!usage) return undefined;
-  return formatContextChip(usage, { compact: width < 56 });
+  if (density === "xs") {
+    // Bare count — no "tok" unit (saves ~4 cols next to mode).
+    const raw = formatContextChip(usage, { compact: true });
+    return raw.replace(/\s*tok\s*$/i, "");
+  }
+  if (density === "sm") {
+    return formatContextChip(usage, { compact: true });
+  }
+  return formatContextChip(usage, { compact: density === "md" });
 }
 
 function ContextChip(props: {
@@ -116,21 +152,29 @@ function ContextChip(props: {
       style={{
         fg: exact ? theme.cyan : theme.muted,
         attributes: exact ? TextAttributes.BOLD : TextAttributes.DIM,
+        flexShrink: 0,
       }}
     />
   );
 }
 
-function sep(theme: Theme): ReactNode {
-  return <text selectable={false} content="  │  " style={{ fg: theme.muted }} />;
+function sep(theme: Theme, tight = false): ReactNode {
+  return (
+    <text
+      selectable={false}
+      content={tight ? " │ " : " │ "}
+      style={{ fg: theme.muted, flexShrink: 0 }}
+    />
+  );
 }
 
 /** Far-right amber remaining-line badges. */
 function ScrollRemainderBadges(props: {
   theme: Theme;
   metrics: ScrollMetrics;
+  compact?: boolean | undefined;
 }): ReactNode {
-  const { theme, metrics } = props;
+  const { theme, metrics, compact = false } = props;
   if (metrics.linesAbove <= 0 && metrics.linesBelow <= 0) return null;
   return (
     <box style={{ flexDirection: "row", alignItems: "center", flexShrink: 0 }}>
@@ -139,7 +183,7 @@ function ScrollRemainderBadges(props: {
           <text selectable={false} content=" " />
           <text
             selectable={false}
-            content={` ▲ ${metrics.linesAbove} `}
+            content={compact ? `▲${metrics.linesAbove}` : ` ▲ ${metrics.linesAbove} `}
             style={{
               fg: theme.white,
               bg: theme.queued,
@@ -153,7 +197,7 @@ function ScrollRemainderBadges(props: {
           <text selectable={false} content=" " />
           <text
             selectable={false}
-            content={` ▼ ${metrics.linesBelow} `}
+            content={compact ? `▼${metrics.linesBelow}` : ` ▼ ${metrics.linesBelow} `}
             style={{
               fg: theme.white,
               bg: theme.queued,
@@ -167,22 +211,24 @@ function ScrollRemainderBadges(props: {
 }
 
 /**
- * Clickable status chip — idle is muted; hover gets a filled chip so the
- * user can see it is interactive; active (toggled on) stays cyan/bold.
- *
- * Always `selectable={false}` + preventDefault on mouse-down so a click
- * toggles without starting a drag-selection of the label text.
+ * Compact chip that expands on hover.
+ * Idle: short chord (`^T`). Hover: full action (`show thinking`).
  */
 function ClickableHint(props: {
-  label: string;
-  active: boolean;
-  theme: Theme;
-  onClick?: (() => void) | undefined;
+  /** Short label when not hovered (e.g. `^T`). */
+  readonly short: string;
+  /** Expanded label on hover (e.g. `show thinking`). Defaults to short. */
+  readonly expand?: string | undefined;
+  readonly active: boolean;
+  readonly theme: Theme;
+  readonly onClick?: (() => void) | undefined;
 }): ReactNode {
-  const { label, active, theme, onClick } = props;
+  const { short, expand, active, theme, onClick } = props;
   const [hovered, setHovered] = useState(false);
+  const full = expand ?? short;
+  // Hover always shows the expanded phrase (with padding so the chip reads).
+  const content = hovered ? ` ${full} ` : short;
 
-  // Hover: inverse chip (white on selection). Active: cyan bold. Idle: muted.
   const fg = hovered
     ? theme.white
     : active
@@ -195,7 +241,6 @@ function ClickableHint(props: {
   return (
     <box
       onMouseDown={(event) => {
-        // Block OpenTUI selection before it claims the press.
         event.preventDefault();
         event.stopPropagation();
         onClick?.();
@@ -211,26 +256,37 @@ function ClickableHint(props: {
     >
       <text
         selectable={false}
-        content={hovered ? ` ${label} ` : label}
-        style={{
-          fg,
-          bg,
-          attributes,
-        }}
+        content={content}
+        style={{ fg, bg, attributes }}
       />
     </box>
   );
 }
 
-function ModeBadge(props: { mode: Mode; theme: Theme }): ReactNode {
-  const { mode, theme } = props;
+function ModeBadge(props: {
+  mode: Mode;
+  theme: Theme;
+  /** When true, omit the trailing "MODE" word (saves ~5 cols). */
+  short?: boolean | undefined;
+}): ReactNode {
+  const { mode, theme, short = false } = props;
   const label = modeIndicatorPresentation(mode).label;
-  const bg = mode === "plan" ? theme.mode : mode === "ask" ? theme.chipIndigo : theme.chipTeal;
+  const bg =
+    mode === "plan"
+      ? theme.mode
+      : mode === "ask"
+        ? theme.chipIndigo
+        : theme.chipTeal;
   return (
     <text
       selectable={false}
-      content={` ${label} MODE `}
-      style={{ fg: theme.white, bg, attributes: TextAttributes.BOLD }}
+      content={short ? ` ${label} ` : ` ${label} MODE `}
+      style={{
+        fg: theme.white,
+        bg,
+        attributes: TextAttributes.BOLD,
+        flexShrink: 0,
+      }}
     />
   );
 }
@@ -263,8 +319,10 @@ export function StatusLine(props: StatusLineProps): ReactNode {
   );
 
   const queued = state.queued.length;
-  const compact = width < 56;
+  const density = statusDensityForWidth(width);
   const busy = state.running || state.compacting;
+  const showTasks = (hasActivePlan || planVisible) && density !== "xs";
+  const shortMode = density === "xs" || density === "sm";
 
   useEffect(() => transcriptScrollPort.onMetrics(setScrollMetrics), []);
 
@@ -296,14 +354,26 @@ export function StatusLine(props: StatusLineProps): ReactNode {
     setElapsed(Math.max(0, Math.floor((Date.now() - startedAt) / 1000)));
   }, [busy, startedAt, activity]);
 
+  const ctxChip = contextChipForDensity(state.contextUsage, density);
+  const scrollCompact = density === "xs" || density === "sm";
+
+  // ── Running / compacting ──────────────────────────────────────────────
   if (busy) {
-    const activityText = state.compacting
-      ? `compacting conversation · ${elapsed}s`
-      : formatActivity(activity, elapsed);
-    const ctxChip = contextChipForWidth(state.contextUsage, width);
-    // Reserve room for mode badge + spinner + ctx chip + Esc:cancel.
-    const ctxReserve = ctxChip ? ctxChip.length + 4 : 0;
-    const activityMax = Math.max(12, width - (compact ? 28 : 40) - ctxReserve);
+    // xs: MODE · spinner · tok · ▲▼
+    // sm+: MODE · spinner · activity · tok · ^H · Esc · ▲▼
+    const activityMax =
+      density === "xs"
+        ? 0
+        : density === "sm"
+          ? Math.max(8, width - 36)
+          : Math.max(12, width - 48);
+    const activityText =
+      density === "xs"
+        ? undefined
+        : state.compacting
+          ? `compact · ${elapsed}s`
+          : formatActivity(activity, elapsed, activityMax);
+
     return (
       <box
         style={{
@@ -317,23 +387,35 @@ export function StatusLine(props: StatusLineProps): ReactNode {
           paddingRight: 1,
         }}
       >
-        <box style={{ flexDirection: "row", alignItems: "center", flexShrink: 1 }}>
-          <ModeBadge mode={mode} theme={theme} />
-          <text selectable={false} content="  " />
+        <box
+          style={{
+            flexDirection: "row",
+            alignItems: "center",
+            flexShrink: 1,
+            minWidth: 0,
+          }}
+        >
+          <ModeBadge mode={mode} theme={theme} short={shortMode} />
+          <text selectable={false} content=" " />
           <text
             selectable={false}
             content={`${SPINNER_FRAMES[frame]} `}
-            style={{ fg: theme.spinner }}
+            style={{ fg: theme.spinner, flexShrink: 0 }}
           />
-          <text
-            selectable={false}
-            content={clip(activityText, activityMax)}
-            style={{ fg: theme.activity }}
-          />
-          {/* Context tokens sit adjacent to activity · elapsed while running. */}
+          {activityText ? (
+            <text
+              selectable={false}
+              content={clip(activityText, activityMax)}
+              style={{ fg: theme.activity, flexShrink: 1 }}
+            />
+          ) : null}
           {ctxChip ? (
             <>
-              <text selectable={false} content="  ·  " style={{ fg: theme.muted }} />
+              <text
+                selectable={false}
+                content={density === "xs" ? " " : " · "}
+                style={{ fg: theme.muted, flexShrink: 0 }}
+              />
               <ContextChip
                 chip={ctxChip}
                 theme={theme}
@@ -342,43 +424,60 @@ export function StatusLine(props: StatusLineProps): ReactNode {
             </>
           ) : null}
         </box>
-        <box style={{ flexDirection: "row", alignItems: "center", flexShrink: 0 }}>
-          {hasActivePlan || planVisible ? (
+        <box
+          style={{
+            flexDirection: "row",
+            alignItems: "center",
+            flexShrink: 0,
+          }}
+        >
+          {showTasks ? (
             <>
               <ClickableHint
-                label={tasksToggleLabel(planVisible, compact)}
+                short={tasksToggleLabel(planVisible, density)}
+                expand={planVisible ? "hide tasks" : "show tasks"}
                 active={planVisible}
                 theme={theme}
                 onClick={onTogglePlan}
               />
-              <text selectable={false} content="  " />
+              <text selectable={false} content=" " />
             </>
           ) : null}
-          {queued > 0 ? (
+          {queued > 0 && density !== "xs" ? (
             <text
               selectable={false}
-              content={`${queued} queued  `}
+              content={`${queued}q `}
               style={{ fg: theme.mode }}
             />
           ) : null}
-          {state.compacting ? (
-            <text selectable={false} content="COMPACTING" style={{ fg: theme.mode }} />
-          ) : (
-            <text selectable={false} content="Esc:cancel" style={{ fg: theme.muted }} />
-          )}
-          {/* Gap between Esc:cancel / COMPACTING and ▲/▼ line badges */}
-          {(scrollMetrics.linesAbove > 0 || scrollMetrics.linesBelow > 0) ? (
-            <text selectable={false} content="   " />
+          {density !== "xs" ? (
+            state.compacting ? (
+              <text
+                selectable={false}
+                content="COMPACT"
+                style={{ fg: theme.mode }}
+              />
+            ) : (
+              <text
+                selectable={false}
+                content={density === "sm" ? "Esc" : "Esc:cancel"}
+                style={{ fg: theme.muted }}
+              />
+            )
           ) : null}
-          <ScrollRemainderBadges theme={theme} metrics={scrollMetrics} />
+          <ScrollRemainderBadges
+            theme={theme}
+            metrics={scrollMetrics}
+            compact={scrollCompact}
+          />
         </box>
       </box>
     );
   }
 
-  // Idle: centered chips; context tokens left of scroll badges on the right.
-  // Three columns (flexGrow left + center + flexGrow right) keep the middle true-center.
-  const idleCtx = contextChipForWidth(state.contextUsage, width);
+  // ── Idle ─────────────────────────────────────────────────────────────
+  // Left: mode (+ optional center chips that may shrink)
+  // Right: tokens + scroll (never shrink away)
   return (
     <box
       style={{
@@ -386,127 +485,146 @@ export function StatusLine(props: StatusLineProps): ReactNode {
         width: "100%",
         height: 1,
         alignItems: "center",
+        justifyContent: "space-between",
         backgroundColor: theme.background,
         paddingLeft: 1,
         paddingRight: 1,
       }}
     >
-      {/* Left balance spacer (mirrors right so center stays centered). */}
-      <box style={{ flexGrow: 1, flexShrink: 1, minWidth: 0 }} />
-
-      {/* Centered shortcut chips */}
       <box
         style={{
           flexDirection: "row",
           alignItems: "center",
-          flexShrink: 0,
-          justifyContent: "center",
+          flexShrink: 1,
+          minWidth: 0,
+          overflow: "hidden",
         }}
       >
-        <ModeBadge mode={mode} theme={theme} />
-        {width >= 42 ? (
+        <ModeBadge mode={mode} theme={theme} short={shortMode} />
+
+        {/* sm+: minimal command hint */}
+        {density === "md" || density === "lg" ? (
           <>
             {sep(theme)}
-            <text selectable={false} content="/:commands" style={{ fg: theme.muted }} />
+            <text
+              selectable={false}
+              content={density === "lg" ? "/:commands" : "/"}
+              style={{ fg: theme.muted, flexShrink: 0 }}
+            />
           </>
         ) : null}
-        {!compact ? (
+
+        {/* md+: thinking / output / scroll / clear — short chords, expand on hover */}
+        {density === "md" || density === "lg" ? (
           <>
             {sep(theme)}
             <ClickableHint
-              label={thinkingExpanded ? "^T thinking on" : "^T thinking"}
+              short="^T"
+              expand={
+                thinkingExpanded ? "hide thinking" : "show thinking"
+              }
               active={thinkingExpanded}
               theme={theme}
               onClick={onToggleThinking}
             />
             {sep(theme)}
             <ClickableHint
-              label={outputExpanded ? "^O output on" : "^O output"}
+              short="^O"
+              expand={outputExpanded ? "hide output" : "show output"}
               active={outputExpanded}
               theme={theme}
               onClick={onToggleOutput}
             />
             {sep(theme)}
             <ClickableHint
-              label="^U top"
+              short="^U"
+              expand="jump to top"
               active={false}
               theme={theme}
               onClick={onJumpTop}
             />
             {sep(theme)}
             <ClickableHint
-              label="^D end"
+              short="^D"
+              expand="jump to end"
               active={false}
               theme={theme}
               onClick={onJumpBottom}
             />
             {sep(theme)}
             <ClickableHint
-              label="^X clear"
+              short="^X"
+              expand="clear draft"
               active={false}
               theme={theme}
               onClick={onClearDraft}
             />
-            {width >= 72 ? (
-              <>
-                {sep(theme)}
-                <ClickableHint
-                  label="/shortcuts"
-                  active={false}
-                  theme={theme}
-                  onClick={onOpenShortcuts}
-                />
-              </>
-            ) : null}
           </>
         ) : null}
-        {hasActivePlan || planVisible ? (
+
+        {/* lg only: shortcuts link */}
+        {density === "lg" ? (
           <>
             {sep(theme)}
             <ClickableHint
-              label={tasksToggleLabel(planVisible, width < 72)}
+              short="/shortcuts"
+              expand="keyboard shortcuts"
+              active={false}
+              theme={theme}
+              onClick={onOpenShortcuts}
+            />
+          </>
+        ) : null}
+
+        {showTasks ? (
+          <>
+            {sep(theme)}
+            <ClickableHint
+              short={tasksToggleLabel(planVisible, density)}
+              expand={planVisible ? "hide tasks" : "show tasks"}
               active={planVisible}
               theme={theme}
               onClick={onTogglePlan}
             />
           </>
         ) : null}
-        {queued > 0 ? (
+
+        {queued > 0 && density !== "xs" ? (
           <>
             {sep(theme)}
             <text
               selectable={false}
-              content={`${queued} queued`}
-              style={{ fg: theme.mode }}
+              content={density === "sm" ? `${queued}q` : `${queued} queued`}
+              style={{ fg: theme.mode, flexShrink: 0 }}
             />
           </>
         ) : null}
       </box>
 
-      {/* Right: context usage chip + scroll remainder badges */}
+      {/* Right rail: tokens + scroll — never overwritten by left chips */}
       <box
         style={{
-          flexGrow: 1,
-          flexShrink: 1,
-          minWidth: 0,
           flexDirection: "row",
-          justifyContent: "flex-end",
           alignItems: "center",
+          flexShrink: 0,
+          justifyContent: "flex-end",
         }}
       >
-        {idleCtx ? (
+        {ctxChip ? (
           <>
+            <text selectable={false} content=" " />
             <ContextChip
-              chip={idleCtx}
+              chip={ctxChip}
               theme={theme}
               exact={state.contextUsage?.exact === true}
             />
-            {(scrollMetrics.linesAbove > 0 || scrollMetrics.linesBelow > 0) ? (
-              <text selectable={false} content="  " />
-            ) : null}
           </>
         ) : null}
-        <ScrollRemainderBadges theme={theme} metrics={scrollMetrics} />
+        <ScrollRemainderBadges
+          theme={theme}
+          metrics={scrollMetrics}
+          compact={scrollCompact}
+        />
       </box>
     </box>
   );
