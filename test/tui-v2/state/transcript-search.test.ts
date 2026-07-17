@@ -13,6 +13,7 @@ function buildState() {
     state,
     seq.build("assistant-message", { messageId: seq.ids.message(), text: "The Bug is on line 3." }, undefined),
   );
+  // Notices are toast-only and do not enter the transcript.
   state = applyAppEvent(state, seq.build("notice", { level: "info", text: "no bugs elsewhere" }, undefined));
   return state;
 }
@@ -27,9 +28,9 @@ describe("transcript search (V2-057)", () => {
     const matches = findMatches(buildState(), "bug");
     // user: "bug" (in "the bug") + "bug" (in "bug.ts") = 2
     // assistant: "Bug" = 1
-    // notice: "bugs" contains "bug" = 1
-    expect(matches).toHaveLength(4);
-    expect(new Set(matches.map((m) => m.itemId)).size).toBe(3);
+    // notice is ignored
+    expect(matches).toHaveLength(3);
+    expect(new Set(matches.map((m) => m.itemId)).size).toBe(2);
   });
 
   it("navigates forward and backward with wraparound", () => {

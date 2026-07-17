@@ -121,6 +121,10 @@ export function createCompositionRoot(
   // that (it is only about where raw AppEvents surface for tests/consumers).
   // Late-bound: session is constructed below; usage recording closes over it.
   let sessionRef: SessionController | undefined;
+  const focus = new FocusController();
+  const overlay = new OverlayController(focus);
+  const toast = new ToastController();
+
   const emit = (event: AnyAppEvent): void => {
     transcript.dispatch(event);
     plan.observe(event);
@@ -135,12 +139,18 @@ export function createCompositionRoot(
         event.payload.model,
       );
     }
+    // session.notice / agent notices → toast only (not chat items).
+    if (event.type === "notice") {
+      const level = event.payload.level === "warn" ? "warn" : "info";
+      toast.show(event.payload.text, {
+        level,
+        key: `notice-${level}`,
+        durationMs: level === "info" ? 1800 : 2600,
+      });
+    }
     if (externalEmit) externalEmit(event);
     else recorded.push(event);
   };
-
-  const focus = new FocusController();
-  const overlay = new OverlayController(focus);
 
   const ports: AppPorts = {
     agent: options.agent ?? createCurrentAgentPort(),
@@ -151,7 +161,6 @@ export function createCompositionRoot(
     confirm: options.confirm ?? createOverlayConfirmPort(overlay),
     requestSecret: options.requestSecret ?? createOverlaySecretPort(overlay),
   };
-  const toast = new ToastController();
   // Auto-copy-on-release disabled — it fought touch/focus/history.
   // Explicit copy remains via Ctrl+Shift+C (selection.copy).
   const selection = new SelectionController(ports.clipboard, {

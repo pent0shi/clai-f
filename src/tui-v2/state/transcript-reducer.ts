@@ -299,7 +299,9 @@ export function applyAppEvent(state: TranscriptState, event: AnyAppEvent): Trans
       return finalizeMessage(withSeq, event, "thinking", event.payload.content);
 
     case "notice":
-      return pushNotice(withSeq, event, event.payload.level, event.payload.text);
+      // Chrome feedback only — composition-root surfaces these as toasts.
+      // Never append INFO/WARN rows into the chat (inflates history item counts).
+      return withSeq;
 
     case "tool-call": {
       // Close open streams so cards never interleave under live thinking /

@@ -170,7 +170,9 @@ function scrubMessages(messages: ChatMessage[]): ChatMessage[] {
 
 function scrubTranscript(items?: TranscriptItem[] | undefined): TranscriptItem[] | undefined {
   if (!items) return undefined;
-  return items.map((item) => {
+  // Drop UI chrome notices — they must never bloat saved history item counts.
+  const durable = items.filter((item) => item.kind !== "notice");
+  return durable.map((item) => {
     switch (item.kind) {
       case "user":
         return { ...item, text: redactSecrets(item.text), done: true };
@@ -187,8 +189,6 @@ function scrubTranscript(items?: TranscriptItem[] | undefined): TranscriptItem[]
           status: item.status === "running" ? "ok" : item.status,
           done: true,
         };
-      case "notice":
-        return { ...item, text: redactSecrets(item.text), done: true };
       case "plan":
         return { ...item, done: true };
       case "compacted":
@@ -198,6 +198,10 @@ function scrubTranscript(items?: TranscriptItem[] | undefined): TranscriptItem[]
           originalItems: scrubTranscript(item.originalItems) ?? [],
           done: true,
         };
+      default: {
+        // notice already filtered; keep exhaustiveness for future kinds
+        return item;
+      }
     }
   });
 }

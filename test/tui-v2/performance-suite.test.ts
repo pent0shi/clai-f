@@ -89,8 +89,15 @@ describe("V2-091 performance suite (Node pure paths)", () => {
 
     const store = new TranscriptStore(100);
     const seq = sequencer();
+    // Notices are toast-only and do not enter the store; use real conversation rows.
     for (let i = 0; i < 1_000; i += 1) {
-      store.dispatch(seq.build("notice", { level: "info", text: `event-${i}` }, undefined));
+      store.dispatch(
+        seq.build(
+          "assistant-message",
+          { messageId: seq.ids.message(), text: `event-${i}` },
+          undefined,
+        ),
+      );
     }
     expect(store.getState().order).toHaveLength(100);
     expect(store.getState().byId.size).toBe(100);

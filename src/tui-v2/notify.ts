@@ -1,9 +1,9 @@
 /**
  * Ephemeral UI notifications via the toast stack.
  *
- * Prefer this over session.notice for chrome feedback (toggles, jumps, clear)
- * so the transcript is not filled with UI chatter. Use session.notice for
- * durable session/mode/config facts that should stay in chat history.
+ * session.notice also routes here (via composition-root) and no longer
+ * appends INFO/WARN rows into the transcript. Prefer `notify` / session.notice
+ * for chrome only — never for durable conversation content.
  */
 
 import type { ToastController, ToastLevel } from "./controllers/toast-controller.js";

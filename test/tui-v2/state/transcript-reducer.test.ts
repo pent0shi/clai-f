@@ -306,14 +306,13 @@ describe("transcript reducer (V2-050)", () => {
       if (i.kind === "user") return "U";
       return i.kind;
     });
+    // Notices between steps are toast-only and do not appear as chat rows.
     expect(summary).toEqual([
       "U",
       "T:think-1 greeting",
       "A:Hey! I'm cla",
-      "N",
       "T:think-2 clarify",
       "A:I didn't pro",
-      "N",
       "T:think-3 refuse",
       "A:Give me a re",
     ]);
@@ -480,7 +479,7 @@ describe("transcript reducer (V2-050)", () => {
     expect(() => normalizeSemanticDocument(extractTranscriptSemanticDocument(state))).not.toThrow();
   });
 
-  it("appends notice and compacted items", () => {
+  it("ignores chrome notices but appends compacted items", () => {
     const seq = buildSequencer();
     let state = EMPTY_TRANSCRIPT_STATE;
     state = applyAppEvent(state, seq.build("notice", { level: "warn", text: "careful" }, undefined));
@@ -489,8 +488,9 @@ describe("transcript reducer (V2-050)", () => {
       seq.build("compacted", { summary: "sum", beforeTokens: 100, afterTokens: 40 }, undefined),
     );
     const items = transcriptItems(state);
-    expect(items[0]).toMatchObject({ kind: "notice", level: "warn", text: "careful" });
-    expect(items[1]).toMatchObject({ kind: "compacted", beforeTokens: 100, afterTokens: 40 });
+    // Notices are toast-only — must never become chat rows.
+    expect(items.every((i) => i.kind !== "notice")).toBe(true);
+    expect(items[0]).toMatchObject({ kind: "compacted", beforeTokens: 100, afterTokens: 40 });
   });
 
   it("closes an open streaming item and surfaces a notice on turn-error", () => {

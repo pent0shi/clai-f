@@ -315,31 +315,45 @@ export async function handleHistory(services: AppServices): Promise<void> {
     );
     return;
   }
+  // Live session once at the top — never also list the same id below
+  // (that looked like two copies of one chat with different item counts).
+  const otherSessions = sessions.filter((s) => s.id !== currentId);
+  const liveVisualCount = conversationItemCount(
+    services.transcript.getState(),
+  );
   const options: PickerOption[] = [
     {
       value: "__current__",
       label: currentTitle?.trim() || "Current session",
       description: currentMessages.length
-        ? `now  ·  ${currentMessages.length} messages  ·  this window`
+        ? `now  ·  ${liveVisualCount} items  ·  ${currentMessages.length} model msgs  ·  this window`
         : "now  ·  empty session  ·  this window",
       active: true,
     },
-    ...sessions.map((session) => {
-      const count = session.transcript?.length ?? session.messages.length;
+    ...otherSessions.map((session) => {
+      const durableVisual = (session.transcript ?? []).filter(
+        (i) => i.kind !== "notice",
+      );
+      const count =
+        durableVisual.length > 0
+          ? durableVisual.length
+          : session.messages.filter(
+              (m) =>
+                m.role === "user" ||
+                m.role === "assistant" ||
+                m.role === "tool",
+            ).length;
       const date = session.updatedAt ?? session.createdAt;
       const when = relativeTime(date) || "some time ago";
       const stamp = date.slice(0, 16).replace("T", " ");
       const where = shortCwd(session.cwd);
-      const isLive = session.id === currentId;
       const title =
-        (session.name && session.name.trim()) ||
-        (isLive ? currentTitle : undefined) ||
-        "Untitled chat";
+        (session.name && session.name.trim()) || "Untitled chat";
       // Two-line card: title on top; meta chips underneath.
       const meta = [
         when,
         stamp,
-        `${count} message${count === 1 ? "" : "s"}`,
+        `${count} item${count === 1 ? "" : "s"}`,
         where ? `in ${where}` : "",
       ]
         .filter(Boolean)
@@ -348,7 +362,7 @@ export async function handleHistory(services: AppServices): Promise<void> {
         value: session.id,
         label: title,
         description: meta,
-        active: isLive,
+        active: false,
       };
     }),
   ];
@@ -380,6 +394,16 @@ export async function handleHistory(services: AppServices): Promise<void> {
         services.session.notice("info", "already on this session");
         services.overlay.close();
         return;
+      }
+
+      // Persist the outgoing live session before rebinding id, so work is not
+      // lost and we don't orphan a half-saved row under the old id.
+      if (currentMessages.length > 0) {
+        try {
+          await services.session.persistNow();
+        } catch {
+          /* best-effort */
+        }
       }
 
       clearActiveProjectRoot();
