@@ -446,8 +446,31 @@ export const toolRegistry: Record<string, ToolHandler> = {
     const urls = extractResultUrls(result.output).slice(0, want);
     if (urls.length === 0) return result;
 
+    // Heartbeats reset the runner's stall watchdog (web.search emits no
+    // stdout of its own). Honor turn cancel between pages so Esc/Ctrl+C
+    // does not wait for every fetchTop page to time out.
+    if (options?.signal?.aborted) {
+      return {
+        ...result,
+        ok: false,
+        output: `${result.output}\n\n(aborted before fetchTop)`,
+        exitCode: 130,
+      };
+    }
+    options?.onOutput?.(
+      `fetchTop: reading ${urls.length} page(s)…\n`,
+      "stdout",
+    );
+
     const pages = await Promise.all(
-      urls.map(async (url) => {
+      urls.map(async (url, i) => {
+        if (options?.signal?.aborted) {
+          return `── PAGE: ${url} (aborted)`;
+        }
+        options?.onOutput?.(
+          `fetchTop [${i + 1}/${urls.length}]: ${url}\n`,
+          "stdout",
+        );
         try {
           const page = await webFetch(
             { url, responseMode: "readable", includeHeaders: false },

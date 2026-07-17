@@ -51,8 +51,8 @@ describe("native prompts", () => {
     const p = renderAgentSystemPrompt("shell.start, fs.write", {
       nativeTools: true,
     });
-    expect(p).toMatch(/LEAVE the server running|leave server running/i);
-    expect(p).toMatch(/http:\/\/localhost|<port>|job id/i);
-    expect(p).toMatch(/Do NOT call plan\.create again only to add/i);
+    expect(p).toMatch(/LEAVE(?: the server)? running|leave server running/i);
+    expect(p).toMatch(/http:\/\/localhost|<port>|job id|URL \+ job id/i);
+    expect(p).toMatch(/Do NOT (?:call plan\.create again|re-plan) only to add/i);
   });
 });

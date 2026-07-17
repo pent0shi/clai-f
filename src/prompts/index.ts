@@ -1,8 +1,9 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { detectSystem } from "../os/detect.js";
+import { EMBEDDED_PROMPTS } from "./embedded.js";
 
 
 export function scratchDirFor(cwd: string): string {
@@ -14,9 +15,26 @@ export function scratchDirFor(cwd: string): string {
 
 const PROMPTS_DIR = dirname(fileURLToPath(import.meta.url));
 
-/** Load a sibling markdown prompt (single source of truth for agent/ask). */
+/**
+ * Load a system prompt template.
+ *
+ * Prefer the compile-time embedded copy so `bun build --compile` single-file
+ * binaries (Homebrew/Scoop) work — sibling `.md` files are NOT present under
+ * Bun's virtual FS (`/$bunfs/root/`). Fall back to reading the on-disk
+ * markdown when developing with plain Node/tsx and the file exists.
+ */
 function loadPromptFile(filename: string): string {
-  return readFileSync(join(PROMPTS_DIR, filename), "utf8").replace(/\r\n/g, "\n");
+  const embedded = EMBEDDED_PROMPTS[filename];
+  if (typeof embedded === "string" && embedded.length > 0) {
+    return embedded.replace(/\r\n/g, "\n");
+  }
+  const onDisk = join(PROMPTS_DIR, filename);
+  if (existsSync(onDisk)) {
+    return readFileSync(onDisk, "utf8").replace(/\r\n/g, "\n");
+  }
+  throw new Error(
+    `Missing system prompt "${filename}". Re-run: node scripts/embed-prompts.mjs`,
+  );
 }
 
 const askPrompt = loadPromptFile("system.ask.md");
@@ -54,7 +72,8 @@ After a tool result, next call or concise final answer. tool.batch for independe
 
 - Inspect state before changing it. Preserve existing stack/style. Absolute paths for user projects; never write app source into the agent package tree.
 - Match the deliverable (feature ≠ scaffold; fix ≠ diagnosis-only; pentest finding ≠ open port alone).
-- Multi-step builds: orient → implement (tasks optional) → verify. Local apps: shell.start, leave running, report URL + job id.
+- Multi-step: create working tasks → implement → automated checks (typecheck/build/tests when applicable) → live verify. Local apps: shell.start, leave running, report URL + job id.
+- Task cycle: in_progress → work → read results → done only when that task's outcome holds → next. Never mark done on hope after firing a command.
 - Debug: repro → localize → hypothesis → minimal fix → re-run the failing check. Never stop at narrating the fix.
 - Pentest: map surface (ports beyond top-N when needed, subdomains, content enum), threat-model, stack-matched tools, real PoCs, residual risk honesty. Background long scans and continue other work. No local dev server for remote targets.
 - Images: inspect attachments (vision/OCR); try path + scratch copy before asking the user to re-save.
@@ -62,7 +81,7 @@ After a tool result, next call or concise final answer. tool.batch for independe
 - Background long-lived work; web.search/web.fetch for current facts; cite tool URLs.
 - Fail → understand → fix → retry. Report blockers plainly.
 - Stay in scope; OS-correct commands for {{os}} / {{shell}}. Scratch under {{scratch}} only.
-`;
+`
 
 /** Slice template at a stable markdown section header (inclusive of header). */
 function sectionFrom(template: string, header: string): string {
@@ -116,7 +135,8 @@ Structured tools are attached by the API. Call them natively — no fenced tool 
 # WORKING RULES
 
 - Inspect before mutate. Preserve stack. Side effects go through tools + clai confirmation.
-- Multi-step: orient, optional tasks, verify before done.
+- Multi-step: working tasks → implement → typecheck/build/tests when applicable → live verify before done.
+- Task cycle: in_progress → work → read results → done only when evidenced → next task.
 - Debug: fix and re-verify. Pentest: map surface → threat model → test → PoC → residual risk; no local server for remote targets.
 - Background long work; web.search for current facts. Stay in scope for {{os}} / {{shell}}.
 `;
@@ -232,26 +252,45 @@ export function toolNudge(native: boolean): string {
     : "Emit a ```tool block with valid JSON now.";
 }
 
-/** Injected when REPL mode is plan — planning only, deep context first. */
+/** Injected when REPL mode is plan — deep thinking + comprehensive durable plan. */
 export function planModeDirective(): string {
   return [
-    "PLAN MODE — gather + plan only (no project writes, no active exploits).",
-    "Goal: produce the best possible durable plan for the user's request.",
-    "- Take as many turns as needed. For pentest: map attack surface fully — ports (escalate beyond top-N), subdomains, content/API enum, JS harvest, tech fingerprint, auth surfaces — with any recon/scan tool (nmap, ffuf, dig, http.fetch, shell.start long scans, …).",
-    "- Background long scans and continue other recon. Hunger for complete surface before planning.",
-    "- Do not scaffold, write project files, or run active exploitation/C2. Put exploit/implement steps as plan tasks for after accept.",
-    "- When ready, plan.create once: rich detail (context, approach, risks, verify) + all relevant tasks (any count, no filler).",
-    "- Prefer evidence-based plans. After plan.create, stop for accept / discard / view / suggest.",
+    "PLAN MODE — think, research, architect. Do not implement or exploit yet.",
+    "Plan mode is NOT agent-mode task execution. Here tasks are part of a durable plan you design — they are the roadmap the user will accept before any build/exploit work.",
+    "",
+    "How to plan (give 1000% effort):",
+    "- Understand the real user goal, constraints, stack/target, and success definition.",
+    "- Gather what you need first: workspace/stack inspection, recon, docs, web.search for current APIs/CVEs/techniques when facts may be stale. Prefer evidence over imagination.",
+    "- Consider alternatives, risks, edge cases, dependency order, and verification for each step.",
+    "- For pentest: map surface fully before plan.create — ports (escalate beyond top-N), subdomains, content/API enum, JS harvest, tech fingerprint, auth surfaces (nmap, ffuf, dig, http.fetch, shell.start long scans, …). Background long scans and continue other recon.",
+    "- Do not scaffold, write project files, or run active exploitation/C2. Put implement/exploit steps as plan tasks for after accept.",
+    "",
+    "When context is enough, call plan.create once with:",
+    "- goal + rich detail (context found, approach, architecture, risks, how each phase is verified)",
+    "- a complete ordered task list (any count; only real work; no filler) covering build/test/verify or recon→test→exploit→report as appropriate",
+    "- for software: include implement, automated checks (typecheck/build/tests when applicable), and live/runtime verification as separate tasks when they are distinct work",
+    "After plan.create, STOP for accept / discard / view / suggest. Prefer evidence-based plans.",
   ].join("\n");
 }
 
-/** Injected when REPL mode is agent — execute with optional tasks. */
+/** Injected when REPL mode is agent — execute with working tasks, verify before done. */
 export function agentModeDirective(): string {
   return [
-    "AGENT MODE — you execute with hunger for the user's real success condition.",
-    "- Orient, then act. Create tasks when multi-phase work needs them; skip for trivial work.",
-    "- No artificial task cap. Verify before claiming done. Do not stop at thin proxies (scaffold without feature, ports without tested vulns).",
-    "- Long jobs: background them and continue other useful work.",
-    "- Prefer fixing failures over narrating them. Change approach after repeated failures.",
+    "AGENT MODE — execute until the user's real success condition is evidenced.",
+    "Tasks here are YOUR working checklist (not a user-facing plan document). They keep multi-phase work honest.",
+    "",
+    "Task discipline (agent mode):",
+    "- For non-trivial work (multi-file feature, new app, pentest engagement, multi-step fix): decompose the goal into concrete outcome-titled tasks early, then work them. Skip task lists only for trivial one-shots.",
+    "- Prefer more small, checkable tasks over one vague mega-task. No artificial cap; only relevant items.",
+    "- Cycle for each task: task.update(in_progress) → run the real tools/commands → READ and analyze every result → if the task outcome is satisfied, task.update(done) and open the next task immediately; if not, keep working that task (fix, retry, change approach) until it is, then mark done.",
+    "- Never mark done on hope or right after firing a command. Done means you saw evidence that this task's outcome holds.",
+    "- Do not stop at thin proxies (scaffold without the feature, ports without tested findings, build without the requested behavior).",
+    "",
+    "Build / ship software:",
+    "- After implementing: run stack checks that apply (typecheck, build, unit/integration tests). Fix failures before claiming success.",
+    "- Then live/runtime verification when applicable (start app, probe routes/UI, leave server running, report URL + job id).",
+    "- Only then tell the user it works — with what you actually observed.",
+    "",
+    "Long jobs: background them and continue other useful work. Prefer fixing failures over narrating them. Change approach after repeated identical failures.",
   ].join("\n");
 }

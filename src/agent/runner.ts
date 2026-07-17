@@ -182,6 +182,8 @@ import {
   recordTaskWorkSuccess,
   resolveUserDestinationHint,
   taskEvidenceFromLedger,
+  TOOL_ABORT_GRACE_MS,
+  toolHardBudgetMs,
   toolStallBudgetMs,
   type LooseWorkReceipt,
   userAskedForFeatureApp,
@@ -2009,9 +2011,15 @@ export async function runAgentTurn(
 
 
       const TOOL_STALL_ABORT_MS = toolStallBudgetMs(call);
+      const TOOL_HARD_BUDGET_MS = toolHardBudgetMs(call);
       const stallSecs = Math.round(TOOL_STALL_ABORT_MS / 1000);
+      const hardSecs = Math.round(TOOL_HARD_BUDGET_MS / 1000);
       let stallTimer: NodeJS.Timeout | undefined;
+      let hardTimer: NodeJS.Timeout | undefined;
+      let graceTimer: NodeJS.Timeout | undefined;
       let stalledByWatchdog = false;
+      let hardTimedOut = false;
+      let forceSettled = false;
       const resetStallTimer = (): void => {
         if (stallTimer) clearTimeout(stallTimer);
         stallTimer = setTimeout(() => {
@@ -2027,11 +2035,18 @@ export async function runAgentTurn(
             toolAc.abort();
           }
         }, TOOL_STALL_ABORT_MS);
+        // Node: do not keep the process alive solely for the stall timer.
+        (stallTimer as unknown as { unref?: () => void }).unref?.();
       };
       resetStallTimer();
 
-      try {
-        result = await runToolCall(call, {
+      /**
+       * Force-settle a hung tool promise after abort or hard budget.
+       * Some transports ignore AbortSignal; without this race the agent
+       * could freeze for minutes after "cancelling stalled tool".
+       */
+      const runToolWithForcedSettle = (): Promise<ToolResult> => {
+        const work = runToolCall(call, {
           signal: toolAc.signal,
           requestSecret: options.requestSecret,
           onOutput: (chunk) => {
@@ -2069,6 +2084,99 @@ export async function runAgentTurn(
             }
             : {}),
         });
+
+        return new Promise<ToolResult>((resolve, reject) => {
+          let settled = false;
+          const finishOk = (r: ToolResult): void => {
+            if (settled) return;
+            settled = true;
+            if (graceTimer) clearTimeout(graceTimer);
+            resolve(r);
+          };
+          const finishErr = (err: unknown): void => {
+            if (settled) return;
+            settled = true;
+            if (graceTimer) clearTimeout(graceTimer);
+            reject(err);
+          };
+          const forceCancelResult = (): ToolResult => {
+            forceSettled = true;
+            if (stalledByWatchdog) {
+              return {
+                ok: false,
+                output: `Tool timed out after ${stallSecs}s without output (force-cancelled).`,
+                exitCode: 124,
+              };
+            }
+            if (hardTimedOut) {
+              return {
+                ok: false,
+                output: `Tool hard-timeout after ${hardSecs}s — cancelled.`,
+                exitCode: 124,
+              };
+            }
+            return {
+              ok: false,
+              output: "Tool aborted before it could complete (force-cancelled).",
+              exitCode: 130,
+            };
+          };
+          const armGraceForceSettle = (): void => {
+            if (settled || graceTimer) return;
+            graceTimer = setTimeout(() => {
+              if (settled) return;
+              writeNotice(
+                "warn",
+                `${call.name} did not stop after cancel — force-settling`,
+                chalk.yellow(
+                  `  ⏳ ${call.name} ignore cancel — force-settling hung tool\n`,
+                ),
+              );
+              finishOk(forceCancelResult());
+            }, TOOL_ABORT_GRACE_MS);
+            (graceTimer as unknown as { unref?: () => void }).unref?.();
+          };
+
+          work.then(finishOk, finishErr);
+
+          // Hard wall-clock: abort + force-settle after budget.
+          hardTimer = setTimeout(() => {
+            if (settled) return;
+            hardTimedOut = true;
+            writeNotice(
+              "warn",
+              `${call.name} exceeded ${hardSecs}s hard budget — cancelling`,
+              chalk.yellow(
+                `  ⏳ ${call.name} hard-timeout (${hardSecs}s) — cancelling\n`,
+              ),
+            );
+            if (!toolAc.signal.aborted) toolAc.abort();
+            armGraceForceSettle();
+          }, TOOL_HARD_BUDGET_MS);
+          (hardTimer as unknown as { unref?: () => void }).unref?.();
+
+          // After any abort (stall, user Esc/Ctrl+C, parent), force-settle
+          // if the tool promise does not resolve within the grace window.
+          const onToolAbort = (): void => armGraceForceSettle();
+          if (toolAc.signal.aborted) onToolAbort();
+          else toolAc.signal.addEventListener("abort", onToolAbort, { once: true });
+        });
+      };
+
+      try {
+        result = await runToolWithForcedSettle();
+        // User Esc/Ctrl+C: force-settle may resolve with a cancel result
+        // instead of throwing — still end the turn as aborted.
+        if (parentSignal.aborted && !stalledByWatchdog && !hardTimedOut) {
+          writeAbort();
+          return {
+            ok: false,
+            call,
+            result: { ok: false, output: "Aborted." },
+            contextOutput: "Aborted.",
+            lastAnswer: "Aborted.",
+          };
+        }
         if (liveBytes > 0) {
           writeToolOutput(toolEventId, "\n", "\n");
         }
@@ -2079,9 +2187,8 @@ export async function runAgentTurn(
         );
       } catch (toolError) {
         jobManager.updateJobStatus(jobId, "failed", 1);
-        if (isAbortError(toolError, toolAc.signal)) {
-
-          if (parentSignal.aborted) {
+        if (isAbortError(toolError, toolAc.signal) || forceSettled) {
+          if (parentSignal.aborted && !stalledByWatchdog && !hardTimedOut) {
             writeAbort();
             return {
               ok: false,
@@ -2095,8 +2202,10 @@ export async function runAgentTurn(
             ok: false,
             output: stalledByWatchdog
               ? `Tool timed out after ${TOOL_STALL_ABORT_MS / 1_000}s without output.`
-              : "Tool aborted before it could complete.",
-            exitCode: stalledByWatchdog ? 124 : 130,
+              : hardTimedOut
+                ? `Tool hard-timeout after ${hardSecs}s — cancelled.`
+                : "Tool aborted before it could complete.",
+            exitCode: stalledByWatchdog || hardTimedOut ? 124 : 130,
           };
         } else {
           const errMsg =
@@ -2105,6 +2214,8 @@ export async function runAgentTurn(
         }
       } finally {
         if (stallTimer) clearTimeout(stallTimer);
+        if (hardTimer) clearTimeout(hardTimer);
+        if (graceTimer) clearTimeout(graceTimer);
         engagementLease?.release();
         parentSignal.removeEventListener("abort", onParentAbort);
       }

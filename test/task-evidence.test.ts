@@ -26,6 +26,7 @@ import {
   recordTaskWorkSuccess,
   resolveUserDestinationHint,
   toolFitsTaskClass,
+  toolHardBudgetMs,
   toolStallBudgetMs,
   userAskedForFeatureApp,
 } from "../src/agent/task-evidence.js";
@@ -233,6 +234,21 @@ describe("coding plan requirement helpers", () => {
         args: { command: "echo hi" },
       }),
     ).toBe(60_000);
+    expect(
+      toolStallBudgetMs({ name: "web.search", args: { query: "x" } }),
+    ).toBe(45_000);
+    expect(
+      toolHardBudgetMs({
+        name: "web.search",
+        args: { query: "x", fetchTop: 2 },
+      }),
+    ).toBe(15_000 + 2 * 30_000 + 15_000);
+    expect(
+      toolHardBudgetMs({ name: "web.fetch", args: { url: "https://x" } }),
+    ).toBe(45_000);
+    expect(
+      toolHardBudgetMs({ name: "shell.exec", args: { command: "echo hi" } }),
+    ).toBe(5 * 60_000);
   });
 
   it("picks install task for npm install, not localStorage", () => {

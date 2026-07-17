@@ -4,6 +4,8 @@ import { resolve } from "node:path";
 import {
   renderAskSystemPrompt,
   renderAgentSystemPrompt,
+  agentModeDirective,
+  planModeDirective,
   _ASK_TEMPLATE,
   _AGENT_TEMPLATE,
   currentDateTimeContext,
@@ -69,6 +71,30 @@ describe("prompt rendering", () => {
     const when = new Date("2026-05-29T12:34:56.000Z");
     expect(currentDateTimeContext(when)).toContain("2026-05-29T12:34:56.000Z");
   });
+
+  it("agent prompt distinguishes agent tasks vs plan tasks and verify-before-done", () => {
+    const prompt = renderAgentSystemPrompt("task.update, plan.create, shell.exec");
+    expect(prompt).toMatch(/AGENT-MODE TASKS vs PLAN-MODE TASKS/i);
+    expect(prompt).toMatch(/read\/analyze results|read tool results|READ results/i);
+    expect(prompt).toMatch(/typecheck|automated checks/i);
+    expect(prompt).toMatch(/Never mark done before success|done only when|Never mark done because/i);
+  });
+
+  it("agentModeDirective requires evidence before task done + build testing", () => {
+    const d = agentModeDirective();
+    expect(d).toMatch(/working checklist/i);
+    expect(d).toMatch(/Never mark done on hope/i);
+    expect(d).toMatch(/typecheck|automated checks/i);
+    expect(d).toMatch(/open the next task immediately/i);
+  });
+
+  it("planModeDirective is plan-as-deliverable, not execution", () => {
+    const d = planModeDirective();
+    expect(d).toMatch(/NOT agent-mode task execution/i);
+    expect(d).toMatch(/plan\.create/i);
+    expect(d).toMatch(/Do not implement/i);
+    expect(d).toMatch(/1000%|comprehensive|architecture/i);
+  });
 });
 
 describe("phase 11 — prompt template ↔ markdown drift", () => {
@@ -92,5 +118,18 @@ describe("phase 11 — prompt template ↔ markdown drift", () => {
       .trimEnd();
     const inline = _AGENT_TEMPLATE.replace(/\r\n/g, "\n").trimEnd();
     expect(md).toBe(inline);
+  });
+
+  it("embedded prompts match on-disk markdown (brew/bun binary source)", () => {
+    // embed-prompts.mjs must be re-run whenever .md changes; this catches drift.
+    for (const name of ["system.ask.md", "system.agent.md"] as const) {
+      const md = readFileSync(
+        resolve(__dirname, `../src/prompts/${name}`),
+        "utf8",
+      ).replace(/\r\n/g, "\n");
+      const embedded =
+        name === "system.ask.md" ? _ASK_TEMPLATE : _AGENT_TEMPLATE;
+      expect(embedded.replace(/\r\n/g, "\n")).toBe(md);
+    }
   });
 });

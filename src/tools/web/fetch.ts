@@ -51,7 +51,14 @@ export async function webFetch(
   args: WebFetchArgs,
   options: WebFetchOptions = {},
 ): Promise<ToolResult> {
-  const outcome = await webFetchCore(args, options.core ?? {});
+  // Forward turn-cancel / stall-watchdog abort into the core pipeline.
+  // Without this, Esc/Ctrl+C aborted the tool controller in the runner
+  // but web.fetch ignored options.signal and could hang for minutes.
+  const core: WebFetchCoreOptions = {
+    ...(options.core ?? {}),
+    ...(options.signal ? { signal: options.signal } : {}),
+  };
+  const outcome = await webFetchCore(args, core);
 
   // Audit every invocation, success or failure (Requirement 5.6).
   // We never await the audit log so a slow disk does not delay the

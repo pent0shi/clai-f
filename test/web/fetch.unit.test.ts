@@ -274,4 +274,40 @@ describe("web.fetch unit tests", () => {
     expect(result.error?.kind).toBe("timeout");
     expect(result.error?.message).toContain("timeout after 30s");
   });
+
+  it("honors caller AbortSignal so turn cancel does not hang", async () => {
+    const httpsRequest = (_url: string | URL, _options: unknown): ClientRequest => {
+      const req = new EventEmitter() as unknown as ClientRequest;
+      (req as unknown as { end: () => void }).end = (): void => {
+        /* hang until abort */
+      };
+      const options = _options as { signal?: AbortSignal } | undefined;
+      const sig = options?.signal;
+      if (sig) {
+        sig.addEventListener("abort", () => {
+          queueMicrotask(() => {
+            const err = new Error("aborted");
+            (err as Error & { name: string }).name = "AbortError";
+            (req as unknown as { emit: (...a: unknown[]) => void }).emit(
+              "error",
+              err,
+            );
+          });
+        });
+      }
+      return req;
+    };
+
+    const ac = new AbortController();
+    // Via webFetch options.signal (the path the runner uses).
+    const promise = webFetch(
+      { url: "https://example.com/" },
+      { signal: ac.signal, core: { httpsRequest, dnsLookup } },
+    );
+    // Abort shortly after start — must settle, not hang.
+    queueMicrotask(() => ac.abort());
+    const result = await promise;
+    expect(result.ok).toBe(false);
+    expect(result.output.toLowerCase()).toMatch(/abort|timeout|cancel/);
+  });
 });

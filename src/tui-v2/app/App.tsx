@@ -145,10 +145,19 @@ export function App(): ReactNode {
       case "app.interrupt": {
         // Ctrl+C: first press aborts if running (and arms quit); second press
         // within the window exits. Idle: first arms, second exits.
+        // Important: while a hung tool is still "running", a second Ctrl+C
+        // must still exit — otherwise cancel that never settles traps the UI.
         key.preventDefault();
         const now = Date.now();
+        const doublePress =
+          lastCtrlC.current > 0 &&
+          now - lastCtrlC.current < CTRL_C_QUIT_WINDOW_MS;
         if (services.session.getState().running) {
           services.session.abort();
+          if (doublePress) {
+            services.requestExit();
+            break;
+          }
           lastCtrlC.current = now;
           services.session.notice(
             "info",
@@ -156,10 +165,7 @@ export function App(): ReactNode {
           );
           break;
         }
-        if (
-          lastCtrlC.current > 0 &&
-          now - lastCtrlC.current < CTRL_C_QUIT_WINDOW_MS
-        ) {
+        if (doublePress) {
           services.requestExit();
         } else {
           lastCtrlC.current = now;

@@ -712,8 +712,50 @@ export function toolStallBudgetMs(call: {
   ) {
     return 15 * 60_000; // create-next-app + npm install often 2–10+ min with quiet stretches
   }
+  // Network tools should not sit silent for a full minute — their own
+  // per-request timeouts are shorter; 45s is a safety net for hung sockets.
+  if (call.name === "web.search" || call.name === "web.fetch" || call.name === "http.fetch") {
+    return 45_000;
+  }
   return 60_000;
 }
+
+/**
+ * Hard wall-clock budget for a tool call. When exceeded the runner aborts
+ * and force-settles even if the underlying promise never resolves (hung
+ * socket that ignored AbortSignal). Distinct from the stall watchdog
+ * (which fires on *silence*); this fires on total elapsed time.
+ */
+export function toolHardBudgetMs(call: {
+  name: string;
+  args: Record<string, unknown>;
+}): number {
+  const cmd = typeof call.args.command === "string" ? call.args.command : "";
+  if (call.name === "pkg.install") return 20 * 60_000;
+  if (
+    (call.name === "shell.exec" || call.name === "shell.start") &&
+    isLongQuietInstallOrScaffoldCommand(cmd)
+  ) {
+    return 20 * 60_000;
+  }
+  if (call.name === "web.search") {
+    // search (15s) + up to 3 fetchTop pages (30s each) + margin
+    const fetchTop =
+      typeof call.args.fetchTop === "number" && Number.isFinite(call.args.fetchTop)
+        ? Math.max(0, Math.min(3, Math.floor(call.args.fetchTop)))
+        : 0;
+    return 15_000 + fetchTop * 30_000 + 15_000;
+  }
+  if (call.name === "web.fetch") return 45_000;
+  if (call.name === "http.fetch") return 90_000;
+  if (call.name === "net.scan" || call.name === "pentest.recon") return 15 * 60_000;
+  if (call.name === "shell.start") return 120_000; // should background quickly
+  // Default hard cap so a silent hung tool cannot freeze the session forever.
+  return 5 * 60_000;
+}
+
+/** Grace period after abort before force-settling a hung tool promise. */
+export const TOOL_ABORT_GRACE_MS = 2_500;
 
 /** Harmless version/which probes models use instead of tool.check before planning. */
 export function isReadOnlyVersionProbeCommand(cmd: string): boolean {

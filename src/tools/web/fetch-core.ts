@@ -90,6 +90,13 @@ export interface WebFetchCoreOptions {
   dnsLookup?: DnsLookupFn;
   /** Wall-clock source for timing fields. Defaults to `Date.now`. */
   now?: () => number;
+  /**
+   * Caller abort (turn cancel / stall watchdog). When aborted, the
+   * in-flight hop is torn down immediately — without this, Esc/Ctrl+C
+   * and the stall watchdog could leave `web.fetch` hung until its own
+   * 30s timer fired (or forever if a socket ignored that timer).
+   */
+  signal?: AbortSignal;
 }
 
 // ---------------------------------------------------------------------------
@@ -169,8 +176,11 @@ export async function webFetchCore(
   // Wire up a single AbortController + 30 s wall-clock timer. The signal
   // is passed to DNS, the request, and the body reader so an abort
   // anywhere in the pipeline collapses every dangling listener.
+  // Also forward the caller's AbortSignal so turn cancel / stall watchdog
+  // actually kill the fetch (previously only the local timer was wired).
   const controller = new AbortController();
   let timedOut = false;
+  let callerAborted = false;
   const timeoutHandle = setTimeout(() => {
     timedOut = true;
     controller.abort();
@@ -179,6 +189,16 @@ export async function webFetchCore(
   // forgets to await us. `setTimeout` returns a `Timeout` in Node which
   // exposes `.unref()`; the cast keeps lib.dom.d.ts happy.
   (timeoutHandle as unknown as { unref?: () => void }).unref?.();
+
+  const callerSignal = options.signal;
+  const onCallerAbort = (): void => {
+    callerAborted = true;
+    controller.abort();
+  };
+  if (callerSignal) {
+    if (callerSignal.aborted) onCallerAbort();
+    else callerSignal.addEventListener("abort", onCallerAbort);
+  }
 
   const initialUrl = new URL(a.url);
   const isHttps = initialUrl.protocol === "https:";
@@ -241,13 +261,35 @@ export async function webFetchCore(
   } catch (err) {
     // Runaway exception: surface as "network" so the caller still gets
     // a typed outcome instead of a thrown Error.
-    if (timedOut) {
+    if (timedOut && !callerAborted) {
       return errorOutcome({
         requestedUrl: a.url,
         finalUrl: lastUrl,
         mode: a.responseMode,
         capture,
         error: timeoutError(lastUrl, t0, now),
+        now,
+        t0,
+        includeHeaders: a.includeHeaders,
+        includeTls: a.includeTls,
+        includeTiming: a.includeTiming,
+        includeRedirectChain: a.includeRedirectChain,
+        redactSensitive: a.redactSensitive,
+      });
+    }
+    if (callerAborted || controller.signal.aborted) {
+      return errorOutcome({
+        requestedUrl: a.url,
+        finalUrl: lastUrl,
+        mode: a.responseMode,
+        capture,
+        error: {
+          kind: "timeout",
+          message: callerAborted
+            ? "web.fetch aborted by caller (turn cancelled or stall watchdog)."
+            : timeoutError(lastUrl, t0, now).message,
+          url: lastUrl,
+        },
         now,
         t0,
         includeHeaders: a.includeHeaders,
@@ -273,6 +315,9 @@ export async function webFetchCore(
     });
   } finally {
     clearTimeout(timeoutHandle);
+    if (callerSignal) {
+      callerSignal.removeEventListener("abort", onCallerAbort);
+    }
   }
 }
 

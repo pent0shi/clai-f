@@ -464,10 +464,13 @@ export function planContextMessage(plan: SessionPlan, approved: boolean): string
       );
     }
     lines.push(
-      "Flow: task.update in_progress → real work → WAIT for and READ the tool result → " +
-        "mark done only when verified → next task. Durable evidence shown beside a task survives resume; use it to close that task rather than repeating already-confirmed work. " +
+      "Flow: task.update in_progress → real work → WAIT for and READ every tool result for that task → " +
+        "only then mark done when the task outcome is satisfied → immediately open the next task. " +
+        "Never mark done right after firing a command on the hope it will succeed — analyze the actual output first. " +
+        "Durable evidence shown beside a task survives resume; use it to close that task rather than repeating already-confirmed work. " +
         "Independent read-only lookups may parallelize within a task. " +
-        "Never mark done before successful relevant evidence. If a tool fails: mark failed, fix, retry. " +
+        "If a tool fails: mark failed or stay in progress, fix, retry until the task is truly done. " +
+        "For software builds: run automated checks (typecheck/build/tests when applicable) then live/runtime proof. " +
         "For run/verify: prove runtime (shell.start, ready tail, LISTEN, or localhost GET), leave server running, final message includes URL, port, and job id. " +
         "Do not re-open done tasks. If mid-task evidence shows the plan is wrong, adapt (fix root cause; for pentest, revise plan with completed tasks preserved).",
     );
