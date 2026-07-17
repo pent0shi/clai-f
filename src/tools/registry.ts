@@ -47,6 +47,8 @@ import { looksLongRunning } from "./command-intent.js";
 import { packageBinaryName } from "./package-binary.js";
 import { resolveNmapTimeoutPolicy, runNmapScan } from "./nmap-runner.js";
 import { compareAuthorizationContexts, discoverWebSurface, enumerateApi } from "./pentest-workflows.js";
+import { nativeDnsLookup } from "./dns-native.js";
+import { nativeWhoisLookup } from "./whois-native.js";
 import { type ToolRunOptions, type ToolHandler } from "./tool-types.js";
 import { fromWireName, sanitizeToolName } from "../llm/tool-protocol.js";
 import {
@@ -321,6 +323,25 @@ export const toolRegistry: Record<string, ToolHandler> = {
     // model's "check-then-install" intent cheap and idempotent.
     const checkArg = optionalString(args, "checkBinary");
     const binary = checkArg ?? packageBinaryName(tool);
+    // dig/whois are never required — built-in dns.lookup / whois.lookup cover them.
+    const nativeCovered = new Set([
+      "dig",
+      "whois",
+      "bind",
+      "bind9",
+      "dnsutils",
+      "bind-utils",
+      "nslookup",
+    ]);
+    if (nativeCovered.has(tool.toLowerCase()) || nativeCovered.has(binary.toLowerCase())) {
+      return {
+        ok: true,
+        output:
+          `${tool} is optional. Use built-in dns.lookup (Node resolver + DNS-over-HTTPS) ` +
+          `and whois.lookup (RDAP + port-43) — no system binary install required.`,
+        exitCode: 0,
+      };
+    }
     if (await commandAvailable(binary)) {
       return {
         ok: true,
@@ -568,13 +589,7 @@ export const toolRegistry: Record<string, ToolHandler> = {
         `dns.lookup: unsupported record type "${recordRaw}". Allowed: ${[...allowed].join(", ")}`,
       );
     }
-    return spawnArgv({
-      command: "dig",
-      argv: [host.value, recordRaw, "+noall", "+answer", "+stats"],
-      timeoutMs: 30_000,
-      signal: options?.signal,
-      onOutput: options?.onOutput,
-    });
+    return nativeDnsLookup(host.value, recordRaw as Parameters<typeof nativeDnsLookup>[1]);
   },
   /**
    * Run a single whois query so callers asking about ownership/registrar
@@ -584,13 +599,7 @@ export const toolRegistry: Record<string, ToolHandler> = {
     const host = parseHost(requireString(args, "target"));
     // Keep whois short-lived: many servers hang or buffer until close. A hard
     // 20s cap beats the outer 60s "no output" stall watchdog aborting mid-recon.
-    return spawnArgv({
-      command: "whois",
-      argv: [host.value],
-      timeoutMs: 20_000,
-      signal: options?.signal,
-      onOutput: options?.onOutput,
-    });
+    return nativeWhoisLookup(host.value);
   },
   async "pentest.recon"(args, options) {
     const host = parseHost(requireString(args, "target"));
@@ -689,6 +698,20 @@ export const toolRegistry: Record<string, ToolHandler> = {
             return { key: step.key, display, result };
           }
           return { key: step.key, display, result: await runNmapScan(step.argv, options) };
+        }
+        if (step.key === "dns") {
+          return {
+            key: step.key,
+            display: `native DNS ANY ${host.value}`,
+            result: await nativeDnsLookup(host.value, "ANY"),
+          };
+        }
+        if (step.key === "whois") {
+          return {
+            key: step.key,
+            display: `native WHOIS ${host.value}`,
+            result: await nativeWhoisLookup(host.value),
+          };
         }
         const timeoutMs = step.key === "whois" ? 20_000 : 30_000;
         return {

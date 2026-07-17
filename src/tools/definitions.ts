@@ -394,14 +394,14 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   ),
   def(
     "dns.lookup",
-    "DNS query for a single record type.",
+    "DNS query for a single record type. Built-in (Node resolver + DNS-over-HTTPS) — does NOT require dig/nslookup/host.",
     {
       type: "object",
       properties: {
         target: { type: "string" },
         record: {
           type: "string",
-          description: "A, AAAA, MX, TXT, ...",
+          description: "A, AAAA, MX, TXT, NS, CNAME, SOA, SRV, CAA, PTR, ANY",
         },
       },
       required: ["target"],
@@ -411,7 +411,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   ),
   def(
     "whois.lookup",
-    "WHOIS lookup for domain or IP ownership.",
+    "Registration/ownership lookup (RDAP + port-43). Built-in — does NOT require the whois binary.",
     {
       type: "object",
       properties: { target: { type: "string" } },
@@ -422,7 +422,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   ),
   def(
     "pentest.recon",
-    "Bundled whois/dns/nmap recon. Prefer discrete tools when only one step is needed. Default nmap is top-100; escalate with topPorts, ports, or full for thorough engagements.",
+    "Bundled whois/dns/nmap recon. DNS+WHOIS use built-in resolvers (no dig/whois binaries). Prefer discrete tools when only one step is needed. Default nmap is top-100; escalate with topPorts, ports, or full for thorough engagements.",
     {
       type: "object",
       properties: {

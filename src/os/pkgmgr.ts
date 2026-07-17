@@ -1,4 +1,4 @@
-import { execa } from "execa";
+import { commandAvailable as hasExecutable } from "./command.js";
 
 export interface PackageManager {
   id: "brew" | "apt" | "dnf" | "pacman" | "winget" | "choco" | "unknown";
@@ -21,12 +21,7 @@ export function assertSafePackageName(tool: string): string {
 }
 
 async function commandExists(command: string): Promise<boolean> {
-  try {
-    await execa(process.platform === "win32" ? "where" : "which", [command]);
-    return true;
-  } catch {
-    return false;
-  }
+  return hasExecutable(command);
 }
 
 export async function detectPackageManager(): Promise<PackageManager> {

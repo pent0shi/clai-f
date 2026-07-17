@@ -1,5 +1,5 @@
-import { execSync } from "node:child_process";
-import { platform } from "node:os";
+import { execFileSync } from "node:child_process";
+import { findExecutable } from "../os/command.js";
 import type { ToolResult } from "../types.js";
 
 export interface ToolAvailability {
@@ -41,7 +41,10 @@ const INSTALL_HINTS: Record<string, string> = {
   hydra: "pkg.install hydra",
   rg: "pkg.install ripgrep",
   jq: "pkg.install jq",
-  dig: "pkg.install dnsutils (or bind-utils)",
+  dig: "optional — dns.lookup uses built-in resolver (no dig needed)",
+  whois: "optional — whois.lookup uses RDAP/port-43 (no whois binary needed)",
+  nslookup: "optional — use dns.lookup (built-in)",
+  host: "optional — use dns.lookup (built-in)",
   subfinder:
     "go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest",
   httpx: "go install github.com/projectdiscovery/httpx/cmd/httpx@latest",
@@ -49,46 +52,41 @@ const INSTALL_HINTS: Record<string, string> = {
   tesseract: "pkg.install tesseract",
 };
 
+/**
+ * Binaries that are never hard-required because clai ships a native tool
+ * path (or a soft substitute). Missing them must not fail tool.check or
+ * push the model into pkg.install death spirals.
+ */
+const BUILTIN_COVERED = new Set([
+  "dig",
+  "whois",
+  "nslookup",
+  "host",
+  "hostid",
+]);
+
 /** True if path is only a project-local node_modules/.bin shim (not global). */
 export function isProjectLocalNodeBin(path: string): boolean {
   return /(?:^|[/\\])node_modules[/\\]\.bin[/\\]/i.test(path);
 }
 
-function findCommand(name: string): string | undefined {
-  try {
-    const cmd =
-      platform() === "win32" ? `where.exe ${name}` : `command -v ${name}`;
-    // Sanitize PATH: drop node_modules/.bin entries so tool.check reports
-    // real system installs, not an unrelated project's local vite/npm bins
-    // (e.g. clai's node_modules while scaffolding on Desktop).
-    const env = { ...process.env };
-    if (env.PATH) {
-      env.PATH = env.PATH.split(platform() === "win32" ? ";" : ":")
-        .filter((p) => p && !/node_modules[/\\]\.bin$/i.test(p))
-        .join(platform() === "win32" ? ";" : ":");
-    }
-    const result = execSync(cmd, {
-      timeout: 3_000,
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-      env,
-    });
-    const found = result.trim().split("\n")[0]?.trim();
-    if (found && isProjectLocalNodeBin(found)) return undefined;
-    return found;
-  } catch {
-    return undefined;
-  }
+async function findCommand(name: string): Promise<string | undefined> {
+  const found = await findExecutable(name);
+  return found && !isProjectLocalNodeBin(found) ? found : undefined;
 }
 
-function getVersion(name: string): string | undefined {
+function getVersion(name: string, resolvedPath?: string): string | undefined {
   const spec = VERSION_COMMANDS[name];
   if (!spec) return undefined;
   try {
-    const result = execSync(spec.join(" "), {
+    // Prefer the absolute path we already resolved so empty/stripped PATH
+    // cannot break version probes.
+    const argv0 = resolvedPath ?? spec[0]!;
+    const result = execFileSync(argv0, spec.slice(1), {
       timeout: 5_000,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
+      env: { ...process.env, PATH: process.env.PATH ?? "" },
     });
     // Take the first non-empty line containing a version-like pattern
     const lines = result.split("\n").filter(Boolean);
@@ -103,7 +101,7 @@ function getVersion(name: string): string | undefined {
 }
 
 export async function checkTool(name: string): Promise<ToolAvailability> {
-  const path = findCommand(name);
+  const path = await findCommand(name);
   if (!path) {
     return {
       name,
@@ -111,7 +109,7 @@ export async function checkTool(name: string): Promise<ToolAvailability> {
       installHint: INSTALL_HINTS[name],
     };
   }
-  const version = getVersion(name);
+  const version = getVersion(name, path);
   return {
     name,
     available: true,
@@ -191,7 +189,7 @@ export async function toolCheckHandler(
     return SUBSTITUTE_FAMILIES.find((f) => f.includes(n));
   }
 
-  function substituteAvailable(name: string): boolean {
+  async function substituteAvailable(name: string): Promise<boolean> {
     const family = familyOf(name);
     if (!family) return false;
     if (results.some((r) => family.includes(r.name.toLowerCase()) && r.available)) {
@@ -200,22 +198,25 @@ export async function toolCheckHandler(
     // Substitute may not be in the requested list — probe PATH lightly
     for (const alt of family) {
       if (alt === name.toLowerCase()) continue;
-      if (findCommand(alt)) return true;
+      if (await findCommand(alt)) return true;
     }
     return false;
   }
 
-  function isSoftMissing(name: string): boolean {
+  async function isSoftMissing(name: string): Promise<boolean> {
     const n = name.toLowerCase();
     if (LOCAL_OPTIONAL.has(n)) return true;
+    // dig/whois/nslookup are optional — dns.lookup / whois.lookup are built-in.
+    if (BUILTIN_COVERED.has(n)) return true;
     // Alternate package managers are always soft when missing: work proceeds with
     // whichever manager is present; never hard-fail the whole check for yarn alone.
     if (["yarn", "pnpm", "bun", "pipenv", "poetry", "uv"].includes(n)) return true;
-    if (substituteAvailable(n)) return true;
+    if (await substituteAvailable(n)) return true;
     return false;
   }
 
-  const lines = results.map((r) => {
+  const softMissing = await Promise.all(results.map((r) => isSoftMissing(r.name)));
+  const lines = results.map((r, index) => {
     if (r.available) {
       const ver = r.version ? ` (${r.version})` : "";
       return `✓ ${r.name}${ver} — ${r.path}`;
@@ -227,7 +228,10 @@ export async function toolCheckHandler(
         `project-local node_modules/.bin is ignored)${hint}`
       );
     }
-    if (isSoftMissing(r.name)) {
+    if (BUILTIN_COVERED.has(r.name.toLowerCase())) {
+      return `○ ${r.name} — not found (optional; use dns.lookup / whois.lookup — built-in, no binary needed)${hint ? ` ${hint}` : ""}`;
+    }
+    if (softMissing[index]) {
       const fam = familyOf(r.name);
       const alts = fam
         ? fam.filter((x) => x !== r.name.toLowerCase()).join("/")
@@ -238,7 +242,7 @@ export async function toolCheckHandler(
   });
 
   // Fail only when a hard-required tool is missing. node+npm ✓ with yarn ○ is ok=true.
-  const hardMissing = results.filter((r) => !r.available && !isSoftMissing(r.name));
+  const hardMissing = results.filter((r, index) => !r.available && !softMissing[index]);
   const ok = hardMissing.length === 0;
   const footer =
     hardMissing.length > 0

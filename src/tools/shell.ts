@@ -1,11 +1,12 @@
 import { spawn } from "node:child_process";
-import { createWriteStream, type WriteStream } from "node:fs";
+import { createWriteStream, existsSync, type WriteStream } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { ToolResult, ToolStats } from "../types.js";
 import { redactSecrets } from "../llm/provider.js";
 import { safeCwd } from "../os/cwd.js";
 import { getArtifactDir } from "../store/paths.js";
+import { augmentedPathEnv } from "../os/command.js";
 
 export interface ShellExecArgs {
   command: string;
@@ -54,6 +55,16 @@ export interface SpawnArgvArgs {
 const DEFAULT_MAX_MODEL_BYTES = 12_000;
 const DEFAULT_MAX_CAPTURE_BYTES = 500 * 1024 * 1024;
 const DEFAULT_TIMEOUT_MS = 180_000;
+
+/** Prefer the platform default shell, but tolerate minimal sandboxes that omit it. */
+function resolveShell(): string | undefined {
+  if (process.platform === "win32") return process.env.ComSpec ?? "cmd.exe";
+  const candidates = ["/bin/sh", process.env.SHELL, "/bin/bash", "/bin/zsh"];
+  for (const candidate of candidates) {
+    if (candidate && existsSync(candidate)) return candidate;
+  }
+  return undefined;
+}
 
 /**
  * When false, children never inherit process.stdin (no TTY password prompts).
@@ -332,18 +343,30 @@ export async function shellExec(args: ShellExecArgs): Promise<ToolResult> {
   let linesRead = 0;
   let captureLimitHit = false;
 
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve) => {
     const detached = process.platform !== "win32";
     const stdio = chooseStdio(args.command, args.interactiveStdin);
     const usingInteractiveStdin = stdio[0] === "inherit";
     const restoreStdin = usingInteractiveStdin
       ? takeOverCookedStdin()
       : () => {};
+    const shell = resolveShell();
+    if (!shell) {
+      restoreStdin();
+      if (artifact) artifact.stream.end();
+      resolve({
+        ok: false,
+        exitCode: 127,
+        output: "No usable command shell was found. shell.exec requires /bin/sh (or $SHELL); use a purpose-built tool where available.",
+      });
+      return;
+    }
     const child = spawn(args.command, {
       cwd: args.cwd ?? safeCwd(),
       detached: detached && !usingInteractiveStdin,
-      shell: true,
+      shell,
       stdio,
+      env: { ...process.env, PATH: augmentedPathEnv() },
     });
     let aborted = false;
     let timedOut = false;
@@ -434,7 +457,11 @@ export async function shellExec(args: ShellExecArgs): Promise<ToolResult> {
       if (aborted || args.signal?.aborted) {
         resolve({ ok: false, output: "Command aborted.", exitCode: 130 });
       } else {
-        reject(error);
+        resolve({
+          ok: false,
+          exitCode: 127,
+          output: `Unable to start command shell (${shell}): ${error.message}`,
+        });
       }
     });
     child.on("close", (code) => {
@@ -595,6 +622,7 @@ export async function spawnArgv(args: SpawnArgvArgs): Promise<ToolResult> {
       detached: detached && !usingInteractiveStdin,
       shell: false,
       stdio,
+      env: { ...process.env, PATH: augmentedPathEnv() },
     });
     if (args.stdinText !== undefined) child.stdin?.end(args.stdinText);
     let aborted = false;
