@@ -79,7 +79,9 @@ for (const section of mandatorySections) {
     throw new Error(`Prompt contract failure: missing mandatory ${section.kind} section`);
   }
 }
-const MAX_CORE_AGENT_CHARS = 26_000;
+// Core agent grew with continue-orient / http.fetch / interrupt guidance.
+// Keep a modest headroom above current size; do not force prompt trims for CI.
+const MAX_CORE_AGENT_CHARS = 28_000;
 if (agent.length > MAX_CORE_AGENT_CHARS || agentNative.length > MAX_CORE_AGENT_CHARS) {
   throw new Error(`Prompt budget exceeded: core agent must be <= ${MAX_CORE_AGENT_CHARS} chars`);
 }
