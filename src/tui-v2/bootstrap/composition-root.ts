@@ -145,7 +145,8 @@ export function createCompositionRoot(
       toast.show(event.payload.text, {
         level,
         key: `notice-${level}`,
-        durationMs: level === "info" ? 1800 : 2600,
+        // Hold 2s at rest; enter/exit animation is added by ToastController.
+        durationMs: level === "info" ? 2000 : 2500,
       });
     }
     if (externalEmit) externalEmit(event);

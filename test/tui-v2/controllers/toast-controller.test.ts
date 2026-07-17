@@ -1,23 +1,28 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ToastController } from "../../../src/tui-v2/controllers/toast-controller.js";
+import {
+  ToastController,
+  toastTotalLifetimeMs,
+} from "../../../src/tui-v2/controllers/toast-controller.js";
 
 afterEach(() => {
   vi.useRealTimers();
 });
 
 describe("ToastController", () => {
-  it("shows a toast and auto-dismisses after the duration", async () => {
+  it("shows a toast and auto-dismisses after enter+hold+exit", async () => {
     vi.useFakeTimers();
     const toast = new ToastController();
     const seen: number[] = [];
     toast.subscribe(() => seen.push(toast.getToasts().length));
 
-    toast.show("Copied to clipboard", { level: "success", durationMs: 2000 });
+    const holdMs = 2000;
+    toast.show("Copied to clipboard", { level: "success", durationMs: holdMs });
     expect(toast.getToasts()).toHaveLength(1);
     expect(toast.getToasts()[0]?.message).toBe("Copied to clipboard");
     expect(toast.getToasts()[0]?.level).toBe("success");
 
-    await vi.advanceTimersByTimeAsync(1999);
+    // Still visible during hold (and enter/exit budget).
+    await vi.advanceTimersByTimeAsync(toastTotalLifetimeMs(holdMs) - 1);
     expect(toast.getToasts()).toHaveLength(1);
 
     await vi.advanceTimersByTimeAsync(2);

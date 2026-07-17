@@ -48,10 +48,9 @@ function buildServices(overrides: { requestExit?: () => void } = {}): AppService
   return services;
 }
 
+/** Chrome feedback is toast-only (not transcript notice rows). */
 function notices(services: AppServices): string[] {
-  return [...services.transcript.getState().byId.values()]
-    .filter((item) => item.kind === "notice")
-    .map((item) => (item.kind === "notice" ? item.text : ""));
+  return services.toast.getToasts().map((t) => t.message);
 }
 
 const ALIAS_ONLY = new Set(["use", "search-provider", "reasoning", "thinking", "quit"]);
@@ -166,7 +165,8 @@ describe("command parity (V2-080)", () => {
     await services.commands.dispatch({ name: "clear", args: "" });
     expect(services.session.messages).toHaveLength(0);
     expect(services.session.sessionId).toBe(id);
-    expect(services.transcript.getState().order).toHaveLength(1); // notice only
+    // Clear feedback is toast-only — transcript stays empty of notice rows.
+    expect(services.transcript.getState().order).toHaveLength(0);
     expect(notices(services).some((t) => t.includes("context cleared"))).toBe(true);
   });
 
@@ -292,17 +292,20 @@ describe("command parity (V2-080)", () => {
     expect(notices(services).length).toBeGreaterThan(0);
   });
 
-  it("session.notice lands in the transcript store", () => {
+  it("session.notice surfaces as a toast, not a transcript row", () => {
     const services = buildServices();
     services.session.notice("warn", "something went wrong");
     const items = [...services.transcript.getState().byId.values()];
-    expect(items.some((i) => i.kind === "notice" && i.level === "warn" && i.text === "something went wrong")).toBe(
+    expect(items.some((i) => i.kind === "notice")).toBe(false);
+    const toasts = services.toast.getToasts();
+    expect(toasts.some((t) => t.level === "warn" && t.message === "something went wrong")).toBe(
       true,
     );
   });
 
   it("session.reset with mintNewId rebinds the sequencer sequence", async () => {
     const services = buildServices();
+    // Notices still advance lastSequence (via withSeq) but do not append rows.
     services.session.notice("info", "before");
     const beforeSeq = services.transcript.getState().lastSequence;
     expect(beforeSeq).toBeGreaterThan(0);

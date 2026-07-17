@@ -254,12 +254,14 @@ describe("command handlers (V2-072..075)", () => {
     expect(services.overlay.getState().kind).toBe("none");
   });
 
-  it("/output with no tool calls yet emits a notice", async () => {
+  it("/output with no tool calls yet emits a toast", async () => {
     const services = buildServices();
     await services.commands.dispatch({ name: "output", args: "" });
     expect(services.overlay.getState().kind).toBe("none");
-    const notices = [...services.transcript.getState().byId.values()].filter((i) => i.kind === "notice");
-    expect(notices.some((n) => n.kind === "notice" && n.text.includes("no tool output"))).toBe(true);
+    // Chrome feedback is toast-only (not a transcript notice row).
+    expect(
+      services.toast.getToasts().some((t) => t.message.includes("no tool output")),
+    ).toBe(true);
   });
 
   it("activates a provider that already has a stored key without prompting for a secret", async () => {

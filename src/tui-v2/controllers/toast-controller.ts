@@ -1,9 +1,10 @@
 /**
  * Ephemeral toast queue (UI chrome, not transcript history).
  *
- * Toasts auto-dismiss after a short TTL. Same-key shows replace the previous
- * toast so rapid toggles (thinking / output / scroll) do not stack noise.
- * The host owns layout; this controller only owns data + timers.
+ * Lifecycle (host animates enter/exit):
+ *   enter (~200ms) → hold (default 2000ms) → exit (~200ms) → dismiss
+ *
+ * Same-key shows replace the previous toast so rapid toggles do not stack.
  */
 
 export type ToastLevel = "info" | "success" | "warn" | "error";
@@ -13,6 +14,7 @@ export interface ToastItem {
   readonly message: string;
   readonly level: ToastLevel;
   readonly createdAt: number;
+  /** Hold time at rest (ms) — enter/exit animation are extra. */
   readonly durationMs: number;
   /** Optional replace key — new shows with the same key dismiss the old one. */
   readonly key?: string | undefined;
@@ -20,7 +22,7 @@ export interface ToastItem {
 
 export interface ShowToastOptions {
   readonly level?: ToastLevel | undefined;
-  /** Visible lifetime; default 1800ms. */
+  /** Visible hold at rest; default 2000ms (enter/exit are added on top). */
   readonly durationMs?: number | undefined;
   /**
    * Replace any existing toast with this key (e.g. "thinking", "scroll").
@@ -31,9 +33,19 @@ export interface ShowToastOptions {
 
 export type ToastListener = () => void;
 
-export const DEFAULT_TOAST_DURATION_MS = 1800;
+/** Time at rest in the final on-screen position. */
+export const DEFAULT_TOAST_DURATION_MS = 2000;
+/** Slide-in from top. */
+export const TOAST_ENTER_MS = 200;
+/** Slide-out back to top. */
+export const TOAST_EXIT_MS = 200;
+
 const MAX_VISIBLE_TOASTS = 3;
 const MAX_MESSAGE_CHARS = 72;
+
+export function toastTotalLifetimeMs(holdMs: number): number {
+  return TOAST_ENTER_MS + Math.max(0, holdMs) + TOAST_EXIT_MS;
+}
 
 export class ToastController {
   private items: ToastItem[] = [];
@@ -96,7 +108,11 @@ export class ToastController {
       }
     }
 
-    const timer = setTimeout(() => this.dismiss(id), durationMs);
+    // Dismiss after enter + hold + exit so the host can finish exit animation.
+    const timer = setTimeout(
+      () => this.dismiss(id),
+      toastTotalLifetimeMs(durationMs),
+    );
     (timer as unknown as { unref?: () => void }).unref?.();
     this.timers.set(id, timer);
     this.emit();

@@ -33,6 +33,11 @@ import { useServices, useTheme } from "./providers.js";
 import { promptPlanApprovalIfNeeded } from "./plan-lifecycle.js";
 import { StatusLine } from "../components/status/status-line.js";
 import { ToastHost } from "../components/toast/toast-host.js";
+import {
+  paneSlideTop,
+  paneSlideWidth,
+} from "../components/plan/plan-pane-anim.js";
+import { usePanePresence } from "../components/plan/use-pane-presence.js";
 import { transcriptScrollPort } from "../components/transcript/transcript-scroll-port.js";
 import { composerActionPort } from "../composer/composer-action-port.js";
 import { formatShortcutsReference } from "../actions/format-shortcuts.js";
@@ -51,6 +56,7 @@ export function App(): ReactNode {
   const services = useServices();
   const theme = useTheme();
   const [focusContext, setFocusContext] = useState(services.focus.activeContext());
+  /** User / auto request to show the task pane. */
   const [planVisible, setPlanVisible] = useState(false);
   const plan = usePlan(services.plan);
   const overlay = useOverlayState(services.overlay);
@@ -61,6 +67,11 @@ export function App(): ReactNode {
   const [composerSeed, setComposerSeed] = useState<
     { token: number; text: string } | undefined
   >(undefined);
+
+  // Smooth enter/exit (~120ms in / ~100ms out); stays mounted through exit.
+  const panePresence = usePanePresence(planVisible);
+  /** Layout + focus treat the pane as present until exit finishes. */
+  const planPresent = panePresence.mounted;
 
   useEffect(() => services.focus.onChange(setFocusContext), [services.focus]);
 
@@ -85,10 +96,11 @@ export function App(): ReactNode {
     setPlanVisible(true);
   }, [plan]);
 
+  // Reserve split/overlay space while the pane is mounted (incl. exit anim).
   const layout = computeLayout({
     columns: width,
     rows: height,
-    planVisible,
+    planVisible: planPresent,
     splitEnabled: layoutSupportsSplit(width),
   });
 
@@ -111,17 +123,19 @@ export function App(): ReactNode {
   const contentInnerWidth = Math.max(10, width - horizontalPadding * 2);
   // Breathing room between chat text and the plan/task pane border.
   const planChatGap =
-    planVisible && layout.plan.placement === "split"
+    planPresent && layout.plan.placement === "split"
       ? 2
-      : planVisible && layout.plan.placement === "overlay"
+      : planPresent && layout.plan.placement === "overlay"
         ? 2
         : 0;
+  // Split width tracks progress so the pane grows/shrinks with the animation.
   const splitPlanW =
-    planVisible && layout.plan.placement === "split"
-      ? layout.plan.width
+    planPresent && layout.plan.placement === "split"
+      ? paneSlideWidth(panePresence.progress, layout.plan.width)
       : 0;
+  // Overlay keeps full horizontal reserve (motion is vertical slide from top).
   const overlayPlanW =
-    planVisible && layout.plan.placement === "overlay"
+    planPresent && layout.plan.placement === "overlay"
       ? planOverlayWidth(width) + planChatGap
       : 0;
   const chatContentWidth = Math.max(24, contentInnerWidth - splitPlanW - overlayPlanW);
@@ -264,7 +278,7 @@ export function App(): ReactNode {
       case "focus.next-region": {
         key.preventDefault();
         const regions =
-          planVisible && layout.plan.placement !== "hidden"
+          planPresent && layout.plan.placement !== "hidden"
             ? (["composer", "transcript", "plan"] as const)
             : (["composer", "transcript"] as const);
         services.focus.cycleRegion([...regions]);
@@ -282,10 +296,10 @@ export function App(): ReactNode {
 
   const planPaneWidth =
     layout.plan.placement === "split"
-      ? layout.plan.width
+      ? Math.max(splitPlanW, 1)
       : planOverlayWidth(width);
   const planPanel =
-    planVisible && layout.plan.placement !== "hidden" ? (
+    planPresent && layout.plan.placement !== "hidden" ? (
       <PlanView
         theme={theme}
         plan={plan}
@@ -293,6 +307,14 @@ export function App(): ReactNode {
         width={planPaneWidth}
       />
     ) : null;
+
+  const overlayRestTop = Math.max(1, Math.floor(height * 0.08));
+  const overlayPaneHeight = Math.max(12, Math.floor(height * 0.72));
+  const overlayAnimTop = paneSlideTop(
+    panePresence.progress,
+    overlayRestTop,
+    overlayPaneHeight,
+  );
 
   // Composer only owns the keyboard when the focus region is composer.
   // Clicking the transcript leaves focus there so ↑/↓ scroll the chat instead
@@ -452,14 +474,14 @@ export function App(): ReactNode {
               contentWidth={Math.max(20, chatContentWidth - planChatGap)}
             />
           </box>
-          {layout.plan.placement === "split" ? (
+          {layout.plan.placement === "split" && planPresent && splitPlanW > 0 ? (
             <box
               title=" Tasks "
               titleColor={theme.inputBorder}
               border
               borderStyle="rounded"
               style={{
-                width: layout.plan.width,
+                width: splitPlanW,
                 height: "100%",
                 flexShrink: 0,
                 // Same electric aqua as the composer input border.
@@ -526,7 +548,7 @@ export function App(): ReactNode {
         />
       </box>
 
-      {layout.plan.placement === "overlay" && planVisible ? (
+      {layout.plan.placement === "overlay" && planPresent ? (
         <box
           title=" Tasks "
           titleColor={theme.inputBorder}
@@ -534,12 +556,13 @@ export function App(): ReactNode {
           borderStyle="rounded"
           style={{
             position: "absolute",
-            top: Math.max(1, Math.floor(height * 0.08)),
+            // Slide in from above (same ease as toasts), hold, slide out.
+            top: overlayAnimTop,
             // Sit flush with the right edge of the padded content column
             // so the plan pane aligns with where the input box ends.
             right: horizontalPadding,
             width: planOverlayWidth(width),
-            height: Math.max(12, Math.floor(height * 0.72)),
+            height: overlayPaneHeight,
             // Same electric aqua as the composer input border.
             borderColor: theme.inputBorder,
             backgroundColor: theme.statusBackground,
