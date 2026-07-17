@@ -87,7 +87,10 @@ import { isScratchOnlyWrite } from "./scratch-write.js";
 import {
   COMPACTION_SYSTEM_PROMPT,
 } from "./compaction-summary.js";
-import { maybeAppendPlanModeReminder } from "./plan-mode-reminders.js";
+import {
+  maybeAppendPlanModeReminder,
+  PLAN_REMINDER_TOAST,
+} from "./plan-mode-reminders.js";
 import { LoopGuard } from "./loop-guard.js";
 import {
   loadPlan,
@@ -4074,7 +4077,15 @@ export async function runAgentTurn(
                   : "general",
           });
           toolContent = reminded.content;
-          if (reminded.reminded) planRemindedAt.add(productiveSteps);
+          if (reminded.reminded) {
+            planRemindedAt.add(productiveSteps);
+            // Chrome only — model already has the note on this tool result.
+            writeNotice(
+              "info",
+              PLAN_REMINDER_TOAST,
+              chalk.dim(`  ℹ ${PLAN_REMINDER_TOAST}\n`),
+            );
+          }
           if (historyNativeCalls.length) {
             appendToolResult(
               messages,

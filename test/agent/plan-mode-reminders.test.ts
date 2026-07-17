@@ -6,6 +6,7 @@ import {
   shouldAttachPlanModeReminder,
   PLAN_REMINDER_FIRST_STEP,
   PLAN_REMINDER_STEP_INTERVAL,
+  PLAN_REMINDER_TOAST,
 } from "../../src/agent/plan-mode-reminders.js";
 
 describe("plan-mode reminders", () => {
@@ -48,7 +49,7 @@ describe("plan-mode reminders", () => {
     ).toBe(false);
   });
 
-  it("appends a calm note without changing success markers", () => {
+  it("appends a calm note onto tool output without rewriting the result", () => {
     const body = "Tool http.fetch result (exit=0, ok=true):\nstatus 200";
     const { content, reminded } = maybeAppendPlanModeReminder(body, {
       isPlanMode: true,
@@ -61,14 +62,24 @@ describe("plan-mode reminders", () => {
     });
     expect(reminded).toBe(true);
     expect(content.startsWith(body)).toBe(true);
-    expect(content).toContain("[plan-mode note · step 15]");
-    expect(content).toContain("plan.create");
-    expect(content.length - body.length).toBeLessThan(500);
+    expect(content).toContain("[plan-mode reminder · step 15]");
+    expect(content).toMatch(/do NOT stop|do not stop/i);
+    expect(content).toMatch(/take as much time/i);
+    expect(content).toMatch(/plan\.create/);
+    expect(content).toMatch(/attack surface|juicy findings/i);
   });
 
-  it("reminder text stays informational (no hard stop wording)", () => {
+  it("reminder text is informational and anti-rush, not a hard stop", () => {
     const text = planModeResearchReminder({ step: 25, kindHint: "pentest" });
     expect(text).toMatch(/step 25/);
-    expect(text.toLowerCase()).not.toMatch(/you must stop|abort now|forbidden/);
+    expect(text).toMatch(/only a reminder/i);
+    expect(text).toMatch(/Continue/i);
+    expect(text.toLowerCase()).not.toMatch(
+      /you must stop|abort now|forbidden|stop researching now/,
+    );
+  });
+
+  it("exports a short toast label for the UI", () => {
+    expect(PLAN_REMINDER_TOAST).toMatch(/reminder sent/i);
   });
 });
