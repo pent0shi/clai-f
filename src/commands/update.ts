@@ -7,7 +7,7 @@ import { getConfig, updateConfig } from "../store/config.js";
 const REPO = "pentoshi007/clai";
 
 
-const FALLBACK_VERSION = "3.7.7";
+const FALLBACK_VERSION = "3.7.9";
 
 function resolvePackageVersion(): string {
   try {
