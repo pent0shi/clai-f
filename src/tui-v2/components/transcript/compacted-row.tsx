@@ -58,7 +58,8 @@ export function CompactedRow(props: {
     const title = tokenLabel
       ? `Compacted context · ${tokenLabel}`
       : "Compacted context";
-    services.overlay.openPager(title, summary);
+    // Compacted memory is always markdown-friendly — start formatted.
+    services.overlay.openPager(title, summary, undefined, undefined, "force");
   };
 
   const click = useClickWithoutDrag(openPager);

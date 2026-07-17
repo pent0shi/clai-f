@@ -13,6 +13,8 @@ import type { AppServices } from "../bootstrap/composition-root.js";
 import type { ToolItem } from "../state/transcript-types.js";
 import type { FileChange } from "../../tools/file-diff.js";
 import { formatModalPlainText } from "./file-diff-view.js";
+import { defaultPagerMarkdownMode } from "./pager-view-policy.js";
+import { stripPagerLineGutters } from "./pager-markdown.js";
 
 interface SearchHit {
   readonly title?: string | undefined;
@@ -209,15 +211,32 @@ export async function openToolOutputPager(
         : undefined);
 
     if (fileChange && options.bodyOverride === undefined) {
-      const body = await resolveFileChangeBody(fileChange);
+      const guttered = await resolveFileChangeBody(fileChange);
       const title =
         options.titleOverride ??
         `${fileChange.kind === "create" ? "Created" : fileChange.kind === "delete" ? "Deleted" : fileChange.kind === "append" ? "Appended" : fileChange.kind === "overwrite" ? "Wrote" : "Edited"} · ${fileChange.basename}`;
+      const mdMode = defaultPagerMarkdownMode({
+        kind: "file-change",
+        fileChange,
+        path: fileChange.path,
+        body: fileChange.afterText,
+      });
+      // Pure-create / green-only markdown: open clean text for format default.
+      // Mixed red+green edits: keep guttered raw body.
+      const body =
+        mdMode === "force"
+          ? stripPagerLineGutters(guttered) ||
+            fileChange.afterText ||
+            guttered ||
+            "(empty file)"
+          : guttered || "(empty file)";
       const opened = services.overlay.openPager(
         title,
-        body || "(empty file)",
+        body,
         undefined,
-        fileChange.path,
+        // highlightPath only for raw syntax path (edits); pure md uses format
+        mdMode === "force" ? undefined : fileChange.path,
+        mdMode,
       );
       if (!opened) {
         services.session.notice(
@@ -243,11 +262,13 @@ export async function openToolOutputPager(
       const title =
         options.titleOverride ??
         toolPagerTitle(item.name, item.argsDisplay);
+      // Multi-file: always raw (mixed files / diffs).
       const opened = services.overlay.openPager(
         title,
         parts.join("\n").trim() || "(no output)",
         undefined,
         item.fileChanges[0]?.path,
+        "plain",
       );
       if (!opened) {
         services.session.notice(
@@ -364,11 +385,23 @@ export async function openToolOutputPager(
     const pagerBody = artifactSource
       ? body || "(no output)"
       : `${header}${body || "(no output)"}${note}`;
+    const mdMode = defaultPagerMarkdownMode({
+      kind: "tool",
+      toolName: item.name,
+      path: highlightPath ?? pathFromArgsDisplay(item.argsDisplay),
+      body: body,
+    });
+    // Formatted md reads: prefer clean file text without path chrome for render.
+    const finalBody =
+      mdMode === "force" && openedSourceFile
+        ? body || "(no output)"
+        : pagerBody;
     const opened = services.overlay.openPager(
       title,
-      pagerBody,
+      finalBody,
       artifactSource,
-      highlightPath,
+      mdMode === "force" ? undefined : highlightPath,
+      mdMode,
     );
     if (!opened) {
       services.session.notice("warn", "could not open output pager (another overlay is open)");

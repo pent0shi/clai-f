@@ -4,9 +4,10 @@
  * writeMany previews. Kept separate so tool-card.tsx stays under the line budget.
  */
 
-import { useState, type ReactNode } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import { TextAttributes } from "@opentui/core";
 import type { MouseEvent } from "@opentui/core";
+import { useTerminalDimensions } from "@opentui/react";
 import type { Theme } from "../../rendering/theme.js";
 import {
   collapsedFileChangesLabel,
@@ -17,6 +18,11 @@ import {
 } from "../../rendering/file-diff-view.js";
 import type { FileChange } from "../../../tools/file-diff.js";
 import { useClickWithoutDrag } from "./use-click-without-drag.js";
+import { renderMarkdownLines } from "../../rendering/render-markdown-lines.js";
+import {
+  isMarkdownPath,
+  isPureAddFileChange,
+} from "../../rendering/pager-view-policy.js";
 
 /** Default preview rows for a single-file edit card. */
 const SINGLE_FILE_PREVIEW_ROWS = 40;
@@ -146,7 +152,8 @@ function FileDiffHunks(props: {
     onOpen,
     maxRows = SINGLE_FILE_PREVIEW_ROWS,
   } = props;
-  const rows = presentFileChangePreview(change, { maxRows });
+  const { width: termWidth } = useTerminalDimensions();
+  const wrapWidth = Math.max(24, termWidth - 12);
   const open = useClickWithoutDrag(() => onOpen(change));
   const mark =
     change.kind === "create" ? "+" : change.kind === "overwrite" ? "~" : "·";
@@ -156,6 +163,52 @@ function FileDiffHunks(props: {
       : change.kind === "overwrite"
         ? theme.activity
         : theme.toolOutput;
+
+  // Pure-create / green-only .md: show rendered markdown in the card (not red/green).
+  const mdSource = change.afterText ?? "";
+  const showMarkdown =
+    isPureAddFileChange(change) &&
+    isMarkdownPath(change.path) &&
+    Boolean(mdSource.trim());
+
+  const mdLines = useMemo(() => {
+    if (!showMarkdown) return [];
+    return renderMarkdownLines(mdSource, {
+      width: wrapWidth,
+      defaultFg: theme.foreground,
+      stripOuterIndent: true,
+    }).slice(0, maxRows);
+  }, [showMarkdown, mdSource, wrapWidth, theme.foreground, maxRows]);
+
+  if (showMarkdown && mdLines.length > 0) {
+    return (
+      <box
+        style={{ flexDirection: "column", width: "100%" }}
+        onMouseDown={open.onMouseDown}
+        onMouseUp={open.onMouseUp}
+      >
+        {showPath ? (
+          <text selectable style={{ height: 1 }}>
+            <span style={{ fg: markFg }}>{` ${mark} `}</span>
+            <span style={{ fg: theme.inputBorder }}>
+              {relativeDisplayPath(change.path)}
+            </span>
+            <span style={{ fg: theme.muted }}> · formatted</span>
+          </text>
+        ) : null}
+        {mdLines.map((content, ri) => (
+          <text
+            key={ri}
+            content={content ?? " "}
+            selectable
+            wrapMode="none"
+          />
+        ))}
+      </box>
+    );
+  }
+
+  const rows = presentFileChangePreview(change, { maxRows });
   return (
     <box
       style={{ flexDirection: "column", width: "100%" }}

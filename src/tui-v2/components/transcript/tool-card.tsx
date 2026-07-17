@@ -15,8 +15,9 @@
  * title (verb + relative path). Collapse-all applies to every file-diff card.
  */
 
-import { type ReactNode } from "react";
+import { useMemo, type ReactNode } from "react";
 import { TextAttributes } from "@opentui/core";
+import { useTerminalDimensions } from "@opentui/react";
 import type { OutputSpool } from "../../../app/events/event-buffer.js";
 import type { AppServices } from "../../bootstrap/composition-root.js";
 import type { ToolItem } from "../../state/transcript-types.js";
@@ -31,7 +32,10 @@ import {
   type BatchSection,
 } from "../../rendering/batch-sections.js";
 import { presentOutput, presentTool } from "../../rendering/tool-presenter.js";
-import { openToolOutputPager } from "../../rendering/open-tool-output.js";
+import {
+  openToolOutputPager,
+  pathFromArgsDisplay,
+} from "../../rendering/open-tool-output.js";
 import {
   isFileMutationTool,
   type FileChange,
@@ -39,6 +43,8 @@ import {
 import { LinkableText } from "./linkable-text.js";
 import { useClickWithoutDrag } from "./use-click-without-drag.js";
 import { DiffActionButton, FileDiffBody } from "./file-diff-card.js";
+import { renderMarkdownLines } from "../../rendering/render-markdown-lines.js";
+import { shouldDefaultFormattedView } from "../../rendering/pager-view-policy.js";
 
 /** Border / status accent: green ok · yellow running · red failed. */
 const STATUS_COLOR: Record<ToolItem["status"], keyof Theme> = {
@@ -212,9 +218,33 @@ export function ToolCard(props: {
       : { lines: [] as const, summary: "" };
   const isBatchLive = isBatchName && item.status === "running";
 
+  const { width: termWidth } = useTerminalDimensions();
+  const readPath = pathFromArgsDisplay(item.argsDisplay);
+  // fs.read of markdown: prefer formatted preview (same policy as pager).
+  const formatMdRead =
+    !isBatch &&
+    !isBatchLive &&
+    !isFileDiff &&
+    !isMutation &&
+    shouldDefaultFormattedView({
+      kind: "tool",
+      toolName: item.name,
+      path: readPath,
+      body: tail,
+    });
+  const mdPreview = useMemo(() => {
+    if (!formatMdRead || !tail.trim()) return null;
+    const budget = expanded ? 60 : 10;
+    return renderMarkdownLines(tail, {
+      width: Math.max(24, termWidth - 12),
+      defaultFg: theme.toolOutput,
+      stripOuterIndent: true,
+    }).slice(0, budget);
+  }, [formatMdRead, tail, expanded, termWidth, theme.toolOutput]);
+
   // write/edit/writeMany: structured body only — never receipt dumps.
   const { lines, hiddenAboveCount, truncatedNotice } =
-    isBatch || isBatchLive || isFileDiff || isWriteMany || isMutation
+    isBatch || isBatchLive || isFileDiff || isWriteMany || isMutation || formatMdRead
       ? {
           lines: [] as string[],
           hiddenAboveCount: 0,
@@ -239,6 +269,7 @@ export function ToolCard(props: {
     isFileDiff ||
     isWriteMany ||
     lines.length > 0 ||
+    Boolean(mdPreview && mdPreview.length > 0) ||
     item.outputBytes > 0 ||
     Boolean(item.artifactPath);
 
@@ -497,7 +528,10 @@ export function ToolCard(props: {
       ) : null}
 
       {/* Normal (non-batch) output body — click opens pager; drag selects. */}
-      {!isBatch && !isBatchLive && !isFileDiff && lines.length > 0 ? (
+      {!isBatch &&
+      !isBatchLive &&
+      !isFileDiff &&
+      (lines.length > 0 || (mdPreview && mdPreview.length > 0)) ? (
         <box
           style={{
             flexDirection: "column",
@@ -521,9 +555,20 @@ export function ToolCard(props: {
               height: 1,
             }}
           >
-            {" OUTPUT "}
+            {formatMdRead ? " OUTPUT · formatted " : " OUTPUT "}
           </text>
-          <OutputLines lines={lines} theme={theme} gutterFg={theme.toolOutput} />
+          {mdPreview && mdPreview.length > 0 ? (
+            mdPreview.map((content, i) => (
+              <text
+                key={`md-${i}`}
+                content={content ?? " "}
+                selectable
+                wrapMode="none"
+              />
+            ))
+          ) : (
+            <OutputLines lines={lines} theme={theme} gutterFg={theme.toolOutput} />
+          )}
         </box>
       ) : null}
 
