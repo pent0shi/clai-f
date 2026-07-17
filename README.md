@@ -117,6 +117,7 @@ Inside a session:
 | **Network** | `net.scan` (nmap wrapper, SYN with privilege / TCP fallback), `net.context`, `net.pingSweep`, `pentest.recon` (whois + dig + top ports) |
 | **HTTP evidence** | `http.fetch` — status, headers, cookies, TLS, body for **raw protocol / pentest** work (not casual page reading) |
 | **Web reading / OSINT** | `web.search`, `web.fetch` (readable pages), plus shell for specialized CLIs |
+| **Batch recon** | `tool.batch` — up to 20 lookups in one call; optional `on_fail` fail-fast or selective cancel when dependents need a prerequisite |
 | **Discovery** | `tool.check`, `pkg.install`, `wordlist.find` — install only what is missing; locate wordlists per OS (no Kali-only path guesses) |
 | **DNS / ownership** | `dns.lookup`, `whois.lookup` for narrow questions |
 | **Shell** | Full toolbox: `nmap`, `ffuf`, `gobuster`, `feroxbuster`, `sqlmap`, `hydra`, `nikto`, `masscan`, `nuclei`, `tshark`, … via `shell.exec` |
@@ -156,18 +157,19 @@ Default posture is **non-destructive proof**. Escalate impact only when you ask 
 - Full plan + notes pager (`Ctrl+P` / `/plan`)  
 - Approve with `/implement`, revise in chat, cancel with `/discard`  
 - Plans **survive context compaction** and **reload with `/history`**  
+- Agent mode: working checklist + evidence-before-done; plan mode: roadmap you approve before execution  
 
 ---
 
 ## Terminal UI (operator console)
 
-Full-screen UI by default: streaming chat, tool cards, plan pane, pickers, history, secure key prompts. Falls back to a classic line REPL if the terminal cannot host the UI.
+Full-screen OpenTUI console by default: streaming chat, nested tool cards (including `tool.batch` sub-sections), file diffs, plan pane, pickers, history, secure key prompts. Falls back to a classic line REPL if the terminal cannot host the UI.
 
 | Action | How |
 |--------|-----|
 | Send | `Enter` |
 | Newline | `Shift+Enter` |
-| Abort turn | `Esc` |
+| Abort turn | `Esc` / `Ctrl+C` (cancels in-flight tools cleanly) |
 | Expand thinking | `Ctrl+T` (clickable on status strip) |
 | Expand tool / compacted output | `Ctrl+O` |
 | Plan pane | `Ctrl+H` |
@@ -176,9 +178,9 @@ Full-screen UI by default: streaming chat, tool cards, plan pane, pickers, histo
 | Commands / files | `/` · `@` |
 | Exit | `Ctrl+C` twice |
 
-Tool cards show **command/input** clearly and keep long scan tails in **OUTPUT** (expand or open pager). Compaction cards preserve engagement memory without dropping the plan.
+Tool cards show **command/input** clearly and keep long scan tails in **OUTPUT** (expand or open pager). File writes show a **diff preview**. Deletes always ask for confirmation (`y`/`n`); press **`v`** to preview the path before confirming. Compaction cards preserve engagement memory without dropping the plan.
 
-**`/history`** restores full sessions — prompts, tools, findings context, and the matching plan when present.
+**`/history`** restores full sessions — prompts, tool results, findings context, and the matching plan when present (including after abort / autosave).
 
 ---
 
@@ -198,14 +200,18 @@ Coding and general sysadmin work use the same agent (scaffold, debug, packages) 
 ## Features (summary)
 
 - **Pentest-first agent loop** — recon-before-plan, stack-aware enum, evidence-backed findings  
-- **Durable plans** — `plan.create` / `task.update`, side pane, approve/refine/discard  
-- **11 LLM providers** with streaming (many free tiers + local Ollama)  
-- **Safety gate** + pentest authorization + optional engagement scope  
+- **Durable plans** — `plan.create` / `task.update`, side pane, approve/refine/discard; agent vs plan task workflows  
+- **Parallel multi-tool turns** — independent reads run together; failures do **not** cancel siblings by default  
+- **`tool.batch` fail policy** — opt-in `on_fail=cancel_pending` or selective `cancel_on_fail` / rules when later work depends on earlier success  
+- **Native + text tool calling** — `toolCalling: auto|native|text`  
+- **11+ LLM providers** with streaming (free tiers + local Ollama)  
+- **Safety gate** + pentest authorization + optional engagement scope (deletes always confirm with preview)  
 - **OS-aware** installs and wordlist discovery (macOS / Linux / Windows)  
 - **Context compaction** (auto + `/compact`) that keeps the plan alive  
-- **Session history** with full transcript restore  
+- **Session history** with full transcript + plan restore  
 - **Background jobs** for long scanners and listeners  
 - **Web OSINT** — `web.search` / `web.fetch` alongside raw `http.fetch`  
+- **Stall / cancel robustness** — tool heartbeats, hard deadlines, clean Esc abort with results recorded  
 
 ---
 
@@ -265,15 +271,44 @@ CLI mirrors: `clai authorize-pentest`, `clai scope add`, `clai doctor` (missing 
 
 | Tool | Role in engagements |
 |------|---------------------|
-| `shell.exec` / `shell.start` | nmap, ffuf, sqlmap, hydra, custom PoCs, listeners |
-| `net.scan` · `net.context` · `pentest.recon` | Host/port/service discovery |
+| `shell.exec` / `shell.start` · `shell.jobs` / `tail` / `stop` | nmap, ffuf, sqlmap, hydra, custom PoCs, listeners, background jobs |
+| `net.scan` · `net.context` · `net.pingSweep` · `pentest.recon` | Host/port/service discovery |
 | `http.fetch` | Raw HTTP/TLS evidence |
 | `web.search` · `web.fetch` | OSINT / docs (readable), not raw exploit traffic |
 | `dns.lookup` · `whois.lookup` | Narrow DNS / ownership |
+| `tool.batch` | Fan-out up to 20 tools; `concurrency` 1–6; `on_fail` continue (default) / cancel_pending / rules; per-call `cancel_on_fail` |
 | `tool.check` · `pkg.install` · `wordlist.find` | Tooling readiness |
-| `fs.*` | Loot, notes, report files (sandboxed roots) |
-| `plan.create` · `task.update` | Engagement checklist |
+| `fs.read` · `fs.list` · `fs.search` · `fs.write` · `fs.writeMany` · `fs.edit` · `fs.replaceLines` · `fs.append` · `fs.delete` | Files (sandboxed roots; delete always confirms + optional preview) |
+| `plan.create` · `task.update` | Engagement checklist / working tasks |
 | `sysinfo` · `image.ocr` · `pdf.read` | Host context, report/screenshot OCR |
+| `agent.handoff` | Ask mode → offer agent mode when the user wants action, not explanation |
+
+### `tool.batch` fail policy (opt-in)
+
+Default is **continue** — one failed lookup never kills the rest (best for recon).
+
+```json
+// Fail-fast: stop remaining calls after the first failure
+{"name":"tool.batch","args":{
+  "on_fail":"cancel_pending",
+  "calls":[
+    {"name":"net.scan","args":{"target":"lab.example"}},
+    {"name":"http.fetch","args":{"url":"https://lab.example/"}}
+  ]
+}}
+
+// Selective: if scan fails, cancel only fuzz (dns still runs)
+{"name":"tool.batch","args":{
+  "calls":[
+    {"id":"dns","name":"dns.lookup","args":{"target":"lab.example"}},
+    {"id":"scan","name":"net.scan","args":{"target":"lab.example"},
+     "cancel_on_fail":["fuzz"]},
+    {"id":"fuzz","name":"shell.exec","args":{"command":"ffuf …"}}
+  ]
+}}
+```
+
+Top-level multi-tool messages (several separate tool blocks) never cancel siblings; use `tool.batch` when you need a fail policy.
 
 ### Search providers (OSINT)
 
@@ -334,10 +369,10 @@ Node.js ≥ 20.
 Tag-driven CI (`.github/workflows/release.yml`): tests → multi-platform binaries → GitHub Release → npm `@pentoshi/clai` → Homebrew tap.
 
 ```sh
-npm version 2.0.34 --no-git-tag-version
+npm version 3.7.6 --no-git-tag-version
 # bump FALLBACK_VERSION / manifests as needed
-git commit -am "v2.0.34" && git push origin main
-git tag -a v2.0.34 -m "clai v2.0.34" && git push origin v2.0.34
+git commit -am "v3.7.6" && git push origin main
+git tag -a v3.7.6 -m "clai v3.7.6" && git push origin v3.7.6
 ```
 
 Secrets: `NPM_TOKEN`, `TAP_GITHUB_TOKEN`. Optional: `NPM_PROVENANCE=true`.
@@ -352,13 +387,13 @@ clai/
 │  ├─ index.ts              # CLI entry
 │  ├─ modes/                # ask · agent
 │  ├─ agent/                # loop, plans, compaction, tool parsing
-│  ├─ llm/                  # providers + streaming
-│  ├─ tools/                # shell, net, http, web, fs, pentest, …
+│  ├─ llm/                  # providers + streaming + native tools
+│  ├─ tools/                # shell, net, http, web, fs, batch, pentest, …
 │  ├─ safety/               # classifier + patterns
 │  ├─ store/                # config, history, keys, plans, scope, logs
-│  ├─ tui/                  # full-screen terminal UI
+│  ├─ tui-v2/               # full-screen OpenTUI (primary)
 │  ├─ app/                  # session, commands, events
-│  └─ prompts/              # agent methodology (incl. pentest)
+│  └─ prompts/              # agent methodology (incl. pentest; embedded for bun)
 ├─ bin/clai.mjs
 ├─ install/ · manifests/
 └─ package.json

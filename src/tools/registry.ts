@@ -58,8 +58,24 @@ import {
   getAllowInteractiveStdinInherit,
   looksInteractiveStdin,
 } from "./shell.js";
+import {
+  compileBatchFailMode,
+  evaluateCancelTargets,
+  formatBatchCancelReason,
+  parseBatchFailPolicy,
+  parseCancelOnFailField,
+  resolveBatchCallId,
+  type BatchCallFailMeta,
+  type BatchFailMode,
+} from "./batch-fail-policy.js";
 
 export type { ToolRunOptions, ToolHandler };
+export {
+  parseBatchFailPolicy,
+  compileBatchFailMode,
+  evaluateCancelTargets,
+  formatBatchCancelReason,
+} from "./batch-fail-policy.js";
 
 function requireString(args: Record<string, unknown>, key: string): string {
   const value = args[key];
@@ -1043,8 +1059,11 @@ const BATCH_HARD_TIMEOUT_MS = 180_000;
 const BATCH_HEARTBEAT_MS = 5_000;
 
 interface BatchCallSpec {
+  id: string;
   name: string;
   args: Record<string, unknown>;
+  cancelOnFail: string[];
+  index0: number;
 }
 
 /**
@@ -1078,6 +1097,7 @@ function parseBatchCalls(value: unknown): BatchCallSpec[] {
       `tool.batch accepts at most ${BATCH_MAX_CALLS} calls per invocation`,
     );
   }
+  const seenIds = new Set<string>();
   return value.map((entry, index) => {
     if (
       !entry ||
@@ -1091,10 +1111,9 @@ function parseBatchCalls(value: unknown): BatchCallSpec[] {
         `tool.batch call #${index} must be { name: string, args: object }`,
       );
     }
-    const { name: rawName, args } = entry as {
-      name: string;
-      args: Record<string, unknown>;
-    };
+    const rec = entry as Record<string, unknown>;
+    const rawName = rec.name as string;
+    const args = rec.args as Record<string, unknown>;
     const name = normalizeBatchToolName(rawName);
     if (BATCH_FORBIDDEN_TOOLS.has(name)) {
       throw new Error(
@@ -1107,8 +1126,36 @@ function parseBatchCalls(value: unknown): BatchCallSpec[] {
           (name !== rawName ? ` (normalized to "${name}")` : ""),
       );
     }
-    return { name, args };
+    const id = resolveBatchCallId(rec, index, seenIds);
+    const cancelOnFail = parseCancelOnFailField(rec, `call #${index}`);
+    return { id, name, args, cancelOnFail, index0: index };
   });
+}
+
+/** Combine parent abort + policy abort into one signal for children. */
+function mergeAbortSignals(
+  a: AbortSignal,
+  b: AbortSignal,
+): AbortSignal {
+  const anyFn = (
+    AbortSignal as unknown as {
+      any?: (signals: AbortSignal[]) => AbortSignal;
+    }
+  ).any;
+  if (typeof anyFn === "function") {
+    return anyFn([a, b]);
+  }
+  const ac = new AbortController();
+  const forward = (): void => {
+    if (!ac.signal.aborted) ac.abort();
+  };
+  if (a.aborted || b.aborted) {
+    ac.abort();
+    return ac.signal;
+  }
+  a.addEventListener("abort", forward, { once: true });
+  b.addEventListener("abort", forward, { once: true });
+  return ac.signal;
 }
 
 async function runWithLimit<T>(
@@ -1132,9 +1179,13 @@ async function runWithLimit<T>(
   await Promise.all(runners);
 }
 
+type BatchOutcomeStatus = "ok" | "fail" | "cancelled";
+
 interface BatchOutcome {
   index: number;
+  id: string;
   name: string;
+  status: BatchOutcomeStatus;
   ok: boolean;
   output: string;
   exitCode?: number | undefined;
@@ -1146,6 +1197,20 @@ async function runToolBatch(
   options?: ToolRunOptions,
 ): Promise<ToolResult> {
   const calls = parseBatchCalls(args.calls);
+  const knownIds = new Set(calls.map((c) => c.id));
+  const callMeta: BatchCallFailMeta[] = calls.map((c) => ({
+    id: c.id,
+    name: c.name,
+    index1: c.index0 + 1,
+    cancelOnFail: c.cancelOnFail,
+  }));
+  const metaById = new Map(callMeta.map((m) => [m.id, m]));
+  const failMode: BatchFailMode = compileBatchFailMode(
+    parseBatchFailPolicy(args, knownIds),
+    callMeta,
+    knownIds,
+  );
+
   // Re-classify each child: block always refused; confirm allowed only when
   // the parent turn already confirmed (options.confirmed) so shell/fs mutates
   // cannot sneak past the safety gate as a "safe" batch wrapper.
@@ -1186,12 +1251,19 @@ async function runToolBatch(
   );
   // Parallel only when every child is read-only/safe-parallel. Mixed or
   // mutating batches run one-at-a-time in order.
+  // Selective/fail-fast policies also force serial so cancel decisions apply
+  // before dependents start (deterministic for models).
+  if (failMode.kind !== "continue") {
+    needsSerial = true;
+  }
   const concurrency = needsSerial ? 1 : requestedConcurrency;
 
   // Local abort that fires on parent cancel OR the batch hard timeout.
   // Children receive this signal so a hung http.fetch/dns cannot pin the UI
   // on "● tool.batch running" forever.
   const batchAc = new AbortController();
+  // Policy cancel (on_fail) — separate from user Esc / hard timeout.
+  const policyAc = new AbortController();
   const onParentAbort = (): void => {
     if (!batchAc.signal.aborted) batchAc.abort();
   };
@@ -1205,24 +1277,92 @@ async function runToolBatch(
   (hardTimer as unknown as { unref?: () => void }).unref?.();
 
   let finished = 0;
+  const failedIds = new Set<string>();
+  const cancelledIds = new Set<string>();
+  /** id → human reason for policy cancel */
+  const cancelReasons = new Map<string, string>();
+  let policyCancelCount = 0;
+
   const tick = (line: string): void => {
     // Heartbeats also reset the runner's 60s "stalled tool" watchdog, which
     // previously aborted silent batches mid-flight and left no tool-result.
     options?.onOutput?.(line.endsWith("\n") ? line : `${line}\n`, "stdout");
   };
-  tick(`[batch] starting ${calls.length} call(s), concurrency=${concurrency}`);
+  const modeLabel =
+    failMode.kind === "continue"
+      ? "continue"
+      : failMode.kind === "cancel_pending"
+        ? "cancel_pending"
+        : `rules(${failMode.rules.length})`;
+  tick(
+    `[batch] starting ${calls.length} call(s), concurrency=${concurrency}, on_fail=${modeLabel}`,
+  );
   const heartbeat = setInterval(() => {
     tick(`[batch] still running — ${finished}/${calls.length} finished`);
   }, BATCH_HEARTBEAT_MS);
   (heartbeat as unknown as { unref?: () => void }).unref?.();
 
+  const applyFailPolicy = (justFailedId: string): void => {
+    failedIds.add(justFailedId);
+    const targets = evaluateCancelTargets(
+      failMode,
+      failedIds,
+      calls.map((c) => c.id),
+    );
+    if (targets.size === 0) return;
+    const triggerList = [...failedIds];
+    const reason = formatBatchCancelReason(triggerList, metaById);
+    let newly = 0;
+    for (const id of targets) {
+      if (cancelledIds.has(id)) continue;
+      // Never mark the just-failed id as cancelled (it has a real outcome).
+      if (failedIds.has(id)) continue;
+      const idx = calls.findIndex((c) => c.id === id);
+      if (idx < 0) continue;
+      // Already finished with a result — leave it.
+      if (outcomes[idx]) continue;
+      cancelledIds.add(id);
+      cancelReasons.set(id, reason);
+      newly += 1;
+    }
+    if (newly > 0) {
+      policyCancelCount += newly;
+      if (!policyAc.signal.aborted) policyAc.abort();
+      tick(
+        `[batch] on_fail cancelled ${newly} call(s) after ${metaById.get(justFailedId)?.name ?? justFailedId} failed`,
+      );
+    }
+  };
+
   const outcomes: Array<BatchOutcome | undefined> = new Array(calls.length);
+  const childSignal = mergeAbortSignals(batchAc.signal, policyAc.signal);
+
   try {
     await runWithLimit(calls, concurrency, async (spec, index) => {
+      // Policy-cancelled before start (or mid-batch after sibling fail).
+      if (cancelledIds.has(spec.id) && !outcomes[index]) {
+        outcomes[index] = {
+          index,
+          id: spec.id,
+          name: spec.name,
+          status: "cancelled",
+          ok: false,
+          output:
+            cancelReasons.get(spec.id) ??
+            "Cancelled — not run because a sibling call failed",
+          exitCode: 130,
+        };
+        finished += 1;
+        tick(`[batch] #${index + 1} ${spec.name} cancelled`);
+        return;
+      }
+
       if (batchAc.signal.aborted) {
         outcomes[index] = {
           index,
+          id: spec.id,
           name: spec.name,
+          status: "cancelled",
           ok: false,
           output: "Aborted before execution.",
           exitCode: 130,
@@ -1230,6 +1370,25 @@ async function runToolBatch(
         finished += 1;
         return;
       }
+
+      // Re-check cancel after waiting in the worker queue.
+      if (cancelledIds.has(spec.id)) {
+        outcomes[index] = {
+          index,
+          id: spec.id,
+          name: spec.name,
+          status: "cancelled",
+          ok: false,
+          output:
+            cancelReasons.get(spec.id) ??
+            "Cancelled — not run because a sibling call failed",
+          exitCode: 130,
+        };
+        finished += 1;
+        tick(`[batch] #${index + 1} ${spec.name} cancelled`);
+        return;
+      }
+
       tick(`[batch] #${index + 1} ${spec.name} starting`);
       try {
         // Lightweight child heartbeats so silent tools (whois) never trip the
@@ -1246,7 +1405,7 @@ async function runToolBatch(
             // clean). Progress ticks above drive the live UI + stall watchdog.
             // Forward confirmed so approved mutates inside a batch still run.
             {
-              signal: batchAc.signal,
+              signal: childSignal,
               ...(options?.confirmed !== undefined
                 ? { confirmed: options.confirmed }
                 : {}),
@@ -1264,30 +1423,95 @@ async function runToolBatch(
         } finally {
           clearInterval(childHeartbeat);
         }
-        outcomes[index] = {
-          index,
-          name: spec.name,
-          ok: result.ok,
-          output: result.output,
-          exitCode: result.exitCode,
-        };
-        tick(
-          `[batch] #${index + 1} ${spec.name} ${result.ok ? "ok" : "fail"}` +
-            (result.exitCode !== undefined ? ` exit=${result.exitCode}` : ""),
-        );
+
+        // If we were policy-aborted mid-flight and the child looks aborted,
+        // surface as cancelled rather than a generic fail when we intended cancel.
+        if (
+          cancelledIds.has(spec.id) ||
+          (policyAc.signal.aborted &&
+            !result.ok &&
+            (result.exitCode === 130 ||
+              /abort|cancel/i.test(result.output ?? "")))
+        ) {
+          const reason =
+            cancelReasons.get(spec.id) ??
+            "Cancelled — aborted because a sibling call failed";
+          outcomes[index] = {
+            index,
+            id: spec.id,
+            name: spec.name,
+            status: "cancelled",
+            ok: false,
+            output: reason,
+            exitCode: 130,
+          };
+          cancelledIds.add(spec.id);
+          tick(`[batch] #${index + 1} ${spec.name} cancelled`);
+        } else if (result.ok) {
+          outcomes[index] = {
+            index,
+            id: spec.id,
+            name: spec.name,
+            status: "ok",
+            ok: true,
+            output: result.output,
+            exitCode: result.exitCode,
+          };
+          tick(
+            `[batch] #${index + 1} ${spec.name} ok` +
+              (result.exitCode !== undefined
+                ? ` exit=${result.exitCode}`
+                : ""),
+          );
+        } else {
+          outcomes[index] = {
+            index,
+            id: spec.id,
+            name: spec.name,
+            status: "fail",
+            ok: false,
+            output: result.output,
+            exitCode: result.exitCode,
+          };
+          tick(
+            `[batch] #${index + 1} ${spec.name} fail` +
+              (result.exitCode !== undefined
+                ? ` exit=${result.exitCode}`
+                : ""),
+          );
+          applyFailPolicy(spec.id);
+        }
       } catch (error) {
-        outcomes[index] = {
-          index,
-          name: spec.name,
-          ok: false,
-          output: "",
-          error: error instanceof Error ? error.message : String(error),
-        };
-        tick(
-          `[batch] #${index + 1} ${spec.name} error: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
-        );
+        const message =
+          error instanceof Error ? error.message : String(error);
+        // Policy abort while starting/running → cancelled if we marked it.
+        if (cancelledIds.has(spec.id) || policyAc.signal.aborted) {
+          outcomes[index] = {
+            index,
+            id: spec.id,
+            name: spec.name,
+            status: "cancelled",
+            ok: false,
+            output:
+              cancelReasons.get(spec.id) ??
+              "Cancelled — aborted because a sibling call failed",
+            exitCode: 130,
+          };
+          cancelledIds.add(spec.id);
+          tick(`[batch] #${index + 1} ${spec.name} cancelled`);
+        } else {
+          outcomes[index] = {
+            index,
+            id: spec.id,
+            name: spec.name,
+            status: "fail",
+            ok: false,
+            output: "",
+            error: message,
+          };
+          tick(`[batch] #${index + 1} ${spec.name} error: ${message}`);
+          applyFailPolicy(spec.id);
+        }
       } finally {
         finished += 1;
       }
@@ -1300,27 +1524,68 @@ async function runToolBatch(
     }
   }
 
-  // Fill any holes left by a mid-batch abort/timeout so we always emit a
-  // complete sectioned body and a tool-result (never stuck "running").
-  const timedOut = batchAc.signal.aborted && !options?.signal?.aborted;
+  // Fill any holes left by a mid-batch abort/timeout/policy cancel so we
+  // always emit a complete sectioned body and a tool-result.
+  const parentAborted = Boolean(options?.signal?.aborted);
+  // Hard timeout aborts batchAc; policy cancel only aborts policyAc.
+  const hardTimedOut = batchAc.signal.aborted && !parentAborted;
+
   for (let i = 0; i < calls.length; i += 1) {
     if (outcomes[i]) continue;
+    const spec = calls[i]!;
+    if (cancelledIds.has(spec.id) || cancelReasons.has(spec.id)) {
+      outcomes[i] = {
+        index: i,
+        id: spec.id,
+        name: spec.name,
+        status: "cancelled",
+        ok: false,
+        output:
+          cancelReasons.get(spec.id) ??
+          "Cancelled — not run because a sibling call failed",
+        exitCode: 130,
+      };
+      continue;
+    }
+    if (parentAborted) {
+      outcomes[i] = {
+        index: i,
+        id: spec.id,
+        name: spec.name,
+        status: "cancelled",
+        ok: false,
+        output: "Not run — batch aborted.",
+        exitCode: 130,
+      };
+      continue;
+    }
+    if (hardTimedOut) {
+      outcomes[i] = {
+        index: i,
+        id: spec.id,
+        name: spec.name,
+        status: "fail",
+        ok: false,
+        output: `Not run — tool.batch timed out after ${BATCH_HARD_TIMEOUT_MS / 1000}s.`,
+        exitCode: 124,
+      };
+      continue;
+    }
     outcomes[i] = {
       index: i,
-      name: calls[i]!.name,
+      id: spec.id,
+      name: spec.name,
+      status: "cancelled",
       ok: false,
-      output: timedOut
-        ? `Not run — tool.batch timed out after ${BATCH_HARD_TIMEOUT_MS / 1000}s.`
-        : "Not run — batch aborted.",
-      exitCode: timedOut ? 124 : 130,
+      output: "Not run — batch aborted.",
+      exitCode: 130,
     };
   }
 
   const finalOutcomes = outcomes as BatchOutcome[];
   const allOk = finalOutcomes.every((outcome) => outcome.ok);
-  const parentAborted = Boolean(options?.signal?.aborted);
   const sections = finalOutcomes.map((outcome) => {
-    const status = outcome.ok ? "ok" : "fail";
+    const status = outcome.status;
     const head = `── #${outcome.index + 1} ${outcome.name} [${status}${outcome.exitCode !== undefined ? ` exit=${outcome.exitCode}` : ""}]`;
     const body = outcome.error
       ? `error: ${outcome.error}`
@@ -1328,18 +1593,25 @@ async function runToolBatch(
     return `${head}\n${body}`;
   });
   let output = sections.join("\n\n");
-  if (timedOut && !allOk) {
+  if (hardTimedOut && !allOk) {
     output =
       `[batch] timed out after ${BATCH_HARD_TIMEOUT_MS / 1000}s — partial results below\n\n` +
       output;
+  } else if (policyCancelCount > 0) {
+    const n = finalOutcomes.filter((o) => o.status === "cancelled").length;
+    if (n > 0) {
+      output =
+        `[batch] on_fail cancelled ${n} call(s) — partial results below\n\n` +
+        output;
+    }
   }
   // Soft-success for the agent turn: one failed whois/dns must NOT cancel
   // sibling top-level tools (http.fetch, net.scan, …). Partial failures stay
   // visible in the sectioned body and non-zero exitCode for the model.
-  const softOk = !parentAborted && !timedOut;
+  const softOk = !parentAborted && !hardTimedOut;
   return {
     ok: softOk ? true : allOk,
     output,
-    exitCode: allOk ? 0 : timedOut ? 124 : parentAborted ? 130 : 1,
+    exitCode: allOk ? 0 : hardTimedOut ? 124 : parentAborted ? 130 : 1,
   };
 }

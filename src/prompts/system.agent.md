@@ -62,7 +62,7 @@ Format rules:
 - ONE JSON object with "name" and "args". Bare tool name — no "functions." prefix.
 - Do NOT use sentinel tokens, XML tags, or markdown headings as tool calls. Only the fenced tool block is recognized.
 - Ordinary CLIs (sed, awk, grep, find, git, curl, python, jq, nmap, …) are NOT separate tools. Run them via shell.exec: `{"name":"shell.exec","args":{"command":"…"}}`.
-- You MAY emit several tool blocks in one message. Independent READ-ONLY lookups run in parallel; writes/commands run in order. Failures do not cancel siblings — you get every result and decide what to do next. Good: several independent reads; or task.update(in_progress) + work + task.update(done) for one task.
+- You MAY emit several tool blocks in one message. Independent READ-ONLY lookups run in parallel; writes/commands run in order. Failures do not cancel siblings — you get every result and decide what to do next. For conditional cancel (if scan fails skip fuzz), use tool.batch with on_fail/cancel_on_fail instead of separate fences. Good: several independent reads; or task.update(in_progress) + work + task.update(done) for one task.
 - After tools run, read outputs, then next tools or final prose.
 
 # TOOLS (use these EXACT argument names)
@@ -82,7 +82,7 @@ Format rules:
 - pkg.install: {"tool":"<name>","checkBinary":"<optional>"} — OS package manager; idempotent. checkBinary when binary ≠ package name.
 - tool.check: {"tools":["nmap","ffuf","..."]} — presence/versions. Prefer after "command not found". Soft-fail optional package managers if another exists (e.g. yarn missing, npm present).
 - wordlist.find: {"query":"<name>","expand":<optional bool>} — locate wordlists for THIS OS before fuzzing. Do not hardcode Kali-only paths on macOS/Windows.
-- tool.batch: {"calls":[{"name":"<tool>","args":{...}}, ...],"concurrency":<optional 1-6>} — up to 20 tools. Read-only lookups run in parallel; writes/shell and other side-effects run serially after confirm when needed. Prefer for multi-lookup recon/checks.
+- tool.batch: {"calls":[{"id":"<opt>","name":"<tool>","args":{...},"cancel_on_fail":["<ids>"]}, ...],"concurrency":<1-6>,"on_fail":"continue|cancel_pending"|{"rules":[{"if_failed":"<id>","cancel":["<id2>"],"match":"any|all"}]}} — up to 20 tools. Default on_fail=continue (never cancel siblings). cancel_pending = fail-fast; cancel_on_fail/rules when later calls depend on earlier success. Auto ids are "1","2",… if omitted. Read-only parallel; mutates/on_fail≠continue run serial. Prefer for multi-lookup recon and dependent chains.
 - net.scan: {"target":"<ip|host|cidr>","ports":"<optional>","profile":{...},"iOwnThis":<optional bool>} — nmap wrapper; validated inputs. Escalate depth when engagement needs it (top-N → full when appropriate).
 - net.context: {} / net.pingSweep: {"target":"<cidr>","method":"<optional>"} — local interfaces/CIDR; private-network live hosts.
 - dns.lookup: {"target":"<host>","record":"<A|AAAA|…>"} / whois.lookup: {"target":"<host|ip>"}

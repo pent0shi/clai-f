@@ -11,15 +11,20 @@
 
 import { cleanToolOutputLines, presentOutput } from "./tool-presenter.js";
 
+export type BatchSectionStatus = "ok" | "fail" | "cancelled";
+
 export interface BatchSection {
   readonly index: number;
   readonly name: string;
+  /** True only when status is ok (back-compat for callers). */
   readonly ok: boolean;
+  readonly status: BatchSectionStatus;
   readonly exitCode: number | undefined;
   readonly body: string;
 }
 
-const HEADER_RE = /^──\s+#(\d+)\s+([\w.]+)\s+\[(ok|fail)(?:\s+exit=(\d+))?\]/;
+const HEADER_RE =
+  /^──\s+#(\d+)\s+([\w.]+)\s+\[(ok|fail|cancelled)(?:\s+exit=(\d+))?\]/;
 
 /**
  * Split a completed tool.batch output into per-sub-tool sections.
@@ -31,6 +36,7 @@ export function parseBatchSections(output: string): BatchSection[] {
     index: number;
     name: string;
     ok: boolean;
+    status: BatchSectionStatus;
     exitCode: number | undefined;
   } | null = null;
   const bodyLines: string[] = [];
@@ -46,10 +52,12 @@ export function parseBatchSections(output: string): BatchSection[] {
         bodyLines.length = 0;
       }
       const exitCode = m[4] !== undefined ? parseInt(m[4], 10) : undefined;
+      const status = m[3] as BatchSectionStatus;
       current = {
         index: parseInt(m[1]!, 10),
         name: m[2]!,
-        ok: m[3] === "ok",
+        status,
+        ok: status === "ok",
         exitCode: Number.isFinite(exitCode) ? exitCode : undefined,
       };
     } else if (current !== null) {
@@ -82,15 +90,27 @@ export function presentBatchSection(
   const presented = presentOutput(section.body, undefined, expanded);
   // Prefer cleaned body even when presentOutput samples ends for huge text.
   const hasBody = section.body.trim().length > 0;
-  return {
-    glyph: section.ok ? "✓" : "✗",
-    statusLabel: section.ok
-      ? section.exitCode !== undefined
+  const status = section.status ?? (section.ok ? "ok" : "fail");
+  let glyph = "✗";
+  let statusLabel = "failed";
+  if (status === "ok") {
+    glyph = "✓";
+    statusLabel =
+      section.exitCode !== undefined
         ? `done (exit ${section.exitCode})`
-        : "done"
-      : section.exitCode !== undefined
-        ? `failed (exit ${section.exitCode})`
-        : "failed",
+        : "done";
+  } else if (status === "cancelled") {
+    glyph = "⊘";
+    statusLabel =
+      section.exitCode !== undefined
+        ? `cancelled (exit ${section.exitCode})`
+        : "cancelled";
+  } else if (section.exitCode !== undefined) {
+    statusLabel = `failed (exit ${section.exitCode})`;
+  }
+  return {
+    glyph,
+    statusLabel,
     name: section.name,
     lines: hasBody ? presented.lines : [],
     hiddenAboveCount: presented.hiddenAboveCount,
@@ -101,11 +121,19 @@ export function presentBatchSection(
 /** Human summary line under the parent batch header. */
 export function batchSummaryLine(sections: readonly BatchSection[]): string {
   if (sections.length === 0) return "";
-  const failed = sections.filter((s) => !s.ok).length;
-  if (failed === 0) {
+  const failed = sections.filter(
+    (s) => (s.status ?? (s.ok ? "ok" : "fail")) === "fail",
+  ).length;
+  const cancelled = sections.filter(
+    (s) => (s.status ?? (s.ok ? "ok" : "fail")) === "cancelled",
+  ).length;
+  if (failed === 0 && cancelled === 0) {
     return `${sections.length} sub-tool(s) — all ok`;
   }
-  return `${failed}/${sections.length} sub-tool(s) failed`;
+  const parts: string[] = [];
+  if (failed > 0) parts.push(`${failed} failed`);
+  if (cancelled > 0) parts.push(`${cancelled} cancelled`);
+  return `${parts.join(", ")} / ${sections.length} sub-tool(s)`;
 }
 
 /** True when this tool item should use nested batch UI. */
@@ -142,7 +170,7 @@ export function parseBatchLiveProgress(raw: string): {
   for (const tick of ticks) {
     const body = tick.replace(/^\[batch\]\s*/i, "");
     const start = /^#(\d+)\s+([\w.]+)\s+starting/i.exec(body);
-    const done = /^#(\d+)\s+([\w.]+)\s+(ok|fail)/i.exec(body);
+    const done = /^#(\d+)\s+([\w.]+)\s+(ok|fail|cancelled)/i.exec(body);
     const running = /^#(\d+)\s+([\w.]+)\s+still running/i.exec(body);
     const still = /^still running/i.test(body);
     if (start) {
@@ -151,9 +179,10 @@ export function parseBatchLiveProgress(raw: string): {
         tone: "running",
       });
     } else if (done) {
-      const ok = done[3]!.toLowerCase() === "ok";
+      const st = done[3]!.toLowerCase();
+      const ok = st === "ok";
       byKey.set(done[1]!, {
-        text: `#${done[1]} ${done[2]} · ${ok ? "ok" : "fail"}`,
+        text: `#${done[1]} ${done[2]} · ${st}`,
         tone: ok ? "ok" : "fail",
       });
     } else if (running) {
@@ -195,7 +224,7 @@ export function parseBatchLiveProgress(raw: string): {
  * runner formatting so the full-batch view stays familiar).
  */
 export function formatBatchSectionForPager(section: BatchSection): string {
-  const status = section.ok ? "ok" : "fail";
+  const status = section.status ?? (section.ok ? "ok" : "fail");
   const exit =
     section.exitCode !== undefined ? ` exit=${section.exitCode}` : "";
   const head = `── #${section.index} ${section.name} [${status}${exit}]`;

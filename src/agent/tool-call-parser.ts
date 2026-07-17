@@ -674,6 +674,13 @@ const TOOL_ARG_KEYS = new Set([
   "cwd",
   "name",
   "concurrency",
+  "on_fail",
+  "onFail",
+  "fail_policy",
+  "failPolicy",
+  "id",
+  "cancel_on_fail",
+  "cancelOnFail",
   // Extra optional keys that commonly ride along with a bare args object so
   // it is still recognized (and its tool inferred) instead of leaking to the
   // screen — e.g. shell.exec with {"command":"…","timeoutMs":300000}.

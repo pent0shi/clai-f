@@ -175,4 +175,202 @@ describe("phase 12 — tool.batch", () => {
     // But the batch should still report success/aborted output without throwing.
     expect(typeof result.output).toBe("string");
   });
+
+  it("default on_fail=continue keeps later siblings after a fail", async () => {
+    const result = await runToolCall({
+      name: "tool.batch",
+      args: {
+        calls: [
+          {
+            name: "fs.read",
+            args: { path: "/no/such/file/clai-batch-continue" },
+          },
+          { name: "sysinfo", args: {} },
+        ],
+      },
+    });
+    expect(result.ok).toBe(true);
+    expect(result.exitCode).toBe(1);
+    expect(result.output).toMatch(/#1 fs\.read \[fail/);
+    expect(result.output).toMatch(/#2 sysinfo \[ok/);
+    expect(result.output).not.toMatch(/\[cancelled/);
+  });
+
+  it("on_fail=cancel_pending skips later calls after first fail", async () => {
+    const result = await runToolCall({
+      name: "tool.batch",
+      args: {
+        on_fail: "cancel_pending",
+        calls: [
+          {
+            name: "fs.read",
+            args: { path: "/no/such/file/clai-batch-failfast" },
+          },
+          { name: "sysinfo", args: {} },
+          { name: "sysinfo", args: {} },
+        ],
+      },
+    });
+    expect(result.ok).toBe(true);
+    expect(result.exitCode).toBe(1);
+    expect(result.output).toMatch(/on_fail cancelled/);
+    expect(result.output).toMatch(/#1 fs\.read \[fail/);
+    expect(result.output).toMatch(/#2 sysinfo \[cancelled/);
+    expect(result.output).toMatch(/#3 sysinfo \[cancelled/);
+    expect(result.output).toMatch(/because #1 fs\.read failed/);
+  });
+
+  it("accepts cancel_rest / fail_fast aliases for cancel_pending", async () => {
+    for (const on_fail of ["cancel_rest", "fail_fast"] as const) {
+      const result = await runToolCall({
+        name: "tool.batch",
+        args: {
+          on_fail,
+          calls: [
+            {
+              name: "fs.read",
+              args: { path: `/no/such/file/clai-batch-${on_fail}` },
+            },
+            { name: "sysinfo", args: {} },
+          ],
+        },
+      });
+      expect(result.output).toMatch(/\[cancelled/);
+    }
+  });
+
+  it("per-call cancel_on_fail only cancels listed targets", async () => {
+    // shell.exec forces serial so order is deterministic.
+    const result = await runToolCall({
+      name: "tool.batch",
+      args: {
+        calls: [
+          {
+            id: "a",
+            name: "shell.exec",
+            args: { command: "false" },
+            cancel_on_fail: ["c"],
+          },
+          { id: "b", name: "sysinfo", args: {} },
+          { id: "c", name: "sysinfo", args: {} },
+        ],
+      },
+    });
+    expect(result.ok).toBe(true);
+    expect(result.output).toMatch(/#1 shell\.exec \[fail/);
+    expect(result.output).toMatch(/#2 sysinfo \[ok/);
+    expect(result.output).toMatch(/#3 sysinfo \[cancelled/);
+    expect(result.output).toMatch(/because #1 shell\.exec failed/);
+  });
+
+  it("rules match=all requires every trigger to fail", async () => {
+    const onlyOneFails = await runToolCall({
+      name: "tool.batch",
+      args: {
+        on_fail: {
+          rules: [
+            {
+              if_failed: ["1", "2"],
+              match: "all",
+              cancel: ["3"],
+            },
+          ],
+        },
+        calls: [
+          {
+            name: "fs.read",
+            args: { path: "/no/such/file/clai-batch-rule-a" },
+          },
+          { name: "sysinfo", args: {} },
+          { name: "sysinfo", args: {} },
+        ],
+      },
+    });
+    // Call 1 fails, call 2 ok → match=all not satisfied → call 3 runs.
+    expect(onlyOneFails.output).toMatch(/#3 sysinfo \[ok/);
+    expect(onlyOneFails.output).not.toMatch(/#3 sysinfo \[cancelled/);
+
+    const bothFail = await runToolCall({
+      name: "tool.batch",
+      args: {
+        on_fail: {
+          rules: [
+            {
+              if_failed: ["1", "2"],
+              match: "all",
+              cancel: ["3"],
+            },
+          ],
+        },
+        calls: [
+          {
+            name: "fs.read",
+            args: { path: "/no/such/file/clai-batch-rule-b1" },
+          },
+          {
+            name: "fs.read",
+            args: { path: "/no/such/file/clai-batch-rule-b2" },
+          },
+          { name: "sysinfo", args: {} },
+        ],
+      },
+    });
+    expect(bothFail.output).toMatch(/#3 sysinfo \[cancelled/);
+  });
+
+  it("rejects unknown ids in on_fail rules and cancel_on_fail", async () => {
+    await expect(
+      runToolCall({
+        name: "tool.batch",
+        args: {
+          on_fail: {
+            rules: [{ if_failed: "missing", cancel: ["1"] }],
+          },
+          calls: [{ name: "sysinfo", args: {} }],
+        },
+      }),
+    ).rejects.toThrow(/unknown id "missing"/);
+
+    await expect(
+      runToolCall({
+        name: "tool.batch",
+        args: {
+          calls: [
+            {
+              id: "a",
+              name: "sysinfo",
+              args: {},
+              cancel_on_fail: ["nope"],
+            },
+          ],
+        },
+      }),
+    ).rejects.toThrow(/unknown id "nope"/);
+  });
+
+  it("rejects duplicate call ids", async () => {
+    await expect(
+      runToolCall({
+        name: "tool.batch",
+        args: {
+          calls: [
+            { id: "x", name: "sysinfo", args: {} },
+            { id: "x", name: "sysinfo", args: {} },
+          ],
+        },
+      }),
+    ).rejects.toThrow(/duplicate call id/);
+  });
+
+  it("rejects invalid on_fail strings", async () => {
+    await expect(
+      runToolCall({
+        name: "tool.batch",
+        args: {
+          on_fail: "explode_everything",
+          calls: [{ name: "sysinfo", args: {} }],
+        },
+      }),
+    ).rejects.toThrow(/on_fail must be/);
+  });
 });
