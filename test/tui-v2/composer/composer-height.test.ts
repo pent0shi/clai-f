@@ -6,6 +6,8 @@ import {
 } from "../../../src/tui-v2/composer/composer-height.js";
 import {
   composerDraftOverflows,
+  composerOwnsWheel,
+  measureComposerLines,
   nextComposerScrollOffset,
   tryScrollComposerDraft,
 } from "../../../src/tui-v2/composer/composer-wheel.js";
@@ -51,6 +53,12 @@ describe("composer wheel / draft scroll", () => {
     expect(composerDraftOverflows(12, 12)).toBe(false);
   });
 
+  it("treats any multi-line draft as owning the wheel", () => {
+    expect(composerOwnsWheel(1)).toBe(false);
+    expect(composerOwnsWheel(2)).toBe(true);
+    expect(composerOwnsWheel(40)).toBe(true);
+  });
+
   it("scrolls the draft viewport without overflowing bounds", () => {
     expect(
       nextComposerScrollOffset({
@@ -89,10 +97,41 @@ describe("composer wheel / draft scroll", () => {
     ).toBeUndefined();
   });
 
-  it("consumes wheel only when the draft overflows", () => {
-    let setY: number | undefined;
+  it("consumes wheel for multi-line drafts even when fully visible", () => {
+    let downs = 0;
     const editor = {
+      lineCount: 5,
+      virtualLineCount: 5,
+      plainText: "a\nb\nc\nd\ne",
+      editorView: {
+        getViewport: () => ({ offsetY: 0, offsetX: 0, height: 10, width: 80 }),
+        getTotalVirtualLineCount: () => 5,
+        setViewport: () => {},
+      },
+      moveCursorUp: () => {},
+      moveCursorDown: () => {
+        downs += 1;
+      },
+    };
+    // 5 lines fit in 10 rows — still own the wheel so chat does not move.
+    expect(
+      tryScrollComposerDraft(editor, {
+        contentLines: 5,
+        visibleRows: 10,
+        direction: "down",
+        delta: 1,
+      }),
+    ).toBe(true);
+    expect(downs).toBe(3);
+    expect(measureComposerLines(editor, 1)).toBe(5);
+  });
+
+  it("scrolls overflowing draft viewport and leaves single-line to chat", () => {
+    let setY: number | undefined;
+    const overflowing = {
       virtualLineCount: 40,
+      lineCount: 40,
+      plainText: "x\n".repeat(40),
       editorView: {
         getViewport: () => ({ offsetY: 0, offsetX: 0, height: 10, width: 80 }),
         getTotalVirtualLineCount: () => 40,
@@ -104,7 +143,7 @@ describe("composer wheel / draft scroll", () => {
       moveCursorDown: () => {},
     };
     expect(
-      tryScrollComposerDraft(editor, {
+      tryScrollComposerDraft(overflowing, {
         contentLines: 40,
         visibleRows: 10,
         direction: "down",
@@ -112,9 +151,22 @@ describe("composer wheel / draft scroll", () => {
       }),
     ).toBe(true);
     expect(setY).toBe(3);
+
+    const single = {
+      lineCount: 1,
+      virtualLineCount: 1,
+      plainText: "hello",
+      editorView: {
+        getViewport: () => ({ offsetY: 0, offsetX: 0, height: 1, width: 80 }),
+        getTotalVirtualLineCount: () => 1,
+        setViewport: () => {},
+      },
+      moveCursorUp: () => {},
+      moveCursorDown: () => {},
+    };
     expect(
-      tryScrollComposerDraft(editor, {
-        contentLines: 5,
+      tryScrollComposerDraft(single, {
+        contentLines: 1,
         visibleRows: 10,
         direction: "down",
       }),

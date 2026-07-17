@@ -1,6 +1,6 @@
 /**
- * Wheel over the composer: scroll an overflowing draft in-place, or signal
- * that the chat transcript should scroll instead.
+ * Wheel over the composer: scroll a multi-line / overflowing draft in-place,
+ * or signal that the chat transcript may scroll (short single-line drafts).
  */
 
 export function composerDraftOverflows(
@@ -8,6 +8,11 @@ export function composerDraftOverflows(
   visibleRows: number,
 ): boolean {
   return Math.max(1, contentLines) > Math.max(1, visibleRows);
+}
+
+/** Multi-line draft (newlines or soft-wrap) owns the wheel — never the chat. */
+export function composerOwnsWheel(contentLines: number): boolean {
+  return Math.max(1, contentLines) > 1;
 }
 
 /** Next viewport Y for an overflowing draft; undefined if nothing to scroll. */
@@ -32,7 +37,9 @@ export function nextComposerScrollOffset(opts: {
 
 /** Minimal editor surface used for draft-internal wheel scroll. */
 export interface ComposerWheelEditor {
+  readonly lineCount?: number;
   readonly virtualLineCount?: number;
+  readonly plainText?: string;
   readonly editorView: {
     getViewport(): {
       offsetY: number;
@@ -53,9 +60,26 @@ export interface ComposerWheelEditor {
   moveCursorDown(): unknown;
 }
 
+/** Best-effort visual line count from the live editor (React state can lag). */
+export function measureComposerLines(
+  editor: ComposerWheelEditor | null | undefined,
+  contentLinesFallback: number,
+): number {
+  if (!editor) return Math.max(1, contentLinesFallback);
+  const fromView =
+    editor.editorView.getTotalVirtualLineCount?.() ??
+    editor.virtualLineCount ??
+    0;
+  const logical = editor.lineCount ?? 0;
+  const hardBreaks = editor.plainText
+    ? Math.max(1, editor.plainText.split("\n").length)
+    : 1;
+  return Math.max(1, contentLinesFallback, fromView, logical, hardBreaks);
+}
+
 /**
- * Scroll the draft when it overflows the visible rows.
- * Returns true when the wheel was consumed by the composer (not chat).
+ * Scroll the draft when the composer owns the wheel.
+ * Returns true when chat must NOT scroll (multi-line / overflow draft).
  */
 export function tryScrollComposerDraft(
   editor: ComposerWheelEditor,
@@ -66,31 +90,40 @@ export function tryScrollComposerDraft(
     readonly delta?: number | undefined;
   },
 ): boolean {
-  if (!composerDraftOverflows(opts.contentLines, opts.visibleRows)) return false;
-
-  try {
-    const view = editor.editorView;
-    const vp = view.getViewport();
-    const total =
-      view.getTotalVirtualLineCount?.() ??
-      editor.virtualLineCount ??
-      opts.contentLines;
-    const nextY = nextComposerScrollOffset({
-      offsetY: vp.offsetY,
-      viewportHeight: vp.height || opts.visibleRows,
-      totalLines: total,
-      direction: opts.direction,
-      delta: opts.delta,
-    });
-    if (nextY !== undefined) {
-      view.setViewport(vp.offsetX, nextY, vp.width, vp.height, false);
-      return true;
-    }
-  } catch {
-    // Fall through to cursor-based scroll.
+  const lines = measureComposerLines(editor, opts.contentLines);
+  // Any multi-line draft keeps wheel off the chat (expanded paste, Shift+Enter).
+  if (!composerOwnsWheel(lines) && !composerDraftOverflows(lines, opts.visibleRows)) {
+    return false;
   }
 
   const steps = Math.max(1, opts.delta ?? 1) * 3;
+
+  // Prefer viewport scroll when content is taller than the visible box.
+  if (composerDraftOverflows(lines, opts.visibleRows)) {
+    try {
+      const view = editor.editorView;
+      const vp = view.getViewport();
+      const total =
+        view.getTotalVirtualLineCount?.() ??
+        editor.virtualLineCount ??
+        lines;
+      const nextY = nextComposerScrollOffset({
+        offsetY: vp.offsetY,
+        viewportHeight: vp.height || opts.visibleRows,
+        totalLines: total,
+        direction: opts.direction,
+        delta: opts.delta,
+      });
+      if (nextY !== undefined && nextY !== vp.offsetY) {
+        view.setViewport(vp.offsetX, nextY, vp.width, vp.height, false);
+        return true;
+      }
+    } catch {
+      // Fall through to cursor-based scroll.
+    }
+  }
+
+  // Cursor motion always moves the editor viewport with the caret.
   if (opts.direction === "up") {
     for (let i = 0; i < steps; i++) editor.moveCursorUp();
     return true;
@@ -99,5 +132,6 @@ export function tryScrollComposerDraft(
     for (let i = 0; i < steps; i++) editor.moveCursorDown();
     return true;
   }
+  // Multi-line but unknown direction — still consume so chat stays put.
   return true;
 }

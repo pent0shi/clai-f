@@ -483,7 +483,11 @@ export function ComposerEditor(props: ComposerEditorProps): ReactNode {
     }
   }
 
-  /** Overflowing draft scrolls in place; short draft yields wheel to chat. */
+  /**
+   * Wheel over the composer must never also move the chat when the draft is
+   * multi-line (expanded paste / Shift+Enter). Always stopPropagation so the
+   * app-root handler cannot double-scroll the transcript behind us.
+   */
   function onComposerWheel(event: MouseEvent): void {
     if (!event.scroll || overlay.kind !== "none") return;
     event.preventDefault();
@@ -491,18 +495,22 @@ export function ComposerEditor(props: ComposerEditorProps): ReactNode {
     const { direction, delta } = event.scroll;
     const editor = editorRef.current;
     const visible = resolveComposerTextRows(contentRows, props.height);
-    if (
-      editor &&
-      shouldOwnKeyboard &&
-      tryScrollComposerDraft(editor, {
-        contentLines: contentRows,
-        visibleRows: visible,
-        direction,
-        delta,
-      })
-    ) {
-      return;
+
+    // Keep keyboard focus on the composer while interacting with the draft.
+    if (editor && shouldOwnKeyboard) {
+      if (
+        tryScrollComposerDraft(editor, {
+          contentLines: contentRows,
+          visibleRows: visible,
+          direction,
+          delta,
+        })
+      ) {
+        return;
+      }
     }
+
+    // Single-line / empty draft only: forward wheel to chat deliberately.
     services.focus.focusRegion("transcript");
     editor?.blur();
     const step = Math.max(1, delta || 1) * 3;
