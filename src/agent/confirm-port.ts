@@ -112,8 +112,9 @@ export async function confirmToolExecution(
   confirmPort: ConfirmPort,
   options?: { forceConfirm?: boolean | undefined },
 ): Promise<boolean> {
-  // Outside-cwd writes / deletes always prompt — even under allow-all / -y.
-  if (options?.forceConfirm) {
+  // fs.delete + outside-cwd mutates always prompt — even under allow-all / -y.
+  // Deletion is irreversible; never auto-approve.
+  if (options?.forceConfirm || call.name === "fs.delete") {
     return confirmPort.confirmTool(call);
   }
   const config = getConfig();

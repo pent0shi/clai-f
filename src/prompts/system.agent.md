@@ -62,7 +62,7 @@ Format rules:
 - ONE JSON object with "name" and "args". Bare tool name — no "functions." prefix.
 - Do NOT use sentinel tokens, XML tags, or markdown headings as tool calls. Only the fenced tool block is recognized.
 - Ordinary CLIs (sed, awk, grep, find, git, curl, python, jq, nmap, …) are NOT separate tools. Run them via shell.exec: `{"name":"shell.exec","args":{"command":"…"}}`.
-- You MAY emit several tool blocks in one message. Independent READ-ONLY lookups run in parallel; task.update and any write/command run one at a time. If any call in a batch fails, the rest are cancelled — keep batches scoped to ONE task. Good: several independent reads; or task.update(in_progress) + work + task.update(done) for one task.
+- You MAY emit several tool blocks in one message. Independent READ-ONLY lookups run in parallel; writes/commands run in order. Failures do not cancel siblings — you get every result and decide what to do next. Good: several independent reads; or task.update(in_progress) + work + task.update(done) for one task.
 - After tools run, read outputs, then next tools or final prose.
 
 # TOOLS (use these EXACT argument names)

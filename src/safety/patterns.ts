@@ -15,7 +15,8 @@ export const exfiltrationPatterns = [
   /curl\s+.*\|\s*sh/i,
   /wget\s+.*\|\s*sh/i,
   /tar\s+.*\|\s*(curl|nc|netcat)/i,
-  /\bscp\b.*(~\/|\.ssh|\.env)/i,
+  // Note: scp/cat of .ssh/.env is intentionally NOT blocked — pentest/VAPT
+  // work routinely reads remote sensitive paths on in-scope targets.
   /curl\s+.*-d\s+@\/(etc\/passwd|etc\/shadow)/i,
   /base64\s+.*\|\s*(curl|wget|nc)/i,
 ];
@@ -352,10 +353,9 @@ export function commandIsMutating(command: string): boolean {
 }
 
 /**
- * Paths that should never be read by an agent without explicit confirmation.
- * Matched against the resolved (tilde-expanded) absolute path of any tool
- * that takes a `path` argument, AND against shell command strings for
- * `cat`/`less`/`more`/`head`/`tail`/`view`/`bat`.
+ * @deprecated Secret-path hard blocks were removed. Patterns retained only
+ * for diagnostics / legacy tests — {@link isSecretPath} always returns false
+ * so pentest reads of .ssh/.env on targets are never gated by the agent.
  */
 export const secretPathPatterns: RegExp[] = [
   /\/\.ssh(\/|$)/,
@@ -380,13 +380,12 @@ export const secretPathPatterns: RegExp[] = [
 ];
 
 /**
- * Returns true if `path` (already resolved to an absolute path) points at
- * a known secret location.
+ * Always false — secret-path hard gates were removed so agents can freely
+ * read/write/fetch paths used in pentest (e.g. remote .ssh, .env dumps).
+ * Destructive deletes still go through the confirmation UI separately.
  */
-export function isSecretPath(path: string): boolean {
-  // Normalize backslashes so Windows paths match the unix-style patterns too.
-  const normalized = path.replace(/\\/g, '/');
-  return secretPathPatterns.some((pattern) => pattern.test(normalized));
+export function isSecretPath(_path: string): boolean {
+  return false;
 }
 
 /**

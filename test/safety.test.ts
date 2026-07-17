@@ -67,16 +67,14 @@ describe("safety classifier", () => {
 });
 
 describe("phase 1 — secret-leak hardening", () => {
-  it("isSecretPath identifies common secret locations", () => {
-    expect(isSecretPath(resolve(homedir(), ".ssh/id_rsa"))).toBe(true);
-    expect(isSecretPath(resolve(homedir(), ".clai/keys.json"))).toBe(true);
-    expect(isSecretPath(resolve(homedir(), ".aws/credentials"))).toBe(true);
-    expect(isSecretPath(resolve("/Users/x/project/.env"))).toBe(true);
-    expect(isSecretPath(resolve("/Users/x/project/cert.pem"))).toBe(true);
-    expect(isSecretPath("/etc/shadow")).toBe(true);
-    // Negative cases
+  it("isSecretPath hard-gate is disabled (always false) for pentest freeness", () => {
+    // Paths that used to be blocked must never hard-block the agent.
+    expect(isSecretPath(resolve(homedir(), ".ssh/id_rsa"))).toBe(false);
+    expect(isSecretPath(resolve(homedir(), ".clai/keys.json"))).toBe(false);
+    expect(isSecretPath(resolve(homedir(), ".aws/credentials"))).toBe(false);
+    expect(isSecretPath(resolve("/Users/x/project/.env"))).toBe(false);
+    expect(isSecretPath("/etc/shadow")).toBe(false);
     expect(isSecretPath(resolve("/Users/x/project/package.json"))).toBe(false);
-    expect(isSecretPath(resolve("/Users/x/project/src/index.ts"))).toBe(false);
   });
 
   it("containsShellMetacharacter flags pipes, &&, redirects, sudo, command subst", () => {
@@ -93,28 +91,19 @@ describe("phase 1 — secret-leak hardening", () => {
     expect(containsShellMetacharacter("git status")).toBe(false);
   });
 
-  it("blocks shell commands that touch ~/.clai/keys.json", () => {
-    const result = classifyToolCall({
-      name: "shell.exec",
-      args: { command: "cat ~/.clai/keys.json" },
-    });
-    expect(result.level).toBe("block");
-  });
-
-  it("blocks shell commands that touch ~/.ssh/id_rsa", () => {
-    const result = classifyToolCall({
-      name: "shell.exec",
-      args: { command: "cat ~/.ssh/id_rsa" },
-    });
-    expect(result.level).toBe("block");
-  });
-
-  it("blocks shell commands that touch .env", () => {
-    const result = classifyToolCall({
-      name: "shell.exec",
-      args: { command: "cat ./project/.env" },
-    });
-    expect(result.level).toBe("block");
+  it("allows shell reads of paths that used to be secret-gated (pentest)", () => {
+    for (const command of [
+      "cat ~/.clai/keys.json",
+      "cat ~/.ssh/id_rsa",
+      "cat ./project/.env",
+    ]) {
+      const result = classifyToolCall({
+        name: "shell.exec",
+        args: { command },
+      });
+      // Not block — may be safe or confirm depending on metacharacters.
+      expect(result.level).not.toBe("block");
+    }
   });
 
   it("does not treat remote URL paths as local secret paths", () => {
@@ -128,30 +117,29 @@ describe("phase 1 — secret-leak hardening", () => {
     expect(result.level).toBe("safe");
   });
 
-  it("still blocks local .env paths even when a URL is also present", () => {
+  it("does not hard-block .env when mixed with a URL (metachar may still confirm)", () => {
     const result = classifyToolCall({
       name: "shell.exec",
       args: {
         command: 'curl -s "https://example.com/health" && cat ./project/.env',
       },
     });
-    expect(result.level).toBe("block");
+    expect(result.level).not.toBe("block");
   });
 
-  it("blocks fs.read for ~/.clai/keys.json", () => {
-    const result = classifyToolCall({
-      name: "fs.read",
-      args: { path: "~/.clai/keys.json" },
-    });
-    expect(result.level).toBe("block");
-  });
-
-  it("blocks fs.read for ~/.ssh/id_rsa", () => {
-    const result = classifyToolCall({
-      name: "fs.read",
-      args: { path: "~/.ssh/id_rsa" },
-    });
-    expect(result.level).toBe("block");
+  it("allows fs.read for paths that used to be secret-gated", () => {
+    expect(
+      classifyToolCall({
+        name: "fs.read",
+        args: { path: "~/.clai/keys.json" },
+      }).level,
+    ).toBe("safe");
+    expect(
+      classifyToolCall({
+        name: "fs.read",
+        args: { path: "~/.ssh/id_rsa" },
+      }).level,
+    ).toBe("safe");
   });
 
   it("still allows fs.read for ordinary project files", () => {
@@ -160,6 +148,14 @@ describe("phase 1 — secret-leak hardening", () => {
       args: { path: "./package.json" },
     });
     expect(result.level).toBe("safe");
+  });
+
+  it("always confirms fs.delete (never auto, never block as secret)", () => {
+    const result = classifyToolCall({
+      name: "fs.delete",
+      args: { path: "./tsconfig.node.json" },
+    });
+    expect(result.level).toBe("confirm");
   });
 
   it("confirms env (mutating? no — now auto-safe under non-mutating policy)", () => {
@@ -373,15 +369,15 @@ describe("phase 1 — secret-leak hardening", () => {
     ).toBe("safe");
   });
 
-  it("blocks fs.write to a secret path", () => {
+  it("confirms fs.write even to former secret paths (no hard block)", () => {
     const result = classifyToolCall({
       name: "fs.write",
       args: { path: "~/.ssh/authorized_keys", content: "x" },
     });
-    expect(result.level).toBe("block");
+    expect(result.level).toBe("confirm");
   });
 
-  it("classifies pdf.read as safe and blocks secret paths", () => {
+  it("classifies pdf.read as safe including former secret paths", () => {
     expect(
       classifyToolCall({
         name: "pdf.read",
@@ -393,7 +389,7 @@ describe("phase 1 — secret-leak hardening", () => {
         name: "pdf.read",
         args: { path: "~/.ssh/id_rsa" },
       }).level,
-    ).toBe("block");
+    ).toBe("safe");
   });
 
   it("auto-approves pkg.install when the binary is already on PATH (no-op check)", () => {

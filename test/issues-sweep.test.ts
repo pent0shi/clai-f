@@ -11,13 +11,13 @@ import { isCtrlO } from "../src/ui/keys.js";
  */
 
 describe("issues.md §23 — sweep", () => {
-  it("cat ~/.clai/keys.json is blocked, not auto-safe", () => {
+  it("cat ~/.clai/keys.json is not hard-blocked (secret-path gate removed)", () => {
     expect(
       classifyToolCall({
         name: "shell.exec",
         args: { command: "cat ~/.clai/keys.json" },
       }).level,
-    ).toBe("block");
+    ).not.toBe("block");
   });
 
   it("env / printenv auto-run (read-only env inspection is not mutating)", () => {

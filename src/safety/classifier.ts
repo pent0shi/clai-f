@@ -6,7 +6,6 @@ import type { RiskLevel, ToolCall } from "../types.js";
 import {
   destructiveCommandPatterns,
   exfiltrationPatterns,
-  isSecretPath,
   isVersionOrHelpProbe,
   networkScanTools,
   readOnlyShellCommands,
@@ -185,33 +184,6 @@ export function isPentestToolCall(call: ToolCall): boolean {
   if (call.name !== "shell.exec" && call.name !== "shell.start") return false;
   const command = stringArg(call.args, "command") ?? "";
   return commandContainsNetworkScanner(command);
-}
-
-/**
- * Pull rough "path-looking" tokens out of a command string. Used so we can
- * refuse to auto-execute commands that touch known secret paths even when
- * the base command (cat, head, tail, less, etc.) is otherwise safe.
- */
-function extractPathLikeTokens(command: string): string[] {
-  // Match tilde paths, absolute paths, and dotted relative paths. URL paths
-  // are intentionally stripped first: this check protects LOCAL secrets
-  // (~/.ssh, ~/.clai/keys.json, project .env). A remote URL like
-  // https://example.com/.env must not be resolved as if it were a local
-  // filesystem path (that false-positive blocked normal pentest verification
-  // probes against scoped external targets).
-  const withoutUrls = command.replace(/\bhttps?:\/\/[^\s'"`<>]+/gi, " ");
-  const matches = withoutUrls.match(/(?:~|\.{1,2}|\/)?[\w./~-]+/g) ?? [];
-  return matches.filter((token) => /[\\/~]/.test(token));
-}
-
-function commandTouchesSecretPath(command: string): boolean {
-  return extractPathLikeTokens(command).some((token) => {
-    try {
-      return isSecretPath(resolveForSecretCheck(token));
-    } catch {
-      return false;
-    }
-  });
 }
 
 // Absolute roots whose contents are part of the OS / shared system. A
@@ -398,13 +370,6 @@ export function classifyShellCommand(
       reason: "Command resembles secret or data exfiltration",
     };
   }
-  if (commandTouchesSecretPath(command)) {
-    return {
-      level: "block",
-      reason:
-        "Command references a known secret path (e.g. ~/.ssh, ~/.clai/keys.json, .env)",
-    };
-  }
   // A bare version/help probe (node --version, npm -v, go version, docker
   // --help, even nmap --version) is read-only — auto-run it.
   if (isVersionOrHelpProbe(command)) {
@@ -473,20 +438,6 @@ export function classifyToolCall(
     call.name === "fs.list" ||
     call.name === "fs.search"
   ) {
-    const pathArg = stringArg(call.args, "path");
-    if (pathArg) {
-      try {
-        if (isSecretPath(resolveForSecretCheck(pathArg))) {
-          return {
-            level: "block",
-            reason:
-              "Path is a known secret location and cannot be read by the agent",
-          };
-        }
-      } catch {
-        // resolve failed — fall through to safe
-      }
-    }
     return { level: "safe", reason: "Read-only operation" };
   }
 
@@ -584,19 +535,6 @@ export function classifyToolCall(
   }
 
   if (call.name === "fs.write") {
-    const pathArg = stringArg(call.args, "path");
-    if (pathArg) {
-      try {
-        if (isSecretPath(resolveForSecretCheck(pathArg))) {
-          return {
-            level: "block",
-            reason: "Refusing to write to a known secret path",
-          };
-        }
-      } catch {
-        // fall through
-      }
-    }
     return {
       level: "confirm",
       reason: "Mutating operation requires confirmation",
@@ -626,26 +564,6 @@ export function classifyToolCall(
   }
 
   if (call.name === "fs.writeMany") {
-    // Block the whole batch if ANY target is a known secret path.
-    const files = Array.isArray(call.args.files) ? call.args.files : [];
-    for (const entry of files) {
-      const pathArg =
-        entry && typeof entry === "object"
-          ? (entry as { path?: unknown }).path
-          : undefined;
-      if (typeof pathArg === "string") {
-        try {
-          if (isSecretPath(resolveForSecretCheck(pathArg))) {
-            return {
-              level: "block",
-              reason: `Refusing to write to a known secret path: ${pathArg}`,
-            };
-          }
-        } catch {
-          // fall through
-        }
-      }
-    }
     return {
       level: "confirm",
       reason: "Mutating operation requires confirmation",
@@ -667,38 +585,10 @@ export function classifyToolCall(
   }
 
   if (call.name === "image.ocr") {
-    const pathArg = stringArg(call.args, "path");
-    if (pathArg) {
-      try {
-        if (isSecretPath(resolveForSecretCheck(pathArg))) {
-          return {
-            level: "block",
-            reason:
-              "Path is a known secret location and cannot be OCR-read by the agent",
-          };
-        }
-      } catch {
-        // resolve failed — let the tool return a normal file error
-      }
-    }
     return { level: "safe", reason: "Read-only local image OCR" };
   }
 
   if (call.name === "pdf.read") {
-    const pathArg = stringArg(call.args, "path");
-    if (pathArg) {
-      try {
-        if (isSecretPath(resolveForSecretCheck(pathArg))) {
-          return {
-            level: "block",
-            reason:
-              "Path is a known secret location and cannot be read by the agent",
-          };
-        }
-      } catch {
-        // resolve failed — let the tool return a normal file error
-      }
-    }
     return {
       level: "safe",
       reason: "Read-only local PDF text extraction (with OCR fallback)",
@@ -733,19 +623,6 @@ export function classifyToolCall(
     call.name === "fs.replaceLines" ||
     call.name === "fs.append"
   ) {
-    const pathArg = stringArg(call.args, "path");
-    if (pathArg) {
-      try {
-        if (isSecretPath(resolveForSecretCheck(pathArg))) {
-          return {
-            level: "block",
-            reason: "Refusing to edit a known secret path",
-          };
-        }
-      } catch {
-        // fall through
-      }
-    }
     return {
       level: "confirm",
       reason: "File edit requires confirmation",
@@ -753,23 +630,10 @@ export function classifyToolCall(
   }
 
   if (call.name === "fs.delete") {
-    const pathArg = stringArg(call.args, "path");
-    if (pathArg) {
-      try {
-        if (isSecretPath(resolveForSecretCheck(pathArg))) {
-          return {
-            level: "block",
-            reason: "Refusing to delete a known secret path",
-          };
-        }
-      } catch {
-        // fall through
-      }
-    }
     return {
       level: "confirm",
       reason:
-        "File deletion requires manual confirmation (never auto-confirmed)",
+        "File deletion requires manual confirmation (never auto-confirmed, even under allow-all)",
     };
   }
 

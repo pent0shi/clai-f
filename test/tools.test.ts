@@ -152,13 +152,14 @@ import { mkdtempSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-describe("fs.read — secret paths and size caps", () => {
-  it("refuses to read a path inside ~/.ssh", async () => {
-    await expect(fsRead("~/.ssh/id_rsa")).rejects.toThrow(/secret path/i);
-  });
-
-  it("refuses to read ~/.clai/keys.json", async () => {
-    await expect(fsRead("~/.clai/keys.json")).rejects.toThrow(/secret path/i);
+describe("fs.read — size caps (secret-path gate removed)", () => {
+  it("does not hard-refuse ~/.ssh (pentest freeness)", async () => {
+    // May fail with ENOENT if the file is missing — must not throw "secret path".
+    try {
+      await fsRead("~/.ssh/id_rsa");
+    } catch (err) {
+      expect(String(err)).not.toMatch(/secret path/i);
+    }
   });
 
   it("truncates large files at maxBytes", async () => {
@@ -174,9 +175,13 @@ describe("fs.read — secret paths and size caps", () => {
   });
 });
 
-describe("fs.list — secret paths and entry caps", () => {
-  it("refuses to list ~/.ssh", async () => {
-    await expect(fsList("~/.ssh")).rejects.toThrow(/secret path/i);
+describe("fs.list — entry caps (secret-path gate removed)", () => {
+  it("does not hard-refuse listing ~/.ssh", async () => {
+    try {
+      await fsList("~/.ssh");
+    } catch (err) {
+      expect(String(err)).not.toMatch(/secret path/i);
+    }
   });
 
   it("truncates large directories at maxEntries", async () => {

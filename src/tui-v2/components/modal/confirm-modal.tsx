@@ -19,6 +19,8 @@ export interface ConfirmModalProps {
   readonly theme: Theme;
   readonly request: ConfirmRequest;
   readonly onViewPlan?: (() => void) | undefined;
+  /** Preview file contents for delete confirms (`v`). */
+  readonly onViewFile?: (() => void) | undefined;
   /** Compact strip above the input (preferred). */
   readonly docked?: boolean | undefined;
 }
@@ -33,7 +35,7 @@ const TITLES: Record<ConfirmRequest["kind"], string> = {
 };
 
 export function ConfirmModal(props: ConfirmModalProps): ReactNode {
-  const { services, theme, request, onViewPlan, docked } = props;
+  const { services, theme, request, onViewPlan, onViewFile, docked } = props;
 
   useKeyboard((key) => {
     if (key.eventType === "release") return;
@@ -59,9 +61,13 @@ export function ConfirmModal(props: ConfirmModalProps): ReactNode {
         return;
       }
     } else {
-      if (chord === "y") services.overlay.answerConfirm(true);
-      else if (chord === "n" || chord === "escape") {
+      if (chord === "y" || chord === "enter") {
+        services.overlay.answerConfirm(true);
+      } else if (chord === "n" || chord === "escape") {
         services.overlay.answerConfirm(false);
+      } else if (chord === "v" && request.viewPath) {
+        // Preview only — leave confirm open under the pager.
+        onViewFile?.();
       } else return;
     }
     key.preventDefault();
@@ -83,7 +89,9 @@ export function ConfirmModal(props: ConfirmModalProps): ReactNode {
         ? "y/i implement  ·  s suggest  ·  p view  ·  n/d discard  ·  esc dismiss"
         : request.kind === "continue"
           ? "y continue  ·  n stop  ·  esc cancel"
-          : "y approve  ·  n deny  ·  esc cancel";
+          : request.viewPath
+            ? "y approve  ·  n deny  ·  v view file  ·  esc cancel"
+            : "y approve  ·  n deny  ·  esc cancel";
 
   // Soft-wrap long tool prompts for the dock width.
   const promptLines = wrapPrompt(request.prompt, docked ? 88 : 72);

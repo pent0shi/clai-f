@@ -13,6 +13,7 @@ import {
 import {
   formatModalPlainText,
   presentFileChangePreview,
+  wrapCodeLine,
 } from "../src/tui-v2/rendering/file-diff-view.js";
 import { formatToolArgs } from "../src/agent/tool-call-parser.js";
 
@@ -117,6 +118,26 @@ describe("buildFileChange + presenters", () => {
     const u = formatUnifiedPreview(change);
     expect(u).toMatch(/^-x/m);
     expect(u).toMatch(/^\+y/m);
+  });
+
+  it("soft-wraps long code lines without ellipsis truncation", () => {
+    const long =
+      '<path d="M9 16.5 14 10-10" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>';
+    expect(wrapCodeLine(long, 40).every((c) => c.length <= 40)).toBe(true);
+    expect(wrapCodeLine(long, 40).join("")).toBe(long);
+    expect(wrapCodeLine(long, 40).join("")).not.toContain("…");
+
+    const change = buildFileChange({
+      path: "/tmp/public/favicon.svg",
+      before: "",
+      after: long + "\n",
+      kind: "create",
+    });
+    const preview = presentFileChangePreview(change, { maxLineChars: 40 });
+    const body = preview.map((r) => r.displayText).join("");
+    expect(body).toContain("stroke-linecap");
+    expect(body).not.toContain("…");
+    expect(preview.every((r) => r.displayText.length <= 40)).toBe(true);
   });
 });
 

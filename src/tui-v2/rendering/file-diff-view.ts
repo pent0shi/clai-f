@@ -19,7 +19,6 @@ import { getActiveProjectRoot } from "../../agent/project-root.js";
 import { safeCwd } from "../../os/cwd.js";
 import type { Theme } from "./theme.js";
 import {
-  clipSpans,
   emptyCarry,
   highlightLineForPath,
   type LangId,
@@ -42,7 +41,12 @@ export interface PresentedDiffRow {
   readonly spans: readonly SyntaxSpan[];
 }
 
-const DEFAULT_CLIP = 96;
+/**
+ * Soft-wrap budget for chat card code rows. Gutter + " │ " + card chrome eat
+ * ~12 cols; keep body under this so long SVG/HTML lines never collide the
+ * right border. Never use ellipsis truncation — full text via wrap chunks.
+ */
+const DEFAULT_WRAP = 72;
 
 function gutterWidth(change: FileChange): number {
   let max = 1;
@@ -73,9 +77,38 @@ function prefixFor(op: DiffOp): string {
   return " ";
 }
 
-function clip(text: string, max: number): string {
-  if (text.length <= max) return text;
-  return `${text.slice(0, Math.max(0, max - 1))}…`;
+/** Hard-wrap by character columns — no ellipsis, no dropped characters. */
+export function wrapCodeLine(text: string, max: number): string[] {
+  const width = Math.max(8, max);
+  if (text.length <= width) return [text];
+  const out: string[] = [];
+  for (let i = 0; i < text.length; i += width) {
+    out.push(text.slice(i, i + width));
+  }
+  return out.length > 0 ? out : [""];
+}
+
+/** Slice syntax spans for [start, end) character offsets on a single source line. */
+function sliceSpans(
+  spans: readonly SyntaxSpan[],
+  start: number,
+  end: number,
+): SyntaxSpan[] {
+  if (end <= start) return [];
+  const out: SyntaxSpan[] = [];
+  let cursor = 0;
+  for (const s of spans) {
+    const sStart = cursor;
+    const sEnd = cursor + s.text.length;
+    cursor = sEnd;
+    if (sEnd <= start || sStart >= end) continue;
+    const from = Math.max(0, start - sStart);
+    const to = Math.min(s.text.length, end - sStart);
+    if (to > from) {
+      out.push({ kind: s.kind, text: s.text.slice(from, to) });
+    }
+  }
+  return out;
 }
 
 export function syntaxColor(kind: SyntaxKind, theme: Theme): string {
@@ -119,8 +152,8 @@ export function presentFileChangePreview(
   change: FileChange,
   options: { maxLineChars?: number; maxRows?: number } = {},
 ): PresentedDiffRow[] {
-  const maxLineChars = options.maxLineChars ?? DEFAULT_CLIP;
-  const maxRows = options.maxRows ?? 48;
+  const maxLineChars = options.maxLineChars ?? DEFAULT_WRAP;
+  const maxRows = options.maxRows ?? 80;
   const rows: PresentedDiffRow[] = [];
   const carry = emptyCarry();
 
@@ -145,17 +178,28 @@ export function presentFileChangePreview(
       if (used >= maxRows) break;
       const text = dl.text;
       const fullSpans = highlightLineForPath(text, change.path, carry);
-      const displayText = clip(text, maxLineChars);
-      const spans = clipSpans(fullSpans, maxLineChars);
-      rows.push({
-        tone: dl.op,
-        gutter: lineGutter(dl, width),
-        prefix: prefixFor(dl.op),
-        text,
-        displayText,
-        spans,
-      });
-      used += 1;
+      const chunks = wrapCodeLine(text, maxLineChars);
+      let offset = 0;
+      for (let ci = 0; ci < chunks.length; ci += 1) {
+        if (used >= maxRows) break;
+        const chunk = chunks[ci]!;
+        const end = offset + chunk.length;
+        const spans = sliceSpans(fullSpans, offset, end);
+        rows.push({
+          tone: dl.op,
+          // Only the first visual row of a wrapped source line shows the number.
+          gutter: ci === 0 ? lineGutter(dl, width) : " ".repeat(width),
+          prefix: ci === 0 ? prefixFor(dl.op) : " ",
+          text: chunk,
+          displayText: chunk,
+          spans:
+            spans.length > 0
+              ? spans
+              : [{ kind: "plain" as const, text: chunk }],
+        });
+        used += 1;
+        offset = end;
+      }
     }
   }
 

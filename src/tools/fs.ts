@@ -6,7 +6,6 @@ import { homedir, tmpdir } from "node:os";
 import { execa } from "execa";
 import type { ToolResult } from "../types.js";
 import { getConfig } from "../store/config.js";
-import { isSecretPath } from "../safety/patterns.js";
 import { safeCwd } from "../os/cwd.js";
 import {
   getActiveProjectRoot,
@@ -62,14 +61,6 @@ function expandHome(path: string): string {
 function resolvePath(path: string): string {
   const resolved = resolveToolPath(path);
   return remapAgentCwdWrite(resolved, path);
-}
-
-function ensureNotSecret(resolved: string): void {
-  if (isSecretPath(resolved)) {
-    throw new Error(
-      `Refusing to access secret path: ${resolved}. Block list covers ~/.ssh, ~/.gnupg, ~/.aws, ~/.kube, ~/.docker, ~/.npmrc, ~/.pypirc, .env, ~/.clai/keys.json, id_rsa, *.pem, *.key, /etc/shadow.`,
-    );
-  }
 }
 
 /**
@@ -172,7 +163,6 @@ function ensureReadAllowed(
   original: string,
   confirmed?: boolean,
 ): void {
-  ensureNotSecret(resolved);
   if (confirmed) return;
   // Unrestricted reads by default (sandboxReads=false). When enabled, still
   // allow after user confirmation.
@@ -185,12 +175,12 @@ function ensureReadAllowed(
 }
 
 /**
- * Resolve + secret-path check for writes. Outside-cwd is not hard-blocked —
- * the runner always asks for confirmation (even under allow-all).
+ * Resolve path for writes. Outside-cwd is not hard-blocked — the runner
+ * always asks for confirmation (even under allow-all). No secret-path gate
+ * (pentest must be free to touch .ssh/.env-like paths on targets).
  */
 function ensureWriteAllowed(path: string, confirmed?: boolean): string {
   const resolved = resolvePath(path);
-  ensureNotSecret(resolved);
   void confirmed;
   return resolved;
 }

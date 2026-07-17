@@ -162,7 +162,6 @@ import {
   canMarkTaskDone,
   hasLocalRuntimeProof,
   hasRemoteWorkProof,
-  isBatchSoftFailTool,
   isDevServerCall,
   isEvidenceWorkTool,
   isFeatureImplementationCall,
@@ -3980,9 +3979,9 @@ export async function runAgentTurn(
         if (allCalls.length > 1) {
           writeNotice(
             "info",
-            `${allCalls.length} tool calls in this message — running scoped (independent read-only lookups in parallel, everything else in order)`,
+            `${allCalls.length} tool calls in this message — read-only in parallel, writes in order (failures do not cancel siblings)`,
             chalk.dim(
-              `  ℹ ${allCalls.length} tool calls — read-only lookups in parallel, the rest in order\n`,
+              `  ℹ ${allCalls.length} tool calls — parallel reads, ordered writes; failures continue\n`,
             ),
           );
         }
@@ -4031,24 +4030,20 @@ export async function runAgentTurn(
             return false;
           }
         };
-        /** Tools whose failure must NOT cancel sibling calls in this turn. */
-        const shouldSoftFailTool = (name: string): boolean => {
-
-          if (isBatchSoftFailTool(name)) return true;
-          if (BATCH_SAFE_TOOLS.has(name)) return true;
-          return false;
-        };
         // Recon waves often emit 6–10 lookups; 4 forced a second sequential wave.
         const PARALLEL_LIMIT = 8;
 
         let aborted = false;
-        let blocked = false;
-        let blockedResult: any = null;
-        let failed = false;
         let awaitingPlanApproval = false;
         /** Native tool_call ids that already have a role:tool history entry. */
         const recordedNativeIds = new Set<string>();
 
+        /**
+         * Record a tool result into history. Failures / user declines are
+         * always returned to the model — we never cancel later siblings or
+         * force-end the turn as "blocked" because one tool failed. Only an
+         * explicit user abort stops remaining calls.
+         */
         const recordResult = (
           boundCall: BoundCall,
           res: {
@@ -4059,7 +4054,6 @@ export async function runAgentTurn(
             lastAnswer?: string | undefined;
             blockOrCancel?: boolean | undefined;
           },
-          continueAfterFailure = false,
         ): void => {
           recordedNativeIds.add(boundCall.id);
           const toolContent = `Tool ${res.call.name} result (exit=${res.result.exitCode ?? 0}, ok=${res.result.ok}):\n${res.contextOutput}`;
@@ -4192,11 +4186,9 @@ export async function runAgentTurn(
               session.planApproved.value = true;
             }
           }
+          // User Esc/Ctrl+C only — never cancel siblings because a delete failed
+          // or a confirm was declined; the model must see every tool result.
           if (res.lastAnswer === "Aborted.") aborted = true;
-          else if (res.blockOrCancel) {
-            blocked = true;
-            blockedResult = res;
-          } else if (!res.ok && !continueAfterFailure) failed = true;
         };
 
         const groups = groupToolCallsForExecution(
@@ -4205,13 +4197,7 @@ export async function runAgentTurn(
           PARALLEL_LIMIT,
         );
         for (const group of groups) {
-          if (
-            aborted ||
-            blocked ||
-            failed ||
-            awaitingPlanApproval ||
-            governorPauseReason
-          ) break;
+          if (aborted || awaitingPlanApproval || governorPauseReason) break;
           if (group.length === 1) {
             const call = group[0]!;
             const bc = callToBound.get(call);
@@ -4225,8 +4211,7 @@ export async function runAgentTurn(
               id,
               options.signal || new AbortController().signal,
             );
-            const softFail = shouldSoftFailTool(call.name);
-            recordResult(bc, res, softFail);
+            recordResult(bc, res);
           } else {
             // Concurrent group — BoundCall via Map; record in document order.
             const groupBound: BoundCall[] = [];
@@ -4250,12 +4235,13 @@ export async function runAgentTurn(
               ),
             );
             for (let k = 0; k < results.length; k += 1) {
-              recordResult(groupBound[k]!, results[k]!, true);
+              recordResult(groupBound[k]!, results[k]!);
             }
           }
         }
 
         // Cards still "running" get a terminal UI result; history always pairs.
+        // Only abort / plan-gate / governor leave calls un-run now.
         for (let i = 0; i < toRun.length; i += 1) {
           const bc = toRun[i]!;
           if (recordedNativeIds.has(bc.id)) continue;
@@ -4265,15 +4251,11 @@ export async function runAgentTurn(
           const uiId = callIds[i]!;
           const reason = aborted
             ? "Cancelled — turn aborted before this call ran."
-            : blocked
-              ? "Cancelled — earlier tool was blocked or declined."
-              : awaitingPlanApproval
-                ? "Deferred — waiting for plan approval."
-                : governorPauseReason
-                  ? `Deferred — progress governor paused execution: ${governorPauseReason}`
-                  : failed
-                    ? "Cancelled — earlier tool in this batch failed."
-                    : "Cancelled — not executed.";
+            : awaitingPlanApproval
+              ? "Deferred — waiting for plan approval."
+              : governorPauseReason
+                ? `Deferred — progress governor paused execution: ${governorPauseReason}`
+                : "Cancelled — not executed.";
           const result: ToolResult = {
             ok: false,
             output: reason,
@@ -4344,13 +4326,8 @@ export async function runAgentTurn(
           writeAbort();
           return finishTurn(lastAnswer, productiveSteps, "aborted");
         }
-        if (blocked && blockedResult) {
-          lastAnswer = blockedResult.lastAnswer || "Blocked or Cancelled.";
-          outcomeState.outcome.status = "blocked";
-          await saveOutcomeState(outcomeState);
-          moveTurn("blocked", lastAnswer);
-          return finishTurn(lastAnswer, productiveSteps, "blocked");
-        }
+        // Confirm declines / tool failures already have role:tool results —
+        // continue the agent loop so the model can adapt (do not force "blocked").
 
         await maybeAutoCompact("post-tool-token-budget");
 

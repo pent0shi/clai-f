@@ -60,6 +60,7 @@ export function OverlayHost(props: OverlayHostProps): ReactNode {
             theme={theme}
             request={state.request}
             onViewPlan={state.onViewPlan}
+            onViewFile={state.onViewFile}
             docked
           />
         ) : null}

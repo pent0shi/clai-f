@@ -74,7 +74,7 @@ describe("fsWriteMany", () => {
     expect(result.output).toContain("non-empty");
   });
 
-  it("blocks the batch if any target is a secret path", () => {
+  it("confirms fs.writeMany including former secret paths (no hard block)", () => {
     const decision = classifyToolCall({
       name: "fs.writeMany",
       args: {
@@ -84,7 +84,7 @@ describe("fsWriteMany", () => {
         ],
       },
     });
-    expect(decision.level).toBe("block");
+    expect(decision.level).toBe("confirm");
   });
 });
 

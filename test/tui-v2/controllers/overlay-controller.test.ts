@@ -126,10 +126,14 @@ describe("OverlayController (V2-071..076)", () => {
     expect(focus.activeContext()).toBe("composer");
   });
 
-  it("rejects non-plan overlays while a confirm is open", () => {
+  it("rejects jobs while a confirm is open, but allows pager preview (v/p)", () => {
     const overlay = new OverlayController(new FocusController());
-    overlay.openConfirm({ kind: "tool", prompt: "run?" });
+    overlay.openConfirm({ kind: "tool", prompt: "delete?", viewPath: "/tmp/x" });
     expect(overlay.openJobs()).toBe(false);
-    expect(overlay.openPager("x", "y")).toBe(false);
+    // Pager may suspend under any confirm so delete "v" / plan "p" work.
+    expect(overlay.openPager("Preview", "file body")).toBe(true);
+    expect(overlay.getState().kind).toBe("pager");
+    overlay.close();
+    expect(overlay.getState().kind).toBe("confirm");
   });
 });

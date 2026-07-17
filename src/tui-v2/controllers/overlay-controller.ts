@@ -20,6 +20,11 @@ export type PlanConfirmResult = "implement" | "discard" | "suggest" | "dismiss";
 export interface ConfirmRequest {
   readonly kind: ConfirmKind;
   readonly prompt: string;
+  /**
+   * Absolute or user path the operator can preview with `v` before approving
+   * (used for fs.delete so they can inspect the file first).
+   */
+  readonly viewPath?: string | undefined;
 }
 
 export interface PickerRequest {
@@ -53,6 +58,8 @@ export type OverlayState =
       /** Boolean for tool/pentest/etc.; plan uses PlanConfirmResult via answerPlanConfirm. */
       readonly resolve: (ok: boolean | PlanConfirmResult) => void;
       readonly onViewPlan?: (() => void) | undefined;
+      /** Open file preview pager without resolving the confirm (fs.delete `v`). */
+      readonly onViewFile?: (() => void) | undefined;
       readonly planResolve?: ((result: PlanConfirmResult) => void) | undefined;
     }
   | { readonly kind: "secret"; readonly request: SecretRequestView; readonly resolve: (value: string | undefined) => void }
@@ -115,9 +122,11 @@ export class OverlayController {
       ...(source ? { source } : {}),
       ...(highlightPath ? { highlightPath } : {}),
     };
-    const opened = this.state.kind === "confirm" && this.state.request.kind === "plan" && !this.suspended
-      ? this.suspendUnder(pager, "pager")
-      : this.open(pager, "pager");
+    // Allow pager over any confirm (plan "p" or delete "v") without resolving it.
+    const opened =
+      this.state.kind === "confirm" && !this.suspended
+        ? this.suspendUnder(pager, "pager")
+        : this.open(pager, "pager");
     if (!opened) source?.dispose();
     return opened;
   }
@@ -131,14 +140,19 @@ export class OverlayController {
   }
 
   /** Resolves `false` if a blocking overlay was already open rather than hanging. */
-  openConfirm(request: ConfirmRequest, onViewPlan?: () => void): Promise<boolean> {
+  openConfirm(
+    request: ConfirmRequest,
+    onViewPlan?: () => void,
+    onViewFile?: () => void,
+  ): Promise<boolean> {
     return new Promise((resolve) => {
       const opened = this.open(
         {
           kind: "confirm",
           request,
           resolve: (ok) => resolve(ok === true || ok === "implement"),
-          onViewPlan,
+          ...(onViewPlan ? { onViewPlan } : {}),
+          ...(onViewFile ? { onViewFile } : {}),
         },
         "modal",
       );
