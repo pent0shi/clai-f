@@ -134,6 +134,34 @@ export async function addScopeTargets(
   return scope;
 }
 
+/**
+ * Replace the authorized target list entirely (does not merge with existing).
+ * Empty `targets` clears the file (scoping disabled).
+ */
+export async function replaceScopeTargets(
+  targets: string[],
+  patch: Partial<Omit<EngagementScope, "authorizedTargets">> = {},
+): Promise<EngagementScope | undefined> {
+  const normalized = targets
+    .map(normalizeScopeTarget)
+    .filter((target) => target.length > 0);
+  if (normalized.length === 0) {
+    await clearScope();
+    return undefined;
+  }
+  const existing = await loadScope();
+  const now = new Date().toISOString();
+  const scope: EngagementScope = {
+    ...(existing ?? {}),
+    ...patch,
+    authorizedTargets: Array.from(new Set(normalized)),
+    createdAt: existing?.createdAt ?? patch.createdAt ?? now,
+    updatedAt: now,
+  };
+  await saveScope(scope);
+  return scope;
+}
+
 export async function clearScope(): Promise<void> {
   cached = undefined;
   cacheLoaded = true;

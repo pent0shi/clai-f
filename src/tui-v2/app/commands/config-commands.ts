@@ -9,6 +9,7 @@ import {
   addScopeTargets,
   clearScope,
   loadScope,
+  replaceScopeTargets,
   saveScope,
 } from "../../../store/scope.js";
 import { formatShortcutsReference } from "../../actions/format-shortcuts.js";
@@ -124,16 +125,17 @@ export async function handleScope(
         notice(services, "info", "engagement scope cleared · scoping disabled");
         return;
       }
-      // Replace list: clear then add (normalizes hostnames / URLs).
-      await clearScope();
-      const scope = await addScopeTargets(result, {
+      // Full replace (not merge) so removed rows stay gone.
+      const scope = await replaceScopeTargets(result, {
         name: current?.name,
         createdAt: current?.createdAt,
       });
       notice(
         services,
         "info",
-        `scope saved · ${scope.authorizedTargets.join(", ")}`,
+        scope
+          ? `scope saved · ${scope.authorizedTargets.join(", ")}`
+          : "engagement scope cleared · scoping disabled",
       );
       return;
     }

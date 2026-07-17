@@ -2,7 +2,7 @@
 /**
  * Engagement scope editor — multi-row target inputs docked above the composer.
  *
- * Empty targets = scoping disabled. Add more rows with + / Ctrl+A.
+ * Empty targets = scoping disabled. Each row has a remove control; + adds rows.
  */
 
 import { useEffect, useRef, useState, type ReactNode } from "react";
@@ -22,56 +22,112 @@ export interface ScopeModalProps {
 
 const ACCENT = "#2EEBFF";
 
+/** One editor row: stable id so remove/add does not scramble refs. */
+interface ScopeRow {
+  readonly id: number;
+  readonly text: string;
+}
+
+let nextRowId = 1;
+
+function rowsFromTargets(targets: readonly string[]): ScopeRow[] {
+  if (targets.length === 0) {
+    return [{ id: nextRowId++, text: "" }];
+  }
+  // Saved targets + one empty row for the next host.
+  return [
+    ...targets.map((text) => ({ id: nextRowId++, text })),
+    { id: nextRowId++, text: "" },
+  ];
+}
+
 export function ScopeModal(props: ScopeModalProps): ReactNode {
   const { services, theme, request, docked } = props;
-  const seed =
-    request.initialTargets.length > 0 ? [...request.initialTargets, ""] : [""];
-  const [rowCount, setRowCount] = useState(seed.length);
+  const [rows, setRows] = useState<ScopeRow[]>(() =>
+    rowsFromTargets(request.initialTargets),
+  );
   const [focusIdx, setFocusIdx] = useState(0);
-  /** Live text mirrors for display / save (inputs are uncontrolled via ref). */
-  const [drafts, setDrafts] = useState<string[]>(seed);
-  const inputRefs = useRef<Array<InputRenderable | null>>([]);
+  const inputRefs = useRef<Map<number, InputRenderable | null>>(new Map());
+  /** After first paint, push saved text into every Input via setText. */
+  const prefilled = useRef(false);
 
-  useEffect(() => {
-    queueMicrotask(() => {
-      const el = inputRefs.current[focusIdx];
-      el?.focus();
-      // Prefill from seed once the ref is live.
-      if (el && drafts[focusIdx] && el.plainText !== drafts[focusIdx]) {
-        try {
-          el.setText?.(drafts[focusIdx]!);
-        } catch {
-          /* setText may be unavailable on some builds */
+  function applyTextToInputs(list: ScopeRow[]): void {
+    for (const row of list) {
+      const el = inputRefs.current.get(row.id);
+      if (!el) continue;
+      try {
+        if (el.plainText !== row.text) {
+          el.setText(row.text);
         }
+      } catch {
+        /* ignore */
       }
-    });
-  }, [focusIdx, rowCount]);
-
-  function readTargets(): string[] {
-    const out: string[] = [];
-    for (let i = 0; i < rowCount; i++) {
-      const fromRef = inputRefs.current[i]?.plainText?.trim() ?? "";
-      const fromDraft = (drafts[i] ?? "").trim();
-      const v = fromRef || fromDraft;
-      if (v) out.push(v);
     }
-    return out;
   }
 
-  function syncDraft(index: number): void {
-    const text = inputRefs.current[index]?.plainText ?? "";
-    setDrafts((prev) => {
-      const next = [...prev];
-      while (next.length < rowCount) next.push("");
-      next[index] = text;
-      return next;
+  // Prefill all inputs once refs exist (not only the focused row).
+  useEffect(() => {
+    const id = requestAnimationFrame(() => {
+      applyTextToInputs(rows);
+      if (!prefilled.current) {
+        prefilled.current = true;
+        inputRefs.current.get(rows[0]?.id ?? -1)?.focus();
+      } else {
+        const focused = rows[focusIdx];
+        if (focused) inputRefs.current.get(focused.id)?.focus();
+      }
     });
+    return () => cancelAnimationFrame(id);
+    // Re-run when row count / ids change so new empty rows get focus wiring.
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- intentional
+  }, [rows.map((r) => r.id).join(","), focusIdx]);
+
+  function syncFromInputs(): ScopeRow[] {
+    return rows.map((row) => {
+      const el = inputRefs.current.get(row.id);
+      const live = el?.plainText;
+      return {
+        id: row.id,
+        text: live !== undefined ? live : row.text,
+      };
+    });
+  }
+
+  function readTargets(): string[] {
+    return syncFromInputs()
+      .map((r) => r.text.trim())
+      .filter(Boolean);
+  }
+
+  function updateRowText(id: number, text: string): void {
+    setRows((prev) =>
+      prev.map((r) => (r.id === id ? { ...r, text } : r)),
+    );
   }
 
   function addRow(): void {
-    setRowCount((n) => n + 1);
-    setDrafts((prev) => [...prev, ""]);
-    setFocusIdx(rowCount);
+    const synced = syncFromInputs();
+    const next = [...synced, { id: nextRowId++, text: "" }];
+    setRows(next);
+    setFocusIdx(next.length - 1);
+  }
+
+  function removeRow(index: number): void {
+    const synced = syncFromInputs();
+    if (synced.length <= 1) {
+      // Keep one empty row (scoping disabled until they type).
+      const only = { id: nextRowId++, text: "" };
+      setRows([only]);
+      setFocusIdx(0);
+      queueMicrotask(() => applyTextToInputs([only]));
+      return;
+    }
+    const removed = synced[index];
+    if (removed) inputRefs.current.delete(removed.id);
+    const next = synced.filter((_, i) => i !== index);
+    setRows(next);
+    setFocusIdx(Math.max(0, Math.min(index, next.length - 1)));
+    queueMicrotask(() => applyTextToInputs(next));
   }
 
   function submit(): void {
@@ -102,14 +158,7 @@ export function ScopeModal(props: ScopeModalProps): ReactNode {
     }
     if (chord === "enter") {
       key.preventDefault();
-      syncDraft(focusIdx);
-      const cur =
-        inputRefs.current[focusIdx]?.plainText?.trim() ??
-        (drafts[focusIdx] ?? "").trim();
-      if (focusIdx === rowCount - 1 && cur.length > 0) {
-        addRow();
-        return;
-      }
+      // Enter always saves (use + / ^a to add rows) so multi-target saves work.
       submit();
     }
   });
@@ -160,10 +209,10 @@ export function ScopeModal(props: ScopeModalProps): ReactNode {
         />
       )}
 
-      {Array.from({ length: rowCount }, (_, index) => (
+      {rows.map((row, index) => (
         <box
-          key={index}
-          style={{ flexDirection: "row", width: "100%" }}
+          key={row.id}
+          style={{ flexDirection: "row", width: "100%", alignItems: "center" }}
         >
           <text
             content={`${index + 1}. `}
@@ -171,12 +220,13 @@ export function ScopeModal(props: ScopeModalProps): ReactNode {
           />
           <input
             ref={(el: InputRenderable | null) => {
-              inputRefs.current[index] = el;
+              inputRefs.current.set(row.id, el);
             }}
             focused={focusIdx === index}
             placeholder="host or domain (e.g. example.com)"
             onContentChange={() => {
-              syncDraft(index);
+              const el = inputRefs.current.get(row.id);
+              updateRowText(row.id, el?.plainText ?? "");
               setFocusIdx(index);
             }}
             backgroundColor={theme.background}
@@ -184,7 +234,18 @@ export function ScopeModal(props: ScopeModalProps): ReactNode {
             focusedBackgroundColor={theme.background}
             focusedTextColor={theme.foreground}
             cursorColor={ACCENT}
-            style={{ flexGrow: 1, minWidth: 24 }}
+            style={{ flexGrow: 1, minWidth: 20 }}
+          />
+          <text content=" " />
+          <text
+            content=" ✕ "
+            style={{
+              fg: theme.white,
+              bg: theme.failedBg,
+              attributes: TextAttributes.BOLD,
+              flexShrink: 0,
+            }}
+            onMouseDown={() => removeRow(index)}
           />
         </box>
       ))}
@@ -211,7 +272,7 @@ export function ScopeModal(props: ScopeModalProps): ReactNode {
         />
         <text content=" " />
         <text
-          content=" Clear (disable) "
+          content=" Clear all "
           style={{
             fg: theme.white,
             bg: theme.failedBg,
@@ -228,7 +289,7 @@ export function ScopeModal(props: ScopeModalProps): ReactNode {
       </box>
 
       <text
-        content="enter:save  ·  ^a / +:add row  ·  clear:disable scope  ·  esc:cancel"
+        content="enter:save  ·  ^a / +:add  ·  ✕:remove row  ·  clear all:disable  ·  esc:cancel"
         style={{ fg: theme.muted, attributes: TextAttributes.DIM }}
       />
     </box>
