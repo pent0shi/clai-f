@@ -995,11 +995,11 @@ export async function runToolCall(
 }
 
 /**
- * Tools that `tool.batch` is allowed to invoke. Limited to read-only
- * operations so the batch runner cannot escalate into shell execution
- * or mutating HTTP methods. http.fetch is allowed but downstream
- * GET/HEAD enforcement still happens in the classifier when individual
- * calls are routed.
+ * Tools that may run **in parallel** inside `tool.batch` without racing
+ * mutates. Anything outside this set is still allowed in a batch but is
+ * forced serial (and may require confirmation — see {@link runToolBatch}).
+ *
+ * Kept for tests and call-sites that want the parallel-safe set.
  */
 export const BATCH_SAFE_TOOLS = new Set([
   "fs.read",
@@ -1010,25 +1010,60 @@ export const BATCH_SAFE_TOOLS = new Set([
   "dns.lookup",
   "whois.lookup",
   "net.context",
+  "net.scan",
+  "net.pingSweep",
+  "pentest.recon",
   "tool.check",
   "wordlist.find",
   "image.ocr",
   "pdf.read",
   "web.search",
   "web.fetch",
+  "shell.jobs",
+  "shell.tail",
+]);
+
+/**
+ * Tools that must never ride inside tool.batch (session bookkeeping /
+ * recursive batch / mode handoff). Everything else registered is allowed.
+ */
+const BATCH_FORBIDDEN_TOOLS = new Set([
+  "tool.batch",
+  "plan.create",
+  "task.update",
+  "agent.handoff",
 ]);
 
 const BATCH_MAX_CALLS = 20;
 const BATCH_DEFAULT_CONCURRENCY = 3;
 const BATCH_MAX_CONCURRENCY = 6;
 /** Hard ceiling so tool.batch never sits on "running" forever (hang DNS/HTTP). */
-const BATCH_HARD_TIMEOUT_MS = 90_000;
+const BATCH_HARD_TIMEOUT_MS = 180_000;
 /** Progress heartbeats keep the outer tool stall watchdog alive. */
 const BATCH_HEARTBEAT_MS = 5_000;
 
 interface BatchCallSpec {
   name: string;
   args: Record<string, unknown>;
+}
+
+/**
+ * Normalize a batch child tool name: wire forms (`tool_check`, `fs_read`)
+ * and dotted names both resolve to the registry canonical name.
+ */
+export function normalizeBatchToolName(raw: string): string {
+  const trimmed = raw.trim();
+  if (!trimmed) return trimmed;
+  if (toolRegistry[trimmed]) return trimmed;
+  const mapped = fromWireName(trimmed);
+  if (mapped && toolRegistry[mapped]) return mapped;
+  // Underscore-all form that fromWireName may still leave as-is if unregistered
+  // mid-name (tool_check → tool.check via first underscore heuristic).
+  if (!trimmed.includes(".") && trimmed.includes("_")) {
+    const dotted = trimmed.replace(/_/g, ".");
+    if (toolRegistry[dotted]) return dotted;
+  }
+  return trimmed;
 }
 
 function parseBatchCalls(value: unknown): BatchCallSpec[] {
@@ -1056,13 +1091,20 @@ function parseBatchCalls(value: unknown): BatchCallSpec[] {
         `tool.batch call #${index} must be { name: string, args: object }`,
       );
     }
-    const { name, args } = entry as {
+    const { name: rawName, args } = entry as {
       name: string;
       args: Record<string, unknown>;
     };
-    if (!BATCH_SAFE_TOOLS.has(name)) {
+    const name = normalizeBatchToolName(rawName);
+    if (BATCH_FORBIDDEN_TOOLS.has(name)) {
       throw new Error(
-        `tool.batch refuses to run "${name}" — only read-only tools are allowed (${[...BATCH_SAFE_TOOLS].join(", ")})`,
+        `tool.batch refuses to run "${rawName}" — ${name} cannot be nested inside a batch`,
+      );
+    }
+    if (!toolRegistry[name]) {
+      throw new Error(
+        `tool.batch refuses unknown tool "${rawName}"` +
+          (name !== rawName ? ` (normalized to "${name}")` : ""),
       );
     }
     return { name, args };
@@ -1104,21 +1146,36 @@ async function runToolBatch(
   options?: ToolRunOptions,
 ): Promise<ToolResult> {
   const calls = parseBatchCalls(args.calls);
-  // Re-classify each child call so confirm/block tools (eg http.fetch POST,
-  // public scans without scope) cannot ride in on tool.batch's safe label.
+  // Re-classify each child: block always refused; confirm allowed only when
+  // the parent turn already confirmed (options.confirmed) so shell/fs mutates
+  // cannot sneak past the safety gate as a "safe" batch wrapper.
   const scope = await loadScope().catch(() => undefined);
+  let needsSerial = false;
   for (const spec of calls) {
     const decision = classifyToolCall(
       { name: spec.name, args: spec.args },
       { scope },
     );
-    if (decision.level !== "safe") {
+    if (decision.level === "block") {
       throw new Error(
-        `tool.batch refuses ${spec.name}: ${decision.reason} (only safe-classified calls are allowed inside a batch)`,
+        `tool.batch refuses ${spec.name}: ${decision.reason}`,
       );
     }
+    if (decision.level === "confirm") {
+      if (!options?.confirmed) {
+        throw new Error(
+          `tool.batch refuses ${spec.name}: ${decision.reason} ` +
+            `(confirm-level tools need approval — emit them as top-level tools, or re-run the batch after confirm)`,
+        );
+      }
+      needsSerial = true;
+    }
+    // Non-parallel-safe tools always serialize to avoid racing writes/shells.
+    if (!BATCH_SAFE_TOOLS.has(spec.name)) {
+      needsSerial = true;
+    }
   }
-  const concurrency = Math.max(
+  const requestedConcurrency = Math.max(
     1,
     Math.min(
       typeof args.concurrency === "number"
@@ -1127,6 +1184,9 @@ async function runToolBatch(
       BATCH_MAX_CONCURRENCY,
     ),
   );
+  // Parallel only when every child is read-only/safe-parallel. Mixed or
+  // mutating batches run one-at-a-time in order.
+  const concurrency = needsSerial ? 1 : requestedConcurrency;
 
   // Local abort that fires on parent cancel OR the batch hard timeout.
   // Children receive this signal so a hung http.fetch/dns cannot pin the UI
@@ -1184,7 +1244,22 @@ async function runToolBatch(
             { name: spec.name, args: spec.args },
             // Do not fan full child stdout into the card (keeps final sections
             // clean). Progress ticks above drive the live UI + stall watchdog.
-            { signal: batchAc.signal },
+            // Forward confirmed so approved mutates inside a batch still run.
+            {
+              signal: batchAc.signal,
+              ...(options?.confirmed !== undefined
+                ? { confirmed: options.confirmed }
+                : {}),
+              ...(options?.requestSecret
+                ? { requestSecret: options.requestSecret }
+                : {}),
+              ...(options?.authorizeNetworkHop
+                ? { authorizeNetworkHop: options.authorizeNetworkHop }
+                : {}),
+              ...(options?.engagementAuthorization
+                ? { engagementAuthorization: options.engagementAuthorization }
+                : {}),
+            },
           );
         } finally {
           clearInterval(childHeartbeat);

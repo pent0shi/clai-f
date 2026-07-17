@@ -105,6 +105,9 @@ export const bynaraProvider: LlmProvider = {
       onToolCallDelta: request.onToolCallDelta,
       reasoning: request.thinking,
       reasoningStyle: "openai",
+      // Unified 60s stall budget (see DEFAULT_STREAM_IDLE_TIMEOUT_MS).
+      idleTimeoutMs: 60_000,
+      initialIdleTimeoutMs: 60_000,
       tools: request.tools,
       toolChoice: request.toolChoice,
       parallelToolCalls: request.parallelToolCalls,

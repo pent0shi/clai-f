@@ -712,10 +712,9 @@ export function toolStallBudgetMs(call: {
   ) {
     return 15 * 60_000; // create-next-app + npm install often 2–10+ min with quiet stretches
   }
-  // Network tools should not sit silent for a full minute — their own
-  // per-request timeouts are shorter; 45s is a safety net for hung sockets.
+  // Network tools: 60s silence budget (aligned with model stream stall).
   if (call.name === "web.search" || call.name === "web.fetch" || call.name === "http.fetch") {
-    return 45_000;
+    return 60_000;
   }
   return 60_000;
 }

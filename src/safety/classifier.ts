@@ -506,11 +506,60 @@ export function classifyToolCall(
   }
 
   if (call.name === "tool.batch") {
-    // The batch handler enforces a hard allowlist of read-only tools and a
-    // capped concurrency. Treat it as safe so batched recon can run without
-    // a per-call confirmation. If the caller smuggles in a non-safe tool,
-    // the handler rejects it.
-    return { level: "safe", reason: "Read-only batch dispatch" };
+    // Inspect children: all-safe batches stay auto-run; any confirm-level
+    // child elevates the whole batch so shell/fs mutates cannot hide behind
+    // a "safe batch" label. Block-level children block the batch. Nested
+    // tool.batch / plan tools are rejected in the handler.
+    const rawCalls = call.args?.calls;
+    if (!Array.isArray(rawCalls) || rawCalls.length === 0) {
+      return { level: "safe", reason: "Empty or invalid batch (handler will reject)" };
+    }
+    let elevates = false;
+    for (const entry of rawCalls) {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+      const childName =
+        typeof (entry as { name?: unknown }).name === "string"
+          ? String((entry as { name: string }).name).trim()
+          : "";
+      if (!childName) continue;
+      // Wire form (tool_check) → canonical (tool.check) for classification.
+      const dotted = childName.includes(".")
+        ? childName
+        : childName.includes("_")
+          ? childName.replace(/_/g, ".")
+          : childName;
+      // Nested batches would recurse forever and are forbidden in the handler.
+      if (dotted === "tool.batch") {
+        return {
+          level: "block",
+          reason: "Nested tool.batch is not allowed",
+        };
+      }
+      const childArgs =
+        typeof (entry as { args?: unknown }).args === "object" &&
+        (entry as { args?: unknown }).args !== null &&
+        !Array.isArray((entry as { args?: unknown }).args)
+          ? ((entry as { args: Record<string, unknown> }).args)
+          : {};
+      const child = classifyToolCall(
+        { name: dotted, args: childArgs },
+        options,
+      );
+      if (child.level === "block") {
+        return {
+          level: "block",
+          reason: `Batch child ${dotted}: ${child.reason}`,
+        };
+      }
+      if (child.level === "confirm") elevates = true;
+    }
+    if (elevates) {
+      return {
+        level: "confirm",
+        reason: "Batch includes tools that require confirmation",
+      };
+    }
+    return { level: "safe", reason: "Batch of read-only / auto-safe tools" };
   }
 
   if (call.name === "http.fetch") {

@@ -4,7 +4,9 @@ import {
   displayCompactSummary,
   hydrateFromClassicTranscript,
   hydrateFromMessages,
+  hydrateSessionVisual,
   serializeForHistory,
+  transcriptLooksIncomplete,
 } from "../../../src/tui-v2/state/transcript-hydrate.js";
 import { asToolCallId } from "../../../src/app/events/app-event.js";
 import type { TranscriptState } from "../../../src/tui-v2/state/transcript-types.js";
@@ -70,6 +72,34 @@ describe("hydrateFromMessages", () => {
     expect(kinds).toEqual(["user", "assistant"]);
   });
 
+  it("reconstructs tool cards from assistant toolCalls + role:tool results", () => {
+    const { state, toolOutputs } = hydrateFromMessages([
+      { role: "user", content: "list files" },
+      {
+        role: "assistant",
+        content: "Checking.",
+        toolCalls: [
+          {
+            id: "call_1",
+            name: "fs.list",
+            args: { path: "." },
+          },
+        ],
+      },
+      {
+        role: "tool",
+        toolCallId: "call_1",
+        name: "fs.list",
+        content: "a.ts\nb.ts",
+        ok: true,
+      },
+      { role: "assistant", content: "Found two files." },
+    ]);
+    const kinds = state.order.map((id) => state.byId.get(id)!.kind);
+    expect(kinds).toEqual(["user", "assistant", "tool", "assistant"]);
+    expect(toolOutputs.get(asToolCallId("call_1"))).toContain("a.ts");
+  });
+
   it("resets lastSequence so live turns after /history are not dropped", () => {
     // Regression: hydrate used to set lastSequence = N while the session
     // sequencer rebinds to 0, so turn-started (seq 1) was ignored.
@@ -81,6 +111,50 @@ describe("hydrateFromMessages", () => {
     ]);
     expect(state.order.length).toBeGreaterThan(1);
     expect(state.lastSequence).toBe(0);
+  });
+});
+
+describe("hydrateSessionVisual", () => {
+  it("prefers message-derived tools when classic transcript is thin", () => {
+    const messages = [
+      { role: "user" as const, content: "run it" },
+      {
+        role: "assistant" as const,
+        content: "ok",
+        toolCalls: [
+          { id: "c1", name: "shell.exec", args: { command: "ls" } },
+          { id: "c2", name: "shell.exec", args: { command: "pwd" } },
+        ],
+      },
+      {
+        role: "tool" as const,
+        toolCallId: "c1",
+        content: "a\nb",
+        ok: true,
+      },
+      {
+        role: "tool" as const,
+        toolCallId: "c2",
+        content: "/tmp",
+        ok: true,
+      },
+    ];
+    const thinClassic: ClassicItem[] = [
+      { kind: "user", id: "u1", text: "run it", done: true },
+      {
+        kind: "assistant",
+        id: "a1",
+        text: "Aborted.",
+        streaming: false,
+        done: true,
+      },
+    ];
+    const hydrated = hydrateSessionVisual(thinClassic, messages);
+    const toolCount = [...hydrated.state.byId.values()].filter(
+      (i) => i.kind === "tool",
+    ).length;
+    expect(toolCount).toBe(2);
+    expect(transcriptLooksIncomplete(thinClassic.length, messages)).toBe(true);
   });
 });
 

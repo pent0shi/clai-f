@@ -141,11 +141,9 @@ export const nvidiaProvider: LlmProvider = {
       onToolCallDelta: request.onToolCallDelta,
       reasoning: request.thinking,
       reasoningStyle: "nvidia",
-      // NIM queues/cold starts and the large agent prompt can take longer
-      // than 45s before the first SSE byte. After the first byte, retain a
-      // short watchdog so a genuinely wedged stream is still cancellable.
-      initialIdleTimeoutMs: 90_000,
-      idleTimeoutMs: 30_000,
+      // Unified 60s stall budget (see DEFAULT_STREAM_IDLE_TIMEOUT_MS).
+      initialIdleTimeoutMs: 60_000,
+      idleTimeoutMs: 60_000,
       tools: request.tools,
       toolChoice: request.toolChoice,
       parallelToolCalls: request.parallelToolCalls,

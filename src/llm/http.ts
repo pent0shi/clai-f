@@ -179,8 +179,24 @@ async function readBodyCapped(
   return collected;
 }
 
-/** Default no-byte watchdog for provider streams. */
-export const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 30_000;
+/**
+ * Default no-byte watchdog for provider streams (all providers / modes).
+ * Unified to 60s so "stream stalled" behaves the same everywhere.
+ */
+export const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 60_000;
+
+/**
+ * Mid-stream silence budget when reasoning/thinking is enabled.
+ * Same as the global default (1 minute).
+ */
+export const THINKING_STREAM_IDLE_TIMEOUT_MS = 60_000;
+
+/**
+ * First-byte idle budget when reasoning/thinking is enabled.
+ * Same as the global default (1 minute).
+ */
+export const THINKING_STREAM_INITIAL_IDLE_TIMEOUT_MS = 60_000;
+
 
 
 export interface StreamLineReaderOptions {
@@ -706,9 +722,21 @@ export async function openAiCompatibleStream(options: {
   initialIdleTimeoutMs?: number | undefined;
 }): Promise<OpenAiCompatibleResult> {
   // Combine the caller's abort signal with an idle watchdog so a stuck
-  // connection on a thinking model can't wedge the REPL forever.
-  const idleTimeoutMs = options.idleTimeoutMs ?? DEFAULT_STREAM_IDLE_TIMEOUT_MS;
-  const initialIdleTimeoutMs = options.initialIdleTimeoutMs ?? idleTimeoutMs;
+  // connection can't wedge the REPL forever. Thinking models get a much
+  // longer first-byte budget and a longer mid-stream silence budget —
+  // the old 30s default aborted healthy Bynara/OpenRouter streams that
+  // were still "thinking" without tokens.
+  const reasoningOn = Boolean(options.reasoning?.enabled);
+  const idleTimeoutMs =
+    options.idleTimeoutMs ??
+    (reasoningOn
+      ? THINKING_STREAM_IDLE_TIMEOUT_MS
+      : DEFAULT_STREAM_IDLE_TIMEOUT_MS);
+  const initialIdleTimeoutMs =
+    options.initialIdleTimeoutMs ??
+    (reasoningOn
+      ? THINKING_STREAM_INITIAL_IDLE_TIMEOUT_MS
+      : idleTimeoutMs);
   const idleController = new AbortController();
   let idleTimer: NodeJS.Timeout | undefined;
   let idleFired = false;

@@ -165,20 +165,49 @@ export function hydrateFromClassicTranscript(
   };
 }
 
-/** Fallback when a history row only has model messages (no visual transcript). */
+/**
+ * Format tool args for a compact card label when restoring from model history.
+ */
+function argsDisplayFromToolCall(args: Record<string, unknown> | undefined): string {
+  if (!args || typeof args !== "object") return "";
+  try {
+    const json = JSON.stringify(args);
+    if (json.length <= 80) return json;
+    return `${json.slice(0, 77)}…`;
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Fallback when a history row only has model messages (no visual transcript),
+ * or when the visual transcript is thinner than the model history (e.g. abort
+ * stub saved after tools ran in-memory but never as transcript items).
+ *
+ * Reconstructs user / assistant bubbles and tool cards from native
+ * `toolCalls` + `role: "tool"` pairs so /history still shows commands and
+ * outputs when possible.
+ */
 export function hydrateFromMessages(messages: readonly ChatMessage[]): HydrateResult {
   const order: string[] = [];
   const byId = new Map<string, TranscriptItem>();
+  const toolOutputs = new Map<ToolCallId, string>();
   let sequence = 0;
 
+  // Index tool results by toolCallId for pairing with assistant toolCalls.
+  const toolResultsById = new Map<string, ChatMessage>();
   for (const message of messages) {
-    if (message.role !== "user" && message.role !== "assistant") continue;
-    // Skip pure session-memory system-style content if it landed as assistant.
-    if (message.role === "assistant" && !message.content.trim()) continue;
-    sequence += 1;
-    const id =
-      message.role === "user" ? `hist-user-${sequence}` : `hist-asst-${sequence}`;
+    if (message.role === "tool" && message.toolCallId) {
+      toolResultsById.set(message.toolCallId, message);
+    }
+  }
+
+  for (const message of messages) {
+    if (message.role === "system" || message.role === "tool") continue;
+
     if (message.role === "user") {
+      sequence += 1;
+      const id = `hist-user-${sequence}`;
       const item: UserItem = {
         id,
         sequence,
@@ -189,7 +218,13 @@ export function hydrateFromMessages(messages: readonly ChatMessage[]): HydrateRe
       };
       byId.set(id, item);
       order.push(id);
-    } else {
+      continue;
+    }
+
+    // assistant
+    if (message.content.trim()) {
+      sequence += 1;
+      const id = `hist-asst-${sequence}`;
       const item: AssistantItem = {
         id,
         sequence,
@@ -202,6 +237,36 @@ export function hydrateFromMessages(messages: readonly ChatMessage[]): HydrateRe
       byId.set(id, item);
       order.push(id);
     }
+
+    const calls = message.toolCalls;
+    if (!calls?.length) continue;
+    for (const call of calls) {
+      sequence += 1;
+      const toolCallId = asToolCallId(call.id || `hist-tool-${sequence}`);
+      const result = toolResultsById.get(call.id);
+      const output = result?.content ?? "";
+      if (output) toolOutputs.set(toolCallId, output);
+      const ok = result?.ok !== false;
+      const item: ToolItem = {
+        id: String(toolCallId),
+        sequence,
+        turnId: undefined,
+        timestamp: sequence,
+        kind: "tool",
+        toolCallId,
+        name: call.name || result?.name || "tool",
+        argsDisplay: argsDisplayFromToolCall(call.args),
+        status: result ? (ok ? "ok" : "failed") : "ok",
+        exitCode: result ? (ok ? 0 : 1) : undefined,
+        summary: undefined,
+        artifactPath: undefined,
+        reason: undefined,
+        outputBytes: Buffer.byteLength(output, "utf8"),
+        fileChanges: undefined,
+      };
+      byId.set(item.id, item);
+      order.push(item.id);
+    }
   }
 
   return {
@@ -212,8 +277,56 @@ export function hydrateFromMessages(messages: readonly ChatMessage[]): HydrateRe
       // See hydrateFromClassicTranscript — do not block the live sequencer.
       lastSequence: 0,
     },
-    toolOutputs: new Map(),
+    toolOutputs,
   };
+}
+
+/**
+ * True when the visual transcript is missing the bulk of tool work that still
+ * exists in model messages (common after abort-before-save of the UI snapshot).
+ */
+export function transcriptLooksIncomplete(
+  transcriptLen: number,
+  messages: readonly ChatMessage[],
+): boolean {
+  const toolMsgCount = messages.filter((m) => m.role === "tool").length;
+  const toolCallCount = messages.reduce(
+    (n, m) => n + (m.toolCalls?.length ?? 0),
+    0,
+  );
+  const toolWork = Math.max(toolMsgCount, toolCallCount);
+  if (toolWork === 0) return false;
+  // Transcript has fewer tool rows than tool results in messages.
+  // Callers may also treat a very short transcript vs many messages as incomplete.
+  return transcriptLen < toolWork + 1;
+}
+
+/**
+ * Prefer the richer of classic visual transcript vs message-derived hydrate
+ * so /history does not drop tools when only one representation survived.
+ */
+export function hydrateSessionVisual(
+  transcript: readonly ClassicTranscriptItem[] | undefined,
+  messages: readonly ChatMessage[],
+): HydrateResult {
+  const fromMessages = hydrateFromMessages(messages);
+  if (!transcript || transcript.length === 0) {
+    return fromMessages;
+  }
+  const fromClassic = hydrateFromClassicTranscript(transcript);
+  const classicToolCount = [...fromClassic.state.byId.values()].filter(
+    (i) => i.kind === "tool",
+  ).length;
+  const messageToolCount = [...fromMessages.state.byId.values()].filter(
+    (i) => i.kind === "tool",
+  ).length;
+  // Prefer the snapshot with more tool cards (real work); break ties with
+  // more total items, then classic (preserves thinking/notices).
+  if (messageToolCount > classicToolCount) return fromMessages;
+  if (fromMessages.state.order.length > fromClassic.state.order.length * 1.5) {
+    return fromMessages;
+  }
+  return fromClassic;
 }
 
 /**

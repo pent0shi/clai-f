@@ -236,7 +236,7 @@ describe("coding plan requirement helpers", () => {
     ).toBe(60_000);
     expect(
       toolStallBudgetMs({ name: "web.search", args: { query: "x" } }),
-    ).toBe(45_000);
+    ).toBe(60_000);
     expect(
       toolHardBudgetMs({
         name: "web.search",

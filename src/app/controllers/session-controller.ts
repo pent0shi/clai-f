@@ -108,6 +108,10 @@ export class SessionController implements Disposable {
   /** User-message count at last successful AI title (classic refresh cadence). */
   private titledAtUserCount = 0;
   private titleInFlight = false;
+  /** Throttle mid-turn history autosaves so abort/crash still keep tools on disk. */
+  private lastAutosaveAt = 0;
+  private autosaveInFlight = false;
+  private static readonly AUTOSAVE_MIN_MS = 15_000;
 
   constructor(private readonly deps: SessionControllerDeps) {
     this.sessionIdValue = asSessionId(deps.sessionId ?? mintSessionId());
@@ -589,13 +593,23 @@ export class SessionController implements Disposable {
       onMessages: (messages) => {
         this.history = messages;
         this.notifyState();
+        // Periodic durable snapshot so Esc/kill mid-run does not wipe tools.
+        this.scheduleAutosave();
       },
     });
   
     this.notifyState();
     const result = await pending;
-    if (result.status === "completed") {
+    // Persist on every terminal outcome — aborted turns used to skip save,
+    // so /history only showed "Aborted." while plans still had real work.
+    if (
+      result.status === "completed" ||
+      result.status === "aborted" ||
+      result.status === "error"
+    ) {
       await this.persistNow();
+    }
+    if (result.status === "completed") {
       // Fire-and-forget AI title so the turn path is not blocked on a second
       // model call; classic TUI does the same after each completed exchange.
       void this.maybeRefreshTitle();
@@ -603,6 +617,25 @@ export class SessionController implements Disposable {
     for (const listener of this.turnEndListeners) listener(result);
     this.notifyState();
     return result;
+  }
+
+  /**
+   * Best-effort mid-turn autosave (throttled). Called from onMessages so a
+   * long agent run still lands tools/messages on disk before abort/crash.
+   */
+  private scheduleAutosave(): void {
+    if (this.deps.noHistory || getConfig().privateMode) return;
+    if (!this.history.some((m) => m.role === "user")) return;
+    const now = Date.now();
+    if (now - this.lastAutosaveAt < SessionController.AUTOSAVE_MIN_MS) return;
+    if (this.autosaveInFlight) return;
+    this.lastAutosaveAt = now;
+    this.autosaveInFlight = true;
+    void this.persistNow()
+      .catch(() => undefined)
+      .finally(() => {
+        this.autosaveInFlight = false;
+      });
   }
 
   dispose(): void {

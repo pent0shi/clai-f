@@ -156,8 +156,11 @@ describe("V2-025 controllers run a complete scripted turn (Phase 2 gate)", () =>
     expect(plans.current()?.goal).toBe("do the thing");
     expect(session.getState().historyLength).toBe(2);
     expect(session.getState().running).toBe(false);
-    expect(persistence.saved).toHaveLength(1);
-    expect(persistence.saved[0]).toEqual(turnMessages);
+    // Mid-turn autosave + end-of-turn persist may both write; last wins.
+    expect(persistence.saved.length).toBeGreaterThanOrEqual(1);
+    expect(persistence.saved[persistence.saved.length - 1]).toEqual(
+      turnMessages,
+    );
   });
 
   it("produces byte-identical events on replay with deterministic ids + clock", async () => {

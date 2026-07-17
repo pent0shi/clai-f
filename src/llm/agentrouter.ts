@@ -109,10 +109,9 @@ export const agentrouterProvider: LlmProvider = {
       onToolCallDelta: request.onToolCallDelta,
       reasoning: request.thinking,
       reasoningStyle: "openai",
-      // AgentRouter's upstreams (gpt-5, claude opus, etc.) often spend
-      // 30-60s on initial reasoning before the first token; mirror Codex's
-      // recommended 5-minute idle timeout so the UI doesn't bail early.
-      idleTimeoutMs: 300_000,
+      // Unified 60s stall budget (see DEFAULT_STREAM_IDLE_TIMEOUT_MS).
+      idleTimeoutMs: 60_000,
+      initialIdleTimeoutMs: 60_000,
       headers: agentRouterHeaders,
       tools: request.tools,
       toolChoice: request.toolChoice,

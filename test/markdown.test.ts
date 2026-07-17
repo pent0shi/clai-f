@@ -55,6 +55,22 @@ describe("block markdown rendering", () => {
     expect(out).not.toContain("```");
   });
 
+  it("soft-wraps long fenced code lines without ellipsis truncation", () => {
+    const long =
+      "const x = " +
+      `"${"a".repeat(120)}"; // long string that must wrap inside the fence`;
+    const md = "```ts\n" + long + "\n```";
+    const width = 48;
+    const out = strip(renderMarkdown(md, width));
+    // Full content preserved (no … truncation); wrap may insert │ gutters.
+    expect(out).not.toContain("…");
+    expect((out.match(/a/g) ?? []).length).toBeGreaterThanOrEqual(120);
+    // Every physical line fits the wrap budget (+ indent).
+    for (const line of out.split("\n")) {
+      expect(stringWidth(line)).toBeLessThanOrEqual(width + 4);
+    }
+  });
+
   it("renders headings without the # markers", () => {
     expect(strip(renderMarkdown("# Title\nbody"))).toContain("Title");
     expect(strip(renderMarkdown("# Title\nbody"))).not.toContain("#");

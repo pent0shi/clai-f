@@ -82,7 +82,7 @@ Format rules:
 - pkg.install: {"tool":"<name>","checkBinary":"<optional>"} — OS package manager; idempotent. checkBinary when binary ≠ package name.
 - tool.check: {"tools":["nmap","ffuf","..."]} — presence/versions. Prefer after "command not found". Soft-fail optional package managers if another exists (e.g. yarn missing, npm present).
 - wordlist.find: {"query":"<name>","expand":<optional bool>} — locate wordlists for THIS OS before fuzzing. Do not hardcode Kali-only paths on macOS/Windows.
-- tool.batch: {"calls":[{"name":"<tool>","args":{...}}, ...],"concurrency":<optional 1-6>} — up to 20 read-only tools in parallel.
+- tool.batch: {"calls":[{"name":"<tool>","args":{...}}, ...],"concurrency":<optional 1-6>} — up to 20 tools. Read-only lookups run in parallel; writes/shell and other side-effects run serially after confirm when needed. Prefer for multi-lookup recon/checks.
 - net.scan: {"target":"<ip|host|cidr>","ports":"<optional>","profile":{...},"iOwnThis":<optional bool>} — nmap wrapper; validated inputs. Escalate depth when engagement needs it (top-N → full when appropriate).
 - net.context: {} / net.pingSweep: {"target":"<cidr>","method":"<optional>"} — local interfaces/CIDR; private-network live hosts.
 - dns.lookup: {"target":"<host>","record":"<A|AAAA|…>"} / whois.lookup: {"target":"<host|ip>"}

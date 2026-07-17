@@ -103,7 +103,8 @@ describe("createCompositionRoot", () => {
       capabilities: caps,
     });
     await services.session.submit("go");
-    expect(persistence.saved.length).toBe(1);
+    // Mid-turn autosave + end-of-turn persist may both write.
+    expect(persistence.saved.length).toBeGreaterThanOrEqual(1);
     services.dispose();
   });
 

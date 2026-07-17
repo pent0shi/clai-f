@@ -8,6 +8,8 @@ import stringWidth from "string-width";
 
 const FENCE_OPEN = chalk.dim;
 const FENCE_LINE = chalk.cyan;
+/** Continuation gutter for soft-wrapped code lines (keeps block readable). */
+const FENCE_CONT = chalk.dim("│ ");
 
 function repeat(char: string, count: number): string {
   return char.repeat(Math.max(0, count));
@@ -16,11 +18,13 @@ function repeat(char: string, count: number): string {
 function renderFenceHeader(lang: string, width = 60): string {
   const label = lang || "code";
   const head = `─── ${label} `;
-  return FENCE_OPEN(head + repeat("─", Math.max(0, width - head.length)));
+  const barWidth = Math.max(8, Math.min(width, 120));
+  return FENCE_OPEN(head + repeat("─", Math.max(0, barWidth - head.length)));
 }
 
 function renderFenceFooter(width = 60): string {
-  return FENCE_OPEN(repeat("─", width));
+  const barWidth = Math.max(8, Math.min(width, 120));
+  return FENCE_OPEN(repeat("─", barWidth));
 }
 
 // Walk inline markdown tokens and convert them to ANSI styles. Designed to
@@ -158,20 +162,23 @@ export function renderInlineMarkdown(text: string): string {
 interface BlockState {
   inFence: boolean;
   fenceLang: string;
+  /** Fence header/footer width matches the wrap budget so long code stays inside the bar. */
+  fenceWidth?: number;
 }
 
 function renderBlockLine(line: string, state: BlockState): string {
+  const fenceWidth = state.fenceWidth ?? 60;
   // Code fence open/close
   const fenceMatch = line.match(/^(\s*)```(\w*)\s*(.*)$/);
   if (fenceMatch) {
     if (state.inFence) {
       state.inFence = false;
       state.fenceLang = "";
-      return renderFenceFooter();
+      return renderFenceFooter(fenceWidth);
     }
     state.inFence = true;
     state.fenceLang = fenceMatch[2] ?? "";
-    return renderFenceHeader(state.fenceLang);
+    return renderFenceHeader(state.fenceLang, fenceWidth);
   }
 
   if (state.inFence) {
@@ -414,9 +421,21 @@ function wrapMarkdownLine(
   wrapWidth: number,
   state: BlockState,
 ): string[] {
-  // If it's a fence, don't wrap it
+  // Keep fence chrome + content within wrapWidth (never truncate with …).
+  state.fenceWidth = wrapWidth;
   if (/^(\s*)```/.test(line)) {
     return [renderBlockLine(line, state)];
+  }
+
+  // Soft-wrap long code lines so they stay inside the fence border.
+  // Never truncate with ellipsis — split by columns and keep every character.
+  if (state.inFence) {
+    // Budget 2 cols for the continuation gutter on wrap lines.
+    const budget = Math.max(10, wrapWidth - 2);
+    const chunks = wrapAnsiLine(line, budget);
+    return chunks.map((chunk, idx) =>
+      idx === 0 ? FENCE_LINE(chunk) : FENCE_CONT + FENCE_LINE(chunk),
+    );
   }
 
   // If it's a horizontal rule, don't wrap it

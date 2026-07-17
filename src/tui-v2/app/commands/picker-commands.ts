@@ -36,8 +36,8 @@ import {
 } from "../../../store/history.js";
 import { relativeTime, shortCwd } from "../../../tui/text-format.js";
 import {
-  hydrateFromClassicTranscript,
-  hydrateFromMessages,
+  hydrateSessionVisual,
+  transcriptLooksIncomplete,
 } from "../../state/transcript-hydrate.js";
 import type { CommandInvocation } from "../../../app/commands/command.js";
 import type { AppServices } from "../../bootstrap/composition-root.js";
@@ -388,10 +388,12 @@ export async function handleHistory(services: AppServices): Promise<void> {
         title: session.name,
       });
 
-      const hydrated =
-        session.transcript && session.transcript.length > 0
-          ? hydrateFromClassicTranscript(session.transcript)
-          : hydrateFromMessages(session.messages);
+      // Prefer the richer of visual transcript vs model messages (tools often
+      // survive only in messages after abort-before-save of the UI snapshot).
+      const hydrated = hydrateSessionVisual(
+        session.transcript,
+        session.messages,
+      );
       services.transcript.hydrate(hydrated.state);
 
       // Seed tool output spools so click-to-pager still has bodies.
@@ -410,16 +412,34 @@ export async function handleHistory(services: AppServices): Promise<void> {
         plan?.status === "approved" || plan?.status === "in_progress",
       );
 
-      const itemCount =
-        session.transcript?.length ?? hydrated.state.order.length;
+      const itemCount = hydrated.state.order.length;
       const titleBit = session.name ? ` · ${session.name}` : "";
       const planBit = plan
         ? ` · plan “${plan.goal.slice(0, 40)}${plan.goal.length > 40 ? "…" : ""}”`
         : "";
+      const toolCards = [...hydrated.state.byId.values()].filter(
+        (i) => i.kind === "tool",
+      ).length;
+      const incomplete =
+        transcriptLooksIncomplete(
+          session.transcript?.length ?? 0,
+          session.messages,
+        ) ||
+        (Boolean(plan?.tasks?.length) &&
+          toolCards === 0 &&
+          (session.transcript?.length ?? 0) < 8);
       services.session.notice(
         "info",
         `session resumed${titleBit}${planBit} · ${itemCount} items · ${session.messages.length} model messages`,
       );
+      if (incomplete) {
+        services.session.notice(
+          "warn",
+          plan?.tasks?.length
+            ? "chat history incomplete (turn aborted or saved thin) · plan restored — continue with /implement or keep working in agent mode"
+            : "chat history incomplete — some tool cards may be missing from this resume",
+        );
+      }
       services.overlay.close();
     })();
   });

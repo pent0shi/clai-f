@@ -71,10 +71,12 @@ function isTransientNetworkError(error: unknown): boolean {
 }
 
 function isRetriableError(error: unknown): boolean {
-  
   const message = error instanceof Error ? error.message : String(error);
+  // Mid-stream stalls used to be non-retriable (to avoid infinite hangs).
+  // One quick retry on the same provider recovers flaky thinking pauses
+  // without waiting forever — MAX_RETRIES still bounds the loop.
   if (/stream stalled|request timed out before any response/i.test(message)) {
-    return false;
+    return true;
   }
   if (isRateLimited(error)) return true;
   if (error instanceof ProviderError) {

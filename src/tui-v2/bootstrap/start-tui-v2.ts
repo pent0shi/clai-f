@@ -96,6 +96,13 @@ export async function startTuiV2(
 
   const lifecycle = new RendererLifecycle({
     handle,
+    // Flush chat + visual transcript before the renderer is destroyed so an
+    // aborted mid-run session still restores tools/code under /history.
+    disposers: [
+      async () => {
+        await services.session.persistNow().catch(() => undefined);
+      },
+    ],
     // Ctrl+C / SIGINT: first signal aborts a live turn (or arms quit via the
     // App handler path when the key event arrives). A second SIGINT within
     // the window still exits so kill -INT remains usable without the TUI.
