@@ -12,11 +12,11 @@ import { easeInCubic, easeOutCubic } from "../../motion/ease.js";
 export { easeInCubic, easeOutCubic } from "../../motion/ease.js";
 
 /**
- * Outer box height (includes heavy border rows) — keep in sync with host.
- * 5 = top border + padded content rows + bottom border (roomy, bold label).
- * Surface fill is on the outer box so grey covers the full interior.
+ * Outer box height (includes border rows) — keep in sync with host.
+ * 4 = top border + content row + bottom border (slightly compact, bold label).
+ * Surface fill is on the outer box so grey covers the full interior only.
  */
-export const TOAST_BOX_HEIGHT = 5;
+export const TOAST_BOX_HEIGHT = 4;
 
 /** Resting top row when fully visible (1 = just under terminal top edge). */
 export const TOAST_REST_TOP = 1;

@@ -9,8 +9,16 @@
 
 import { setDefaultMode } from "../../store/config.js";
 import { buildPlanRevisionPrompt } from "../../agent/plan-decision.js";
+import { estimateMessagesTokens } from "../../agent/context-manager.js";
+import {
+  acceptPlanImplementCompaction,
+  extractCompactionSummaryBody,
+  PLAN_IMPLEMENT_COMPACT_MIN_TOKENS,
+} from "../../agent/plan-implement-compact.js";
 import type { SessionPlan } from "../../store/plan.js";
 import type { AppServices } from "../bootstrap/composition-root.js";
+import { serializeTranscriptForCompaction } from "../state/transcript-compaction.js";
+import { notify, notifyWarn } from "../notify.js";
 
 /** Coding / build plans — scaffold + verify. */
 export const IMPLEMENT_PROMPT_CODING =
@@ -102,6 +110,75 @@ export function consumePlanSuggestionInput(
   };
 }
 
+/**
+ * Best-effort research compaction before agent implement.
+ * Accept-by-default structural gate only; never blocks implement.
+ * On hard reject: restore pre-compact history (and re-persist) so disk matches.
+ */
+async function compactResearchForImplement(
+  services: AppServices,
+): Promise<void> {
+  const session = services.session;
+  if (session.getState().running || session.getState().compacting) return;
+
+  const beforeMessages = [...session.messages];
+  const beforeTokens = estimateMessagesTokens(beforeMessages);
+  if (beforeTokens < PLAN_IMPLEMENT_COMPACT_MIN_TOKENS) return;
+  if (beforeMessages.length < 4) return;
+
+  const transcript = serializeTranscriptForCompaction(
+    services.transcript.getState(),
+    (id) => session.spool.tail(id),
+  );
+
+  try {
+    const result = await session.compact(transcript || undefined, 2, undefined, {
+      purpose: "plan-implement",
+    });
+
+    if (!result.summarized) return;
+
+    const decision = acceptPlanImplementCompaction({
+      summarized: result.summarized,
+      summaryBody: extractCompactionSummaryBody(result.messages),
+      beforeTokens: result.beforeTokens,
+      afterTokens: result.afterTokens,
+      afterMessages: result.messages,
+    });
+
+    if (!decision.accept) {
+      session.restoreMessages(beforeMessages);
+      // Overwrite any compacted save from compact() with the original history.
+      await session.persistNow().catch(() => undefined);
+      notifyWarn(
+        services,
+        "plan context compaction skipped — keeping full research history",
+        { key: "plan-compact", durationMs: 2800 },
+      );
+      return;
+    }
+
+    const freed = Math.max(0, result.beforeTokens - result.afterTokens);
+    const pct =
+      result.beforeTokens > 0
+        ? Math.round((freed / result.beforeTokens) * 100)
+        : 0;
+    notify(services, `context compacted for implement · −${pct}%`, {
+      key: "plan-compact",
+      durationMs: 2200,
+    });
+  } catch {
+    // compact() leaves history untouched on throw before assign; restore if needed.
+    session.restoreMessages(beforeMessages);
+    await session.persistNow().catch(() => undefined);
+    notifyWarn(
+      services,
+      "plan context compaction failed — keeping full research history",
+      { key: "plan-compact", durationMs: 2800 },
+    );
+  }
+}
+
 export async function implementPlan(services: AppServices): Promise<void> {
   const plan = services.plan.current();
   if (!plan) return;
@@ -111,6 +188,10 @@ export async function implementPlan(services: AppServices): Promise<void> {
   planDecisionHandled = true;
   awaitingPlanSuggestion = false;
   dismissPlanConfirmIfOpen(services, "implement");
+
+  // Compact research while still in plan mode (before mutates unlock).
+  // Never blocks implement — fail-open to full history.
+  await compactResearchForImplement(services);
 
   // Critical: leave gather-only plan mode so shell/fs mutates are allowed.
   services.session.setMode("agent");

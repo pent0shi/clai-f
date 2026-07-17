@@ -23,6 +23,26 @@ describe("compaction-summary prompts", () => {
     expect(p).toContain("DURABLE STATE");
     expect(p).toContain("ACTIVE PLAN");
     expect(p).toContain("SESSION MATERIAL");
+    expect(p).toMatch(/PHASE AWARENESS/i);
+  });
+
+  it("plan-implement handoff separates evidence from plan-mode-only gates", () => {
+    const p = buildCompactionUserPrompt({
+      purpose: "plan-implement",
+      messageTranscript: "USER: recon target\nTOOL: nmap open 443",
+      durableState: "ACTIVE PLAN: pentest",
+    });
+    expect(p).toMatch(/HANDOFF|plan-mode research/i);
+    expect(p).toContain("## Research evidence");
+    expect(p).toContain("## Plan-mode-only notes");
+    expect(p).toContain("## Durable engagement rules");
+    expect(p).toMatch(/not current agent gates|gather-only/i);
+    expect(p).not.toMatch(/Do not implement or exploit yet/i);
+  });
+
+  it("system prompt warns against freezing temporary mode gates", () => {
+    expect(COMPACTION_SYSTEM_PROMPT).toMatch(/PHASE AWARENESS/i);
+    expect(COMPACTION_SYSTEM_PROMPT).toMatch(/HISTORICAL/i);
   });
 
   it("trims huge transcripts while keeping head and tail", () => {
@@ -65,5 +85,28 @@ describe("LLM compaction integration shape", () => {
     expect(result.messages.some((m) => m.content.includes("Build todo app"))).toBe(
       true,
     );
+  });
+
+  it("plan-implement purpose uses handoff memory prefix", async () => {
+    const msgs: ChatMessage[] = Array.from({ length: 8 }, (_, index) => ({
+      role: index % 2 === 0 ? ("user" as const) : ("assistant" as const),
+      content: `m-${index}-` + "x".repeat(200),
+    }));
+    const result = await compactMessagesWithSummary(
+      msgs,
+      async (prompt) => {
+        expect(prompt).toMatch(/Research evidence/i);
+        return "## Research evidence\nPorts 80/443 open\n## Remaining work\nt2 auth";
+      },
+      { keepRecent: 2, purpose: "plan-implement" },
+    );
+    const mem = result.messages.find(
+      (m) =>
+        m.role === "system" &&
+        m.content.includes("plan-mode research") &&
+        m.content.includes("Ports 80/443"),
+    );
+    expect(mem).toBeTruthy();
+    expect(mem!.content).toMatch(/gather-only phase is over/i);
   });
 });

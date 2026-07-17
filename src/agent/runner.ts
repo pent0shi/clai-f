@@ -61,6 +61,8 @@ import {
   estimateMessagesTokens,
   AUTO_COMPACT_TOKEN_BUDGET,
   COMPACTION_MEMORY_PREFIX,
+  PLAN_IMPLEMENT_MEMORY_PREFIX,
+  isCompactionMemoryMessage,
 } from "./context-manager.js";
 import { auditLog } from "../store/logs.js";
 import { loadProjectContext } from "../store/project.js";
@@ -85,6 +87,7 @@ import { isScratchOnlyWrite } from "./scratch-write.js";
 import {
   COMPACTION_SYSTEM_PROMPT,
 } from "./compaction-summary.js";
+import { maybeAppendPlanModeReminder } from "./plan-mode-reminders.js";
 import { LoopGuard } from "./loop-guard.js";
 import {
   loadPlan,
@@ -2690,16 +2693,19 @@ export async function runAgentTurn(
         });
 
         const insertedSummary =
-          messages.find(
-            (m) =>
-              m.role === "system" &&
-              m.content.startsWith(COMPACTION_MEMORY_PREFIX),
-          )?.content ?? "";
+          messages.find((m) => isCompactionMemoryMessage(m))?.content ?? "";
         const summaryText = insertedSummary.startsWith(
-          `${COMPACTION_MEMORY_PREFIX}\n\n`,
+          `${PLAN_IMPLEMENT_MEMORY_PREFIX}\n\n`,
         )
-          ? insertedText(insertedSummary, `${COMPACTION_MEMORY_PREFIX}\n\n`)
-          : insertedText(insertedSummary, COMPACTION_MEMORY_PREFIX);
+          ? insertedText(insertedSummary, `${PLAN_IMPLEMENT_MEMORY_PREFIX}\n\n`)
+          : insertedSummary.startsWith(`${COMPACTION_MEMORY_PREFIX}\n\n`)
+            ? insertedText(insertedSummary, `${COMPACTION_MEMORY_PREFIX}\n\n`)
+            : insertedText(
+                insertedSummary,
+                insertedSummary.startsWith(PLAN_IMPLEMENT_MEMORY_PREFIX)
+                  ? PLAN_IMPLEMENT_MEMORY_PREFIX
+                  : COMPACTION_MEMORY_PREFIX,
+              );
         // Card shows pre/post of the summarization; plan re-injection is noted.
         writeCompacted(summaryText, beforeTokens, compactedTokens);
         const planNote =
@@ -4013,6 +4019,12 @@ export async function runAgentTurn(
         let awaitingPlanApproval = false;
         /** Native tool_call ids that already have a role:tool history entry. */
         const recordedNativeIds = new Set<string>();
+        /** Plan-mode soft reminders already attached this turn (by step). */
+        const planRemindedAt = new Set<number>();
+        /** True after a successful plan.create this turn (activePlan is turn-start snapshot). */
+        let planCreatedThisTurn = Boolean(
+          activePlan && activePlan.tasks.length > 0,
+        );
 
         /**
          * Record a tool result into history. Failures / user declines are
@@ -4032,7 +4044,29 @@ export async function runAgentTurn(
           },
         ): void => {
           recordedNativeIds.add(boundCall.id);
-          const toolContent = `Tool ${res.call.name} result (exit=${res.result.exitCode ?? 0}, ok=${res.result.ok}):\n${res.contextOutput}`;
+          if (res.ok && res.call.name === "plan.create") {
+            planCreatedThisTurn = true;
+          }
+          productiveSteps += 1;
+          // Soft plan-mode note on tool payloads only (never a user message).
+          // Stop once a plan with tasks exists so we don't nag after plan.create.
+          let toolContent = `Tool ${res.call.name} result (exit=${res.result.exitCode ?? 0}, ok=${res.result.ok}):\n${res.contextOutput}`;
+          const reminded = maybeAppendPlanModeReminder(toolContent, {
+            isPlanMode,
+            planApproved: session.planApproved.value,
+            hasDraftPlan: planCreatedThisTurn,
+            productiveStep: productiveSteps,
+            alreadyRemindedAt: planRemindedAt,
+            step: productiveSteps,
+            kindHint:
+              activePlan?.kind === "pentest" || pentestLikeTurn
+                ? "pentest"
+                : activePlan?.kind === "coding"
+                  ? "coding"
+                  : "general",
+          });
+          toolContent = reminded.content;
+          if (reminded.reminded) planRemindedAt.add(productiveSteps);
           if (historyNativeCalls.length) {
             appendToolResult(
               messages,
@@ -4047,7 +4081,6 @@ export async function runAgentTurn(
               content: toolContent,
             });
           }
-          productiveSteps += 1;
           // Reset retry counters — they track consecutive failures, not cumulative.
           truncatedToolRetries = 0;
           malformedFenceRetries = 0;

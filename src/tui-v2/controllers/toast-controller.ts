@@ -41,7 +41,9 @@ export const TOAST_ENTER_MS = 200;
 export const TOAST_EXIT_MS = 200;
 
 const MAX_VISIBLE_TOASTS = 3;
-const MAX_MESSAGE_CHARS = 72;
+/** Soft cap only — avoid multi-KB spam; long status lines should still fit. */
+export const MAX_TOAST_MESSAGE_CHARS = 160;
+const MAX_MESSAGE_CHARS = MAX_TOAST_MESSAGE_CHARS;
 
 export function toastTotalLifetimeMs(holdMs: number): number {
   return TOAST_ENTER_MS + Math.max(0, holdMs) + TOAST_EXIT_MS;

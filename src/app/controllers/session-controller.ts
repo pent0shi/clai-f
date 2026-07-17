@@ -14,9 +14,9 @@ import {
 import { createSessionPolicy, type SessionPolicy } from "../../agent/session-policy.js";
 import { resolveTurnInput } from "../../attachments/service.js";
 import { generateSessionTitle } from "../../agent/session-title.js";
-import { completeWithProvider } from "../../llm/router.js";
 import { clearTextOnlyModels } from "../../llm/tool-protocol.js";
 import { getConfig, getProviderModel } from "../../store/config.js";
+import { summarizeForSessionCompact } from "./session-compact-helper.js";
 import type { TranscriptItem as ClassicTranscriptItem } from "../../tui/state.js";
 import {
   asSessionId,
@@ -365,77 +365,46 @@ export class SessionController implements Disposable {
     this.notifyState();
   }
 
+  /** Roll back history after a rejected plan-implement compaction. */
+  restoreMessages(messages: readonly ChatMessage[]): void {
+    this.history = [...messages];
+    this.refreshEstimatedContext();
+    this.notifyState();
+  }
+
   async compact(
     sessionTranscript?: string,
     keepRecent = 2,
     signal?: AbortSignal,
+    options: {
+      purpose?: "default" | "plan-implement" | undefined;
+      /** Default true: emit compacted event + persist. */
+      persist?: boolean | undefined;
+    } = {},
   ): Promise<CompactResult> {
     if (this.turn.running) throw new Error("a turn is already running");
     if (this.compactingFlag) throw new Error("compaction already in progress");
 
-    
     const cfg = getConfig();
     const provider = this.provider ?? (cfg.defaultProvider as ProviderId | undefined);
     const model = this.model ?? cfg.defaultModel;
-
-    
+    const persist = options.persist !== false;
     const historySnapshot = [...this.history];
 
     this.compactingFlag = true;
     this.notifyState();
     try {
-      const completeSummary = async (prompt: string): Promise<string> => {
-        const response = await completeWithProvider({
-          provider,
-          model,
-          messages: [
-            {
-              role: "system",
-              content: "You compress conversation history into accurate continuation memory.",
-            },
-            { role: "user", content: prompt },
-          ],
-          temperature: 0.1,
-          maxTokens: 2_048,
-          signal,
-        });
-        return response.text;
-      };
       const result = await compactMessagesWithSummary(
         historySnapshot,
-        async (prompt) => {
-          const chunkSize = 50_000;
-          if (prompt.length <= chunkSize) return completeSummary(prompt);
-          const chunks = Array.from(
-            { length: Math.ceil(prompt.length / chunkSize) },
-            (_, index) => prompt.slice(index * chunkSize, (index + 1) * chunkSize),
-          );
-          const partials: string[] = [];
-          for (let index = 0; index < chunks.length; index += 1) {
-            signal?.throwIfAborted();
-            partials.push(
-              await completeSummary(
-                `Summarize part ${index + 1} of ${chunks.length} of one session. Preserve concrete goals, actions, commands, results, task state, failures, and remaining work.\n\n${chunks[index]}`,
-              ),
-            );
-          }
-          signal?.throwIfAborted();
-          return completeSummary(
-            "Merge these ordered partial session memories into one non-redundant continuation memory. Preserve all concrete facts and unresolved work. Use sections: User goals, Decisions and constraints, Work completed, Commands/tools and results, Current state, Remaining work.\n\n" +
-              partials.map((part, index) => `PART ${index + 1}:\n${part}`).join("\n\n"),
-          );
-        },
-        { budgetTokens: 0, keepRecent },
+        (prompt) =>
+          summarizeForSessionCompact(prompt, { provider, model, signal }),
+        { budgetTokens: 0, keepRecent, purpose: options.purpose },
         sessionTranscript,
       );
       this.history = result.messages;
-      // Stale pre-compact API prompt_tokens would keep showing e.g. 73k after
-      // the model history was replaced. Force the footer to the live estimate.
-      if (result.summarized) {
-        this.noteContextCompacted(result.afterTokens);
-      }
+      if (result.summarized) this.noteContextCompacted(result.afterTokens);
       this.notifyState();
-      if (result.summarized && result.after !== result.before) {
+      if (persist && result.summarized && result.after !== result.before) {
         const memo =
           result.messages.find(
             (m) => m.role === "system" && m.content.startsWith("Session memory"),
@@ -451,7 +420,6 @@ export class SessionController implements Disposable {
             undefined,
           ),
         );
-        // Persist the compacted model history + visual marker together.
         await this.persistNow();
       }
       return result;

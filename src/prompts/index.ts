@@ -253,23 +253,28 @@ export function toolNudge(native: boolean): string {
     : "Emit a ```tool block with valid JSON now.";
 }
 
-/** Injected when REPL mode is plan — deep thinking + comprehensive durable plan. */
+/** Injected when REPL mode is plan — deep research + comprehensive durable plan. */
 export function planModeDirective(): string {
   return [
-    "PLAN MODE — think, research, architect. Do not implement or exploit yet.",
-    "Plan mode is NOT agent-mode task execution. Here tasks are part of a durable plan you design — they are the roadmap the user will accept before any build/exploit work.",
+    "PLAN MODE — research and design a durable plan. Do not implement or fully exploit yet.",
+    "Plan mode is NOT agent-mode task execution. Tasks you create are the roadmap the user accepts before build/exploit work.",
     "",
-    "How to plan (give 1000% effort):",
-    "- Understand the real user goal, constraints, stack/target, and success definition.",
-    "- Gather what you need first: workspace/stack inspection, recon, docs, web.search for current APIs/CVEs/techniques when facts may be stale. Prefer evidence over imagination.",
+    "Time budget (research is unlimited; the deliverable is the plan):",
+    "- You may take as many steps and as much time as you need to gather context: learn attack surface, stack, interesting features/areas, constraints, and success definition.",
+    "- Research exists to inform a high-quality comprehensive plan — not to finish every test/exploit/report before plan.create.",
+    "- Do not rush a thin plan. When research is sufficient for a high-quality roadmap, present plan.create rather than continuing indefinitely.",
+    "",
+    "How to research then plan (give full effort):",
+    "- Prefer evidence: workspace/stack inspection, recon, docs, web.search for current APIs/CVEs/techniques when facts may be stale.",
     "- Consider alternatives, risks, edge cases, dependency order, and verification for each step.",
-    "- For pentest: map surface fully before plan.create — ports (escalate beyond top-N), subdomains, content/API enum, JS harvest, tech fingerprint, auth surfaces (nmap, ffuf, dig, http.fetch, shell.start long scans, …). Background long scans and continue other recon.",
-    "- Do not scaffold, write project files, or run active exploitation/C2. Put implement/exploit steps as plan tasks for after accept.",
+    "- For pentest: map surface thoroughly — ports (escalate beyond top-N when needed), subdomains, content/API enum, JS harvest, tech fingerprint, auth surfaces (nmap, ffuf, dig, http.fetch, shell.start long scans, …). Background long scans; continue other recon.",
+    "- Capture confirmed unauth findings in plan detail as evidence; put remaining auth’d testing, exploit chains, and final report polish in tasks for after accept.",
+    "- Do not scaffold, write project files, or run active C2/destructive exploits. Put implement/exploit steps as plan tasks for after accept.",
     "",
     "When context is enough, call plan.create once with:",
-    "- goal + rich detail (context found, approach, architecture, risks, how each phase is verified)",
-    "- a complete ordered task list (any count; only real work; no filler) covering build/test/verify or recon→test→exploit→report as appropriate",
-    "- for software: include implement, automated checks (typecheck/build/tests when applicable), and live/runtime verification as separate tasks when they are distinct work",
+    "- goal + rich detail (context found, approach, architecture/threat model, risks, how each phase is verified)",
+    "- a complete ordered task list (any count; only real work; no filler) covering remaining build/test/verify or test→exploit→report work as appropriate",
+    "- for software: implement, automated checks, and live/runtime verification as separate tasks when they are distinct work",
     "After plan.create, STOP for accept / discard / view / suggest. Prefer evidence-based plans.",
   ].join("\n");
 }

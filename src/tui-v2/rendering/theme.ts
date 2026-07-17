@@ -52,6 +52,11 @@ export interface Theme {
   readonly response: string;
   /** Amber/yellow activity text while RUNNING (legacy yellow). */
   readonly activity: string;
+  /**
+   * Dark amber plate for "running" status chips (white label on solid bg).
+   * Brighter `activity` is for text/borders only — too light as a fill.
+   */
+  readonly activityBg: string;
   /** Spinner color while RUNNING (legacy magenta). */
   readonly spinner: string;
   /** Queued badge amber-dark (legacy #854D0E). */
@@ -133,6 +138,8 @@ const DARK_THEME: Theme = {
   white: "#FFFFFF",
   response: "#4ADE80",
   activity: "#FACC15",
+  // Dark yellow/amber plate for running badges (white text stays crisp).
+  activityBg: "#854D0E",
   spinner: "#E879F9",
   queued: "#854D0E",
   chipTeal: "#0E7490",
@@ -187,6 +194,8 @@ const LIGHT_THEME: Theme = {
   white: "#FFFFFF",
   response: "#15803d",
   activity: "#a16207",
+  // Dark amber plate for running badges on light terminals.
+  activityBg: "#92400E",
   spinner: "#a21caf",
   queued: "#854D0E",
   chipTeal: "#0e7490",

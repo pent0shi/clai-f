@@ -73,17 +73,16 @@ function ToastPill(props: {
   const surface = toastSurface(theme);
   const border = theme.inputBorder;
   const textFg = theme.userBorder;
-  // Extra spaces + bold attrs read larger in a monospaced TUI.
-  const label = `  ${levelGlyph(item.level)}  ${item.message}  `;
+  // Compact bold label — surface is on the outer box only (no text bg so
+  // fill never paints past border glyphs in OpenTUI).
+  const label = `${levelGlyph(item.level)}  ${item.message}`;
   // Approximate “fade” with DIM when sliding in/out — always keep BOLD.
   const dim = visibility < 0.85;
 
-  // Single bordered box: surface fills the full interior (no nested plate
-  // that left theme.background strips above/below the grey fill).
   return (
     <box
       border
-      borderStyle="heavy"
+      borderStyle="rounded"
       style={{
         position: "absolute",
         top,
@@ -96,8 +95,8 @@ function ToastPill(props: {
         flexDirection: "row",
         alignItems: "center",
         justifyContent: "center",
-        paddingLeft: 3,
-        paddingRight: 3,
+        paddingLeft: 2,
+        paddingRight: 2,
         paddingTop: 0,
         paddingBottom: 0,
       }}
@@ -107,7 +106,6 @@ function ToastPill(props: {
         content={label}
         style={{
           fg: textFg,
-          bg: surface,
           attributes: dim
             ? TextAttributes.BOLD | TextAttributes.DIM
             : TextAttributes.BOLD,
@@ -132,8 +130,8 @@ export function ToastHost(props: ToastHostProps): ReactNode {
 
   if (items.length === 0) return null;
 
-  // Roomier than a slim chip — still capped so it doesn't dominate the TUI.
-  const maxWidth = Math.min(72, Math.max(40, Math.floor(termWidth * 0.62)));
+  // Wide enough for full messages (up to controller cap); slightly compact.
+  const maxWidth = Math.min(64, Math.max(32, Math.floor(termWidth * 0.58)));
   // Newest on top of stack (drawn first in reverse so later paint on top).
   const ordered = [...items].reverse();
   const maxStack = Math.max(
@@ -145,9 +143,10 @@ export function ToastHost(props: ToastHostProps): ReactNode {
   return (
     <>
       {visible.map((item, index) => {
+        // +8 for glyph, spaces, and border/pad — prefer full message width.
         const toastWidth = Math.min(
           maxWidth,
-          Math.max(36, item.message.length + 16),
+          Math.max(32, item.message.length + 8),
         );
         // Top-center horizontally.
         const left = Math.max(0, Math.floor((termWidth - toastWidth) / 2));

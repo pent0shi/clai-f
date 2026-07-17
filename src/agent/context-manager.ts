@@ -41,6 +41,11 @@ export interface CompactOptions {
   budgetTokens?: number | undefined;
   /** Keep this many trailing messages (system + user/assistant pairs). */
   keepRecent?: number | undefined;
+  /**
+   * Bias summarizer prompt (e.g. plan-implement preserves recon evidence).
+   * Does not change accept/reject heuristics.
+   */
+  purpose?: "default" | "plan-implement" | undefined;
 }
 
 export interface CompactResult {
@@ -64,6 +69,12 @@ const DEFAULT_KEEP_RECENT = 6;
  */
 export const COMPACTION_MEMORY_PREFIX =
   "Session memory from compacted earlier turns:";
+/**
+ * Plan-mode research handoff memory (pre-implement compact). Distinct so the
+ * agent does not treat plan-mode gather-only history as permanent gates.
+ */
+export const PLAN_IMPLEMENT_MEMORY_PREFIX =
+  "Session memory from plan-mode research (handoff to agent implement — gather-only phase is over; execute approved tasks):";
 export const MECHANICAL_MEMORY_PREFIX =
   "Earlier turns in this session, summarized";
 
@@ -71,8 +82,18 @@ export function isCompactionMemoryMessage(message: ChatMessage): boolean {
   return (
     message.role === "system" &&
     (message.content.startsWith(COMPACTION_MEMORY_PREFIX) ||
+      message.content.startsWith(PLAN_IMPLEMENT_MEMORY_PREFIX) ||
       message.content.startsWith(MECHANICAL_MEMORY_PREFIX))
   );
+}
+
+/** Prefix used when writing a compacted memory system message. */
+export function compactionMemoryPrefixForPurpose(
+  purpose?: "default" | "plan-implement" | undefined,
+): string {
+  return purpose === "plan-implement"
+    ? PLAN_IMPLEMENT_MEMORY_PREFIX
+    : COMPACTION_MEMORY_PREFIX;
 }
 
 /**
@@ -233,6 +254,7 @@ export async function compactMessagesWithSummary(
     visualTranscript: visual || undefined,
     messageTranscript,
     durableState: durableBits || undefined,
+    purpose: options.purpose,
   });
   const prompt = trimTranscriptForCompaction(rawCombined);
 
@@ -251,9 +273,10 @@ export async function compactMessagesWithSummary(
     }
     return msg;
   });
+  const memoryPrefix = compactionMemoryPrefixForPurpose(options.purpose);
   const compacted: ChatMessage[] = [
     ...head,
-    { role: "system", content: `${COMPACTION_MEMORY_PREFIX}\n\n${summary}` },
+    { role: "system", content: `${memoryPrefix}\n\n${summary}` },
     ...tail,
   ];
   const afterTokens = estimateMessagesTokens(compacted);

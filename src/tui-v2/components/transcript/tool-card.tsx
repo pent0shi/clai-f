@@ -261,7 +261,9 @@ export function ToolCard(props: {
       ? theme.successBg
       : item.status === "failed" || item.status === "blocked"
         ? theme.failedBg
-        : statusFg;
+        : item.status === "running"
+          ? theme.activityBg
+          : theme.chip;
 
   const hasBody =
     isBatch ||
