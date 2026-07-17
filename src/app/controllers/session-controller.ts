@@ -397,7 +397,12 @@ export class SessionController implements Disposable {
       const result = await compactMessagesWithSummary(
         historySnapshot,
         (prompt) =>
-          summarizeForSessionCompact(prompt, { provider, model, signal }),
+          summarizeForSessionCompact(prompt, {
+            provider,
+            model,
+            signal,
+            purpose: options.purpose,
+          }),
         { budgetTokens: 0, keepRecent, purpose: options.purpose },
         sessionTranscript,
       );

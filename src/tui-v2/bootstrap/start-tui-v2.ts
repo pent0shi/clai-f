@@ -107,16 +107,25 @@ export async function startTuiV2(
     // App handler path when the key event arrives). A second SIGINT within
     // the window still exits so kill -INT remains usable without the TUI.
     onSigint: () => {
-      // Backup path when the key event is not delivered (raw SIGINT). The App
-      // keyboard handler owns the normal Ctrl+C double-press UX.
+      // Backup path when the key event is not delivered (raw SIGINT). Always
+      // dismiss a stuck password/confirm overlay first — abort alone used to
+      // leave the sudo modal open and block a clean exit.
+      const dismissed = services.overlay.cancelBlockingPrompt();
       if (services.session.getState().running) {
         services.session.abort();
         services.session.notice(
           "info",
-          "turn aborted · Ctrl+C again to exit",
+          dismissed
+            ? "prompt cancelled · Ctrl+C again to exit"
+            : "turn aborted · Ctrl+C again to exit",
         );
       } else {
-        services.session.notice("info", "Ctrl+C again to exit");
+        services.session.notice(
+          "info",
+          dismissed
+            ? "prompt cancelled · Ctrl+C again to exit"
+            : "Ctrl+C again to exit",
+        );
       }
     },
     onError: (error) => {

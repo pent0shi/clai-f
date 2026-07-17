@@ -443,13 +443,10 @@ export async function handleHistory(services: AppServices): Promise<void> {
       // Notices are UI-only — exclude from item counts (and they are never
       // model messages; session.messages is already the real LLM history).
       const itemCount = conversationItemCount(hydrated.state);
-      const modelMsgCount = session.messages.filter(
-        (m) => m.role === "user" || m.role === "assistant" || m.role === "tool",
-      ).length;
-      const titleBit = session.name ? ` · ${session.name}` : "";
-      const planBit = plan
-        ? ` · plan “${plan.goal.slice(0, 40)}${plan.goal.length > 40 ? "…" : ""}”`
+      const titleBit = session.name
+        ? ` · ${session.name.length > 28 ? `${session.name.slice(0, 27)}…` : session.name}`
         : "";
+      const planBit = plan ? " · plan" : "";
       const toolCards = [...hydrated.state.byId.values()].filter(
         (i) => i.kind === "tool",
       ).length;
@@ -461,16 +458,17 @@ export async function handleHistory(services: AppServices): Promise<void> {
         (Boolean(plan?.tasks?.length) &&
           toolCards === 0 &&
           (session.transcript?.length ?? 0) < 8);
+      // Short toast — full counts were too wide for the chip.
       services.session.notice(
         "info",
-        `session resumed${titleBit}${planBit} · ${itemCount} items · ${modelMsgCount} model messages`,
+        `resumed${titleBit}${planBit} · ${itemCount} items`,
       );
       if (incomplete) {
         services.session.notice(
           "warn",
           plan?.tasks?.length
-            ? "chat history incomplete (turn aborted or saved thin) · plan restored — continue with /implement or keep working in agent mode"
-            : "chat history incomplete — some tool cards may be missing from this resume",
+            ? "thin history · plan OK · /implement to continue"
+            : "thin history · some tools may be missing",
         );
       }
       services.overlay.close();

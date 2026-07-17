@@ -4,6 +4,7 @@ import {
   compactMessagesWithSummary,
   estimateMessagesTokens,
   estimateTokens,
+  shouldApplyAutoCompact,
 } from "../src/agent/context-manager.js";
 import type { ChatMessage } from "../src/types.js";
 
@@ -128,5 +129,97 @@ describe("phase 9 — context manager", () => {
         throw new Error("offline");
       }, { keepRecent: 4 }),
     ).rejects.toThrow("offline");
+  });
+
+  it("prefers soft 16–20k band via progressive trim, without hard-fail ceiling", async () => {
+    // Older turns summarize; recent tail kept; oversized dumps soft-trimmed
+    // toward POST_COMPACT_SOFT_UPPER_BAND — never drop messages to hit a number.
+    const fatTool = "x".repeat(20_000);
+    const msgs: ChatMessage[] = [
+      // ~6k tokens system (realistic-ish; full agent.md is ~8k)
+      { role: "system", content: "SYS " + "s".repeat(20_000) },
+      { role: "user", content: "assess target.example" },
+    ];
+    for (let i = 0; i < 20; i += 1) {
+      msgs.push({
+        role: "assistant",
+        content: `step ${i}`,
+        toolCalls: [
+          {
+            id: `c${i}`,
+            name: "http.fetch",
+            args: { url: `https://t.example/${i}` },
+          },
+        ],
+      });
+      msgs.push({
+        role: "tool",
+        content: fatTool,
+        toolCallId: `c${i}`,
+        name: "http.fetch",
+        ok: true,
+      });
+    }
+    msgs.push({ role: "user", content: "continue" });
+    msgs.push({ role: "assistant", content: "working on next probes" });
+
+    const before = estimateMessagesTokens(msgs);
+    expect(before).toBeGreaterThan(80_000);
+
+    const result = await compactMessagesWithSummary(
+      msgs,
+      async () =>
+        "## User goals\nAssess target.example\n## Work completed\nMany http.fetch probes; stack nginx.\n## Remaining work\nAuth testing\n## Current state\nRecon mid\n## Decisions and constraints\nRemote only\n## Commands/tools and results\nhttp.fetch GETs\n## Open risks / failures\nnone",
+      { budgetTokens: 0, keepRecent: 2 },
+    );
+
+    expect(result.summarized).toBe(true);
+    expect(result.afterTokens).toBeLessThan(before);
+    expect(result.afterTokens).toBeLessThan(before * 0.5);
+    // Soft-trim oversized dumps; keep non-empty tool results and recent user.
+    const toolMsgs = result.messages.filter((m) => m.role === "tool");
+    for (const t of toolMsgs) {
+      expect(t.content.length).toBeGreaterThan(0);
+      expect(t.content.length).toBeLessThan(fatTool.length);
+    }
+    expect(result.messages.some((m) => m.role === "user" && m.content === "continue")).toBe(
+      true,
+    );
+    // Prefer band when system is not itself huge; with ~6k system + memory +
+    // lean tail we should land well under the pre-fix ~50k fat-tail regime.
+    expect(result.afterTokens).toBeLessThan(40_000);
+  });
+
+  it("shouldApplyAutoCompact rejects stubs and non-reductions only", () => {
+    // Near-empty memory after large history → amnesia risk.
+    expect(
+      shouldApplyAutoCompact({
+        summarized: true,
+        summaryBody: "x".repeat(50),
+        beforeTokens: 50_000,
+        afterTokens: 10_000,
+        afterMessages: [{ role: "user", content: "hi" }],
+      }),
+    ).toBe(false);
+    // Not smaller → do not apply.
+    expect(
+      shouldApplyAutoCompact({
+        summarized: true,
+        summaryBody: "x".repeat(250),
+        beforeTokens: 50_000,
+        afterTokens: 60_000,
+        afterMessages: [{ role: "user", content: "hi" }],
+      }),
+    ).toBe(false);
+    // Meaningful shrink with real memory — apply even if not under a magic N.
+    expect(
+      shouldApplyAutoCompact({
+        summarized: true,
+        summaryBody: "x".repeat(250),
+        beforeTokens: 50_000,
+        afterTokens: 30_000,
+        afterMessages: [{ role: "user", content: "hi" }],
+      }),
+    ).toBe(true);
   });
 });

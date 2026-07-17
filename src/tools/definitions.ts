@@ -371,7 +371,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   ),
   def(
     "http.fetch",
-    "HTTP request (GET/HEAD preferred). Confirm for mutating methods.",
+    "Raw HTTP evidence for pentest/protocol/private targets: status, redirect chain, headers/cookies, body. Default no status-retries (pass retries to retry 5xx). TLS cert fingerprint: web.fetch includeTls. Not for casual public-page reading (prefer web.fetch).",
     {
       type: "object",
       properties: {
@@ -385,7 +385,14 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         maxBytes: { type: "integer" },
         iOwnThis: { type: "boolean" },
         own: { type: "boolean" },
-        retries: { type: "integer" },
+        retries: {
+          type: "integer",
+          description: "Retry transient 5xx/429 (default 0 for honest evidence)",
+        },
+        timeoutMs: {
+          type: "integer",
+          description: "Request timeout ms (default 15000, clamp 3000-60000)",
+        },
       },
       required: ["url"],
       additionalProperties: false,

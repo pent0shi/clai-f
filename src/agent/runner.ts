@@ -60,6 +60,7 @@ import {
   estimateTokens,
   estimateMessagesTokens,
   AUTO_COMPACT_TOKEN_BUDGET,
+  shouldApplyAutoCompact,
   COMPACTION_MEMORY_PREFIX,
   PLAN_IMPLEMENT_MEMORY_PREFIX,
   isCompactionMemoryMessage,
@@ -201,6 +202,7 @@ import {
   upsertSessionStateMessage,
   type SessionStateSnapshot,
 } from "./session-state.js";
+import { buildContinueOrientation } from "./continue-orient.js";
 import { detectPackageManager } from "./workspace-orient.js";
 import {
   budgetRemaining,
@@ -729,6 +731,23 @@ export async function runAgentTurn(
       );
     }
 
+    // Soft mid-work recovery (any domain): re-attach to jobs / open tasks /
+    // last tools after interrupt or "continue" — not a hard gate.
+    if (!informationalQuery && !idleOrSocialPrompt) {
+      const continueBrief = buildContinueOrientation({
+        prompt,
+        history: options.history,
+        plan: activePlan,
+        runningJobs: jobManager.getRunningJobs(),
+        recentJobs: jobManager.getRecentJobs(12),
+        informationalQuery,
+        idleOrSocial: idleOrSocialPrompt,
+      });
+      if (continueBrief) {
+        systemSections.push(continueBrief);
+      }
+    }
+
     if (isPlanMode) {
       systemSections.push(planModeDirective());
     } else if (agentMode === "agent") {
@@ -1121,8 +1140,16 @@ export async function runAgentTurn(
 
     refreshSessionState = (plan?: SessionPlan | null | undefined): void => {
       if (idleOrSocialPrompt || informationalQuery) return;
-      if (!buildLikeTurn && !pentestLikeTurn && !plan && !activePlan) return;
+      const runningJobs = jobManager.getRunningJobs();
       const p = plan ?? activePlan;
+      if (
+        !buildLikeTurn &&
+        !pentestLikeTurn &&
+        !p &&
+        runningJobs.length === 0
+      ) {
+        return;
+      }
       const root = getActiveProjectRoot() ?? p?.meta?.projectRoot;
       const pm =
         p?.meta?.packageManager ??
@@ -1134,6 +1161,10 @@ export async function runAgentTurn(
       const done = p?.tasks
         .filter((t) => t.state === "done" || t.state === "skipped")
         .map((t) => t.id);
+      const jobBits = runningJobs.slice(0, 4).map((j) => {
+        const cmd = (j.commandDisplay || j.command).replace(/\s+/g, " ").trim();
+        return `${j.id} ${j.status} ${cmd.slice(0, 40)}`;
+      });
       const snap: SessionStateSnapshot = {
         goal: p?.goal ?? prompt.slice(0, 160),
         projectRoot: root,
@@ -1150,6 +1181,10 @@ export async function runAgentTurn(
         serverProbedOk: sawLocalHttpProbe,
         lastProbeFailed: sawFailedLocalHttpProbe,
         lastOkTool: taskWorkLedger?.lastOkTool,
+        backgroundJobs:
+          jobBits.length > 0
+            ? `${runningJobs.length} running: ${jobBits.join("; ")}`
+            : undefined,
         engagementNote: pentestSession
           ? "remote/security engagement — no local dev server as completion"
           : undefined,
@@ -2640,7 +2675,8 @@ export async function runAgentTurn(
     }
 
 
-    const AUTO_COMPACT_KEEP_RECENT = 6;
+    // Align with /compact default: small recency + dense memory (not keepRecent=6 fat tails).
+    const AUTO_COMPACT_KEEP_RECENT = 2;
     let lastCompactionMsgCount = 0;
 
     const summarizeForCompaction = async (
@@ -2654,7 +2690,8 @@ export async function runAgentTurn(
           { role: "user", content: summaryPrompt },
         ],
         temperature: 0.1,
-        maxTokens: 4_096,
+        // Prefer dense memory; enough room for findings without forcing a tiny stub.
+        maxTokens: 2_048,
         signal: options.signal,
       });
       return response.text;
@@ -2676,7 +2713,20 @@ export async function runAgentTurn(
           summarizeForCompaction,
           { budgetTokens: 0, keepRecent: AUTO_COMPACT_KEEP_RECENT },
         );
-        if (!result.summarized || result.afterTokens >= beforeTokens) return;
+        const summaryBody =
+          result.messages.find((m) => isCompactionMemoryMessage(m))?.content ??
+          "";
+        if (
+          !shouldApplyAutoCompact({
+            summarized: result.summarized,
+            summaryBody,
+            beforeTokens: result.beforeTokens,
+            afterTokens: result.afterTokens,
+            afterMessages: result.messages,
+          })
+        ) {
+          return;
+        }
         messages.splice(0, messages.length, ...result.messages);
         loopGuard.resetReadOnly();
         // Token stats BEFORE plan re-injection so the reduction is accurate.

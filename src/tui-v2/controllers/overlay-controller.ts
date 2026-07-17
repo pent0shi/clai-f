@@ -271,6 +271,31 @@ export class OverlayController {
     resolve(value);
   }
 
+  /**
+   * Dismiss a blocking secret (or confirm) so turn abort / Ctrl+C never leaves
+   * a stuck password UI while the agent has already cancelled.
+   * Returns true if something was dismissed.
+   */
+  cancelBlockingPrompt(): boolean {
+    if (this.state.kind === "secret") {
+      this.answerSecret(undefined);
+      return true;
+    }
+    if (this.state.kind === "confirm") {
+      if (this.state.request.kind === "plan" && this.state.planResolve) {
+        this.answerPlanConfirm("dismiss");
+      } else {
+        this.answerConfirm(false);
+      }
+      return true;
+    }
+    if (this.state.kind === "scope-editor") {
+      this.answerScope(undefined);
+      return true;
+    }
+    return false;
+  }
+
   /** The picker's own `onSelect` decides whether/when to close (e.g. a
    * provider pick may chain into a secret prompt instead of closing). */
   selectPicker(value: string): void {

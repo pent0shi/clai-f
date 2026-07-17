@@ -1,7 +1,10 @@
 import type { ChatMessage } from "../types.js";
 import { redactSecrets } from "../llm/provider.js";
 import { stripThinking } from "../ui/thinking.js";
-import { expandKeepStartForToolPairs } from "./tool-history.js";
+import {
+  expandKeepStartForToolPairs,
+  hasOrphanToolMessages,
+} from "./tool-history.js";
 import {
   buildCompactionUserPrompt,
   trimTranscriptForCompaction,
@@ -33,8 +36,38 @@ export function estimateMessagesTokens(messages: ChatMessage[]): number {
 /**
  * Agent-loop auto-compact threshold (estimated tokens). Shared with `/context`
  * so the reported % of budget matches when auto-compaction fires.
+ *
+ * 100k (was 150k): thinking models balloon context; implement turns with large
+ * tool artifacts hit mid-100k before the old threshold and then fail streams.
+ * Earlier compact keeps implement/plan loops healthier without constant /compact.
  */
-export const AUTO_COMPACT_TOKEN_BUDGET = 150_000;
+export const AUTO_COMPACT_TOKEN_BUDGET = 100_000;
+
+/**
+ * Soft post-compact band we *prefer* (includes system prompt ~8k).
+ * Achieved by dense memory + progressive soft-trim of oversized dumps only.
+ * Never a reject gate, never drops messages/tool pairs to hit the number.
+ */
+export const POST_COMPACT_SOFT_GUIDANCE_TOKENS = 16_000;
+/** Prefer landing at or under this; still accept if content needs more room. */
+export const POST_COMPACT_SOFT_UPPER_BAND_TOKENS = 20_000;
+
+type TailPreferMax = { tool: number; assistant: number; user: number };
+
+/**
+ * Progressive soft-trim tiers for the kept tail. Start generous; only step
+ * tighter if estimate is still above the soft upper band. Never blanks a
+ * message or removes tool pairs.
+ */
+const TAIL_SOFT_TIERS: readonly TailPreferMax[] = [
+  { tool: 6_000, assistant: 8_000, user: 8_000 },
+  { tool: 4_000, assistant: 5_000, user: 6_000 },
+  { tool: 2_500, assistant: 3_500, user: 4_000 },
+];
+
+/** Auto-compact: reject empty/near-empty memory after large history (amnesia). */
+export const AUTO_COMPACT_STUB_MIN_CHARS = 120;
+export const AUTO_COMPACT_STUB_BEFORE_TOKENS = 20_000;
 
 export interface CompactOptions {
   /** Soft budget (tokens). When estimated tokens exceed this, compact. */
@@ -58,7 +91,8 @@ export interface CompactResult {
 }
 
 const DEFAULT_BUDGET_TOKENS = 32_000;
-const DEFAULT_KEEP_RECENT = 6;
+/** Default keepRecent for mechanical compact; LLM auto path uses 2 via runner. */
+const DEFAULT_KEEP_RECENT = 2;
 
 /**
  * Content prefixes that mark a `role:"system"` message as compacted session
@@ -72,9 +106,10 @@ export const COMPACTION_MEMORY_PREFIX =
 /**
  * Plan-mode research handoff memory (pre-implement compact). Distinct so the
  * agent does not treat plan-mode gather-only history as permanent gates.
+ * Explicitly ties this context to the plan/tasks the implementer is seeing.
  */
 export const PLAN_IMPLEMENT_MEMORY_PREFIX =
-  "Session memory from plan-mode research (handoff to agent implement — gather-only phase is over; execute approved tasks):";
+  "Session memory from PLAN MODE research that was used to build the comprehensive detailed plan and tasks you are seeing now (handoff to agent implement — gather-only phase is over; execute approved tasks):";
 export const MECHANICAL_MEMORY_PREFIX =
   "Earlier turns in this session, summarized";
 
@@ -265,20 +300,31 @@ export async function compactMessagesWithSummary(
   }
 
   const head = start === 1 ? [messages[0]!] : [];
-  // Strip <think> tags from tail messages so thinking content never
-  // survives compaction into the model's context.
-  const tail = messages.slice(tailStart).map((msg) => {
-    if (msg.role === "assistant" && /<think/i.test(msg.content)) {
-      return { ...msg, content: stripThinking(msg.content).visible };
-    }
-    return msg;
-  });
+  const rawTail = messages.slice(tailStart);
   const memoryPrefix = compactionMemoryPrefixForPurpose(options.purpose);
-  const compacted: ChatMessage[] = [
-    ...head,
-    { role: "system", content: `${memoryPrefix}\n\n${summary}` },
-    ...tail,
-  ];
+  const memoryMsg: ChatMessage = {
+    role: "system",
+    content: `${memoryPrefix}\n\n${summary}`,
+  };
+
+  // Prefer ~16–20k: start with a generous lean tail, then progressively
+  // soft-trim oversized dumps only while still over the soft upper band.
+  // Never drop messages or tool pairs. If still high after last tier, accept.
+  let compacted = buildLeanCompact(head, memoryMsg, rawTail, TAIL_SOFT_TIERS[0]!);
+  for (let i = 1; i < TAIL_SOFT_TIERS.length; i += 1) {
+    if (estimateMessagesTokens(compacted) <= POST_COMPACT_SOFT_UPPER_BAND_TOKENS) {
+      break;
+    }
+    compacted = buildLeanCompact(head, memoryMsg, rawTail, TAIL_SOFT_TIERS[i]!);
+  }
+
+  // Structural safety only — never reject because afterTokens > soft band.
+  if (hasOrphanToolMessages(compacted)) {
+    throw new Error(
+      "compaction failed: would produce orphan tool messages — keeping full history",
+    );
+  }
+
   const afterTokens = estimateMessagesTokens(compacted);
   return {
     messages: compacted,
@@ -288,6 +334,97 @@ export async function compactMessagesWithSummary(
     afterTokens,
     summarized: true,
   };
+}
+
+function buildLeanCompact(
+  head: ChatMessage[],
+  memoryMsg: ChatMessage,
+  rawTail: ChatMessage[],
+  preferMax: TailPreferMax,
+): ChatMessage[] {
+  return [...head, memoryMsg, ...leanTailMessages(rawTail, preferMax)];
+}
+
+/**
+ * Whether an auto-compact result is safe to apply.
+ * Only structural / quality gates — never "afterTokens must be under N".
+ */
+export function shouldApplyAutoCompact(input: {
+  summarized: boolean;
+  summaryBody: string;
+  beforeTokens: number;
+  afterTokens: number;
+  afterMessages: readonly ChatMessage[];
+}): boolean {
+  if (!input.summarized) return false;
+  // Must actually shrink (otherwise pointless and can thrash).
+  if (input.afterTokens >= input.beforeTokens) return false;
+  if (hasOrphanToolMessages([...input.afterMessages])) return false;
+  const body = input.summaryBody.trim();
+  if (!body) return false;
+  // Amnesia stub only — not a target-size check.
+  if (
+    input.beforeTokens >= AUTO_COMPACT_STUB_BEFORE_TOKENS &&
+    body.length < AUTO_COMPACT_STUB_MIN_CHARS
+  ) {
+    return false;
+  }
+  return true;
+}
+
+function isStaleDurableSystem(content: string): boolean {
+  return (
+    content.startsWith("ACTIVE PLAN") ||
+    content.startsWith("SESSION STATE") ||
+    content.startsWith("ENGAGEMENT SCOPE") ||
+    content.startsWith("TASK ANALYSIS") ||
+    content.includes("SESSION STATE / WORKING MEMORY")
+  );
+}
+
+/** Soft head+tail prefer — only when a single message is huge waste. */
+function preferTrimContent(text: string, preferMax: number): string {
+  if (text.length <= preferMax) return text;
+  const half = Math.floor((preferMax - 48) / 2);
+  if (half < 120) return text; // don't mangle medium messages
+  return `${text.slice(0, half)}\n…(trimmed oversized dump in compact tail; full may be on disk)…\n${text.slice(-half)}`;
+}
+
+function leanTailMessages(
+  tail: ChatMessage[],
+  preferMax: { tool: number; assistant: number; user: number },
+): ChatMessage[] {
+  return tail
+    .filter((msg) => {
+      // Fresh plan/session are re-injected after compact — drop stale copies.
+      if (msg.role === "system" && isStaleDurableSystem(msg.content)) {
+        return false;
+      }
+      // Drop prior compaction memory from the tail (new memory is the prefix).
+      if (isCompactionMemoryMessage(msg)) return false;
+      return true;
+    })
+    .map((msg) => {
+      if (msg.role === "tool") {
+        return { ...msg, content: preferTrimContent(msg.content, preferMax.tool) };
+      }
+      if (msg.role === "assistant") {
+        const visible = /<think/i.test(msg.content)
+          ? stripThinking(msg.content).visible
+          : msg.content;
+        return {
+          ...msg,
+          content: preferTrimContent(visible, preferMax.assistant),
+        };
+      }
+      if (msg.role === "user") {
+        return {
+          ...msg,
+          content: preferTrimContent(msg.content, preferMax.user),
+        };
+      }
+      return msg;
+    });
 }
 
 function oneLine(text: string, maxChars: number): string {

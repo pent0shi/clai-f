@@ -74,8 +74,23 @@ describe("OverlayController (V2-071..076)", () => {
     const overlay = new OverlayController(new FocusController());
     const pending = overlay.openSecret({ title: "key", prompt: "enter it" });
     overlay.answerSecret("sk-test");
+
     expect(await pending).toBe("sk-test");
     expect(overlay.getState().kind).toBe("none");
+  });
+
+  it("cancelBlockingPrompt dismisses a stuck secret without leaving it open", async () => {
+    const overlay = new OverlayController(new FocusController());
+    const pending = overlay.openSecret({
+      title: "Administrator access",
+      prompt: "Enter your password for sudo",
+    });
+    expect(overlay.getState().kind).toBe("secret");
+    expect(overlay.cancelBlockingPrompt()).toBe(true);
+    expect(await pending).toBeUndefined();
+    expect(overlay.getState().kind).toBe("none");
+    // Second cancel is a no-op once closed.
+    expect(overlay.cancelBlockingPrompt()).toBe(false);
   });
 
   it("resolves pending confirm/secret promises safely on dispose", async () => {

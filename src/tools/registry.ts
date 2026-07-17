@@ -463,6 +463,7 @@ export const toolRegistry: Record<string, ToolHandler> = {
       maxBytes: optionalNumber(args, "maxBytes"),
       iOwnThis,
       retries: optionalNumber(args, "retries"),
+      timeoutMs: optionalNumber(args, "timeoutMs"),
       signal: options?.signal,
       // Never attach engagement hop checks for owned loopback — leftover
       // pentest scope must not fail local app verify.

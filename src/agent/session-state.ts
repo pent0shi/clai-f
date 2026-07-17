@@ -27,6 +27,8 @@ export interface SessionStateSnapshot {
   nextHint?: string | undefined;
   /** pentest residual one-liner */
   engagementNote?: string | undefined;
+  /** e.g. "2 running: abc123 ffuf…, def456 npm…" */
+  backgroundJobs?: string | undefined;
 }
 
 /** Build a short, high-signal state block (aim < 400 tokens). */
@@ -57,6 +59,9 @@ export function buildSessionStateBlock(s: SessionStateSnapshot): string {
   if (s.lastProbeFailed) flags.push("last_probe_failed=true");
   if (flags.length) lines.push(`flags: ${flags.join(" ")}`);
   if (s.lastOkTool) lines.push(`last_ok_tool: ${s.lastOkTool}`);
+  if (s.backgroundJobs) {
+    lines.push(`jobs: ${oneLine(s.backgroundJobs, 200)}`);
+  }
   if (s.engagementNote) lines.push(`note: ${oneLine(s.engagementNote, 160)}`);
   if (s.nextHint) lines.push(`next: ${oneLine(s.nextHint, 200)}`);
   lines.push(
@@ -89,11 +94,14 @@ export function inferNextHint(s: SessionStateSnapshot): string | undefined {
   if (s.serverStarted && !s.serverProbedOk && !s.lastProbeFailed) {
     return "Confirm ready (shell.tail or lsof LISTEN or localhost GET); leave server running; report URL + job id. Do not thrash ports.";
   }
-  if (s.openTask && /\brecon|enumerat|scan|dns|nmap/i.test(s.openTask)) {
-    return "Run remote recon tools against the in-scope target (dns/http/net.scan), then mark done with evidence.";
+  if (s.backgroundJobs && /\brunning\b/i.test(s.backgroundJobs)) {
+    return "Background jobs still running: shell.jobs / shell.tail first; harvest results before marking tasks done or starting duplicates.";
+  }
+  if (s.openTask && /\brecon|enumerat|scan|dns|nmap|fuzz|ffuf/i.test(s.openTask)) {
+    return "Finish open recon/fuzz with tools (or tail jobs), then mark done with evidence — do not skip to later tasks.";
   }
   if (s.openTask) {
-    return `Finish open task, verify with tools, mark done only with evidence.`;
+    return `Finish open task, verify with tools, mark done only with evidence — do not jump to later pending tasks.`;
   }
   if (s.pendingTasks?.length) {
     return `Open next pending task with task.update in_progress, then execute it.`;

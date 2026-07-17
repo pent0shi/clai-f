@@ -10,6 +10,7 @@ Write a dense, accurate CONTINUATION MEMORY for another assistant that will resu
 Rules:
 - Fidelity over style. Never invent tool results, file contents, findings, URLs, ports, or completions.
 - Prefer concrete artifacts: absolute paths, commands (short form), exit outcomes, HTTP status, plan task ids/states, job ids, open ports, confirmed vs unconfirmed findings.
+- LENGTH: aim for ~800–1500 tokens of dense bullets — complete short memory beats a long dump that cuts mid-sentence. No full tool transcripts or HTML bodies.
 - Omit secrets, API keys, passwords, tokens, and full credential material. Say "[redacted]" if present.
 - Omit progress bars, repeated failures, and decorative chatter.
 - Do not wrap the whole answer in markdown code fences.
@@ -47,28 +48,38 @@ export function buildCompactionUserPrompt(parts: CompactionPromptParts): string 
   if (planImplement) {
     sections.push(
       "Create a complete but compact HANDOFF MEMORY from PLAN-MODE RESEARCH for an agent that will EXECUTE the accepted plan next.",
-      "The material below was gathered mostly under plan mode (research/roadmap). The next phase is agent implement — not gather-only.",
+      "Open with one framing line: this context is from plan mode — the research run that produced the comprehensive detailed plan and tasks the implementer is seeing (ACTIVE PLAN is re-injected separately).",
+      "The material below was gathered under plan mode to design that plan/tasks. The next phase is agent implement — not gather-only.",
+      "The live ACTIVE PLAN (goal/detail/tasks) will be re-injected separately — your job is ACTIONABLE research memory so implement does not re-discover or miss coverage.",
       "",
-      "Organize under these exact section headings (skip a section only if empty):",
+      "Organize under these exact section headings (include a section even if short — write \"none\" only when truly empty):",
       "## User goals",
       "## Research evidence (facts from plan-mode tools)",
+      "## Coverage ledger (do not blindly re-do)",
+      "## Confirmed findings",
+      "## Negative / tested-OK results",
+      "## Untested / open classes",
+      "## Artifacts & paths",
       "## Durable engagement rules (still apply in agent mode)",
       "## Plan-mode-only notes (historical — not current agent gates)",
-      "## Commands/tools and results",
+      "## Commands/tools and key results",
       "## Current state",
       "## Remaining work (post-accept tasks)",
       "## Open risks / failures",
       "",
-      "CRITICAL separation:",
-      "- Put EVIDENCE in Research evidence: targets, stack, ports, findings, artifact paths, OpenAPI notes, credentials status.",
-      "- Durable engagement rules ONLY if they still bind implement (e.g. stay on remote target/scope, authorized testing, non-destructive default, do not treat clai workspace as the target).",
-      "- Plan-mode-only notes: gather-only, await accept, do not exploit/implement yet, scaffold/write freezes that applied BEFORE accept. Label them explicitly as historical plan-mode — the implementer is past that phase.",
-      "- Do NOT list plan-mode gather-only / read-only / no-mutate gates as if they still block approved task execution.",
-      "- Live ACTIVE PLAN + task states will be re-injected separately; still preserve task progress and what research already covered so work is not repeated blindly.",
-      "",
-      "Preserve: recon evidence, fingerprinted stack, confirmed vs unconfirmed findings,",
-      "targets/hosts in scope, credential/auth status, interesting features still to test,",
-      "artifact paths, and anything the implementer needs that is not already in the live plan document.",
+      "How to fill sections (agent-performance critical):",
+      "- Research evidence: concrete facts only — hosts/IPs, ports, stack fingerprint, auth surfaces, headers, endpoints, versions. Complete every bullet (never end mid-token like \"DEN\" for DENY).",
+      "- Coverage ledger: what recon/enum is already done enough (e.g. DNS done, top-ports done, OpenAPI harvested) so implement can deepen rather than restart from zero.",
+      "- Confirmed findings: each as severity + one-line evidence + impact/repro if known (F1, F2, … or short titles). If none yet, say so.",
+      "- Negative / tested-OK: things checked and not issues (SSRF guard, CORS locked, etc.) so implement does not re-burn steps.",
+      "- Untested / open classes: authz/IDOR, RBAC, payment, injection, etc. still open — especially anything blocked on credentials.",
+      "- Artifacts & paths: absolute paths to reports, downloads, .map extracts, scan outputs under temp/scratch/.clai/outputs.",
+      "- Durable engagement rules ONLY if they still bind implement (remote target/scope, authorized testing, non-destructive default, do not treat clai workspace as the target, no local dev server for remote assessments).",
+      "- Plan-mode-only notes: gather-only / await-accept / no-exploit-yet gates that applied BEFORE accept — label historical; implementer is past that phase.",
+      "- Commands/tools: high-signal tools used + outcomes (not every progress line). Prefer name + target + result in one line.",
+      "- Remaining work: map to task ids/titles when ACTIVE PLAN is in DURABLE STATE (t1…); note blocked-on-creds clearly.",
+      "- Do NOT invent findings. Do NOT omit confirmed issues that appear in the material. Prefer denser bullets over long prose.",
+      "- Prefer COMPLETE short memory over a long memory that cuts off mid-sentence.",
     );
   } else {
     sections.push(
@@ -95,7 +106,9 @@ export function buildCompactionUserPrompt(parts: CompactionPromptParts): string 
     );
   }
 
-  sections.push("Be concise but specific. No secrets. No fabricated successes.");
+  sections.push(
+    "Be concise but specific. Target ~800–1500 tokens of memory. Dense bullets over prose. No secrets. No fabricated successes. No full tool dumps.",
+  );
 
   if (durable) {
     sections.push("", "DURABLE STATE (trust this over older chatter):", durable);

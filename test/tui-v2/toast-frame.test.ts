@@ -1,19 +1,46 @@
 import { describe, expect, it } from "vitest";
-import { toastLabel } from "../../src/tui-v2/components/toast/toast-host.js";
-import { TOAST_BOX_HEIGHT } from "../../src/tui-v2/components/toast/toast-anim.js";
+import {
+  padToastLines,
+  wrapToastBody,
+} from "../../src/tui-v2/components/toast/toast-host.js";
+import {
+  TOAST_BOX_HEIGHT,
+  toastAnimAt,
+} from "../../src/tui-v2/components/toast/toast-anim.js";
 import { MAX_TOAST_MESSAGE_CHARS } from "../../src/tui-v2/controllers/toast-controller.js";
+import { TOAST_ENTER_MS } from "../../src/tui-v2/controllers/toast-controller.js";
 
 describe("toast notification chip", () => {
-  it("is a roomy 3-row solid bar", () => {
+  it("min chip height is 3 (pad + body + pad)", () => {
     expect(TOAST_BOX_HEIGHT).toBe(3);
   });
 
-  it("includes full message in the label (no mid-string clip helper)", () => {
-    const msg = "Tasks hidden · ^H";
-    const label = toastLabel("info", msg);
-    expect(label).toContain(msg);
-    expect(label.startsWith("   ")).toBe(true); // H_PAD = 3
-    expect(label.endsWith("   ")).toBe(true);
+  it("wraps long messages to inner width without exceeding it", () => {
+    const msg =
+      "session resumed · long title here · plan “huge goal name” · 42 items · 99 model messages";
+    const lines = wrapToastBody("info", msg, 28);
+    expect(lines.length).toBeGreaterThan(1);
+    for (const line of lines) {
+      expect(line.length).toBeLessThanOrEqual(28);
+    }
+    expect(lines.join(" ")).toContain("session resumed");
+  });
+
+  it("pads wrapped lines to full chip width", () => {
+    const body = wrapToastBody("warn", "hello world", 20);
+    const padded = padToastLines(body, 24);
+    for (const line of padded) {
+      expect(line.length).toBe(24);
+    }
+  });
+
+  it("animates multi-line height off-screen fully", () => {
+    const tall = 8;
+    const start = toastAnimAt(0, 2000, tall);
+    expect(start.top).toBe(-tall);
+    const hold = toastAnimAt(TOAST_ENTER_MS + 50, 2000, tall);
+    expect(hold.phase).toBe("hold");
+    expect(hold.top).toBe(1);
   });
 
   it("allows long status lines through the controller cap", () => {

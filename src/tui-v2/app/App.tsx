@@ -141,9 +141,52 @@ export function App(): ReactNode {
   const chatContentWidth = Math.max(24, contentInnerWidth - splitPlanW - overlayPlanW);
 
   useKeyboard((key) => {
-    if (key.eventType === "release" || overlay.kind !== "none") return;
+    if (key.eventType === "release") return;
 
     const chord = chordFromKeyEvent(key);
+
+    // Password / confirm overlays used to swallow ALL global keys (early return
+    // when overlay !== none). Then Ctrl+C only aborted via SIGINT and left the
+    // secret UI stuck; Esc never reached App if the hidden input lost focus.
+    // Still allow cancel/interrupt while a blocking prompt is open.
+    if (overlay.kind === "secret" || overlay.kind === "confirm" || overlay.kind === "scope-editor") {
+      if (chord === "escape" || chord === "ctrl+c") {
+        key.preventDefault();
+        const dismissed = services.overlay.cancelBlockingPrompt();
+        if (chord === "ctrl+c") {
+          const now = Date.now();
+          const doublePress =
+            lastCtrlC.current > 0 &&
+            now - lastCtrlC.current < CTRL_C_QUIT_WINDOW_MS;
+          if (services.session.getState().running) {
+            services.session.abort();
+          }
+          if (doublePress) {
+            services.requestExit();
+            return;
+          }
+          lastCtrlC.current = now;
+          notifyWarn(
+            services,
+            dismissed
+              ? "Prompt cancelled · Ctrl+C again to exit"
+              : "Turn aborted · Ctrl+C again to exit",
+            { key: "interrupt", durationMs: 2200 },
+          );
+          return;
+        }
+        // Esc: dismiss prompt + abort turn; never quit.
+        if (services.session.getState().running) {
+          services.session.abort();
+        }
+        return;
+      }
+      // Typing / y-n / etc. handled by the modal's own useKeyboard.
+      return;
+    }
+
+    if (overlay.kind !== "none") return;
+
     // Tab belongs to the completion menu while the composer is active. The
     // previous global focus binding consumed it first, which made `/mod` + Tab
     // appear to freeze the input instead of completing `/model`.
@@ -155,6 +198,7 @@ export function App(): ReactNode {
         // Esc: abort a live turn only. Never exit — multi-Esc used to quit
         // because it shared the double-press path with Ctrl+C.
         key.preventDefault();
+        services.overlay.cancelBlockingPrompt();
         if (services.session.getState().running) {
           services.session.abort();
         }
@@ -165,6 +209,7 @@ export function App(): ReactNode {
         // Important: while a hung tool is still "running", a second Ctrl+C
         // must still exit — otherwise cancel that never settles traps the UI.
         key.preventDefault();
+        services.overlay.cancelBlockingPrompt();
         const now = Date.now();
         const doublePress =
           lastCtrlC.current > 0 &&

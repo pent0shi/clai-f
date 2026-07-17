@@ -508,7 +508,7 @@ describe("audit#6 — http helpers cap responses and watchdog streams", () => {
     }
   });
 
-  it("rejects a stream that contains reasoning but no visible completion", async () => {
+  it("returns reasoning-only streams so the agent can salvage tool calls", async () => {
     const { openAiCompatibleStream } = await import("../src/llm/http.js");
     const originalFetch = globalThis.fetch;
     globalThis.fetch = vi.fn(async () =>
@@ -516,6 +516,33 @@ describe("audit#6 — http helpers cap responses and watchdog streams", () => {
         'data: {"choices":[{"delta":{"reasoning":"I should search."}}]}\n\ndata: [DONE]\n',
         { status: 200, headers: { "content-type": "text/event-stream" } },
       ),
+    ) as unknown as typeof fetch;
+
+    try {
+      const result = await openAiCompatibleStream({
+        provider: "test",
+        baseUrl: "https://example.invalid/v1",
+        apiKey: "test-key",
+        model: "test-model",
+        messages: [{ role: "user", content: "hi" }],
+        onToken: () => {},
+      });
+      // Thinking-only is no longer a hard provider error — runner recovers.
+      expect(result.text).toMatch(/I should search/i);
+      expect(result.toolCalls ?? []).toHaveLength(0);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("still rejects a fully empty stream (no reasoning, no content, no tools)", async () => {
+    const { openAiCompatibleStream } = await import("../src/llm/http.js");
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn(async () =>
+      new Response("data: [DONE]\n", {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      }),
     ) as unknown as typeof fetch;
 
     try {

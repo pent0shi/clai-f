@@ -148,7 +148,10 @@ const PASSTHROUGH_CAP_CHARS = 400_000;
 // otherwise a single fetch can single-handedly blow the context budget and
 // starve the model of room to actually respond (observed as empty/garbled
 // completions on smaller-context-window models after a big fetch).
-const WEB_FETCH_CAP_CHARS = 20_000;
+// http.fetch is evidence-dense and often batched in recon — tighter cap.
+// web.fetch is for reading pages — slightly larger.
+const HTTP_FETCH_CAP_CHARS = 8_000;
+const WEB_FETCH_CAP_CHARS = 14_000;
 
 export function formatToolContext(call: ToolCall, result: ToolResult): string {
   const output = result.output.trim();
@@ -160,14 +163,16 @@ export function formatToolContext(call: ToolCall, result: ToolResult): string {
   const failLine = failureSummaryLine(result);
 
   if (call.name === "web.fetch" || call.name === "http.fetch") {
-    const { text, truncated } = summarizeOutput(output, WEB_FETCH_CAP_CHARS, {
+    const cap =
+      call.name === "http.fetch" ? HTTP_FETCH_CAP_CHARS : WEB_FETCH_CAP_CHARS;
+    const { text, truncated } = summarizeOutput(output, cap, {
       preferErrors,
     });
     const body = truncated
       ? `${text}${
           result.outputPath
-            ? `\n\n[Response exceeds ${WEB_FETCH_CAP_CHARS.toLocaleString()} chars; head/tail shown. Full: ${result.outputPath}]`
-            : `\n\n[Response exceeds ${WEB_FETCH_CAP_CHARS.toLocaleString()} chars; only head and tail shown.]`
+            ? `\n\n[Response exceeds ${cap.toLocaleString()} chars; head/tail shown. Full: ${result.outputPath}]`
+            : `\n\n[Response exceeds ${cap.toLocaleString()} chars; only head and tail shown.]`
         }`
       : text;
     return [failLine, body].filter(Boolean).join("\n").trim();

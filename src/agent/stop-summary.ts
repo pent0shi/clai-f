@@ -1,11 +1,12 @@
 import { loadPlan } from "../store/plan.js";
+import { jobManager } from "../tools/jobs.js";
 import type { SessionPolicy } from "./session-policy.js";
 import type { ChatMessage } from "../types.js";
 
 /**
  * Build a rich summary when the agent stops (user declined to continue or
- * maxIterations ceiling hit). Includes plan state, key findings, and clear
- * resume instructions so a later "continue" can pick up exactly here.
+ * maxIterations ceiling hit). Includes plan state, jobs, key findings, and
+ * clear resume instructions so a later "continue" can pick up exactly here.
  */
 export async function buildRichStopSummary(
   messages: ChatMessage[],
@@ -35,14 +36,40 @@ export async function buildRichStopSummary(
         `  ${icon} [${task.id}] (${task.state}) ${task.title}${task.note ? ` — ${task.note}` : ""}`,
       );
     }
+    const inProgress = plan.tasks.find((t) => t.state === "in_progress");
     const next = plan.tasks.find(
       (t) => t.state === "pending" || t.state === "in_progress",
     );
-    if (next) {
+    if (inProgress) {
+      parts.push(
+        `\nResume open task first: ${inProgress.id} — "${inProgress.title}" (do not skip to later tasks).`,
+      );
+    } else if (next) {
       parts.push(`\nNext task to resume: ${next.id} — "${next.title}"`);
     }
     const doneCount = plan.tasks.filter((t) => t.state === "done").length;
     parts.push(`\nProgress: ${doneCount}/${plan.tasks.length} tasks done.`);
+  }
+
+  const running = jobManager.getRunningJobs();
+  const recent = jobManager.getRecentJobs(8);
+  if (running.length > 0 || recent.length > 0) {
+    parts.push("\n## Background Jobs");
+    for (const job of running.slice(0, 8)) {
+      parts.push(
+        `  ▶ [${job.id}] ${job.status} — ${(job.commandDisplay || job.command).slice(0, 80)}`,
+      );
+    }
+    if (running.length === 0) {
+      for (const job of recent.slice(0, 5)) {
+        parts.push(
+          `  · [${job.id}] ${job.status} — ${(job.commandDisplay || job.command).slice(0, 80)}`,
+        );
+      }
+    }
+    parts.push(
+      "On continue: shell.jobs / shell.tail relevant ids before re-running the same work.",
+    );
   }
 
   // Key findings from tool results (last 20 tool messages)
@@ -62,7 +89,9 @@ export async function buildRichStopSummary(
   }
 
   parts.push("\n## To Resume");
-  parts.push('Type "continue" to pick up from where this session left off.');
+  parts.push(
+    'Type "continue" to pick up mid-work: re-check jobs and the open task, harvest results, then proceed — do not mark tasks done without evidence.',
+  );
 
   return parts.join("\n");
 }

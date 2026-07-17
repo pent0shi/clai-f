@@ -971,14 +971,19 @@ export async function openAiCompatibleStream(options: {
           cleanup();
           const toolCalls = finalizeOpenAiToolCalls(toolCallState);
           if (!visible.trim() && toolCalls.length === 0) {
-            const cause = reasoningSeen.trim()
-              ? finishReason === "length"
-                ? "hit the max_tokens limit while still thinking"
-                : "completed after reasoning without a visible answer"
-              : "completed without a visible answer";
-            
+            // Thinking models (Kimi/Moonshot via Mantle, etc.) often emit only
+            // reasoning, sometimes with tool sentinels inside <think>. Returning
+            // the full text lets the agent runner recover tool calls from
+            // thinkContent instead of failing the whole stream as an error.
+            if (reasoningSeen.trim()) {
+              return {
+                text: full,
+                ...(finishReason ? { finishReason } : { finishReason: "stop" }),
+                ...(streamUsage ? { usage: streamUsage } : {}),
+              };
+            }
             throw new ProviderError(
-              `${options.provider} ${cause}.`,
+              `${options.provider} completed without a visible answer.`,
             );
           }
           return {
@@ -1073,13 +1078,17 @@ export async function openAiCompatibleStream(options: {
     cleanup();
     const toolCalls = finalizeOpenAiToolCalls(toolCallState);
     if (!visible.trim() && toolCalls.length === 0) {
-      const cause = reasoningSeen.trim()
-        ? finishReason === "length"
-          ? "hit the max_tokens limit while still thinking"
-          : "completed after reasoning without a visible answer"
-        : "completed without a visible answer";
+      // See [DONE] branch — hand thinking-only streams to the runner so it can
+      // salvage sentinel tool blocks (or nudge) instead of hard-failing.
+      if (reasoningSeen.trim()) {
+        return {
+          text: full,
+          ...(finishReason ? { finishReason } : { finishReason: "stop" }),
+          ...(streamUsage ? { usage: streamUsage } : {}),
+        };
+      }
       throw new ProviderError(
-        `${options.provider} ${cause}.`,
+        `${options.provider} completed without a visible answer.`,
       );
     }
     return {

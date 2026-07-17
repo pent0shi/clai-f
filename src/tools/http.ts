@@ -4,8 +4,14 @@ import type { ToolResult } from "../types.js";
 import { isBlockedAddress } from "./web/ssrf-guard.js";
 import { toReadableText } from "./web/readable.js";
 
-const DEFAULT_MAX_BYTES = 256 * 1024;
-const DEFAULT_RETRIES = 2;
+/** Capture budget for body bytes (artifact + evidence build). Model context is capped later. */
+const DEFAULT_MAX_BYTES = 128 * 1024;
+/**
+ * Default retries for remote evidence: 0 so intentional 5xx/probe responses are
+ * not silently rewritten. Callers may pass retries; owned loopback still soft-
+ * retries connection refused.
+ */
+const DEFAULT_RETRIES = 0;
 const RETRY_STATUSES = new Set([408, 425, 429, 500, 502, 503, 504]);
 const ALLOWED_METHODS = new Set([
   "GET",
@@ -16,6 +22,19 @@ const ALLOWED_METHODS = new Set([
   "DELETE",
   "OPTIONS",
 ]);
+/** Browser-like default UA — less fingerprint noise than clai-http-fetch/*. */
+const DEFAULT_USER_AGENT =
+  "Mozilla/5.0 (compatible; clai/1.0; +https://github.com/pentoshi007/clai) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36";
+const DEFAULT_TIMEOUT_MS = 15_000;
+const MIN_TIMEOUT_MS = 3_000;
+const MAX_TIMEOUT_MS = 60_000;
+
+interface RedirectHop {
+  status: number;
+  url: string;
+  location: string;
+  setCookies: string[];
+}
 
 /**
  * Block (or require explicit ownership confirmation for) requests that
@@ -139,8 +158,15 @@ interface FetchOptions {
   maxBytes?: number | undefined;
   iOwnThis?: boolean | undefined;
   retries?: number | undefined;
+  /** Request timeout in ms (clamped 3s–60s). Default 15s. */
+  timeoutMs?: number | undefined;
   signal?: AbortSignal | undefined;
   authorizeHop?: ((url: string, resolvedAddresses: string[]) => Promise<{ allowed: boolean; reason: string }> | { allowed: boolean; reason: string }) | undefined;
+}
+
+function clampTimeoutMs(value: number | undefined): number {
+  if (value === undefined || !Number.isFinite(value)) return DEFAULT_TIMEOUT_MS;
+  return Math.max(MIN_TIMEOUT_MS, Math.min(MAX_TIMEOUT_MS, Math.floor(value)));
 }
 
 export async function httpFetch(
@@ -200,7 +226,7 @@ export async function httpFetch(
 
   const headers = new Headers(options.headers);
   if (!headers.has("user-agent")) {
-    headers.set("user-agent", "clai-http-fetch/1.1");
+    headers.set("user-agent", DEFAULT_USER_AGENT);
   }
   if (!headers.has("accept")) {
     headers.set(
@@ -231,26 +257,28 @@ export async function httpFetch(
   let attempts = 0;
   let lastNetworkError: unknown;
   let usedUrl = url;
-  // Extra retries for local probes (server often not ready on first tick).
-  const baseRetries =
+  let redirectHops: RedirectHop[] = [];
+  const timeoutMs = clampTimeoutMs(options.timeoutMs);
+  // Status retries only when caller opts in (default 0). Loopback keeps soft
+  // connection-refused retries below regardless of status-retry budget.
+  const statusRetryLimit =
     method === "GET" || method === "HEAD"
       ? clampRetries(options.retries ?? DEFAULT_RETRIES)
       : 0;
-  const retryLimit = ownedLoopback
-    ? Math.max(baseRetries, 4)
-    : baseRetries;
+  const connRetryLimit = ownedLoopback
+    ? Math.max(statusRetryLimit, 4)
+    : statusRetryLimit;
 
   try {
     candidateLoop: for (let ci = 0; ci < urlCandidates.length; ci += 1) {
       const candidateUrl = urlCandidates[ci]!;
       usedUrl = candidateUrl;
-      // Fresh attempt counter per candidate, but keep total for the message.
       let localAttempts = 0;
       for (;;) {
         attempts += 1;
         localAttempts += 1;
         const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), 15000);
+        const timer = setTimeout(() => controller.abort(), timeoutMs);
         const onParentAbort = () => controller.abort();
         if (options.signal) {
           if (options.signal.aborted) {
@@ -261,6 +289,7 @@ export async function httpFetch(
         try {
           let requestUrl = candidateUrl;
           let redirects = 0;
+          redirectHops = [];
           for (;;) {
             response = await fetch(requestUrl, {
               ...init,
@@ -269,6 +298,16 @@ export async function httpFetch(
             const location = response.headers.get("location");
             if (!(response.status >= 300 && response.status < 400 && location)) break;
             if (redirects >= 10) throw new Error("Too many redirects (maximum 10)");
+            const setCookies =
+              typeof response.headers.getSetCookie === "function"
+                ? response.headers.getSetCookie()
+                : multiHeader(response.headers, "set-cookie");
+            redirectHops.push({
+              status: response.status,
+              url: requestUrl,
+              location,
+              setCookies,
+            });
             const next = new URL(location, requestUrl);
             const denial = await authorizeDestination(next);
             if (denial) throw new Error(denial);
@@ -277,14 +316,13 @@ export async function httpFetch(
             redirects += 1;
           }
           if (
-            localAttempts <= retryLimit &&
+            localAttempts <= statusRetryLimit &&
             RETRY_STATUSES.has(response.status)
           ) {
             await drainResponse(response);
             await sleep(retryDelayMs(localAttempts));
             continue;
           }
-          // Success for this candidate
           break candidateLoop;
         } catch (error) {
           lastNetworkError = error;
@@ -293,7 +331,7 @@ export async function httpFetch(
             error.name === "AbortError" &&
             !options.signal?.aborted;
           const errMsg = isTimeout
-            ? "Request timed out after 15s"
+            ? `Request timed out after ${timeoutMs}ms`
             : error instanceof Error
               ? error.message
               : String(error);
@@ -302,17 +340,16 @@ export async function httpFetch(
           }
           // Connection refused on loopback → try next address or retry.
           if (ownedLoopback && isConnectionRefusedError(error)) {
-            if (localAttempts <= retryLimit) {
+            if (localAttempts <= connRetryLimit) {
               await sleep(Math.min(400 * localAttempts, 1500));
               continue;
             }
-            // Exhausted retries for this host — try next loopback candidate.
             if (ci + 1 < urlCandidates.length) {
               break; // next candidate
             }
             throw new Error(errMsg);
           }
-          if (localAttempts > retryLimit) {
+          if (localAttempts > statusRetryLimit) {
             throw new Error(errMsg);
           }
           await sleep(retryDelayMs(localAttempts));
@@ -378,64 +415,30 @@ export async function httpFetch(
       }
     }
   } else {
-    // No streaming body (eg HEAD or empty 204). Fall through with empty text.
     collected = "";
   }
 
-  const headerLines: string[] = [];
-  response.headers.forEach((v, k) => headerLines.push(`${k}: ${v}`));
-  const headerBlock = headerLines.length > 0 ? `Headers:\n${headerLines.join("\n")}\n\n` : "";
-  const truncNote = truncated
-    ? `\n... (truncated at ${limit.toLocaleString()} bytes)`
-    : "";
   const contentType = response.headers.get("content-type") ?? "";
   const isBinary = isBinaryContentType(contentType) || isBinaryContent(collected);
-  const displayBody = isBinary
-    ? `[Binary content (${contentType || "unknown content type"}) - raw body suppressed]`
-    : collected;
-  const body = method === "HEAD" ? "" : displayBody;
-  const readable =
-    method !== "HEAD" && !isBinary && contentType.toLowerCase().includes("html")
-      ? toReadableText(collected)
-      : "";
   const finalUrl = response.url || usedUrl;
-  const meta = {
+  const evidence = formatHttpEvidence({
+    method,
     requestedUrl: url,
+    usedUrl,
     finalUrl,
-    probedUrl: usedUrl !== url ? usedUrl : undefined,
     status: response.status,
     statusText: response.statusText,
-    ok: response.ok,
-    method,
     attempts,
-    retried: attempts > 1,
-    headers: Object.fromEntries(
-      [...response.headers.entries()].sort(([a], [b]) => a.localeCompare(b)),
-    ),
-    contentType,
     bytesRead,
     truncated,
-    truncatedAt: truncated ? limit : undefined,
-    lastNetworkError:
-      lastNetworkError instanceof Error
-        ? lastNetworkError.message
-        : lastNetworkError
-          ? String(lastNetworkError)
-          : undefined,
-  };
-  const evidence = [
-    `${response.status} ${response.statusText} ${finalUrl}`,
-    `attempts=${attempts} bytes=${bytesRead}${truncated ? ` truncated@${limit}` : ""}${usedUrl !== url ? ` via=${usedUrl}` : ""}`,
-    "",
-    "Metadata:",
-    JSON.stringify(meta, null, 2),
-    "",
-    headerBlock.trimEnd(),
-    readable ? `\nReadable content:\n${readable}\n` : "",
-    method === "HEAD" ? "" : `Raw body:\n${body}${truncNote}`,
-  ]
-    .filter((part) => part !== "")
-    .join("\n");
+    limit,
+    contentType,
+    headers: response.headers,
+    body: collected,
+    isBinary,
+    redirectHops,
+    lastNetworkError,
+  });
 
   return {
     ok: true,
@@ -443,6 +446,192 @@ export async function httpFetch(
     exitCode: 0,
     truncated,
   };
+}
+
+function multiHeader(headers: Headers, name: string): string[] {
+  const out: string[] = [];
+  headers.forEach((value, key) => {
+    if (key.toLowerCase() === name.toLowerCase()) out.push(value);
+  });
+  return out;
+}
+
+/** Headers always kept in evidence (security / fingerprint / cookies). */
+const PRIORITY_HEADER_RE =
+  /^(set-cookie|server|x-powered-by|x-aspnet|x-generator|x-frame-options|x-content-type-options|x-xss-protection|content-security-policy|content-type|location|www-authenticate|access-control-|strict-transport|referrer-policy|permissions-policy|cross-origin-|cache-control|via|cf-ray|x-request-id|x-amz-|x-served|link|allow|retry-after)$/i;
+
+function formatHttpEvidence(input: {
+  method: string;
+  requestedUrl: string;
+  usedUrl: string;
+  finalUrl: string;
+  status: number;
+  statusText: string;
+  attempts: number;
+  bytesRead: number;
+  truncated: boolean;
+  limit: number;
+  contentType: string;
+  headers: Headers;
+  body: string;
+  isBinary: boolean;
+  redirectHops: RedirectHop[];
+  lastNetworkError: unknown;
+}): string {
+  const lines: string[] = [];
+  lines.push(
+    `${input.status} ${input.statusText} ${input.method} ${input.finalUrl}`,
+  );
+
+  if (input.redirectHops.length > 0) {
+    const chain = [
+      ...input.redirectHops.map(
+        (h) => `${h.status} ${h.url} → ${h.location}`,
+      ),
+      `${input.status} ${input.finalUrl}`,
+    ];
+    lines.push(`redirects: ${chain.join(" → ")}`);
+    for (const hop of input.redirectHops) {
+      if (hop.setCookies.length) {
+        lines.push(
+          `  hop ${hop.status} set-cookie: ${hop.setCookies.join("; ")}`,
+        );
+      }
+    }
+  }
+
+  const metaBits = [
+    `attempts=${input.attempts}`,
+    `bytes=${input.bytesRead}`,
+  ];
+  if (input.truncated) metaBits.push(`truncated@${input.limit}`);
+  if (input.usedUrl !== input.requestedUrl) metaBits.push(`via=${input.usedUrl}`);
+  if (input.requestedUrl !== input.finalUrl && input.redirectHops.length === 0) {
+    metaBits.push(`requested=${input.requestedUrl}`);
+  }
+  lines.push(metaBits.join(" "));
+
+  if (input.finalUrl.startsWith("https:")) {
+    lines.push(
+      "TLS: leaf cert not captured by http.fetch — use web.fetch with includeTls=true for fingerprint/SAN.",
+    );
+  }
+
+  // ALL response headers, always — cheap vs body and critical for pentest.
+  // Security/fingerprint headers first for scannability; remainder sorted after.
+  const allHeaders: Array<[string, string]> = [];
+  input.headers.forEach((v, k) => allHeaders.push([k, v]));
+  allHeaders.sort(([a], [b]) => a.localeCompare(b));
+  const priority: string[] = [];
+  const rest: string[] = [];
+  for (const [k, v] of allHeaders) {
+    const line = `${k}: ${v}`;
+    if (PRIORITY_HEADER_RE.test(k)) priority.push(line);
+    else rest.push(line);
+  }
+  lines.push("");
+  lines.push("Headers:");
+  for (const line of priority) lines.push(line);
+  for (const line of rest) lines.push(line);
+
+  const tech = deriveTechHints(input.headers, input.body, input.contentType);
+  if (tech) {
+    lines.push("");
+    lines.push(`Tech hints: ${tech}`);
+  }
+
+  if (input.method !== "HEAD") {
+    lines.push("");
+    lines.push("Body:");
+    if (input.isBinary) {
+      lines.push(
+        `[Binary content (${input.contentType || "unknown content type"}) — raw body suppressed]`,
+      );
+    } else {
+      const ct = input.contentType.toLowerCase();
+      const isHtml = ct.includes("html");
+      const isJson =
+        ct.includes("json") ||
+        ct.includes("javascript") ||
+        ct.includes("xml") ||
+        ct.startsWith("text/");
+      // Single representation: readable HTML OR raw text/json — never both.
+      let bodyText = isHtml
+        ? toReadableText(input.body) || input.body
+        : input.body;
+      // Error pages: keep status/headers rich, body shorter.
+      const isError = input.status >= 400;
+      const bodyCap = isError
+        ? 3_000
+        : isHtml
+          ? 6_000
+          : isJson
+            ? 12_000
+            : 8_000;
+      // Body is the only intentional truncate — status/headers/redirects stay full.
+      if (bodyText.length > bodyCap) {
+        bodyText =
+          bodyText.slice(0, bodyCap) +
+          `\n... (body truncated at ${bodyCap.toLocaleString()} chars — headers/status above are complete; re-fetch with higher maxBytes or page if you need more body)`;
+      }
+      if (input.truncated && !bodyText.includes("capture truncated")) {
+        bodyText += `\n... (wire capture stopped at ${input.limit.toLocaleString()} bytes — raise maxBytes for more body)`;
+      }
+      lines.push(bodyText || "(empty)");
+    }
+  }
+
+  if (input.lastNetworkError) {
+    const err =
+      input.lastNetworkError instanceof Error
+        ? input.lastNetworkError.message
+        : String(input.lastNetworkError);
+    if (err) {
+      lines.push("");
+      lines.push(`note: earlier network error during retries: ${err}`);
+    }
+  }
+
+  return lines.join("\n");
+}
+
+/** Header-derived stack hints only — never invent products. */
+function deriveTechHints(
+  headers: Headers,
+  body: string,
+  contentType: string,
+): string {
+  const bits: string[] = [];
+  const server = headers.get("server");
+  if (server) bits.push(`server=${server}`);
+  const powered = headers.get("x-powered-by");
+  if (powered) bits.push(`x-powered-by=${powered}`);
+  const gen = headers.get("x-generator");
+  if (gen) bits.push(`x-generator=${gen}`);
+  const cookies =
+    typeof headers.getSetCookie === "function"
+      ? headers.getSetCookie()
+      : multiHeader(headers, "set-cookie");
+  if (cookies.length) {
+    const names = cookies
+      .map((c) => c.split("=")[0]?.trim())
+      .filter(Boolean)
+      .slice(0, 8);
+    if (names.length) bits.push(`cookies=${names.join(",")}`);
+  }
+  if (contentType) bits.push(`content-type=${contentType.split(";")[0]?.trim()}`);
+  // Light path markers from body (safe, non-invented).
+  const sample = body.slice(0, 8_000);
+  if (/\/_next\//i.test(sample) || /__NEXT_DATA__/i.test(sample)) {
+    bits.push("marker=next.js");
+  } else if (/wp-content|wordpress/i.test(sample)) {
+    bits.push("marker=wordpress");
+  } else if (/csrfmiddlewaretoken|django/i.test(sample)) {
+    bits.push("marker=django");
+  } else if (/react/i.test(sample) && /data-reactroot|__REACT/i.test(sample)) {
+    bits.push("marker=react");
+  }
+  return bits.join("; ");
 }
 
 function clampRetries(value: number): number {

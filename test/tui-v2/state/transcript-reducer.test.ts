@@ -318,6 +318,53 @@ describe("transcript reducer (V2-050)", () => {
     ]);
   });
 
+  it("reorders streamed answer-then-think so thinking sits above the response", () => {
+    // Live bug: model streams final summary first, then reasoning — thinking
+    // row was left below the deliverable because streaming finalizes skipped reorder.
+    const seq = buildSequencer();
+    const turnId = asTurnId("turn-1");
+    let state = EMPTY_TRANSCRIPT_STATE;
+    state = applyAppEvent(
+      state,
+      seq.build("assistant-delta", { text: "Assessment complete. Risk: LOW." }, turnId),
+    );
+    state = applyAppEvent(
+      state,
+      seq.build(
+        "thinking-delta",
+        { text: "The user wants me to continue; I should provide a final summary." },
+        turnId,
+      ),
+    );
+    state = applyAppEvent(
+      state,
+      seq.build(
+        "thinking-block",
+        {
+          messageId: seq.ids.message(),
+          content: "The user wants me to continue; I should provide a final summary.",
+        },
+        turnId,
+      ),
+    );
+    state = applyAppEvent(
+      state,
+      seq.build(
+        "assistant-message",
+        {
+          messageId: seq.ids.message(),
+          text: "Assessment complete. Risk: LOW.",
+        },
+        turnId,
+      ),
+    );
+    const items = transcriptItems(state);
+    expect(items.map((i) => i.kind)).toEqual(["thinking", "assistant"]);
+    expect((items[0] as ThinkingItem).content).toMatch(/final summary/);
+    expect((items[1] as AssistantItem).text).toMatch(/Risk: LOW/);
+    expect((items[0] as ThinkingItem).streaming).toBe(false);
+  });
+
   it("keeps streaming thinking after the previous response (multi-step deltas)", () => {
     const seq = buildSequencer();
     const turnId = asTurnId("turn-1");

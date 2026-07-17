@@ -32,12 +32,17 @@ describe("compaction-summary prompts", () => {
       messageTranscript: "USER: recon target\nTOOL: nmap open 443",
       durableState: "ACTIVE PLAN: pentest",
     });
-    expect(p).toMatch(/HANDOFF|plan-mode research/i);
+    expect(p).toMatch(/HANDOFF|plan-mode research|plan mode/i);
+    expect(p).toMatch(/comprehensive detailed plan and tasks/i);
     expect(p).toContain("## Research evidence");
+    expect(p).toContain("## Coverage ledger");
+    expect(p).toContain("## Confirmed findings");
+    expect(p).toContain("## Untested / open classes");
+    expect(p).toContain("## Artifacts & paths");
     expect(p).toContain("## Plan-mode-only notes");
     expect(p).toContain("## Durable engagement rules");
-    expect(p).toMatch(/not current agent gates|gather-only/i);
-    expect(p).not.toMatch(/Do not implement or exploit yet/i);
+    expect(p).toMatch(/not current agent gates|gather-only|past that phase/i);
+    expect(p).toMatch(/mid-token|COMPLETE short memory/i);
   });
 
   it("system prompt warns against freezing temporary mode gates", () => {
@@ -103,10 +108,11 @@ describe("LLM compaction integration shape", () => {
     const mem = result.messages.find(
       (m) =>
         m.role === "system" &&
-        m.content.includes("plan-mode research") &&
+        /plan mode research/i.test(m.content) &&
         m.content.includes("Ports 80/443"),
     );
     expect(mem).toBeTruthy();
     expect(mem!.content).toMatch(/gather-only phase is over/i);
+    expect(mem!.content).toMatch(/comprehensive detailed plan and tasks/i);
   });
 });

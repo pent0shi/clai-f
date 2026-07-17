@@ -12,15 +12,15 @@ import { easeInCubic, easeOutCubic } from "../../motion/ease.js";
 export { easeInCubic, easeOutCubic } from "../../motion/ease.js";
 
 /**
- * Toast chip height — keep in sync with host.
- * 3 rows: padding + bold label row + padding (roomier “larger text” feel).
+ * Minimum toast chip height (pad + one body line + pad).
+ * Multi-line wraps use a taller box; pass `boxHeight` into toastAnimAt.
  */
 export const TOAST_BOX_HEIGHT = 3;
 
 /** Resting top row when fully visible (1 = just under terminal top edge). */
 export const TOAST_REST_TOP = 1;
 
-/** Off-screen top when fully hidden above the viewport. */
+/** Off-screen top when fully hidden above the viewport (min height). */
 export const TOAST_HIDDEN_TOP = -TOAST_BOX_HEIGHT;
 
 export type ToastAnimPhase = "enter" | "hold" | "exit" | "gone";
@@ -39,19 +39,24 @@ export interface ToastAnimState {
 /**
  * Compute motion for a toast at `ageMs` since createdAt.
  * @param holdMs time at rest (item.durationMs)
+ * @param boxHeight rendered height (pad + wrapped body lines); default min chip
  */
-export function toastAnimAt(ageMs: number, holdMs: number): ToastAnimState {
+export function toastAnimAt(
+  ageMs: number,
+  holdMs: number,
+  boxHeight: number = TOAST_BOX_HEIGHT,
+): ToastAnimState {
   const age = Math.max(0, ageMs);
   const hold = Math.max(0, holdMs);
+  const h = Math.max(TOAST_BOX_HEIGHT, Math.floor(boxHeight));
+  const hiddenTop = -h;
   const enterEnd = TOAST_ENTER_MS;
   const holdEnd = enterEnd + hold;
   const exitEnd = holdEnd + TOAST_EXIT_MS;
 
   if (age < enterEnd) {
     const p = easeOutCubic(age / Math.max(1, TOAST_ENTER_MS));
-    const top = Math.round(
-      TOAST_HIDDEN_TOP + (TOAST_REST_TOP - TOAST_HIDDEN_TOP) * p,
-    );
+    const top = Math.round(hiddenTop + (TOAST_REST_TOP - hiddenTop) * p);
     return { phase: "enter", top, visibility: p };
   }
   if (age < holdEnd) {
@@ -59,10 +64,8 @@ export function toastAnimAt(ageMs: number, holdMs: number): ToastAnimState {
   }
   if (age < exitEnd) {
     const p = easeInCubic((age - holdEnd) / Math.max(1, TOAST_EXIT_MS));
-    const top = Math.round(
-      TOAST_REST_TOP + (TOAST_HIDDEN_TOP - TOAST_REST_TOP) * p,
-    );
+    const top = Math.round(TOAST_REST_TOP + (hiddenTop - TOAST_REST_TOP) * p);
     return { phase: "exit", top, visibility: 1 - p };
   }
-  return { phase: "gone", top: TOAST_HIDDEN_TOP, visibility: 0 };
+  return { phase: "gone", top: hiddenTop, visibility: 0 };
 }
