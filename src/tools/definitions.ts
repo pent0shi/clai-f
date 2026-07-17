@@ -40,7 +40,16 @@ export const NON_REGISTRY_TOOL_NAMES = new Set([
 export const TOOL_DEFINITIONS: ToolDefinition[] = [
   def(
     "fs.read",
-    "Read a file. Use for inspecting source, configs, or outputs. Prefer offset/limit for large files.",
+    [
+      "Read a text file (or list a directory if path is a dir).",
+      "Decision guide:",
+      "(1) Small/unknown path → fs.read {path} only; small files return fully.",
+      "(2) If output has auto-head or hasMore=true → you do NOT have the whole file; continue with the exact next offset/limit from the footer (do not re-call path-only).",
+      "(3) Known line range → offset+limit or startLine+endLine (1-indexed inclusive).",
+      "(4) Looking for a symbol/string → pattern (regex or /pattern/i) with optional context, OR fs.search then fs.read around hit lines.",
+      "(5) Prefer partial/pattern reads for large files — saves tokens and avoids re-reads.",
+      "Lines in the body are numbered as N: text. Headers report path/range/matches/hasMore.",
+    ].join(" "),
     {
       type: "object",
       properties: {
@@ -50,10 +59,42 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         },
         offset: {
           type: "integer",
-          description: "1-indexed start line for paging",
+          description:
+            "1-indexed start line for paging (alias: startLine). 0 is accepted and treated as 1.",
         },
-        limit: { type: "integer", description: "Max lines to return" },
-        maxBytes: { type: "integer", description: "Max bytes to read" },
+        limit: {
+          type: "integer",
+          description: "Max lines to return from offset (default 200 when paging)",
+        },
+        startLine: {
+          type: "integer",
+          description: "1-indexed inclusive start line (alias of offset)",
+        },
+        endLine: {
+          type: "integer",
+          description: "1-indexed inclusive end line",
+        },
+        pattern: {
+          type: "string",
+          description:
+            'Match windows: JS regex source ("function\\\\s+foo") or /pattern/flags. Use for symbols/strings instead of loading the whole file.',
+        },
+        context: {
+          type: "integer",
+          description: "Lines of context around each pattern match (default 2)",
+        },
+        maxMatches: {
+          type: "integer",
+          description: "Max pattern matches (default 20, max 100)",
+        },
+        caseInsensitive: {
+          type: "boolean",
+          description: "Case-insensitive pattern match (or use /pattern/i)",
+        },
+        maxBytes: {
+          type: "integer",
+          description: "Hard max bytes for full reads of small/medium files",
+        },
       },
       required: ["path"],
       additionalProperties: false,
@@ -118,12 +159,16 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   ),
   def(
     "fs.search",
-    "Search file contents by pattern (ripgrep-style).",
+    "Search file contents by pattern (ripgrep-style). Returns path:line:text hits so you can follow up with fs.read offset/limit or pattern.",
     {
       type: "object",
       properties: {
         pattern: { type: "string" },
         path: { type: "string" },
+        maxMatches: {
+          type: "integer",
+          description: "Max hit lines (default 50)",
+        },
       },
       required: ["pattern"],
       additionalProperties: false,

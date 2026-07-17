@@ -369,10 +369,13 @@ Node.js ≥ 20.
 Tag-driven CI (`.github/workflows/release.yml`): tests → multi-platform binaries → GitHub Release → npm `@pentoshi/clai` → Homebrew tap.
 
 ```sh
-npm version 3.7.6 --no-git-tag-version
-# bump FALLBACK_VERSION / manifests as needed
-git commit -am "v3.7.6" && git push origin main
-git tag -a v3.7.6 -m "clai v3.7.6" && git push origin v3.7.6
+# Single source of truth: package.json "version" only.
+npm version 3.8.0 --no-git-tag-version
+# sync-version refreshes version.generated.ts + install manifests + lock root
+# (also runs automatically on build / pretest / compile)
+npm run sync-version
+git commit -am "v3.8.0" && git push origin main
+git tag -a v3.8.0 -m "clai v3.8.0" && git push origin v3.8.0
 ```
 
 Secrets: `NPM_TOKEN`, `TAP_GITHUB_TOKEN`. Optional: `NPM_PROVENANCE=true`.

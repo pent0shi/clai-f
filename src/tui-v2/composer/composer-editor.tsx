@@ -29,6 +29,8 @@ import {
 import { isLargePaste, PasteRegistry } from "./paste-placeholder.js";
 import { resolveCompletionMenu, type CompletionMenu } from "./completion.js";
 import { buildComposerTextareaOverrides } from "./textarea-keybindings.js";
+import { composerActionPort } from "./composer-action-port.js";
+import { notify } from "../notify.js";
 
 import { CompletionMenuView } from "../components/completion/completion-menu.js";
 import { useOverlayState } from "../state/use-overlay.js";
@@ -108,6 +110,24 @@ export function ComposerEditor(props: ComposerEditorProps): ReactNode {
     if (shouldOwnKeyboard) editorRef.current?.focus();
     else editorRef.current?.blur();
   }, [shouldOwnKeyboard]);
+
+  // Status-line ^X chip (and any other chrome) clears via this port.
+  useEffect(() => {
+    return composerActionPort.registerClear(() => {
+      const editor = editorRef.current;
+      if (!editor) return;
+      editor.clear();
+      promptHistory.current.reset();
+      menuRef.current = { kind: "none" };
+      menuKindRef.current = "none";
+      acceptedSlashRef.current = undefined;
+      setMenu({ kind: "none" });
+      setAcceptedSlash(undefined);
+      setContentRows(1);
+      services.focus.focusRegion("composer");
+      editor.focus();
+    });
+  }, [services.focus]);
 
   // Pull a draft from the queue "Edit" action into the input.
   const lastSeedToken = useRef<number | undefined>(undefined);
@@ -555,7 +575,18 @@ export function ComposerEditor(props: ComposerEditorProps): ReactNode {
       services.overlay.openJobs();
       return;
     }
-    // Clear draft: ^X (Ctrl+U is jump-to-top of chat).
+    // Clear draft: ^X. Ctrl+U is delete-to-line-start in the textarea (and
+    // macOS Cmd+Backspace often arrives as Ctrl+U). Only when the draft is
+    // empty does ^U jump the chat to top — never while the user is editing.
+    if (chord === "ctrl+u") {
+      if (editor.plainText.length === 0) {
+        key.preventDefault();
+        transcriptScrollPort.scrollToTop();
+        notify(services, "Chat · top · ^U", { key: "scroll", durationMs: 1200 });
+      }
+      // Non-empty: let OpenTUI handle delete-to-line-start (do not preventDefault).
+      return;
+    }
     if (chord === "ctrl+x") {
       key.preventDefault();
       editor.clear();
@@ -566,10 +597,11 @@ export function ComposerEditor(props: ComposerEditorProps): ReactNode {
       setMenu({ kind: "none" });
       setAcceptedSlash(undefined);
       setContentRows(1);
+      notify(services, "Draft cleared · ^X", { key: "draft", durationMs: 1400 });
       return;
     }
     // Page keys always scroll the chat (classic parity) — never history.
-    // ^U/^D scroll is handled globally in App so it works from any focus.
+    // ^D scroll-to-bottom is global; ^U is line-delete here (empty → top).
     if (chord === "pageup" || chord === "pagedown") {
       key.preventDefault();
       services.focus.focusRegion("transcript");

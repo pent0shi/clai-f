@@ -501,6 +501,11 @@ export function handleOutput(services: AppServices, invocation: CommandInvocatio
   const arg = invocation.args.trim().toLowerCase();
   if (!arg) {
     services.transcript.toggleOutputGlobal();
+    const on = services.transcript.getState().expandOutputGlobal;
+    services.toast.show(
+      on ? "Tool output expanded · ^O" : "Tool output collapsed · ^O",
+      { key: "output", durationMs: 1500 },
+    );
     return;
   }
   if (arg === "list" || arg === "ls") {
@@ -547,6 +552,9 @@ export function handlePlanPager(services: AppServices): void {
     services.overlay.openPager(
       `Plan · ${plan.goal}`,
       formatPlanPagerDocument(plan),
+      undefined,
+      undefined,
+      "force",
     );
   })();
 }

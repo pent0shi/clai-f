@@ -57,9 +57,12 @@ export const defaultKeymap: readonly KeyBinding[] = [
   binding("ctrl+j", "app.jobs", "global"),
   binding("ctrl+t", "transcript.toggle-thinking", "global"),
   binding("ctrl+o", "transcript.toggle-output", "global"),
-  // Absolute top/bottom of chat from anywhere (including composer).
-  // No bare g/G — those only work with transcript focus and conflict with typing.
-  binding("ctrl+u", "transcript.top", "global"),
+  // Absolute bottom of chat from anywhere (including composer).
+  // Ctrl+U is NOT global: macOS Cmd+Backspace often arrives as Ctrl+U, and
+  // OpenTUI's textarea uses ctrl+u for delete-to-line-start. Jump-to-top is
+  // bound on transcript/pager; from composer only when the draft is empty
+  // (handled in App.tsx so typing never scrolls the chat).
+  // No bare g/G — those conflict with typing.
   binding("ctrl+d", "transcript.bottom", "global"),
   binding("tab", "focus.next-region", "global"),
 
@@ -69,7 +72,7 @@ export const defaultKeymap: readonly KeyBinding[] = [
   binding("alt+enter", "editor.newline", "composer"),
   binding("up", "editor.history-prev", "composer"),
   binding("down", "editor.history-next", "composer"),
-  // Clear draft (^X is free; ^U is jump-to-top).
+  // Clear draft (^X). ^U = delete-to-line-start in the textarea (not clear).
   binding("ctrl+x", "editor.clear", "composer"),
 
   // transcript

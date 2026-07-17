@@ -2,7 +2,7 @@
 /**
  * Chrome under the composer.
  *
- * Idle: centered clickable chips (`/:commands`, ^T/^O/^H, ^U/^D) with hover.
+ * Idle: centered clickable chips (`/:commands`, ^T/^O/^U/^D/^X, ^H) with hover.
  * Running: spinner + activity · Esc:cancel.
  * Scroll remainder badges (`▲ N` / `▼ N`) sit on the far right.
  */
@@ -39,6 +39,14 @@ export interface StatusLineProps {
   readonly onToggleOutput?: (() => void) | undefined;
   /** Click ^H chip → toggle plan pane. */
   readonly onTogglePlan?: (() => void) | undefined;
+  /** Click ^U chip → jump chat to top. */
+  readonly onJumpTop?: (() => void) | undefined;
+  /** Click ^D chip → jump chat to bottom. */
+  readonly onJumpBottom?: (() => void) | undefined;
+  /** Click ^X chip → clear composer draft. */
+  readonly onClearDraft?: (() => void) | undefined;
+  /** Click /shortcuts chip → open keyboard reference. */
+  readonly onOpenShortcuts?: (() => void) | undefined;
 }
 
 const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"] as const;
@@ -241,6 +249,10 @@ export function StatusLine(props: StatusLineProps): ReactNode {
     onToggleThinking,
     onToggleOutput,
     onTogglePlan,
+    onJumpTop,
+    onJumpBottom,
+    onClearDraft,
+    onOpenShortcuts,
   } = props;
   const state = useSessionState(session);
   const [frame, setFrame] = useState(0);
@@ -415,11 +427,37 @@ export function StatusLine(props: StatusLineProps): ReactNode {
               onClick={onToggleOutput}
             />
             {sep(theme)}
-            <text
-              selectable={false}
-              content="^U top · ^D end · ^X clear"
-              style={{ fg: theme.muted }}
+            <ClickableHint
+              label="^U top"
+              active={false}
+              theme={theme}
+              onClick={onJumpTop}
             />
+            {sep(theme)}
+            <ClickableHint
+              label="^D end"
+              active={false}
+              theme={theme}
+              onClick={onJumpBottom}
+            />
+            {sep(theme)}
+            <ClickableHint
+              label="^X clear"
+              active={false}
+              theme={theme}
+              onClick={onClearDraft}
+            />
+            {width >= 72 ? (
+              <>
+                {sep(theme)}
+                <ClickableHint
+                  label="/shortcuts"
+                  active={false}
+                  theme={theme}
+                  onClick={onOpenShortcuts}
+                />
+              </>
+            ) : null}
           </>
         ) : null}
         {hasActivePlan || planVisible ? (

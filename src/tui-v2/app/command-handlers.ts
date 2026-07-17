@@ -31,6 +31,7 @@ import {
   handleMouse,
   handlePrivacy,
   handleScope,
+  handleShortcuts,
   handleUpdate,
 } from "./commands/config-commands.js";
 import { handleInfo, handleKeys, handleSet, handleUnset } from "./commands/key-commands.js";
@@ -116,6 +117,7 @@ export function attachCommandHandlers(services: AppServices): void {
   c.setHandler("privacy", (i) => void handlePrivacy(services, i));
   c.setHandler("update", () => void handleUpdate(services));
   c.setHandler("help", () => handleHelp(services));
+  c.setHandler("shortcuts", () => handleShortcuts(services));
   c.setHandler("exit", () => handleExit(services));
   c.setHandler("set", (i) => void handleSet(services, i));
   c.setHandler("unset", (i) => void handleUnset(services, i));

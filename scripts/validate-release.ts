@@ -21,6 +21,29 @@ for (const group of groups) {
   }
 }
 
+// Generated version constant must match package.json (single source of truth).
+const generatedSrc = await readFile(resolve("src/version.generated.ts"), "utf8");
+const generatedMatch = generatedSrc.match(/export const VERSION = "([^"]+)"/);
+if (!generatedMatch || generatedMatch[1] !== manifest.version) {
+  throw new Error(
+    `src/version.generated.ts VERSION does not match package.json ${manifest.version} — run: npm run sync-version`,
+  );
+}
+const brewRb = await readFile(resolve("manifests/homebrew/clai.rb"), "utf8");
+if (!brewRb.includes(`version "${manifest.version}"`)) {
+  throw new Error(
+    `manifests/homebrew/clai.rb version does not match package.json ${manifest.version} — run: npm run sync-version`,
+  );
+}
+const scoop = JSON.parse(await readFile(resolve("manifests/scoop/clai.json"), "utf8")) as {
+  version?: string;
+};
+if (scoop.version !== manifest.version) {
+  throw new Error(
+    `manifests/scoop/clai.json version does not match package.json ${manifest.version} — run: npm run sync-version`,
+  );
+}
+
 const [assetArg, sidecarArg] = process.argv.slice(2);
 if (assetArg) {
   const asset = resolve(assetArg);

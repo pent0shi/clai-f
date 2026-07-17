@@ -197,105 +197,84 @@ export function cleanTaskTitle(task: PlanTask): string {
   return title || task.title.trim();
 }
 
-const PAGER_WIDTH = 76;
-const RULE = "─".repeat(PAGER_WIDTH);
-
-function pushWrapped(
-  lines: string[],
-  text: string,
-  prefix: string,
-  width: number,
-): void {
-  const bodyWidth = Math.max(12, width - prefix.length);
-  const wrapped = wrapPlanText(text, bodyWidth);
-  for (let i = 0; i < wrapped.length; i++) {
-    lines.push(i === 0 ? `${prefix}${wrapped[i]}` : `${" ".repeat(prefix.length)}${wrapped[i]}`);
-  }
-}
-
 /**
  * Full plan body for the OpenTUI pager (Ctrl+P / /plan).
- * Plain text only — no chalk/ANSI (those look messy in the pager).
- * Tasks are card-like blocks with clear rules between them.
+ * Markdown so the pager renders headings, tables, and lists cleanly.
  */
 export function formatPlanPagerDocument(plan: SessionPlan): string {
   const { done, total } = planProgress(plan);
+  const goal = plan.goal.trim() || "Untitled plan";
+  const updated = plan.updatedAt.replace("T", " ").slice(0, 19);
   const lines: string[] = [];
 
-  lines.push(plan.goal.trim() || "Untitled plan");
+  lines.push(`# ${goal}`);
   lines.push("");
-  lines.push(
-    `Status   ${STATUS_LABEL[plan.status]}    Progress   ${done}/${total}    Kind   ${plan.kind || "general"}`,
-  );
-  lines.push(`Updated  ${plan.updatedAt.replace("T", " ").slice(0, 19)}`);
-  lines.push("");
-  lines.push(RULE);
+  lines.push("| | |");
+  lines.push("| --- | --- |");
+  lines.push(`| **Status** | ${STATUS_LABEL[plan.status]} |`);
+  lines.push(`| **Progress** | ${done}/${total} tasks |`);
+  lines.push(`| **Kind** | ${plan.kind || "general"} |`);
+  lines.push(`| **Updated** | ${updated} |`);
   lines.push("");
 
   const detail = plan.detail.trim();
   if (detail) {
-    lines.push("Approach");
+    lines.push("## Approach");
     lines.push("");
-    for (const raw of detail.split(/\r?\n/)) {
-      const line = raw.replace(/\t/g, "  ");
-      if (line.trim() === "") {
-        lines.push("");
-      } else if (/^#{1,6}\s/.test(line.trim())) {
-        lines.push(line.trim().replace(/^#+\s*/, ""));
-      } else if (/^[-*•]\s/.test(line.trim()) || /^\d+[.)]\s/.test(line.trim())) {
-        pushWrapped(lines, line.trim(), "  ", PAGER_WIDTH);
-      } else {
-        pushWrapped(lines, line.trim(), "  ", PAGER_WIDTH);
+    // Preserve author markdown when present; otherwise indent as body.
+    const looksMd =
+      /^#{1,6}\s/m.test(detail) ||
+      /^[-*]\s/m.test(detail) ||
+      /```/.test(detail) ||
+      /\*\*/.test(detail);
+    if (looksMd) {
+      lines.push(detail);
+    } else {
+      for (const raw of detail.split(/\r?\n/)) {
+        const line = raw.replace(/\t/g, "  ").trimEnd();
+        lines.push(line.length === 0 ? "" : line);
       }
     }
     lines.push("");
-    lines.push(RULE);
-    lines.push("");
   }
 
-  lines.push(`Tasks  (${total})`);
+  lines.push(`## Tasks (${total})`);
   lines.push("");
 
   if (plan.tasks.length === 0) {
-    lines.push("  (no tasks)");
+    lines.push("*No tasks yet.*");
   } else {
+    lines.push("| # | State | Task | Id |");
+    lines.push("| ---: | --- | --- | --- |");
     plan.tasks.forEach((task, i) => {
       const glyph = TASK_GLYPH[task.state] ?? "○";
       const state = TASK_STATE_LABEL[task.state] ?? task.state;
-      const num = String(i + 1).padStart(2, " ");
-      const title = cleanTaskTitle(task);
-
-      // Card header: glyph + index + title (wrapped)
-      pushWrapped(lines, title, `${glyph}  ${num}.  `, PAGER_WIDTH);
-      // State as a clean tag line (not free-floating "done")
-      lines.push(`      [${state}]  ${task.id}`);
-      if (task.note?.trim()) {
-        pushWrapped(lines, task.note.trim(), "      note  ", PAGER_WIDTH);
-      }
-      // Boundary between tasks
-      if (i < plan.tasks.length - 1) {
-        lines.push("");
-        lines.push(RULE);
-        lines.push("");
-      }
+      const title = cleanTaskTitle(task).replace(/\|/g, "\\|");
+      const note = task.note?.trim()
+        ? `<br>*${task.note.trim().replace(/\|/g, "\\|")}*`
+        : "";
+      lines.push(
+        `| ${i + 1} | ${glyph} ${state} | ${title}${note} | \`${task.id}\` |`,
+      );
     });
   }
 
   lines.push("");
-  lines.push(RULE);
+  lines.push("---");
   lines.push("");
   if (plan.status === "draft") {
     lines.push(
-      "Next: y/i or /implement to run · s then type feedback to revise · n discard · or refine in chat.",
+      "**Next:** `y` / `i` or `/implement` to run · `s` + feedback to revise · `n` discard · or refine in chat.",
     );
   } else if (plan.status === "approved" || plan.status === "in_progress") {
-    lines.push("Plan is approved — the agent marks tasks as they complete.");
+    lines.push("Plan is **approved** — the agent marks tasks as they complete.");
   } else if (plan.status === "completed") {
-    lines.push("All tasks completed.");
+    lines.push("All tasks **completed**.");
   } else {
-    lines.push(`Plan status: ${STATUS_LABEL[plan.status]}.`);
+    lines.push(`Plan status: **${STATUS_LABEL[plan.status]}**.`);
   }
-  lines.push("q/esc:close  ·  ↑↓:scroll  ·  ^r:search");
+  lines.push("");
+  lines.push("`q`/`Esc` close · `↑↓` scroll · `^r` search");
 
   return lines.join("\n");
 }

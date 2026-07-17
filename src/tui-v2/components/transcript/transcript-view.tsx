@@ -18,9 +18,14 @@ import { chordFromKeyEvent } from "../../actions/chord-from-key.js";
 import { useTranscriptState } from "../../state/use-transcript-store.js";
 import { useSessionState } from "../../state/use-session-state.js";
 import { transcriptItems } from "../../state/transcript-types.js";
-import { findMatches, nextMatchIndex } from "../../state/transcript-search.js";
+import {
+  findMatches,
+  nextMatchIndex,
+  prevMatchIndex,
+} from "../../state/transcript-search.js";
 import { TranscriptRow } from "./transcript-row.js";
 import { SearchBar } from "./search-bar.js";
+import { notify } from "../../notify.js";
 import { IntroCard } from "./intro-card.js";
 import {
   EMPTY_SCROLL_METRICS,
@@ -135,10 +140,22 @@ export function TranscriptView(props: TranscriptViewProps): ReactNode {
     return parts.join("|");
   }, [state, session.running]);
 
+  /** Filter input visible (typing a term). */
   const [searchOpen, setSearchOpen] = useState(false);
+  /** Sticky query kept after Enter so n/N + highlights work (pager model). */
   const [query, setQuery] = useState("");
   const [matchIndex, setMatchIndex] = useState(-1);
   const matches = useMemo(() => findMatches(state, query), [state, query]);
+  const matchedItemIds = useMemo(() => {
+    const set = new Set<string>();
+    for (const m of matches) set.add(m.itemId);
+    return set;
+  }, [matches]);
+  const activeMatchItemId =
+    matchIndex >= 0 && matchIndex < matches.length
+      ? matches[matchIndex]!.itemId
+      : undefined;
+  const searchActive = query.trim().length > 0;
 
   // Drag-select on response/thinking text → OSC 52 copy on release.
   useNativeSelectionCopy(services);
@@ -319,12 +336,26 @@ export function TranscriptView(props: TranscriptViewProps): ReactNode {
   }
 
   function openSearch(): void {
-    if (searchOpen || services.focus.hasOverlay()) return;
-    closeOverlay.current = services.focus.pushOverlay("transcript-search");
+    // Allow re-opening the filter to edit the sticky query.
+    if (searchOpen) return;
+    // Another overlay (pager/picker) owns focus — do not stack.
+    if (services.focus.hasOverlay() && services.focus.activeContext() !== "transcript-search") {
+      return;
+    }
+    if (!closeOverlay.current) {
+      try {
+        closeOverlay.current = services.focus.pushOverlay("transcript-search");
+      } catch {
+        // Overlay already open — still show the bar if we own search.
+        return;
+      }
+    }
     setSearchOpen(true);
+    followBottom.current = false;
   }
 
-  function closeSearch(): void {
+  /** Drop filter input + sticky query + highlights. */
+  function clearSearch(): void {
     setSearchOpen(false);
     setQuery("");
     setMatchIndex(-1);
@@ -332,11 +363,60 @@ export function TranscriptView(props: TranscriptViewProps): ReactNode {
     closeOverlay.current = undefined;
   }
 
-  function submitSearch(): void {
-    const index = nextMatchIndex(matches, matchIndex);
+  /** Close only the filter input; keep sticky query for n/N + highlights. */
+  function leaveFilterKeepQuery(): void {
+    setSearchOpen(false);
+    closeOverlay.current?.();
+    closeOverlay.current = undefined;
+    services.focus.focusRegion("transcript");
+  }
+
+  function jumpToMatch(index: number): void {
+    if (index < 0 || matches.length === 0) {
+      setMatchIndex(-1);
+      return;
+    }
     setMatchIndex(index);
     const match = matches[index];
-    if (match) scrollRef.current?.scrollChildIntoView(match.itemId);
+    if (!match) return;
+    followBottom.current = false;
+    // Defer until after paint so the row id exists in the scroll tree.
+    queueMicrotask(() => {
+      scrollRef.current?.scrollChildIntoView(match.itemId);
+      publishScrollRemainder(scrollRef.current);
+    });
+  }
+
+  function submitSearch(): void {
+    const needle = query.trim();
+    if (!needle) {
+      // Empty submit just closes the filter.
+      clearSearch();
+      return;
+    }
+    if (matches.length === 0) {
+      notify(services, "No matches", { key: "find", level: "warn", durationMs: 1400 });
+      // Keep filter open so the user can edit the term.
+      return;
+    }
+    const index = nextMatchIndex(matches, matchIndex);
+    jumpToMatch(index);
+    // Pager model: leave sticky find strip + n/N, hide the input.
+    leaveFilterKeepQuery();
+    notify(services, `Find · ${index + 1}/${matches.length}`, {
+      key: "find",
+      durationMs: 1200,
+    });
+  }
+
+  function nextSearchMatch(): void {
+    if (!searchActive || matches.length === 0) return;
+    jumpToMatch(nextMatchIndex(matches, matchIndex));
+  }
+
+  function prevSearchMatch(): void {
+    if (!searchActive || matches.length === 0) return;
+    jumpToMatch(prevMatchIndex(matches, matchIndex));
   }
 
   function resendPrompt(prompt: string): void {
@@ -389,17 +469,49 @@ export function TranscriptView(props: TranscriptViewProps): ReactNode {
   useKeyboard((key) => {
     if (key.eventType === "release") return;
     const chord = chordFromKeyEvent(key);
-    if (searchOpen && chord === "escape") {
-      key.preventDefault();
-      closeSearch();
+
+    // ── Filter input open: Esc closes everything; other keys go to <input>.
+    if (searchOpen) {
+      if (chord === "escape") {
+        key.preventDefault();
+        clearSearch();
+      }
+      // Enter is handled by SearchBar onSubmit → submitSearch.
       return;
     }
+
+    // ── Sticky find (query kept, bar closed): n/N + Esc + ^R to re-edit.
+    if (searchActive) {
+      if (chord === "escape") {
+        key.preventDefault();
+        clearSearch();
+        return;
+      }
+      if (chord === "n") {
+        key.preventDefault();
+        nextSearchMatch();
+        return;
+      }
+      if (chord === "shift+n") {
+        key.preventDefault();
+        prevSearchMatch();
+        return;
+      }
+      if (chord === "ctrl+r") {
+        key.preventDefault();
+        openSearch();
+        return;
+      }
+    }
+
     if (chord === "ctrl+r") {
       key.preventDefault();
       openSearch();
+      return;
     }
+
     // Arrow / page scroll when transcript owns focus.
-    if (!searchOpen && services.focus.activeContext() === "transcript") {
+    if (services.focus.activeContext() === "transcript") {
       const sb = scrollRef.current;
       if (!sb) return;
       const page = sb.viewport.height || 10;
@@ -450,12 +562,13 @@ export function TranscriptView(props: TranscriptViewProps): ReactNode {
       onMouseDragEnd={onTranscriptMouseUp}
       onMouseScroll={onWheelScroll}
     >
-      {searchOpen ? (
+      {searchOpen || searchActive ? (
         <SearchBar
           theme={theme}
           query={query}
           matchCount={matches.length}
-          activeOrdinal={matchIndex + 1}
+          activeOrdinal={matchIndex >= 0 ? matchIndex + 1 : 0}
+          editing={searchOpen}
           onQueryChange={(value) => {
             setQuery(value);
             setMatchIndex(-1);
@@ -494,6 +607,14 @@ export function TranscriptView(props: TranscriptViewProps): ReactNode {
             services={services}
             onOpenUserPrompt={openUserPrompt}
             contentWidth={paneWidth}
+            searchMark={
+              searchActive && matchedItemIds.has(item.id)
+                ? {
+                    matched: true,
+                    active: item.id === activeMatchItemId,
+                  }
+                : undefined
+            }
           />
         ))}
       </scrollbox>

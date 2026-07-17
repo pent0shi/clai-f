@@ -25,9 +25,9 @@ export function useNativeSelectionCopy(services: AppServices): void {
 
     void services.ports.clipboard.writeText(text).then(
       () => {
-        services.toast.show("Copied to clipboard", {
-          level: "success",
-          durationMs: 2000,
+        services.toast.success("Copied to clipboard", {
+          key: "clipboard",
+          durationMs: 1600,
         });
         try {
           renderer.clearSelection();
@@ -36,7 +36,10 @@ export function useNativeSelectionCopy(services: AppServices): void {
         }
       },
       () => {
-        services.toast.show("Copy failed", { level: "error", durationMs: 2500 });
+        services.toast.error("Copy failed", {
+          key: "clipboard",
+          durationMs: 2200,
+        });
       },
     );
   });

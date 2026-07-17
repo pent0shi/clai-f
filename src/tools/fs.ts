@@ -1,7 +1,8 @@
-import { lstatSync, readlinkSync, realpathSync } from "node:fs";
+import { createReadStream, lstatSync, readlinkSync, realpathSync } from "node:fs";
 import { open, readdir, readFile, writeFile, unlink, rm, rename, mkdir, stat } from "node:fs/promises";
 import { join, dirname, basename, relative, resolve } from "node:path";
 import { createHash } from "node:crypto";
+import { createInterface } from "node:readline";
 import { homedir, tmpdir } from "node:os";
 import { execa } from "execa";
 import type { ToolResult } from "../types.js";
@@ -41,13 +42,24 @@ function describeWrite(path: string, content: string, verb: string): string {
   );
 }
 
-// Read the WHOLE file by default. Models repeatedly complained that fs.read
-// returned a truncated body and then wasted turns re-reading with other
-// methods, so the cap is set high enough to return any normal source/text
-// file in one shot. Only genuinely huge files (logs, dumps, minified bundles)
-// exceed it, and those should be paged with offset/limit on purpose.
+// Full-file soft caps. Normal source files fit; logs/dumps/minified bundles
+// auto-page with a head window + next-offset instructions instead of dumping
+// megabytes into context. Hard byte ceiling still applies for raw full reads.
 const DEFAULT_READ_MAX_BYTES = 8 * 1024 * 1024;
+/** Soft auto-head when full read would blow the budget (bytes). */
+const SOFT_FULL_READ_BYTES = 256 * 1024;
+/** Soft auto-head when file has more than this many lines. */
+const SOFT_FULL_READ_LINES = 2000;
+/** Default lines for auto-head / default line-window limit. */
+const DEFAULT_LINE_WINDOW = 200;
 const DEFAULT_LIST_MAX_ENTRIES = 500;
+/** Pattern scan hard stop (bytes streamed). */
+const PATTERN_SCAN_MAX_BYTES = 32 * 1024 * 1024;
+const DEFAULT_PATTERN_MAX_MATCHES = 20;
+const HARD_PATTERN_MAX_MATCHES = 100;
+const DEFAULT_PATTERN_CONTEXT = 2;
+const HARD_PATTERN_CONTEXT = 20;
+const BINARY_SAMPLE_BYTES = 8192;
 
 function expandHome(path: string): string {
   if (path === "~") return homedir();
@@ -185,21 +197,414 @@ function ensureWriteAllowed(path: string, confirmed?: boolean): string {
   return resolved;
 }
 
+export interface FsReadOptions {
+  maxBytes?: number | undefined;
+  confirmed?: boolean | undefined;
+  /** 1-indexed first line to return (inclusive). */
+  offset?: number | undefined;
+  /** Max number of lines to return from `offset`. */
+  limit?: number | undefined;
+  /** Alias for `offset` (1-indexed inclusive). */
+  startLine?: number | undefined;
+  /** Inclusive end line; implies a line window when set. */
+  endLine?: number | undefined;
+  /** Regex source (no surrounding slashes). Return matching windows with context. */
+  pattern?: string | undefined;
+  /** Lines of context each side of a pattern match (default 2, max 20). */
+  context?: number | undefined;
+  /** Max pattern matches to return (default 20, hard max 100). */
+  maxMatches?: number | undefined;
+  /** Case-insensitive pattern match. */
+  caseInsensitive?: boolean | undefined;
+}
+
+/** Stream file lines without loading the whole file into memory. */
+async function* iterateFileLines(
+  resolved: string,
+): AsyncGenerator<string, void, undefined> {
+  const stream = createReadStream(resolved, { encoding: "utf8" });
+  const rl = createInterface({ input: stream, crlfDelay: Infinity });
+  try {
+    for await (const line of rl) {
+      yield line;
+    }
+  } finally {
+    rl.close();
+    stream.destroy();
+  }
+}
+
+async function sampleLooksBinary(resolved: string): Promise<boolean> {
+  const handle = await open(resolved, "r");
+  try {
+    const buf = Buffer.alloc(BINARY_SAMPLE_BYTES);
+    const { bytesRead } = await handle.read(buf, 0, BINARY_SAMPLE_BYTES, 0);
+    if (bytesRead === 0) return false;
+    const sample = buf.subarray(0, bytesRead);
+    // NUL in the first chunk → almost certainly binary.
+    if (sample.includes(0)) return true;
+    // High ratio of non-text control bytes (excluding tab/lf/cr).
+    let control = 0;
+    for (let i = 0; i < sample.length; i += 1) {
+      const c = sample[i]!;
+      if (c < 9 || (c > 13 && c < 32) || c === 127) control += 1;
+    }
+    return control / sample.length > 0.1;
+  } finally {
+    await handle.close().catch(() => undefined);
+  }
+}
+
+/**
+ * Normalize pattern strings models commonly emit:
+ *  - `/foo/i` or `/foo/gim` → body + flags
+ *  - bare `foo` → source as-is
+ * Never throws; invalid regex returns a clear error the model can fix.
+ */
+function compileReadPattern(
+  source: string,
+  caseInsensitive?: boolean,
+): { ok: true; re: RegExp } | { ok: false; error: string } {
+  let trimmed = source.trim();
+  if (!trimmed) {
+    return {
+      ok: false,
+      error:
+        'fs.read pattern must be a non-empty string. Examples: "function\\\\s+foo", "export function handle", or "/TODO/i". Do not pass an empty pattern.',
+    };
+  }
+
+  let flags = caseInsensitive ? "i" : "";
+  // Accept /pattern/flags form that models often copy from editors.
+  const slashForm = trimmed.match(/^\/([\s\S]+)\/([gimsuy]*)$/);
+  if (slashForm) {
+    trimmed = slashForm[1]!;
+    const fromSlash = slashForm[2] ?? "";
+    // Drop global — we scan line-by-line; g would make lastIndex sticky bugs.
+    flags = [...new Set(`${flags}${fromSlash}`.replace(/g/g, "").split(""))].join(
+      "",
+    );
+  }
+
+  if (!trimmed) {
+    return {
+      ok: false,
+      error:
+        'fs.read pattern body is empty after stripping /…/ delimiters. Pass a real pattern, e.g. "class\\\\s+App".',
+    };
+  }
+
+  try {
+    return { ok: true, re: new RegExp(trimmed, flags || undefined) };
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    return {
+      ok: false,
+      error:
+        `Invalid regex pattern: ${msg}. ` +
+        `Pass a JS regex source (escape special chars) or /pattern/flags. ` +
+        `For literal text with dots/parens, escape them (e.g. "foo\\\\.bar\\\\(") or use fs.search then fs.read with offset around the hit line.`,
+    };
+  }
+}
+
+function resolveLineWindow(
+  options: FsReadOptions,
+):
+  | { ok: true; start: number; limit: number; note?: string }
+  | { ok: false; error: string } {
+  const hasStart =
+    typeof options.startLine === "number" || typeof options.offset === "number";
+  const hasEnd = typeof options.endLine === "number";
+  const hasLimit = typeof options.limit === "number";
+  if (!hasStart && !hasEnd && !hasLimit) {
+    return { ok: true, start: 1, limit: DEFAULT_LINE_WINDOW };
+  }
+
+  let start = 1;
+  let note: string | undefined;
+  if (typeof options.startLine === "number" && typeof options.offset === "number") {
+    if (options.startLine !== options.offset) {
+      note = `note: both startLine=${options.startLine} and offset=${options.offset} set; using startLine`;
+    }
+    start = options.startLine;
+  } else if (typeof options.startLine === "number") {
+    start = options.startLine;
+  } else if (typeof options.offset === "number") {
+    start = options.offset;
+  } else if (hasEnd) {
+    // endLine alone: treat as lines 1..endLine
+    start = 1;
+  }
+
+  if (!Number.isFinite(start)) {
+    return { ok: false, error: "fs.read startLine/offset must be a number" };
+  }
+  start = Math.floor(start);
+  // Models often send 0-based offsets; lines are 1-indexed — coerce gently.
+  if (start === 0) {
+    start = 1;
+    note = note
+      ? `${note}; offset/startLine 0 treated as 1 (lines are 1-indexed)`
+      : "note: offset/startLine 0 treated as 1 (lines are 1-indexed)";
+  } else if (start < 1) {
+    return {
+      ok: false,
+      error: "fs.read startLine/offset must be an integer >= 1 (or 0, treated as 1)",
+    };
+  }
+
+  let limit: number;
+  if (hasEnd) {
+    const end = options.endLine!;
+    if (!Number.isInteger(end) && !Number.isFinite(end)) {
+      return { ok: false, error: "fs.read endLine must be a number" };
+    }
+    const endLine = Math.floor(end);
+    if (endLine < start) {
+      return {
+        ok: false,
+        error: `fs.read requires startLine/offset <= endLine (got ${start}..${endLine})`,
+      };
+    }
+    limit = endLine - start + 1;
+    if (hasLimit && options.limit! > 0 && options.limit! < limit) {
+      limit = Math.floor(options.limit!);
+      note = note
+        ? `${note}; limit=${limit} caps endLine window`
+        : `note: limit=${limit} caps endLine window`;
+    }
+  } else if (hasLimit && options.limit! > 0) {
+    limit = Math.floor(options.limit!);
+  } else {
+    limit = DEFAULT_LINE_WINDOW;
+  }
+
+  if (limit < 1) {
+    return { ok: false, error: "fs.read limit must be a positive integer" };
+  }
+  // Hard cap per call so a bad limit cannot dump millions of lines.
+  limit = Math.min(limit, 5000);
+  return note ? { ok: true, start, limit, note } : { ok: true, start, limit };
+}
+
+async function readLineWindow(
+  resolved: string,
+  start: number,
+  limit: number,
+  fileBytes: number,
+  note?: string,
+): Promise<ToolResult> {
+  const collected: string[] = [];
+  let lineNo = 0;
+  let totalLines = 0;
+  let reachedEnd = true;
+
+  for await (const line of iterateFileLines(resolved)) {
+    lineNo += 1;
+    totalLines = lineNo;
+    if (lineNo < start) continue;
+    if (collected.length < limit) {
+      collected.push(`${lineNo}: ${line}`);
+    } else {
+      // Keep counting remaining lines for accurate "of N" footer when cheap.
+      // For huge files we still stream once; stop counting past a soft ceiling
+      // after the window is full so we don't burn CPU on multi-GB logs.
+      if (lineNo >= start + limit + 200_000) {
+        reachedEnd = false;
+        break;
+      }
+    }
+  }
+
+  if (collected.length === 0) {
+    const header =
+      `# fs.read path=${resolved} bytes=${fileBytes}\n` +
+      (totalLines === 0
+        ? `# file is empty\n`
+        : `# requested lines ${start}+ but file has only ${totalLines} line(s)\n`) +
+      `# next: use a smaller offset, or omit offset/limit for auto-head on large files`;
+    return {
+      ok: true,
+      output: note ? `${header}\n# ${note}` : header,
+      truncated: false,
+    };
+  }
+
+  const first = start;
+  const last = start + collected.length - 1;
+  const hasMore = !reachedEnd || totalLines > last;
+  const totalLabel = reachedEnd ? String(totalLines) : `${totalLines}+`;
+  const header =
+    `# fs.read path=${resolved} lines=${first}-${last} of ${totalLabel} bytes=${fileBytes}` +
+    (note ? `\n# ${note}` : "");
+  const next =
+    hasMore
+      ? `\n# hasMore=true next=${JSON.stringify({ offset: last + 1, limit })}`
+      : `\n# hasMore=false`;
+  return {
+    ok: true,
+    output: `${header}\n${collected.join("\n")}${next}`,
+    truncated: hasMore,
+  };
+}
+
+async function readByPattern(
+  resolved: string,
+  options: FsReadOptions,
+  fileBytes: number,
+): Promise<ToolResult> {
+  const compiled = compileReadPattern(
+    options.pattern ?? "",
+    options.caseInsensitive,
+  );
+  if (!compiled.ok) {
+    return { ok: false, output: compiled.error, exitCode: 1 };
+  }
+  const re = compiled.re;
+  const context = Math.min(
+    HARD_PATTERN_CONTEXT,
+    Math.max(0, Math.floor(options.context ?? DEFAULT_PATTERN_CONTEXT)),
+  );
+  const maxMatches = Math.min(
+    HARD_PATTERN_MAX_MATCHES,
+    Math.max(
+      1,
+      Math.floor(options.maxMatches ?? DEFAULT_PATTERN_MAX_MATCHES),
+    ),
+  );
+
+  // Optional range filter when offset/startLine/endLine also provided.
+  let rangeStart = 1;
+  let rangeEnd = Number.POSITIVE_INFINITY;
+  if (
+    typeof options.offset === "number" ||
+    typeof options.startLine === "number" ||
+    typeof options.endLine === "number" ||
+    typeof options.limit === "number"
+  ) {
+    const win = resolveLineWindow(options);
+    if (!win.ok) return { ok: false, output: win.error, exitCode: 1 };
+    rangeStart = win.start;
+    rangeEnd = win.start + win.limit - 1;
+  }
+
+  // Ring buffer of recent lines for leading context.
+  const ring: string[] = [];
+  const matchBlocks: string[] = [];
+  let matches = 0;
+  let lineNo = 0;
+  let bytesSeen = 0;
+  let truncatedScan = false;
+  /** Lines still needed as trailing context after a match. */
+  let pendingAfter = 0;
+  let currentBlock: string[] = [];
+
+  const flushBlock = () => {
+    if (currentBlock.length === 0) return;
+    matchBlocks.push(currentBlock.join("\n"));
+    currentBlock = [];
+  };
+
+  for await (const line of iterateFileLines(resolved)) {
+    lineNo += 1;
+    bytesSeen += Buffer.byteLength(line, "utf8") + 1;
+    if (bytesSeen > PATTERN_SCAN_MAX_BYTES) {
+      truncatedScan = true;
+      break;
+    }
+
+    // Maintain ring for context-before (only lines we might need).
+    ring.push(line);
+    if (ring.length > context + 1) ring.shift();
+
+    const inRange = lineNo >= rangeStart && lineNo <= rangeEnd;
+    const isMatch = inRange && re.test(line);
+
+    if (pendingAfter > 0 && !isMatch) {
+      currentBlock.push(`${lineNo}: ${line}`);
+      pendingAfter -= 1;
+      if (pendingAfter === 0) flushBlock();
+      // After draining trailing context for the last shown match, keep
+      // scanning only long enough to learn whether more matches exist.
+      if (matches >= maxMatches && pendingAfter === 0) {
+        // fall through to isMatch checks below on later lines
+      }
+      continue;
+    }
+
+    if (isMatch && matches < maxMatches) {
+      // If we were still emitting after-context, close previous block first
+      // only when this match is outside that window; otherwise merge.
+      if (pendingAfter === 0 && currentBlock.length > 0) flushBlock();
+      if (pendingAfter === 0) {
+        // Leading context from ring (exclude current line, last is current).
+        const before = ring.slice(0, Math.max(0, ring.length - 1));
+        const startCtx = before.slice(Math.max(0, before.length - context));
+        const ctxStartLine = lineNo - startCtx.length;
+        for (let i = 0; i < startCtx.length; i += 1) {
+          currentBlock.push(`${ctxStartLine + i}: ${startCtx[i]}`);
+        }
+      }
+      currentBlock.push(`${lineNo}: ${line}`);
+      matches += 1;
+      pendingAfter = context;
+      if (pendingAfter === 0) flushBlock();
+      // Do not break yet: keep scanning so hasMore can detect further hits.
+      continue;
+    }
+
+    if (isMatch && matches >= maxMatches) {
+      // One more hit beyond the display cap → hasMore.
+      matches += 1;
+      break;
+    }
+  }
+  if (pendingAfter > 0) flushBlock();
+
+  const capped = matches > maxMatches;
+  const shown = Math.min(matches, maxMatches);
+  const header =
+    `# fs.read path=${resolved} pattern=${JSON.stringify(options.pattern)} ` +
+    `matches=${shown}${capped ? `+` : ""} ` +
+    `context=${context} bytes=${fileBytes}` +
+    (truncatedScan
+      ? `\n# scan stopped at ${PATTERN_SCAN_MAX_BYTES} bytes (file large; narrow with startLine/endLine or use fs.search)`
+      : "") +
+    (rangeEnd !== Number.POSITIVE_INFINITY
+      ? `\n# searched lines ${rangeStart}-${rangeEnd === Number.POSITIVE_INFINITY ? "∞" : rangeEnd}`
+      : "");
+
+  if (shown === 0) {
+    return {
+      ok: true,
+      output:
+        `${header}\n# no matches. Try a simpler pattern, caseInsensitive:true, or fs.search for multi-file hits.\n` +
+        `# tip: fs.read with offset/limit to page, or omit pattern for full/auto-head read`,
+      truncated: truncatedScan,
+    };
+  }
+
+  const body = matchBlocks.join("\n--\n");
+  const footer = capped
+    ? `\n# hasMore=true (capped at maxMatches=${maxMatches}; raise maxMatches up to ${HARD_PATTERN_MAX_MATCHES} or narrow the range)`
+    : `\n# hasMore=false`;
+  return {
+    ok: true,
+    output: `${header}\n${body}${footer}`,
+    truncated: truncatedScan || capped,
+  };
+}
+
 export async function fsRead(
   path: string,
-  options: {
-    maxBytes?: number | undefined;
-    confirmed?: boolean | undefined;
-    /** 1-indexed first line to return (inclusive). Lets the model page a large file instead of re-reading the whole thing. */
-    offset?: number | undefined;
-    /** Max number of lines to return from `offset`. */
-    limit?: number | undefined;
-  } = {},
+  options: FsReadOptions = {},
 ): Promise<ToolResult> {
   const resolved = resolvePath(path);
   ensureReadAllowed(resolved, path, options.confirmed);
 
   // Directory → list contents (models often fs.read a folder by mistake).
+  let fileBytes = 0;
   try {
     const st = await stat(resolved);
     if (st.isDirectory()) {
@@ -222,50 +627,84 @@ export async function fsRead(
         exitCode: 1,
       };
     }
+    fileBytes = st.size;
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
     return { ok: false, output: msg, exitCode: 1 };
   }
 
-  const maxBytes = options.maxBytes ?? DEFAULT_READ_MAX_BYTES;
-  const useLines =
-    typeof options.offset === "number" || typeof options.limit === "number";
-  if (useLines) {
-    const offset = Math.max(1, options.offset ?? 1);
-    const limit = options.limit && options.limit > 0 ? options.limit : 2000;
-    const full = await readFile(resolved, "utf8");
-    const lines = full.split(/\r?\n/);
-    const totalLines = lines.length;
-    const startIdx = Math.min(offset - 1, totalLines);
-    const endIdx = Math.min(startIdx + limit, totalLines);
-    const slice = lines.slice(startIdx, endIdx);
-    const numbered = slice.map((line, i) => `${startIdx + i + 1}: ${line}`);
-    const hasMore = endIdx < totalLines;
-    const prefix =
-      startIdx > 0 ? `[lines ${startIdx + 1}-${endIdx} of ${totalLines}]\n` : "";
-    const suffix = hasMore
-      ? `\n... (${totalLines - endIdx} more line(s); call fs.read with offset=${endIdx + 1} to continue)`
-      : "";
+  if (await sampleLooksBinary(resolved)) {
     return {
-      ok: true,
-      output: `${prefix}${numbered.join("\n")}${suffix}`,
-      truncated: hasMore,
+      ok: false,
+      output:
+        `Binary or non-text file: ${resolved} (${fileBytes} bytes). ` +
+        `Use shell tools for hex/binary inspection, or fs.read with maxBytes only after confirming it is text.`,
+      exitCode: 1,
     };
   }
+
+  // 1) Pattern mode
+  if (typeof options.pattern === "string") {
+    return readByPattern(resolved, options, fileBytes);
+  }
+
+  // 2) Explicit line window
+  const wantsWindow =
+    typeof options.offset === "number" ||
+    typeof options.limit === "number" ||
+    typeof options.startLine === "number" ||
+    typeof options.endLine === "number";
+  if (wantsWindow) {
+    const win = resolveLineWindow(options);
+    if (!win.ok) return { ok: false, output: win.error, exitCode: 1 };
+    return readLineWindow(resolved, win.start, win.limit, fileBytes, win.note);
+  }
+
+  // 3) Auto-head for large files (soft byte/line budget)
+  const maxBytes = options.maxBytes ?? DEFAULT_READ_MAX_BYTES;
+  if (fileBytes > SOFT_FULL_READ_BYTES) {
+    const result = await readLineWindow(
+      resolved,
+      1,
+      DEFAULT_LINE_WINDOW,
+      fileBytes,
+      `auto-head: file is ${fileBytes} bytes (>${SOFT_FULL_READ_BYTES}); returning first ${DEFAULT_LINE_WINDOW} lines. ` +
+        `Use offset/limit, startLine/endLine, or pattern= to fetch more without loading the whole file.`,
+    );
+    return { ...result, truncated: true };
+  }
+
+  // Full read with hard byte cap (stream into string up to maxBytes).
   const handle = await open(resolved, "r");
   try {
     const st = await handle.stat();
     const cap = Math.min(st.size, maxBytes);
     const buffer = Buffer.alloc(cap);
     const { bytesRead } = await handle.read(buffer, 0, cap, 0);
-    const truncated = st.size > maxBytes;
     const text = buffer.subarray(0, bytesRead).toString("utf8");
+    // Soft line cap even when under byte soft limit (huge single-line minified
+    // is handled by bytes; many-line small files by counting).
+    const lineCount = text.length === 0 ? 0 : text.split(/\r?\n/).length;
+    if (lineCount > SOFT_FULL_READ_LINES && st.size <= maxBytes) {
+      // Re-read as window instead of dumping 2k+ lines.
+      return readLineWindow(
+        resolved,
+        1,
+        DEFAULT_LINE_WINDOW,
+        fileBytes,
+        `auto-head: file has ${lineCount} lines (>${SOFT_FULL_READ_LINES}); returning first ${DEFAULT_LINE_WINDOW}. ` +
+          `Use offset/limit or pattern= for the rest.`,
+      );
+    }
+    const truncated = st.size > maxBytes;
     const suffix = truncated
-      ? `\n... (truncated at ${maxBytes.toLocaleString()} bytes of ${st.size.toLocaleString()} — the file is larger than the read cap; call fs.read with offset=1 and limit=N to page through it in line ranges instead of re-reading the whole file)`
+      ? `\n# truncated at ${maxBytes.toLocaleString()} bytes of ${st.size.toLocaleString()} — page with offset/limit or pattern= instead of re-reading the whole file`
       : "";
     return {
       ok: true,
-      output: `${text}${suffix}`,
+      output: truncated
+        ? `# fs.read path=${resolved} bytes=${fileBytes} truncated=true\n${text}${suffix}`
+        : text,
       truncated,
     };
   } finally {
@@ -512,32 +951,122 @@ export async function fsList(
 export async function fsSearch(
   pattern: string,
   path = safeCwd(),
-  options: { confirmed?: boolean | undefined } = {},
+  options: {
+    confirmed?: boolean | undefined;
+    /** Max matching lines to return (default 50, hard cap 200). */
+    maxMatches?: number | undefined;
+  } = {},
 ): Promise<ToolResult> {
   const resolved = resolvePath(path);
   ensureReadAllowed(resolved, path, options.confirmed);
-  const maxLines = 50;
-  try {
-    const result = await execa("rg", ["--max-count", "5", "--max-filesize", "1M", "-l", pattern, resolved], {
-      reject: false,
-      all: true,
-      timeout: 15_000,
-    });
+  const maxMatches = Math.min(
+    200,
+    Math.max(1, Math.floor(options.maxMatches ?? 50)),
+  );
+  if (!pattern.trim()) {
     return {
-      ok: result.exitCode === 0,
-      output: result.all ?? "",
-      exitCode: result.exitCode,
+      ok: false,
+      output: 'fs.search requires a non-empty "pattern"',
+      exitCode: 1,
     };
+  }
+
+  // Prefer content hits (path:line:text) so the model can jump to fs.read
+  // with offset around interesting lines — not just file names.
+  try {
+    const result = await execa(
+      "rg",
+      [
+        "--line-number",
+        "--no-heading",
+        "--color",
+        "never",
+        // Cap hits per file so one noisy log cannot fill the budget alone.
+        "--max-count",
+        "20",
+        "--max-filesize",
+        "1M",
+        "--max-columns",
+        "300",
+        "--max-columns-preview",
+        // Global-ish budget via head_limit on our side after the fact.
+        pattern,
+        resolved,
+      ],
+      {
+        reject: false,
+        all: true,
+        timeout: 15_000,
+      },
+    );
+    // rg exit 1 = no matches (still ok for the model); 2 = error
+    if (result.exitCode === 0 || result.exitCode === 1) {
+      const body = (result.all ?? "").trim();
+      if (!body) {
+        return {
+          ok: true,
+          output: `# fs.search pattern=${JSON.stringify(pattern)} path=${resolved}\n# no matches`,
+          exitCode: 0,
+        };
+      }
+      const allLines = body.split("\n").filter(Boolean);
+      const lines = allLines.slice(0, maxMatches);
+      const truncated = allLines.length > maxMatches;
+      return {
+        ok: true,
+        output:
+          `# fs.search pattern=${JSON.stringify(pattern)} path=${resolved} hits=${lines.length}` +
+          (truncated ? ` (capped at ${maxMatches})` : "") +
+          `\n# tip: fs.read path=… offset=<line> limit=… or pattern= for a focused window\n` +
+          lines.join("\n"),
+        exitCode: 0,
+        truncated,
+      };
+    }
+    // Fall through to grep on rg hard failure.
   } catch {
-    const result = await execa("grep", ["-R", "-l", "-m", String(maxLines), pattern, resolved], {
-      reject: false,
-      all: true,
-      timeout: 15_000,
-    });
+    // rg missing — try grep
+  }
+
+  try {
+    const result = await execa(
+      "grep",
+      ["-R", "-n", "-I", "-m", String(maxMatches), "--", pattern, resolved],
+      {
+        reject: false,
+        all: true,
+        timeout: 15_000,
+      },
+    );
+    const body = (result.all ?? "").trim();
+    if (!body || result.exitCode === 1) {
+      return {
+        ok: true,
+        output: `# fs.search pattern=${JSON.stringify(pattern)} path=${resolved}\n# no matches`,
+        exitCode: 0,
+      };
+    }
+    if (result.exitCode !== 0 && result.exitCode !== 1) {
+      return {
+        ok: false,
+        output: body || `fs.search failed (exit ${result.exitCode})`,
+        exitCode: result.exitCode ?? 1,
+      };
+    }
     return {
-      ok: result.exitCode === 0,
-      output: result.all ?? "",
-      exitCode: result.exitCode,
+      ok: true,
+      output:
+        `# fs.search pattern=${JSON.stringify(pattern)} path=${resolved}\n` +
+        `# tip: fs.read path=… offset=<line> limit=… for a focused window\n` +
+        body,
+      exitCode: 0,
+    };
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    return {
+      ok: false,
+      output: `fs.search failed (need ripgrep or grep): ${msg}`,
+      exitCode: 1,
     };
   }
 }

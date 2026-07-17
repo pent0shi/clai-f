@@ -71,6 +71,11 @@ export type OverlayState =
       readonly source?: ArtifactPagerSource | undefined;
       /** Path for syntax highlighting in file-diff modals. */
       readonly highlightPath?: string | undefined;
+      /**
+       * Markdown rendering: force for help/shortcuts/plan, auto for mixed
+       * bodies, plain to disable. Default auto.
+       */
+      readonly markdown?: "auto" | "force" | "plain" | undefined;
     }
   | { readonly kind: "jobs" };
 
@@ -114,6 +119,7 @@ export class OverlayController {
     body: string,
     source?: ArtifactPagerSource,
     highlightPath?: string,
+    markdown?: "auto" | "force" | "plain",
   ): boolean {
     const pager = {
       kind: "pager" as const,
@@ -121,6 +127,7 @@ export class OverlayController {
       body,
       ...(source ? { source } : {}),
       ...(highlightPath ? { highlightPath } : {}),
+      ...(markdown ? { markdown } : {}),
     };
     // Allow pager over any confirm (plan "p" or delete "v") without resolving it.
     const opened =

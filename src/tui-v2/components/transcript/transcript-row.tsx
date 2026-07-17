@@ -25,6 +25,14 @@ import { ToolCard } from "./tool-card.js";
 import { NoticeRow } from "./notice-row.js";
 import { CompactedRow } from "./compacted-row.js";
 
+/** Active ^R search highlight for a transcript row. */
+export interface TranscriptSearchMark {
+  /** This item contains at least one match for the current query. */
+  readonly matched: boolean;
+  /** This item is the currently selected n/N match. */
+  readonly active: boolean;
+}
+
 export function TranscriptRow(props: {
   item: TranscriptItem;
   state: TranscriptState;
@@ -35,6 +43,8 @@ export function TranscriptRow(props: {
   onOpenUserPrompt: (prompt: string) => void;
   /** Chat-pane columns so markdown tables reflow beside the plan pane. */
   contentWidth?: number | undefined;
+  /** Optional ^R search highlight for this item. */
+  searchMark?: TranscriptSearchMark | undefined;
 }): ReactNode {
   const {
     item,
@@ -45,20 +55,25 @@ export function TranscriptRow(props: {
     services,
     onOpenUserPrompt,
     contentWidth,
+    searchMark,
   } = props;
+
+  let body: ReactNode;
   switch (item.kind) {
     case "user":
-      return <UserMessage item={item} theme={theme} onOpen={onOpenUserPrompt} />;
+      body = <UserMessage item={item} theme={theme} onOpen={onOpenUserPrompt} />;
+      break;
     case "assistant":
-      return (
+      body = (
         <AssistantMessage
           item={item}
           theme={theme}
           contentWidth={contentWidth}
         />
       );
+      break;
     case "thinking":
-      return (
+      body = (
         <ThinkingBlock
           item={item}
           theme={theme}
@@ -66,6 +81,7 @@ export function TranscriptRow(props: {
           onToggle={() => store.toggleItemOverride(item.id, state.expandThinkingGlobal)}
         />
       );
+      break;
     case "tool": {
       // task.update spam — only show failures in the main chat.
       // (The Tasks pane still reflects every successful update.)
@@ -76,7 +92,7 @@ export function TranscriptRow(props: {
       ) {
         return null;
       }
-      return (
+      body = (
         <ToolCard
           item={item}
           theme={theme}
@@ -92,11 +108,13 @@ export function TranscriptRow(props: {
           onExpandAllFileDiffs={() => store.setFileDiffsGlobal(true)}
         />
       );
+      break;
     }
     case "notice":
-      return <NoticeRow item={item} theme={theme} />;
+      body = <NoticeRow item={item} theme={theme} />;
+      break;
     case "compacted":
-      return (
+      body = (
         <CompactedRow
           item={item}
           theme={theme}
@@ -114,9 +132,28 @@ export function TranscriptRow(props: {
           }}
         />
       );
+      break;
     default: {
       const unreachable: never = item;
       throw new Error(`unhandled transcript item: ${JSON.stringify(unreachable)}`);
     }
   }
+
+  // Search highlight wrapper — active match gets a strong wash; other hits a soft one.
+  if (!searchMark?.matched) return body;
+  return (
+    <box
+      border
+      borderStyle="rounded"
+      style={{
+        width: "100%",
+        flexDirection: "column",
+        backgroundColor: searchMark.active ? theme.selection : theme.rowA,
+        borderColor: searchMark.active ? theme.activity : theme.cyan,
+        marginBottom: 0,
+      }}
+    >
+      {body}
+    </box>
+  );
 }

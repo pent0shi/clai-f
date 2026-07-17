@@ -89,9 +89,11 @@ describe("ActionRouter", () => {
     expect(router.resolve("ctrl+r", "transcript")).toBe("transcript.search");
   });
 
-  it("resolves ^U/^D to chat top/bottom and ^X to clear (no g/G)", () => {
+  it("resolves ^D bottom / ^X clear; ^U top only outside composer (line-delete)", () => {
     const router = new ActionRouter();
-    expect(router.resolve("ctrl+u", "composer")).toBe("transcript.top");
+    // Composer: Ctrl+U is NOT transcript.top — textarea uses it for
+    // delete-to-line-start (macOS Cmd+Backspace often arrives as Ctrl+U).
+    expect(router.resolve("ctrl+u", "composer")).toBeUndefined();
     expect(router.resolve("ctrl+d", "composer")).toBe("transcript.bottom");
     expect(router.resolve("ctrl+u", "transcript")).toBe("transcript.top");
     expect(router.resolve("ctrl+d", "transcript")).toBe("transcript.bottom");

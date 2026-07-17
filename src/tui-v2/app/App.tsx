@@ -29,12 +29,15 @@ import { usePlan } from "../state/use-plan.js";
 import { useOverlayState } from "../state/use-overlay.js";
 import { useTranscriptState } from "../state/use-transcript-store.js";
 import { useSessionState } from "../state/use-session-state.js";
-import type { CommandHelpEntry } from "../../app/commands/registry.js";
 import { useServices, useTheme } from "./providers.js";
 import { promptPlanApprovalIfNeeded } from "./plan-lifecycle.js";
 import { StatusLine } from "../components/status/status-line.js";
 import { ToastHost } from "../components/toast/toast-host.js";
 import { transcriptScrollPort } from "../components/transcript/transcript-scroll-port.js";
+import { composerActionPort } from "../composer/composer-action-port.js";
+import { formatShortcutsReference } from "../actions/format-shortcuts.js";
+import { formatCommandHelpMarkdown } from "../rendering/format-help.js";
+import { notify, notifyWarn } from "../notify.js";
 
 const CTRL_C_QUIT_WINDOW_MS = 1500;
 
@@ -159,17 +162,20 @@ export function App(): ReactNode {
             break;
           }
           lastCtrlC.current = now;
-          services.session.notice(
-            "info",
-            "turn aborted · Ctrl+C again to exit",
-          );
+          notifyWarn(services, "Turn aborted · Ctrl+C again to exit", {
+            key: "interrupt",
+            durationMs: 2200,
+          });
           break;
         }
         if (doublePress) {
           services.requestExit();
         } else {
           lastCtrlC.current = now;
-          services.session.notice("info", "Ctrl+C again to exit");
+          notify(services, "Ctrl+C again to exit", {
+            key: "interrupt",
+            durationMs: 2200,
+          });
         }
         break;
       }
@@ -184,10 +190,18 @@ export function App(): ReactNode {
       case "app.jobs":
         key.preventDefault();
         services.overlay.openJobs();
+        notify(services, "Jobs panel", { key: "jobs", durationMs: 1200 });
         break;
       case "app.help":
         key.preventDefault();
-        services.overlay.openPager("Commands", formatHelp(services.commands.help()));
+        services.overlay.openPager(
+          "Commands",
+          formatCommandHelpMarkdown(services.commands.help()),
+          undefined,
+          undefined,
+          "force",
+        );
+        notify(services, "Commands · /help", { key: "help", durationMs: 1200 });
         break;
       case "plan.toggle-detail":
         key.preventDefault();
@@ -207,32 +221,37 @@ export function App(): ReactNode {
             services.overlay.openPager(
               `Plan · ${live.goal}`,
               formatPlanPagerDocument(live),
+              undefined,
+              undefined,
+              "force",
             );
+            notify(services, "Plan detail", { key: "plan-detail", durationMs: 1200 });
           } else {
-            services.session.notice(
-              "info",
-              "no active plan yet — Ctrl+P views plan detail",
-            );
+            notify(services, "No active plan yet", {
+              key: "plan-detail",
+              level: "warn",
+            });
           }
         })();
         break;
       case "transcript.toggle-thinking":
         key.preventDefault();
-        services.transcript.toggleThinkingGlobal();
+        toggleThinking();
         break;
       case "transcript.toggle-output":
         key.preventDefault();
-        services.transcript.toggleOutputGlobal();
+        toggleOutput();
         break;
       case "transcript.top":
-        // ^U — absolute start of the chat (works from composer).
+        // ^U on transcript/pager focus (not global — composer owns Ctrl+U for
+        // line-delete / empty-draft jump in composer-editor).
         key.preventDefault();
-        transcriptScrollPort.scrollToTop();
+        jumpChatTop();
         break;
       case "transcript.bottom":
         // ^D — absolute end of the chat (works from composer).
         key.preventDefault();
-        transcriptScrollPort.scrollToBottom();
+        jumpChatBottom();
         break;
       case "transcript.page-up":
         key.preventDefault();
@@ -242,14 +261,20 @@ export function App(): ReactNode {
         key.preventDefault();
         transcriptScrollPort.scrollBy(12);
         break;
-      case "focus.next-region":
+      case "focus.next-region": {
         key.preventDefault();
-        services.focus.cycleRegion(
+        const regions =
           planVisible && layout.plan.placement !== "hidden"
-            ? ["composer", "transcript", "plan"]
-            : ["composer", "transcript"],
-        );
+            ? (["composer", "transcript", "plan"] as const)
+            : (["composer", "transcript"] as const);
+        services.focus.cycleRegion([...regions]);
+        const next = services.focus.activeContext();
+        notify(services, `Focus · ${next}`, {
+          key: "focus",
+          durationMs: 1100,
+        });
         break;
+      }
       default:
         break;
     }
@@ -311,6 +336,50 @@ export function App(): ReactNode {
     transcriptScrollPort.stopAutoScroll();
   }
 
+  function toggleThinking(): void {
+    services.transcript.toggleThinkingGlobal();
+    const on = services.transcript.getState().expandThinkingGlobal;
+    notify(services, on ? "Thinking expanded · ^T" : "Thinking collapsed · ^T", {
+      key: "thinking",
+      durationMs: 1500,
+    });
+  }
+
+  function toggleOutput(): void {
+    services.transcript.toggleOutputGlobal();
+    const on = services.transcript.getState().expandOutputGlobal;
+    notify(services, on ? "Tool output expanded · ^O" : "Tool output collapsed · ^O", {
+      key: "output",
+      durationMs: 1500,
+    });
+  }
+
+  function jumpChatTop(): void {
+    transcriptScrollPort.scrollToTop();
+    notify(services, "Chat · top · ^U", { key: "scroll", durationMs: 1200 });
+  }
+
+  function jumpChatBottom(): void {
+    transcriptScrollPort.scrollToBottom();
+    notify(services, "Chat · end · ^D", { key: "scroll", durationMs: 1200 });
+  }
+
+  function clearDraft(): void {
+    composerActionPort.clear();
+    notify(services, "Draft cleared · ^X", { key: "draft", durationMs: 1400 });
+  }
+
+  function openShortcutsPager(): void {
+    services.overlay.openPager(
+      "Keyboard shortcuts",
+      formatShortcutsReference(),
+      undefined,
+      undefined,
+      "force",
+    );
+    notify(services, "Keyboard shortcuts", { key: "help", durationMs: 1200 });
+  }
+
   function toggleTasksPane(): void {
     // Same path as Ctrl+H — opening loads the active plan from disk when the
     // in-memory projection is empty.
@@ -320,10 +389,20 @@ export function App(): ReactNode {
         void services.plan
           .load(services.session.sessionId)
           .then((loaded) => {
-            if (!loaded) services.session.notice("info", "no tasks for this session yet");
+            if (!loaded) {
+              notify(services, "No tasks for this session yet", {
+                key: "tasks",
+                level: "warn",
+              });
+            }
           })
           .catch(() => undefined);
       }
+      notify(
+        services,
+        next ? "Tasks shown · ^H" : "Tasks hidden · ^H",
+        { key: "tasks", durationMs: 1400 },
+      );
       return next;
     });
   }
@@ -438,9 +517,13 @@ export function App(): ReactNode {
           planVisible={planVisible}
           thinkingExpanded={transcript.expandThinkingGlobal}
           outputExpanded={transcript.expandOutputGlobal}
-          onToggleThinking={() => services.transcript.toggleThinkingGlobal()}
-          onToggleOutput={() => services.transcript.toggleOutputGlobal()}
+          onToggleThinking={toggleThinking}
+          onToggleOutput={toggleOutput}
           onTogglePlan={toggleTasksPane}
+          onJumpTop={jumpChatTop}
+          onJumpBottom={jumpChatBottom}
+          onClearDraft={clearDraft}
+          onOpenShortcuts={openShortcutsPager}
         />
       </box>
 
@@ -488,15 +571,4 @@ export function App(): ReactNode {
 
 function layoutSupportsSplit(columns: number): boolean {
   return columns >= 120;
-}
-
-function formatHelp(entries: readonly CommandHelpEntry[]): string {
-  return entries
-    .map(
-      (e) =>
-        `${e.command}${e.usage ? ` ${e.usage}` : ""}  —  ${e.description}${
-          e.aliases.length ? ` (aliases: ${e.aliases.join(", ")})` : ""
-        }`,
-    )
-    .join("\n");
 }

@@ -184,6 +184,9 @@ export async function promptPlanApprovalIfNeeded(services: AppServices): Promise
       services.overlay.openPager(
         `Plan · ${plan.goal}`,
         formatPlanPagerDocument(plan),
+        undefined,
+        undefined,
+        "force",
       );
     },
   );

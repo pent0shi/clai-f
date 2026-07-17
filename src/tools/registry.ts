@@ -271,6 +271,12 @@ export const toolRegistry: Record<string, ToolHandler> = {
       maxBytes: optionalNumber(args, "maxBytes"),
       offset: optionalNumber(args, "offset"),
       limit: optionalNumber(args, "limit"),
+      startLine: optionalNumber(args, "startLine"),
+      endLine: optionalNumber(args, "endLine"),
+      pattern: optionalString(args, "pattern"),
+      context: optionalNumber(args, "context"),
+      maxMatches: optionalNumber(args, "maxMatches"),
+      caseInsensitive: optionalBoolean(args, "caseInsensitive"),
       confirmed: options?.confirmed,
     });
   },
@@ -301,7 +307,10 @@ export const toolRegistry: Record<string, ToolHandler> = {
     return fsSearch(
       requireString(args, "pattern"),
       optionalString(args, "path"),
-      { confirmed: options?.confirmed },
+      {
+        confirmed: options?.confirmed,
+        maxMatches: optionalNumber(args, "maxMatches"),
+      },
     );
   },
   async "pkg.install"(args, options) {

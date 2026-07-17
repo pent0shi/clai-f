@@ -138,6 +138,10 @@ export const slashCommands: SlashCommand[] = [
   { command: "/exit", description: "quit" },
   { command: "/quit", description: "alias for /exit" },
   { command: "/help", description: "list commands" },
+  {
+    command: "/shortcuts",
+    description: "list keyboard shortcuts (keys, chords, contexts)",
+  },
 ];
 
 // Well-known models per provider (refreshed May 2026)

@@ -30,12 +30,32 @@ describe("ToastController", () => {
     vi.useFakeTimers();
     const toast = new ToastController();
     for (let i = 0; i < 6; i += 1) toast.show(`msg ${i}`, { durationMs: 5000 });
-    expect(toast.getToasts()).toHaveLength(4);
-    expect(toast.getToasts()[0]?.message).toBe("msg 2");
+    expect(toast.getToasts()).toHaveLength(3);
+    expect(toast.getToasts()[0]?.message).toBe("msg 3");
 
     const id = toast.getToasts()[1]!.id;
     toast.dismiss(id);
     expect(toast.getToasts().some((t) => t.id === id)).toBe(false);
+    toast.dispose();
+  });
+
+  it("replaces toasts that share a key", () => {
+    vi.useFakeTimers();
+    const toast = new ToastController();
+    toast.show("Thinking expanded", { key: "thinking", durationMs: 5000 });
+    toast.show("Thinking collapsed", { key: "thinking", durationMs: 5000 });
+    expect(toast.getToasts()).toHaveLength(1);
+    expect(toast.getToasts()[0]?.message).toBe("Thinking collapsed");
+    toast.dispose();
+  });
+
+  it("supports convenience level helpers", () => {
+    const toast = new ToastController();
+    toast.success("ok");
+    toast.warn("careful");
+    toast.error("bad");
+    const levels = toast.getToasts().map((t) => t.level);
+    expect(levels).toEqual(["success", "warn", "error"]);
     toast.dispose();
   });
 

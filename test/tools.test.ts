@@ -169,9 +169,10 @@ describe("fs.read — size caps (secret-path gate removed)", () => {
     const result = await fsRead(path, { maxBytes: 100 });
     expect(result.ok).toBe(true);
     expect(result.truncated).toBe(true);
-    // 100 bytes of payload + truncation note
-    expect(result.output.startsWith("x".repeat(100))).toBe(true);
-    expect(result.output).toMatch(/truncated/);
+    // Hard maxBytes still caps payload; header may precede the body.
+    expect(result.output).toContain("x".repeat(100));
+    expect(result.output).not.toContain("x".repeat(101));
+    expect(result.output).toMatch(/truncated/i);
   });
 });
 

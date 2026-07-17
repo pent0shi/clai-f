@@ -11,7 +11,8 @@ import {
   loadScope,
   saveScope,
 } from "../../../store/scope.js";
-import { slashCommands } from "../../../repl/slash-commands.js";
+import { formatShortcutsReference } from "../../actions/format-shortcuts.js";
+import { formatCommandHelpMarkdown } from "../../rendering/format-help.js";
 import type { CommandInvocation } from "../../../app/commands/command.js";
 import type { AppServices } from "../../bootstrap/composition-root.js";
 
@@ -193,13 +194,23 @@ export async function handleUpdate(services: AppServices): Promise<void> {
 }
 
 export function handleHelp(services: AppServices): void {
-  const body = slashCommands
-    .map(
-      (item) =>
-        `${item.command}${item.usage ? ` ${item.usage}` : ""}  —  ${item.description}`,
-    )
-    .join("\n");
-  services.overlay.openPager("Command reference", body);
+  services.overlay.openPager(
+    "Commands",
+    formatCommandHelpMarkdown(services.commands.help()),
+    undefined,
+    undefined,
+    "force",
+  );
+}
+
+export function handleShortcuts(services: AppServices): void {
+  services.overlay.openPager(
+    "Keyboard shortcuts",
+    formatShortcutsReference(),
+    undefined,
+    undefined,
+    "force",
+  );
 }
 
 export function handleExit(services: AppServices): void {

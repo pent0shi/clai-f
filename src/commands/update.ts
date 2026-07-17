@@ -3,12 +3,18 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { getConfig, updateConfig } from "../store/config.js";
+import { VERSION as GENERATED_VERSION } from "../version.generated.js";
 
 const REPO = "pentoshi007/clai";
 
-
-const FALLBACK_VERSION = "3.7.9";
-
+/**
+ * Version resolution order:
+ * 1. package.json (dev / npm install) — always matches the checkout
+ * 2. src/version.generated.ts — baked into bun --compile binaries
+ *
+ * Humans only edit package.json; run `npm run sync-version` (also via
+ * build/pretest) to refresh the generated constant and install manifests.
+ */
 function resolvePackageVersion(): string {
   try {
     let dir = dirname(fileURLToPath(import.meta.url));
@@ -29,9 +35,9 @@ function resolvePackageVersion(): string {
       dir = parent;
     }
   } catch {
-    // ignore — use fallback
+    // compiled binary — no package.json nearby
   }
-  return FALLBACK_VERSION;
+  return GENERATED_VERSION;
 }
 
 const CURRENT_VERSION = resolvePackageVersion();

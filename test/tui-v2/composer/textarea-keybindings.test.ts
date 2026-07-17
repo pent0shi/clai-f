@@ -37,4 +37,35 @@ describe("buildComposerTextareaOverrides", () => {
     expect(overrides.some((o) => o.name === "linefeed")).toBe(false);
     expect(overrides.some((o) => o.name === "j" && o.ctrl)).toBe(false);
   });
+
+  it("binds Ctrl+U and Cmd/Meta+Backspace to delete-to-line-start", () => {
+    expect(overrides).toContainEqual({
+      name: "u",
+      ctrl: true,
+      action: "delete-to-line-start",
+    });
+    expect(overrides).toContainEqual({
+      name: "backspace",
+      meta: true,
+      action: "delete-to-line-start",
+    });
+    expect(overrides).toContainEqual({
+      name: "backspace",
+      super: true,
+      action: "delete-to-line-start",
+    });
+  });
+
+  it("binds Cmd/Meta+Delete to delete-to-line-end", () => {
+    expect(overrides).toContainEqual({
+      name: "delete",
+      meta: true,
+      action: "delete-to-line-end",
+    });
+    expect(overrides).toContainEqual({
+      name: "delete",
+      super: true,
+      action: "delete-to-line-end",
+    });
+  });
 });

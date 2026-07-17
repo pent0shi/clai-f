@@ -20,7 +20,6 @@ import {
   findPagerMatches,
   nextPagerMatch,
   prevPagerMatch,
-  segmentPagerLine,
   type PagerMatch,
 } from "../../state/pager-search.js";
 import {
@@ -28,11 +27,18 @@ import {
   padChromeRow,
   wrapPagerLine,
 } from "../../rendering/pager-chrome.js";
-import { syntaxColor } from "../../rendering/file-diff-view.js";
 import {
   emptyCarry,
-  highlightLineForPath,
 } from "../../rendering/syntax-highlight.js";
+import {
+  preparePagerDisplay,
+  type PagerMarkdownMode,
+} from "../../rendering/pager-markdown.js";
+import {
+  PagerLine,
+  bodyOnlyForCopy,
+  parseDiffLine,
+} from "./pager-line.js";
 
 export interface PagerProps {
   readonly services: AppServices;
@@ -42,6 +48,11 @@ export interface PagerProps {
   readonly source?: ArtifactPagerSource | undefined;
   /** When set, syntax-highlight diff bodies using this path's language. */
   readonly highlightPath?: string | undefined;
+  /**
+   * Markdown body rendering. Default `auto` (heuristic). Help/shortcuts/plan
+   * should pass `force`. Tool dumps stay plain unless they look like markdown.
+   */
+  readonly markdown?: PagerMarkdownMode | undefined;
 }
 
 const HIDDEN_SCROLLBARS = {
@@ -61,297 +72,59 @@ const PAGER_FOOTER_FULL =
   "c:copy  ·  drag:select  ·  s/^s:scrollback  ·  e/^e:editor";
 const PAGER_FOOTER_SHORT = "c:copy  ·  s:scrollback  ·  e:editor";
 
-/**
- * Diff modal lines: `  12 │ + body` (see formatModalPlainText).
- * Split so gutters are never selected/copied with the code.
- */
-const DIFF_SPLIT_RE = /^(?<gutter>[\d ]{0,8}) │ (?<rest>.*)$/;
-
-/** Base fg for a non-match body line (path/header cues, plan sections). */
-function baseLineFg(line: string, theme: Theme): string {
-  const t = line.trim();
-  if (/^──\s*full output saved at/i.test(t)) return theme.response;
-  if (/^\/Users\/|^\/home\/|^~\/|^\.clai\/|outputs\//i.test(t)) {
-    return theme.response;
-  }
-  if (t.startsWith("─")) return theme.chip;
-  // Plan pager section titles
-  if (/^(Approach|Tasks|Goal|Status)\b/i.test(t) && !t.includes("  ·")) {
-    return theme.cyan;
-  }
-  if (/^Status\s+/i.test(t) || /^Updated\s+/i.test(t)) return theme.muted;
-  if (/^[✓✗○◉–]\s/.test(t) || /^\s+[✓✗○◉–]\s/.test(line)) {
-    if (t.startsWith("✓") || line.includes("  ✓")) return theme.success;
-    if (t.startsWith("✗") || line.includes("  ✗")) return theme.accent;
-    if (t.startsWith("◉") || line.includes("  ◉")) return theme.activity;
-    return theme.muted;
-  }
-  if (/^(Next:|Plan is approved|All tasks completed)/i.test(t)) return theme.muted;
-  if (/q\/esc:close|Esc or q to close/i.test(t)) return theme.muted;
-  return theme.foreground;
-}
-
-function parseDiffLine(line: string): {
-  gutter: string;
-  prefix: string;
-  code: string;
-  tone: "add" | "del" | "context" | "header";
-} | null {
-  const m = DIFF_SPLIT_RE.exec(line);
-  if (!m?.groups) return null;
-  const gutter = m.groups.gutter ?? "";
-  const rest = m.groups.rest ?? "";
-  // header rows: no +/- marker at start of rest as single-char prefix + space
-  if (/^[+\-−] /.test(rest)) {
-    const prefix = rest[0]!;
-    const code = rest.slice(2);
-    const tone =
-      prefix === "+" ? "add" : prefix === "-" || prefix === "−" ? "del" : "context";
-    return { gutter, prefix, code, tone };
-  }
-  // context with leading space marker "  code" from format (space + space + text)
-  if (rest.startsWith("  ") || rest.startsWith(" ")) {
-    // format is ` ${p} ${text}` so context is "  text" (space space) or "  " empty
-    if (rest[0] === " " && rest[1] === " ") {
-      return { gutter, prefix: " ", code: rest.slice(2), tone: "context" };
-    }
-  }
-  // header-like (kind · path, stats)
-  return { gutter, prefix: " ", code: rest, tone: "header" };
-}
-
-function PagerLine(props: {
-  line: string;
-  index: number;
-  theme: Theme;
-  matches: readonly PagerMatch[];
-  activeMatchIndex: number;
-  hasQuery: boolean;
-  /** Path used for language detection (any extension / family). */
-  highlightPath: string;
-  /** Shared carry — mutated across lines for block comments. */
-  carry: ReturnType<typeof emptyCarry>;
-}): ReactNode {
-  const {
-    line,
-    index,
-    theme,
-    matches,
-    activeMatchIndex,
-    hasQuery,
-    highlightPath,
-    carry,
-  } = props;
-  const isActiveLine =
-    hasQuery &&
-    activeMatchIndex >= 0 &&
-    matches[activeMatchIndex]?.line === index;
-
-  const parsed = parseDiffLine(line);
-
-  if (parsed) {
-    const bg =
-      parsed.tone === "add"
-        ? theme.diffAddBg
-        : parsed.tone === "del"
-          ? theme.diffDelBg
-          : isActiveLine
-            ? theme.rowA
-            : undefined;
-    // Add/del indicated only by background color — no +/- markers.
-    const spans =
-      parsed.tone === "header"
-        ? [{ kind: "plain" as const, text: parsed.code }]
-        : highlightLineForPath(parsed.code, highlightPath, carry);
-    const bodyForSearch = parsed.code;
-    const segs =
-      hasQuery && matches.length > 0
-        ? segmentPagerLine(bodyForSearch, index, matches, activeMatchIndex)
-        : null;
-
-    // Gutter untinted; code column full-width tint. height:1 on every node so
-    // the solid "│" column doesn't look dashed from extra row gaps.
-    const codeBg =
-      parsed.tone === "add" || parsed.tone === "del"
-        ? bg
-        : isActiveLine
-          ? theme.rowA
-          : undefined;
-
-    return (
-      <box
-        id={`pager-line-${index}`}
-        style={{
-          flexDirection: "row",
-          width: "100%",
-          height: 1,
-          flexShrink: 0,
-        }}
-      >
-        <text selectable={false} style={{ height: 1, flexShrink: 0 }}>
-          <span style={{ fg: theme.diffGutter }}>{parsed.gutter}</span>
-          <span style={{ fg: theme.diffGutter }}>{" │ "}</span>
-        </text>
-        <box
-          style={{
-            flexGrow: 1,
-            flexShrink: 1,
-            minWidth: 0,
-            height: 1,
-            ...(codeBg ? { backgroundColor: codeBg } : {}),
-          }}
-        >
-          <text selectable style={{ height: 1 }}>
-            {segs
-              ? segs.map((seg, i) => {
-                  if (seg.kind === "plain") {
-                    return (
-                      <span key={i} style={{ fg: theme.foreground }}>
-                        {seg.text}
-                      </span>
-                    );
-                  }
-                  if (seg.kind === "active") {
-                    return (
-                      <span
-                        key={i}
-                        style={{
-                          fg: theme.background,
-                          bg: theme.activity,
-                          attributes: TextAttributes.BOLD,
-                        }}
-                      >
-                        {seg.text}
-                      </span>
-                    );
-                  }
-                  return (
-                    <span
-                      key={i}
-                      style={{
-                        fg: theme.white,
-                        bg: theme.selection,
-                        attributes: TextAttributes.BOLD,
-                      }}
-                    >
-                      {seg.text}
-                    </span>
-                  );
-                })
-              : spans.map((sp, i) => (
-                  <span
-                    key={i}
-                    style={{
-                      fg:
-                        parsed.tone === "header"
-                          ? theme.muted
-                          : syntaxColor(sp.kind, theme),
-                    }}
-                  >
-                    {sp.text || (i === 0 ? " " : "")}
-                  </span>
-                ))}
-          </text>
-        </box>
-      </box>
-    );
-  }
-
-  const baseFg = baseLineFg(line, theme);
-  if (!hasQuery || matches.length === 0) {
-    return (
-      <text
-        id={`pager-line-${index}`}
-        selectable
-        style={{
-          fg: baseFg,
-          ...(isActiveLine ? { bg: theme.rowA } : {}),
-        }}
-      >
-        {line || " "}
-      </text>
-    );
-  }
-
-  const segments = segmentPagerLine(line, index, matches, activeMatchIndex);
-  return (
-    <text
-      id={`pager-line-${index}`}
-      selectable
-      style={{
-        fg: baseFg,
-        ...(isActiveLine ? { bg: theme.rowA } : {}),
-      }}
-    >
-      {segments.map((seg, i) => {
-        if (seg.kind === "plain") {
-          return (
-            <span key={i} style={{ fg: baseFg }}>
-              {seg.text}
-            </span>
-          );
-        }
-        if (seg.kind === "active") {
-          return (
-            <span
-              key={i}
-              style={{
-                fg: theme.background,
-                bg: theme.activity,
-                attributes: TextAttributes.BOLD,
-              }}
-            >
-              {seg.text}
-            </span>
-          );
-        }
-        return (
-          <span
-            key={i}
-            style={{
-              fg: theme.white,
-              bg: theme.selection,
-              attributes: TextAttributes.BOLD,
-            }}
-          >
-            {seg.text}
-          </span>
-        );
-      })}
-    </text>
-  );
-}
-
-/** Strip gutters from a full pager body for clipboard copy. */
-export function bodyOnlyForCopy(full: string): string {
-  return full
-    .split("\n")
-    .map((line) => {
-      const p = parseDiffLine(line);
-      if (p) return p.code;
-      return line;
-    })
-    .join("\n");
-}
+export { bodyOnlyForCopy } from "./pager-line.js";
 
 export function Pager(props: PagerProps): ReactNode {
-  const { services, theme, title, body, source, highlightPath } = props;
+  const {
+    services,
+    theme,
+    title,
+    body,
+    source,
+    highlightPath,
+    markdown = "auto",
+  } = props;
   const { width: termWidth } = useTerminalDimensions();
   const scrollRef = useRef<ScrollBoxRenderable>(null);
   const [displayBody, setDisplayBody] = useState(body);
   const [artifactPage, setArtifactPage] = useState<ArtifactPage | undefined>(undefined);
   const [pageBusy, setPageBusy] = useState(false);
-  const lines = useMemo(() => displayBody.replace(/\n+$/, "").split("\n"), [displayBody]);
-  const pathForHighlight = highlightPath ?? title;
-  // Search against code-only (no gutters) when body is a diff dump.
-  const searchLines = useMemo(
-    () =>
-      lines.map((line) => {
-        const p = parseDiffLine(line);
-        return p ? p.code : line;
-      }),
-    [lines],
+  // Conservative width: 96% box sits inside app chrome; overestimate caused
+  // "11 lines" to paint past the rounded border after search.
+  const pagerOuterCols = Math.max(40, Math.floor(termWidth * 0.96));
+  const contentCols = Math.max(24, pagerOuterCols - 10);
+  // Meta/footer rows (with their padding) — exact column budget for padChromeRow.
+  const chromeCols = Math.max(20, contentCols - 4);
+
+  // Markdown (or plain) display lines — safe fallback inside preparePagerDisplay.
+  // Artifact/diff dumps with highlightPath stay plain so syntax + gutters win.
+  const display = useMemo(() => {
+    const mode: PagerMarkdownMode =
+      highlightPath || source ? "plain" : markdown;
+    return preparePagerDisplay({
+      body: displayBody,
+      width: contentCols,
+      mode,
+      defaultFg: theme.foreground,
+    });
+  }, [displayBody, contentCols, markdown, highlightPath, source, theme.foreground]);
+
+  const lines = useMemo(
+    () => display.lines.map((l) => l.plain),
+    [display.lines],
   );
+  const pathForHighlight = highlightPath ?? title;
+  // Search haystack:
+  // - markdown: full plain lines (never strip "│" as a diff gutter — that
+  //   blanked help/shortcuts and broke match offsets)
+  // - file-diff dumps: code-only so gutters are not matched
+  const searchLines = useMemo(() => {
+    if (display.mode === "markdown") return lines;
+    return lines.map((line) => {
+      const p = parseDiffLine(line);
+      return p ? p.code : line;
+    });
+  }, [lines, display.mode]);
   const [searchOpen, setSearchOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [matchIndex, setMatchIndex] = useState(-1);
@@ -415,13 +188,6 @@ export function Pager(props: PagerProps): ReactNode {
   async function fullBody(): Promise<string> {
     return source ? source.readAll() : body;
   }
-
-  // Conservative width: 96% box sits inside app chrome; overestimate caused
-  // "11 lines" to paint past the rounded border after search.
-  const pagerOuterCols = Math.max(40, Math.floor(termWidth * 0.96));
-  const contentCols = Math.max(24, pagerOuterCols - 10);
-  // Meta/footer rows (with their padding) — exact column budget for padChromeRow.
-  const chromeCols = Math.max(20, contentCols - 4);
 
   function flash(message: string, ms = 1800): void {
     setStatusFlash(message);
@@ -658,8 +424,17 @@ export function Pager(props: PagerProps): ReactNode {
         void fullBody()
           .then((full) => services.ports.clipboard.writeText(bodyOnlyForCopy(full)))
           .then(
-            () => flash("copied all"),
-            () => flash("copy failed"),
+            () => {
+              flash("copied all");
+              services.toast.success("Copied pager body", {
+                key: "clipboard",
+                durationMs: 1500,
+              });
+            },
+            () => {
+              flash("copy failed");
+              services.toast.error("Copy failed", { key: "clipboard" });
+            },
           );
         break;
       case "pager.close":
@@ -735,14 +510,14 @@ export function Pager(props: PagerProps): ReactNode {
   const filterHint = fitOneLine(
     [
       matches.length > 0
-        ? `${matchStatus}  ·  enter:next  ·  esc:cancel`
+        ? `${matchStatus}  ·  enter:jump  ·  esc:close`
         : query.trim()
-          ? "no matches · esc:cancel"
-          : "type:filter  ·  esc:cancel",
-      matches.length > 0 ? `${matchStatus} · enter · esc` : "esc:cancel",
+          ? "no matches · esc:close"
+          : "type to search  ·  esc:close",
+      matches.length > 0 ? `${matchStatus} · enter · esc:close` : "esc:close",
       matches.length > 0 ? matchStatus : "esc",
     ],
-    Math.max(6, Math.floor(chromeCols * 0.35)),
+    Math.max(8, Math.floor(chromeCols * 0.4)),
   );
 
   // Clip long titles so the border doesn't wrap/overflow.
@@ -792,9 +567,17 @@ export function Pager(props: PagerProps): ReactNode {
               minWidth: 0,
             }}
           >
-            <text selectable={false} style={{ fg: theme.cyan, height: 1 }}>
-              filter:{" "}
-            </text>
+            <text
+              selectable={false}
+              content=" ^R "
+              style={{
+                fg: theme.background,
+                bg: theme.cyan,
+                attributes: TextAttributes.BOLD,
+                height: 1,
+              }}
+            />
+            <text selectable={false} content=" " style={{ height: 1 }} />
             <input
               focused
               value={query}
@@ -851,6 +634,29 @@ export function Pager(props: PagerProps): ReactNode {
           <text content=" " style={{ height: 1 }} />
         ) : null}
         {lines.flatMap((line, index) => {
+          const row = display.lines[index];
+          const isMd = display.mode === "markdown";
+
+          // Markdown lines are already width-wrapped by renderMarkdown; paint
+          // one StyledText row each (search falls back to plain segments).
+          if (isMd) {
+            return [
+              <PagerLine
+                key={`${index}-0`}
+                line={line}
+                index={index}
+                theme={theme}
+                matches={matches}
+                activeMatchIndex={matchIndex}
+                hasQuery={hasQuery}
+                highlightPath={pathForHighlight}
+                carry={syntaxCarry}
+                styled={row?.styled}
+                markdownMode
+              />,
+            ];
+          }
+
           // Don't wrap gutters into mid-line chunks — wrap code only when diff.
           const parsed = parseDiffLine(line);
           if (parsed) {

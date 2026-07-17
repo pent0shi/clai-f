@@ -15,14 +15,30 @@ import type { AppServices } from "../../bootstrap/composition-root.js";
 import { serializeTranscriptForCompaction } from "../../state/transcript-compaction.js";
 import { conversationItemCount } from "../../state/transcript-types.js";
 
+import { notify } from "../../notify.js";
+
 function notice(services: AppServices, level: "info" | "warn", text: string): void {
   services.session.notice(level, text);
+}
+
+/** Short chrome feedback — toast only (no transcript clutter). */
+function flash(
+  services: AppServices,
+  text: string,
+  opts: { key?: string; level?: "info" | "success" | "warn" } = {},
+): void {
+  notify(services, text, {
+    level: opts.level ?? "info",
+    durationMs: 1600,
+    ...(opts.key ? { key: opts.key } : {}),
+  });
 }
 
 export function handleMode(services: AppServices, mode: Mode): void {
   services.session.setMode(mode);
   setDefaultMode(mode);
   notice(services, "info", `mode → ${mode}`);
+  flash(services, `Mode · ${mode}`, { key: "mode", level: "success" });
 }
 
 export function handleClear(services: AppServices): void {
@@ -32,6 +48,7 @@ export function handleClear(services: AppServices): void {
   // for this session, but the UI should not show a stale card after clear.
   void services.plan.load(services.session.sessionId).catch(() => undefined);
   notice(services, "info", "context cleared");
+  flash(services, "Context cleared", { key: "session", level: "success" });
 }
 
 export async function handleNew(services: AppServices): Promise<void> {
@@ -48,6 +65,7 @@ export async function handleNew(services: AppServices): Promise<void> {
   await services.plan.load(services.session.sessionId).catch(() => undefined);
   services.session.setPlanApproved(false);
   notice(services, "info", "fresh session started");
+  flash(services, "Fresh session", { key: "session", level: "success" });
 }
 
 export function handleClean(services: AppServices): void {
@@ -58,12 +76,15 @@ export function handleClean(services: AppServices): void {
   void services.plan.load(services.session.sessionId).catch(() => undefined);
   services.session.setPlanApproved(false);
   notice(services, "info", "fresh session started");
+  flash(services, "Fresh session", { key: "session", level: "success" });
 }
 
 export function handleThink(services: AppServices): void {
   services.transcript.toggleThinkingGlobal();
   const on = services.transcript.getState().expandThinkingGlobal;
-  notice(services, "info", `thinking view → ${on ? "expanded" : "collapsed"}`);
+  flash(services, on ? "Thinking expanded · ^T" : "Thinking collapsed · ^T", {
+    key: "thinking",
+  });
 }
 
 export function handleContext(services: AppServices): void {
@@ -78,11 +99,9 @@ export function handleContext(services: AppServices): void {
     snap && (snap.sessionPromptTokens > 0 || snap.sessionCompletionTokens > 0)
       ? ` · session in ${snap.sessionPromptTokens.toLocaleString()} / out ${snap.sessionCompletionTokens.toLocaleString()}`
       : "";
-  notice(
-    services,
-    "info",
-    `context: ${messages} messages · ${usedLabel}${sessionBits}`,
-  );
+  const text = `context: ${messages} messages · ${usedLabel}${sessionBits}`;
+  notice(services, "info", text);
+  flash(services, text, { key: "context" });
 }
 
 export async function handleCompact(services: AppServices): Promise<void> {

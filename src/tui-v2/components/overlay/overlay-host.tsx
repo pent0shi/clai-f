@@ -107,6 +107,7 @@ export function OverlayHost(props: OverlayHostProps): ReactNode {
           body={state.body}
           source={state.source}
           highlightPath={state.highlightPath}
+          markdown={state.markdown}
         />
       ) : null}
       {state.kind === "jobs" ? <JobsPanel services={services} theme={theme} /> : null}

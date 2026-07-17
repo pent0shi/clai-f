@@ -81,19 +81,20 @@ describe("plan-view rendering helpers (PLAN-001)", () => {
 
   it("formats a full pager document with approach + tasks", () => {
     const doc = formatPlanPagerDocument(plan());
-    expect(doc).toContain("Ship the feature");
-    expect(doc).toContain("Approach");
-    expect(doc).toContain("Tasks");
+    expect(doc).toContain("# Ship the feature");
+    expect(doc).toContain("## Approach");
+    expect(doc).toMatch(/## Tasks/);
     expect(doc).toContain("one");
     expect(doc).toContain("two");
-    expect(doc).toContain("[done]");
-    expect(doc).toContain("[active]");
-    // Tasks separated by horizontal rules
-    expect(doc.split("─").length).toBeGreaterThan(3);
+    expect(doc).toMatch(/done/);
+    expect(doc).toMatch(/active/);
+    // Markdown table + horizontal rule
+    expect(doc).toContain("| # | State | Task | Id |");
+    expect(doc).toContain("---");
     expect(doc).not.toMatch(/\x1b\[/); // no ANSI/chalk
   });
 
-  it("strips redundant t1: prefixes and wraps long notes cleanly", () => {
+  it("strips redundant t1: prefixes and includes notes", () => {
     const doc = formatPlanPagerDocument(
       plan({
         tasks: [
@@ -114,9 +115,9 @@ describe("plan-view rendering helpers (PLAN-001)", () => {
     );
     expect(doc).toContain("Download full OpenAPI");
     expect(doc).not.toMatch(/✓\s+1\.\s+t1:/);
-    expect(doc).toContain("[done]");
-    expect(doc).toContain("[failed]");
-    expect(doc).toContain("note");
-    expect(doc).toMatch(/─{10,}/);
+    expect(doc).toMatch(/done/);
+    expect(doc).toMatch(/failed/);
+    expect(doc).toContain("long note");
+    expect(doc).toContain("---");
   });
 });
