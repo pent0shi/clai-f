@@ -103,45 +103,79 @@ export function JobsPanel(props: JobsPanelProps): ReactNode {
     }
   });
 
+  const sessionShort = services.session.sessionId.slice(0, 8);
+  // ASCII-only chrome: Unicode arrows are double-width in many terminals and
+  // ghost into "selectd" / "obenter" when rows re-paint without fixed height.
+  const titleLine = `Background jobs · session ${sessionShort}…`;
+  const helpLine =
+    "up/down:select · enter/t:tail · k:kill · q/esc:close";
+
   return (
     <box
+      title={` ${titleLine} `}
+      titleColor={theme.accent}
+      border
+      borderStyle="rounded"
       style={{
         flexDirection: "column",
         width: "70%",
         height: "70%",
-        border: true,
         borderColor: theme.border,
         backgroundColor: theme.background,
         paddingLeft: 1,
         paddingRight: 1,
       }}
     >
-      <text style={{ fg: theme.accent }}>
-        {`Background jobs · session ${services.session.sessionId.slice(0, 8)}…`}
-      </text>
-      <text style={{ fg: theme.muted }}>↑↓:select  ·  enter/t:tail  ·  k:kill  ·  q/esc:close</text>
-      <text style={{ fg: theme.border }}>{"─".repeat(40)}</text>
-      <text content=" " />
+      <text
+        content={helpLine}
+        wrapMode="none"
+        style={{
+          fg: theme.muted,
+          height: 1,
+          width: "100%",
+        }}
+      />
+      <text
+        content={"─".repeat(Math.min(48, helpLine.length + 4))}
+        wrapMode="none"
+        style={{ fg: theme.border, height: 1, width: "100%" }}
+      />
+      <text content=" " wrapMode="none" style={{ height: 1 }} />
       <scrollbox scrollY scrollX={false} viewportCulling style={{ flexGrow: 1, width: "100%" }}>
       {jobs.length === 0 ? (
-        <text style={{ fg: theme.muted }}>no background jobs</text>
+        <text
+          content="no background jobs for this session"
+          wrapMode="none"
+          style={{ fg: theme.muted, height: 1 }}
+        />
       ) : (
         jobs.map((job, index) => {
           const status = statusView(job, theme);
           const focused = index === selected;
+          const line = `${focused ? "❯ " : "  "}[${job.id}] ${status.text}  ${elapsedLabel(job)}  ${job.command.slice(0, 48)}`;
           return (
-            <box key={job.id} onMouseDown={() => setSelected(index)} style={{ flexDirection: "row" }}>
-              <text style={{ fg: focused ? theme.accent : theme.foreground }}>
-                {focused ? "❯ " : "  "}
-                [{job.id}] <span style={{ fg: status.fg }}>{status.text}</span>{"  "}
-                {elapsedLabel(job)}  {job.command.slice(0, 48)}
-              </text>
+            <box key={job.id} onMouseDown={() => setSelected(index)} style={{ flexDirection: "row", height: 1 }}>
+              <text
+                content={line}
+                wrapMode="none"
+                style={{
+                  fg: focused ? theme.accent : theme.foreground,
+                  height: 1,
+                  width: "100%",
+                }}
+              />
             </box>
           );
         })
       )}
       </scrollbox>
-      {note ? <text style={{ fg: theme.muted }}>{note}</text> : null}
+      {note ? (
+        <text
+          content={note}
+          wrapMode="none"
+          style={{ fg: theme.muted, height: 1 }}
+        />
+      ) : null}
     </box>
   );
 }

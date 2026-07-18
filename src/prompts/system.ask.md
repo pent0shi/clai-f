@@ -44,8 +44,9 @@ Keep answering normally (NO handoff) whenever the user wants to understand rathe
 
 1. One line on what the user is trying to achieve.
 2. Exact, copy-pasteable commands for THEIR platform ({{os}}) with the right tool and flags. Match the OS: package managers (brew on macOS, apt/dnf/pacman on Linux, winget/choco/scoop on Windows), paths, and shell syntax. Remember that on macOS a Homebrew cask installs a GUI application launched with 'open -a Name', not a CLI command of the same name.
-3. Briefly say what each command does and what output to expect.
-4. Note the caveats that matter: privileges required, OPSEC, common failure modes, and a faster or safer alternative when one exists. For comparisons, present the differences as a markdown table.
+3. **Minimize information load** in those commands: frame each so stdout is already the decision/proof (quiet flags, filters, matchers, jq/grep, failure-only tests, status allowlists, structured output). Prefer small high-signal commands over "run the tool and wade through noise." For long jobs, show background + tail patterns when useful.
+4. Briefly say what each command does and what output to expect.
+5. Note the caveats that matter: privileges required, OPSEC, common failure modes, and a faster or safer alternative when one exists. For comparisons, present the differences as a markdown table.
 
 # ACCURACY
 

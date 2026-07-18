@@ -18,13 +18,21 @@ interface FfufJson {
 const LINE_RE =
   /^([^\s]+)\s+\[Status:\s*(\d+),\s*Size:\s*(\d+),\s*Words:\s*(\d+),\s*Lines:\s*(\d+).*\]/;
 
+/** Prefer real hits; 404/not-found is noise when other statuses exist. */
+function isInterestingStatus(status: number | undefined): boolean {
+  if (status === undefined) return true;
+  if (status === 404 || status === 429) return false;
+  // 2xx, 3xx, auth walls, server errors, etc.
+  return true;
+}
+
 /**
- * ffuf supports JSON output (`-of json`) but the default is plain text. We
- * parse both, group by status, and surface the most interesting clusters.
+ * Structured summary of ffuf hits. Prefer interesting statuses when the run
+ * already mixed signal + 404 noise. Best practice remains filtering at the
+ * command (`-mc`, `-fc`, `-fs`, quiet) so the artifact is clean too.
  */
 export const ffufReducer: Reducer = (raw): ReducerOutput => {
   const results: FfufResult[] = [];
-  // Try JSON first (works when the agent already used `-of json`).
   const jsonStart = raw.indexOf("{");
   if (jsonStart >= 0) {
     try {
@@ -51,15 +59,25 @@ export const ffufReducer: Reducer = (raw): ReducerOutput => {
   }
 
   if (results.length === 0) {
-    return { summary: "# ffuf — no results parsed" };
+    return {
+      summary:
+        "# ffuf — no hit lines parsed (empty match set, or output not yet flushed). " +
+        "Prefer -mc/-fc at the command so only interesting statuses are emitted. Full log is on the job/artifact if this was backgrounded.",
+    };
   }
 
-  // Cluster by (status, length) so likely-templated wildcard responses fold up.
+  const interesting = results.filter((r) => isInterestingStatus(r.status));
+  const used =
+    interesting.length > 0 && interesting.length < results.length
+      ? interesting
+      : results;
+  const dropped404 = results.length - used.length;
+
   const clusters = new Map<
     string,
     { status?: number; length?: number; samples: FfufResult[] }
   >();
-  for (const r of results) {
+  for (const r of used) {
     const key = `${r.status ?? "?"}:${r.length ?? "?"}`;
     const c =
       clusters.get(key) ??
@@ -75,24 +93,30 @@ export const ffufReducer: Reducer = (raw): ReducerOutput => {
     (a, b) => b.samples.length - a.samples.length,
   );
   const lines: string[] = [
-    `# ffuf reduced summary — ${results.length} result(s), ${clusters.size} (status,length) cluster(s)`,
+    `# ffuf hits — ${used.length} interesting result(s)` +
+      (dropped404 > 0
+        ? ` (${dropped404}× 404/noise omitted from summary; full log on artifact if saved)`
+        : "") +
+      `, ${clusters.size} (status,length) cluster(s)`,
   ];
   for (const c of sorted.slice(0, 25)) {
     lines.push("");
     lines.push(
       `## status=${c.status ?? "?"} length=${c.length ?? "?"} — ${c.samples.length} hit(s)`,
     );
-    for (const sample of c.samples.slice(0, 5)) {
+    for (const sample of c.samples.slice(0, 8)) {
       lines.push(`- ${sample.url ?? JSON.stringify(sample.input)}`);
     }
-    if (c.samples.length > 5) {
-      lines.push(`- ... ${c.samples.length - 5} more`);
+    if (c.samples.length > 8) {
+      lines.push(`- ... ${c.samples.length - 8} more`);
     }
   }
   return {
     summary: lines.join("\n"),
     findings: {
       total: results.length,
+      shown: used.length,
+      droppedNoise: dropped404,
       clusters: sorted.map((c) => ({
         status: c.status,
         length: c.length,

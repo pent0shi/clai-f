@@ -1,8 +1,22 @@
+/**
+ * Format tool results for the model context (not the UI spool).
+ *
+ * Philosophy:
+ * - Full bodies stay on disk (artifact / job logs). Never invent "empty".
+ * - Default: honest head+tail size cap — no keyword-rank "generic reduce".
+ * - Optional structured polish only for known scanners (nmap/ffuf/…) that
+ *   extract findings; noise should already be filtered at the command.
+ * - Long work → background job + live file; point at path, use shell.tail.
+ */
+
 import { mkdir, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { fixOwner, handlePermissionError } from "../os/permissions.js";
-import { reduceToolOutput } from "../tools/policies/output-policy.js";
+import {
+  hasStructuredReducer,
+  reduceToolOutput,
+} from "../tools/policies/output-policy.js";
 import type { ToolCall, ToolResult } from "../types.js";
 import { getReliabilityPolicy } from "./reliability-policy.js";
 
@@ -38,6 +52,7 @@ const ERROR_LINE_RE =
 /**
  * Truncate long tool output for the model. When `preferErrors` is set (failed
  * commands), keep error-bearing lines and a heavy tail so stack traces survive.
+ * Never ranks by CVE/port keywords (that was genericReducer — removed).
  */
 export function summarizeOutput(
   output: string,
@@ -126,56 +141,43 @@ export function failureSummaryLine(result: {
     : `FAILURE SUMMARY: ${exit}`;
 }
 
-// Tools whose output is the actual content the model needs verbatim (file
-// bodies, listings, search hits). Running these through the security-signal
-// `genericReducer` was wrong: it ranks lines by pentest keywords and drops
-// the rest, so source code came back as a fragmentary head+tail — the model
-// saw a "truncated" file and kept re-reading it in wasted retries. For these
-// we pass the raw content through (up to a generous cap) and point the model
-// at the saved artifact when it exceeds the cap.
-const PASSTHROUGH_TOOLS = new Set<string>([
-  "fs.read",
-  "fs.list",
-  "fs.search",
-  "fs.edit",
-  "fs.append",
-  "pdf.read",
-  // Structured / short tools — genericReducer was dropping shell.jobs lines
-  // (no CVE keywords → "N lines omitted") so models invented "empty tool" stories.
-  "shell.jobs",
-  "shell.tail",
-  "shell.stop",
-  "sysinfo",
-  "tool.check",
-  "wordlist.find",
-]);
 /** Legacy hard ceiling; effective cap comes from reliability policy (E2). */
 export const PASSTHROUGH_CAP_CHARS_LEGACY = 400_000;
 
-/** Effective fs passthrough cap (E2 tiered policy, config/env overridable). */
+/** Effective default model-context cap for tool bodies (E2). */
 export function fsPassthroughCapChars(): number {
   return getReliabilityPolicy().fsPassthroughCapChars;
 }
-// web.fetch/http.fetch pull in arbitrary third-party pages/API responses that
-// can be hundreds of KB (e.g. a large OpenAPI spec). Unlike local files the
-// model asked to read, this content is never bounded by the user's own
-// project, so it must be capped like every other tool's context output —
-// otherwise a single fetch can single-handedly blow the context budget and
-// starve the model of room to actually respond (observed as empty/garbled
-// completions on smaller-context-window models after a big fetch).
-// http.fetch is evidence-dense and often batched in recon — tighter cap.
-// web.fetch is for reading pages — slightly larger.
+
 const HTTP_FETCH_CAP_CHARS = 8_000;
 const WEB_FETCH_CAP_CHARS = 14_000;
-/** web.search listings are already bounded by maxResults; generous passthrough. */
 const WEB_SEARCH_CAP_CHARS = 24_000;
+/** Default for shell and other tools after optional structured polish. */
+const DEFAULT_CONTEXT_CAP_CHARS = 12_000;
+
+function artifactFooter(
+  path: string | undefined,
+  truncated: boolean,
+  cap: number,
+  kind: string,
+): string {
+  if (!truncated) {
+    return path ? `\nFull output saved to: ${path}` : "";
+  }
+  if (path) {
+    return (
+      `\n\n[${kind} exceeds ${cap.toLocaleString()} chars; head/tail shown. ` +
+      `Full artifact: ${path}. ` +
+      `Use shell.tail / fs.read on the path if you need more — do not re-run the same tool solely because this view is capped.]`
+    );
+  }
+  return `\n\n[${kind} exceeds ${cap.toLocaleString()} chars; head/tail shown. Full body was not persisted.]`;
+}
 
 export function formatToolContext(call: ToolCall, result: ToolResult): string {
   const output = result.output.trim();
   if (!output) {
     const fail = failureSummaryLine(result);
-    // Never return a bare empty body — models invent "tools returned nothing /
-    // platform issue" when they only see "Tool X result (ok=true):\n".
     return (
       fail ??
       (result.ok
@@ -186,72 +188,93 @@ export function formatToolContext(call: ToolCall, result: ToolResult): string {
   const preferErrors = !result.ok;
   const failLine = failureSummaryLine(result);
 
-  // web.search must NEVER go through the pentest genericReducer: that ranks
-  // lines by CVE/port keywords and drops mid-list hits, so models see
-  // "N lines omitted" and re-run the same search as if it were interrupted.
   if (call.name === "web.search") {
     const { text, truncated } = summarizeOutput(output, WEB_SEARCH_CAP_CHARS, {
       preferErrors,
     });
-    const body = truncated
-      ? `${text}${
-          result.outputPath
-            ? `\n\n[Listing exceeds ${WEB_SEARCH_CAP_CHARS.toLocaleString()} chars; head/tail shown. Full: ${result.outputPath}. Search completed successfully — do not re-run the same query solely because this view is capped.]`
-            : `\n\n[Listing exceeds ${WEB_SEARCH_CAP_CHARS.toLocaleString()} chars; head/tail shown. Search completed successfully — do not re-run the same query solely because this view is capped.]`
-        }`
-      : text;
+    const body =
+      text +
+      artifactFooter(
+        result.outputPath,
+        truncated,
+        WEB_SEARCH_CAP_CHARS,
+        "Listing",
+      );
     return [failLine, body].filter(Boolean).join("\n").trim();
   }
 
   if (call.name === "web.fetch" || call.name === "http.fetch") {
     const cap =
       call.name === "http.fetch" ? HTTP_FETCH_CAP_CHARS : WEB_FETCH_CAP_CHARS;
-    const { text, truncated } = summarizeOutput(output, cap, {
-      preferErrors,
-    });
-    const body = truncated
-      ? `${text}${
-          result.outputPath
-            ? `\n\n[Response exceeds ${cap.toLocaleString()} chars; head/tail shown. Full: ${result.outputPath}]`
-            : `\n\n[Response exceeds ${cap.toLocaleString()} chars; only head and tail shown.]`
-        }`
-      : text;
+    const { text, truncated } = summarizeOutput(output, cap, { preferErrors });
+    const body =
+      text + artifactFooter(result.outputPath, truncated, cap, "Response");
     return [failLine, body].filter(Boolean).join("\n").trim();
   }
 
-  if (PASSTHROUGH_TOOLS.has(call.name)) {
-    // E2: tiered cap (default 64k). Full content remains on disk when truncated;
-    // model is instructed to continue with offset/limit or open the artifact.
+  // Large file / listing tools: generous passthrough cap.
+  if (
+    call.name === "fs.read" ||
+    call.name === "fs.list" ||
+    call.name === "fs.search" ||
+    call.name === "fs.edit" ||
+    call.name === "fs.append" ||
+    call.name === "pdf.read"
+  ) {
     const cap = fsPassthroughCapChars();
-    const { text, truncated } = summarizeOutput(output, cap, {
-      preferErrors,
-    });
-    const body = truncated
-      ? `${text}${
-          result.outputPath
-            ? `\n\n[File content exceeds ${cap.toLocaleString()} chars; head/tail shown. Full artifact: ${result.outputPath}. Continue with fs.read offset/limit or pattern — do not re-issue path-only hoping for more.]`
-            : `\n\n[File content exceeds ${cap.toLocaleString()} chars; only head and tail shown. Re-read with offset/limit or pattern for the rest.]`
-        }`
-      : text;
+    const { text, truncated } = summarizeOutput(output, cap, { preferErrors });
+    const body =
+      text +
+      (truncated
+        ? result.outputPath
+          ? `\n\n[File content exceeds ${cap.toLocaleString()} chars; head/tail shown. Full artifact: ${result.outputPath}. Continue with fs.read offset/limit or pattern — do not re-issue path-only hoping for more.]`
+          : `\n\n[File content exceeds ${cap.toLocaleString()} chars; only head and tail shown. Re-read with offset/limit or pattern for the rest.]`
+        : "");
     return [failLine, body].filter(Boolean).join("\n").trim();
   }
 
-  let reduced: string | undefined;
-  try {
-    const command =
-      call.name === "shell.exec" ? String(call.args.command ?? "") : call.name;
-    const policy = reduceToolOutput(output, {
+  // Optional structured polish (nmap/ffuf/…) — never keyword-rank arbitrary shell.
+  const command =
+    call.name === "shell.exec" || call.name === "shell.start"
+      ? String(call.args.command ?? "")
+      : call.name;
+  let bodySource = output;
+  if (
+    hasStructuredReducer({
       toolName: call.name,
       command,
-    });
-    reduced = policy.summary.trim();
-  } catch {
-    reduced = undefined;
+    })
+  ) {
+    try {
+      const polished = reduceToolOutput(output, {
+        toolName: call.name,
+        command,
+      }).summary.trim();
+      if (polished.length > 0) bodySource = polished;
+    } catch {
+      // keep raw
+    }
   }
-  const base = reduced && reduced.length > 0 ? reduced : output;
-  const summary = summarizeOutput(base, 8_000, { preferErrors });
-  const saved = result.outputPath
-    ? `\nFull output saved to: ${result.outputPath}`
-    : "";
-  return [failLine, `${summary.text}${saved}`].filter(Boolean).join("\n").trim();
+
+  const { text, truncated } = summarizeOutput(
+    bodySource,
+    DEFAULT_CONTEXT_CAP_CHARS,
+    { preferErrors },
+  );
+  const body =
+    text +
+    artifactFooter(
+      result.outputPath,
+      truncated || bodySource !== output,
+      DEFAULT_CONTEXT_CAP_CHARS,
+      "Output",
+    );
+  // If we polished scanners, still remind that full log may be longer.
+  const polishNote =
+    bodySource !== output && result.outputPath
+      ? `\n(Structured hit summary above; complete log: ${result.outputPath})`
+      : bodySource !== output
+        ? "\n(Structured hit summary above; filter more at the command next time to shrink the raw log.)"
+        : "";
+  return [failLine, body + polishNote].filter(Boolean).join("\n").trim();
 }

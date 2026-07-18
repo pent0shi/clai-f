@@ -1,5 +1,16 @@
+/**
+ * Optional *structured* polish for known scanner outputs (nmap open ports,
+ * ffuf hits, …). There is **no** generic keyword-ranker — arbitrary shell/fs
+ * output is never "reduced" by guessing what looks interesting.
+ *
+ * Philosophy (clai):
+ * - Eliminate noise at the **command** (flags, matchers, quiet modes).
+ * - Long runs → durable background jobs with live artifact files; model uses
+ *   shell.tail / head+tail / full file when needed.
+ * - Model context gets honest head+tail + artifact path, not invented omissions.
+ */
+
 import { ffufReducer } from "../reducers/ffuf.js";
-import { genericReducer } from "../reducers/generic.js";
 import { gobusterReducer } from "../reducers/gobuster.js";
 import { httpxReducer } from "../reducers/httpx.js";
 import { nmapReducer } from "../reducers/nmap.js";
@@ -19,13 +30,12 @@ function commandHead(command: string): string {
 }
 
 /**
- * Pick a reducer based on (a) the tool name and (b) what binary is being
- * invoked. Falls back to the generic line-ranking reducer.
+ * Structured reducers only for tools that emit parseable *findings*.
+ * Returns null when the caller should use raw head+tail (default for all
+ * other tools — including shell.exec whoami, npm, ls, …).
  */
-export function pickReducer(context: PolicyContext): Reducer {
+export function pickReducer(context: PolicyContext): Reducer | null {
   if (context.toolName === "net.scan" || context.toolName === "pentest.recon") {
-    // Both produce nmap-style text; for recon we still want nmap-shaped parsing
-    // for the nmap sub-step.
     return nmapReducer;
   }
   const head = context.command ? commandHead(context.command) : "";
@@ -52,7 +62,7 @@ export function pickReducer(context: PolicyContext): Reducer {
     case "sqlmap":
       return sqlmapReducer;
     default:
-      return genericReducer;
+      return null;
   }
 }
 
@@ -61,8 +71,17 @@ export function reduceToolOutput(
   context: PolicyContext,
 ): ReducerOutput {
   const reducer = pickReducer(context);
+  if (!reducer) {
+    // No post-hoc keyword filtering — caller formats with head/tail.
+    return { summary: raw };
+  }
   return reducer(raw, {
     command: context.command ?? context.toolName,
     argv: context.argv,
   });
+}
+
+/** True when a specialized (non-identity) reducer will run. */
+export function hasStructuredReducer(context: PolicyContext): boolean {
+  return pickReducer(context) !== null;
 }
