@@ -57,13 +57,45 @@ const DEFAULT_MAX_CAPTURE_BYTES = 500 * 1024 * 1024;
 const DEFAULT_TIMEOUT_MS = 180_000;
 
 /** Prefer the platform default shell, but tolerate minimal sandboxes that omit it. */
-function resolveShell(): string | undefined {
+export function resolveShell(): string | undefined {
   if (process.platform === "win32") return process.env.ComSpec ?? "cmd.exe";
   const candidates = ["/bin/sh", process.env.SHELL, "/bin/bash", "/bin/zsh"];
   for (const candidate of candidates) {
     if (candidate && existsSync(candidate)) return candidate;
   }
   return undefined;
+}
+
+function launchErrorOutput(
+  error: NodeJS.ErrnoException,
+  details: { shell: string; cwd: string },
+): string {
+  const code = error.code ?? "UNKNOWN";
+  const fields = [
+    `shell=${JSON.stringify(details.shell)}`,
+    `cwd=${JSON.stringify(details.cwd)}`,
+    error.syscall ? `syscall=${JSON.stringify(error.syscall)}` : undefined,
+    error.path ? `path=${JSON.stringify(error.path)}` : undefined,
+  ].filter((value): value is string => Boolean(value));
+  return (
+    `Command launch error [${code}]: ${error.message}\n` +
+    `${fields.join("; ")}\n` +
+    "The command did not start. Do not rewrite its syntax to work around this infrastructure error; verify the shell and cwd, then retry at most once."
+  );
+}
+
+interface ShellExecAttemptResult extends ToolResult {
+  /** Internal-only metadata used to safely retry a command that never started. */
+  launchFailure?: {
+    code?: string | undefined;
+    shell: string;
+    cwd: string;
+  } | undefined;
+}
+
+function withoutLaunchMetadata(result: ShellExecAttemptResult): ToolResult {
+  const { launchFailure: _launchFailure, ...publicResult } = result;
+  return publicResult;
 }
 
 /**
@@ -326,9 +358,32 @@ async function redactArtifactInPlace(path: string): Promise<boolean> {
   }
 }
 
-export async function shellExec(args: ShellExecArgs): Promise<ToolResult> {
+async function shellExecAttempt(args: ShellExecArgs): Promise<ShellExecAttemptResult> {
   if (args.signal?.aborted) {
     return { ok: false, output: "Command aborted.", exitCode: 130 };
+  }
+
+  const cwd = args.cwd ?? safeCwd();
+  try {
+    const cwdStat = await stat(cwd);
+    if (!cwdStat.isDirectory()) {
+      return {
+        ok: false,
+        output:
+          `Command launch error [INVALID_CWD]: working directory is not a directory.\n` +
+          `cwd=${JSON.stringify(cwd)}\nThe command did not start; correct the shell.exec cwd instead of changing command syntax.`,
+        exitCode: 127,
+      };
+    }
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    return {
+      ok: false,
+      output:
+        `Command launch error [INVALID_CWD]: ${detail}\n` +
+        `cwd=${JSON.stringify(cwd)}\nThe command did not start; correct the shell.exec cwd instead of changing command syntax.`,
+      exitCode: 127,
+    };
   }
 
   const maxModelBytes = args.maxModelBytes ?? DEFAULT_MAX_MODEL_BYTES;
@@ -367,7 +422,7 @@ export async function shellExec(args: ShellExecArgs): Promise<ToolResult> {
       return;
     }
     const child = spawn(args.command, {
-      cwd: args.cwd ?? safeCwd(),
+      cwd,
       detached: detached && !usingInteractiveStdin,
       shell,
       stdio,
@@ -465,7 +520,15 @@ export async function shellExec(args: ShellExecArgs): Promise<ToolResult> {
         resolve({
           ok: false,
           exitCode: 127,
-          output: `Unable to start command shell (${shell}): ${error.message}`,
+          output: launchErrorOutput(error as NodeJS.ErrnoException, {
+            shell,
+            cwd,
+          }),
+          launchFailure: {
+            code: (error as NodeJS.ErrnoException).code,
+            shell,
+            cwd,
+          },
         });
       }
     });
@@ -573,6 +636,35 @@ export async function shellExec(args: ShellExecArgs): Promise<ToolResult> {
       args.timeoutMs ?? DEFAULT_TIMEOUT_MS,
     );
   });
+}
+
+/**
+ * Run a foreground shell command. A launch-level ENOENT can be transient on
+ * macOS even when /bin/sh and cwd both exist. Because the child never started,
+ * one runtime-owned retry is safe and avoids teaching the model to mutate the
+ * command repeatedly. Command failures after a successful spawn are never
+ * retried here.
+ */
+export async function shellExec(args: ShellExecArgs): Promise<ToolResult> {
+  const first = await shellExecAttempt(args);
+  const launch = first.launchFailure;
+  const retryable =
+    launch?.code === "ENOENT" &&
+    existsSync(launch.shell) &&
+    existsSync(launch.cwd) &&
+    args.signal?.aborted !== true &&
+    args.artifactPath === undefined;
+  if (!retryable) return withoutLaunchMetadata(first);
+
+  await new Promise((resolve) => setTimeout(resolve, 75));
+  const second = await shellExecAttempt(args);
+  const result = withoutLaunchMetadata(second);
+  return {
+    ...result,
+    output: second.launchFailure
+      ? `Automatic retry after a transient command-launch ENOENT also failed.\n${result.output}`
+      : `Recovered automatically from one transient command-launch ENOENT.\n${result.output}`.trimEnd(),
+  };
 }
 
 /**

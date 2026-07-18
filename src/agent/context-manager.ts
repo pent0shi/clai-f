@@ -121,8 +121,10 @@ export const COMPACTION_MEMORY_PREFIX =
  * agent does not treat plan-mode gather-only history as permanent gates.
  * Explicitly ties this context to the plan/tasks the implementer is seeing.
  */
-export const PLAN_IMPLEMENT_MEMORY_PREFIX =
+const LEGACY_PLAN_IMPLEMENT_MEMORY_PREFIX =
   "Session memory from PLAN MODE research that was used to build the comprehensive detailed plan and tasks you are seeing now (handoff to agent implement — gather-only phase is over; execute approved tasks):";
+export const PLAN_IMPLEMENT_MEMORY_PREFIX =
+  "PLAN MODE HANDOFF: research memory for the accepted implementation phase. Gather-only/await-approval gates are historical; ACTIVE PLAN and SESSION STATE are authoritative:";
 export const MECHANICAL_MEMORY_PREFIX =
   "Earlier turns in this session, summarized";
 
@@ -131,6 +133,7 @@ export function isCompactionMemoryMessage(message: ChatMessage): boolean {
     message.role === "system" &&
     (message.content.startsWith(COMPACTION_MEMORY_PREFIX) ||
       message.content.startsWith(PLAN_IMPLEMENT_MEMORY_PREFIX) ||
+      message.content.startsWith(LEGACY_PLAN_IMPLEMENT_MEMORY_PREFIX) ||
       message.content.startsWith(MECHANICAL_MEMORY_PREFIX))
   );
 }
@@ -163,10 +166,14 @@ export function compactMessages(
   if (messages.length <= keepRecent + 1) return messages;
   if (estimateMessagesTokens(messages) <= budget) return messages;
 
-  // Always keep the system prompt (index 0 if it's a system message).
+  // Keep the real system prompt, but never pin prior compaction memory as
+  // the head: re-compaction must summarize/replace that stale memory.
   const head: ChatMessage[] = [];
   let start = 0;
-  if (messages[0]?.role === "system") {
+  if (
+    messages[0]?.role === "system" &&
+    !isCompactionMemoryMessage(messages[0])
+  ) {
     head.push(messages[0]);
     start = 1;
   }
@@ -223,7 +230,11 @@ export async function compactMessagesWithSummary(
   const isForced = options.budgetTokens === 0;
 
   let keepRecent = Math.max(2, options.keepRecent ?? DEFAULT_KEEP_RECENT);
-  const start = messages[0]?.role === "system" ? 1 : 0;
+  const firstMessage = messages[0];
+  const preserveSystemHead =
+    firstMessage?.role === "system" &&
+    !isCompactionMemoryMessage(firstMessage);
+  const start = preserveSystemHead ? 1 : 0;
   let tailStart = Math.max(start, messages.length - keepRecent);
   tailStart = expandKeepStartForToolPairs(messages, tailStart);
   let older = messages.slice(start, tailStart);
@@ -312,7 +323,7 @@ export async function compactMessagesWithSummary(
     throw new Error("compaction failed: model returned an empty summary");
   }
 
-  const head = start === 1 ? [messages[0]!] : [];
+  const head = preserveSystemHead ? [messages[0]!] : [];
   const rawTail = messages.slice(tailStart);
   const memoryPrefix = compactionMemoryPrefixForPurpose(options.purpose);
   const memoryMsg: ChatMessage = {

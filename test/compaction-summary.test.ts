@@ -4,7 +4,11 @@ import {
   COMPACTION_SYSTEM_PROMPT,
   trimTranscriptForCompaction,
 } from "../src/agent/compaction-summary.js";
-import { compactMessagesWithSummary } from "../src/agent/context-manager.js";
+import {
+  compactMessages,
+  compactMessagesWithSummary,
+  isCompactionMemoryMessage,
+} from "../src/agent/context-manager.js";
 import type { ChatMessage } from "../src/types.js";
 
 describe("compaction-summary prompts", () => {
@@ -33,7 +37,7 @@ describe("compaction-summary prompts", () => {
       durableState: "ACTIVE PLAN: pentest",
     });
     expect(p).toMatch(/HANDOFF|plan-mode research|plan mode/i);
-    expect(p).toMatch(/comprehensive detailed plan and tasks/i);
+    expect(p).toMatch(/Do not add another framing paragraph/i);
     expect(p).toContain("## Research evidence");
     expect(p).toContain("## Coverage ledger");
     expect(p).toContain("## Confirmed findings");
@@ -43,6 +47,11 @@ describe("compaction-summary prompts", () => {
     expect(p).toContain("## Durable engagement rules");
     expect(p).toMatch(/not current agent gates|gather-only|past that phase/i);
     expect(p).toMatch(/mid-token|COMPLETE short memory/i);
+    expect(p).toMatch(/DEDUPLICATE/i);
+    expect(p).toMatch(/omit routine fs\.list/i);
+    expect(p).toMatch(/ACTIVE PLAN is injected separately/i);
+    expect(p).toMatch(/revalidation of mutable workspace/i);
+    expect(p).toMatch(/Resolve contradictions/i);
   });
 
   it("system prompt warns against freezing temporary mode gates", () => {
@@ -108,11 +117,77 @@ describe("LLM compaction integration shape", () => {
     const mem = result.messages.find(
       (m) =>
         m.role === "system" &&
-        /plan mode research/i.test(m.content) &&
+        /PLAN MODE HANDOFF/i.test(m.content) &&
         m.content.includes("Ports 80/443"),
     );
     expect(mem).toBeTruthy();
-    expect(mem!.content).toMatch(/gather-only phase is over/i);
-    expect(mem!.content).toMatch(/comprehensive detailed plan and tasks/i);
+    expect(mem!.content).toMatch(/gather-only\/await-approval gates are historical/i);
+    expect(mem!.content).toMatch(/ACTIVE PLAN and SESSION STATE are authoritative/i);
+  });
+
+  it("continues recognizing legacy plan-handoff memories on session resume", () => {
+    expect(
+      isCompactionMemoryMessage({
+        role: "system",
+        content:
+          "Session memory from PLAN MODE research that was used to build the comprehensive detailed plan and tasks you are seeing now (handoff to agent implement — gather-only phase is over; execute approved tasks):\nlegacy memory",
+      }),
+    ).toBe(true);
+  });
+
+  it("replaces index-zero compaction memory during LLM re-compaction", async () => {
+    const staleMemory: ChatMessage = {
+      role: "system",
+      content:
+        "Session memory from compacted earlier turns:\n\nstale resumed memory",
+    };
+    const messages: ChatMessage[] = [
+      staleMemory,
+      { role: "user", content: "old request" },
+      { role: "assistant", content: "old response" },
+      { role: "user", content: "recent request" },
+      { role: "assistant", content: "recent response" },
+    ];
+    let prompt = "";
+
+    const result = await compactMessagesWithSummary(
+      messages,
+      async (value) => {
+        prompt = value;
+        return "## Research evidence\nFresh handoff only";
+      },
+      { budgetTokens: 0, keepRecent: 2, purpose: "plan-implement" },
+    );
+
+    expect(prompt).toContain("stale resumed memory");
+    const memories = result.messages.filter(isCompactionMemoryMessage);
+    expect(memories).toHaveLength(1);
+    expect(memories[0]?.content).toContain("PLAN MODE HANDOFF");
+    expect(memories[0]?.content).toContain("Fresh handoff only");
+    expect(result.messages).not.toContain(staleMemory);
+  });
+
+  it("replaces index-zero compaction memory during mechanical re-compaction", () => {
+    const messages: ChatMessage[] = [
+      {
+        role: "system",
+        content:
+          "Session memory from compacted earlier turns:\n\nstale resumed memory",
+      },
+      { role: "user", content: "old request " + "x".repeat(200) },
+      { role: "assistant", content: "old response " + "x".repeat(200) },
+      { role: "user", content: "recent request" },
+      { role: "assistant", content: "recent response" },
+    ];
+
+    const result = compactMessages(messages, {
+      budgetTokens: 0,
+      keepRecent: 2,
+    });
+
+    const memories = result.filter(isCompactionMemoryMessage);
+    expect(memories).toHaveLength(1);
+    expect(memories[0]?.content).toContain("Earlier turns in this session");
+    expect(result.some((message) => message.content.includes("stale resumed memory"))).toBe(false);
   });
 });

@@ -77,6 +77,22 @@ describe("durable background jobs", () => {
     expect(tail.backgroundJob).toMatchObject({ status: "failed", exitCode: 7 });
   });
 
+  it("labels launch success separately from later application failure", async () => {
+    const { manager } = await fixture();
+    const command = `${JSON.stringify(process.execPath)} -e ${JSON.stringify("setTimeout(() => process.exit(7), 80)")}`;
+    const started = await manager.startJob(command);
+
+    expect(started.ok).toBe(true);
+    expect(started.output).toContain("OS process launch confirmed");
+    expect(started.output).toContain("does not prove application readiness");
+    expect(started.output).toContain("shell.tail");
+
+    const id = started.backgroundJob?.id;
+    expect(id).toBeTruthy();
+    await waitForStatus(manager, id!, ["failed"]);
+    expect(manager.getJob(id!)).toMatchObject({ status: "failed", exitCode: 7 });
+  });
+
   it("forwards sensitive stdin once without persisting it and accepts artifact aliases", async () => {
     const { dir, manager } = await fixture();
     const secret = "modal-password-never-persist";
@@ -143,5 +159,72 @@ describe("durable job safety edges", () => {
     });
     expect(result).toMatchObject({ ok: false, exitCode: 1 });
     expect(manager.getRecentJobs()).toHaveLength(0);
+  });
+
+  it("waits for OS spawn confirmation and returns actionable launch failures", async () => {
+    const { dir, manager } = await fixture();
+    const missingExecutable = join(dir, "definitely-missing-command");
+    const result = await manager.startJob({
+      command: missingExecutable,
+      argv: [],
+      display: "missing-command-fixture",
+    });
+
+    expect(result).toMatchObject({ ok: false, exitCode: 127 });
+    expect(result.output).toContain("Background command launch error [ENOENT]");
+    expect(result.output).toContain(`target=${JSON.stringify(missingExecutable)}`);
+    expect(result.output).toContain(`cwd=${JSON.stringify(process.cwd())}`);
+    expect(result.output).toContain("The command did not start");
+    expect(result.backgroundJob).toMatchObject({ status: "failed", exitCode: 127 });
+    expect(manager.getJob(result.backgroundJob!.id)).toMatchObject({
+      status: "failed",
+      exitCode: 127,
+    });
+  });
+
+  it("rejects an invalid cwd before creating a phantom background job", async () => {
+    const { dir, manager } = await fixture();
+    const missingCwd = join(dir, "missing-cwd");
+    const result = await manager.startJob("echo never-runs", { cwd: missingCwd });
+
+    expect(result).toMatchObject({ ok: false, exitCode: 127 });
+    expect(result.output).toContain("Background command launch error [INVALID_CWD]");
+    expect(result.output).toContain(`cwd=${JSON.stringify(missingCwd)}`);
+    expect(result.output).toContain("The command did not start");
+    expect(manager.getRecentJobs()).toHaveLength(0);
+  });
+
+  it("reports a public shell string that exits 127 immediately as failed", async () => {
+    const { manager } = await fixture();
+    const result = await manager.startJob("definitely-missing-clai-command");
+
+    expect(result).toMatchObject({ ok: false, exitCode: 127 });
+    expect(result.output).toContain("failed immediately");
+    expect(result.output).toContain("do not retry unchanged");
+    expect(result.backgroundJob).toMatchObject({ status: "failed", exitCode: 127 });
+  });
+
+  it("never claims a launched process did not start when final persistence fails", async () => {
+    const { manager } = await fixture();
+    const internal = manager as unknown as { persist: () => Promise<void> };
+    const realPersist = internal.persist.bind(manager);
+    let persistCalls = 0;
+    internal.persist = async () => {
+      persistCalls += 1;
+      if (persistCalls === 2) throw new Error("simulated registry write failure");
+      await realPersist();
+    };
+
+    const command = `${JSON.stringify(process.execPath)} -e ${JSON.stringify("setInterval(() => {}, 1000)")}`;
+    const result = await manager.startJob(command);
+    internal.persist = realPersist;
+
+    expect(result.ok).toBe(true);
+    expect(result.output).toContain("launched as pid=");
+    expect(result.output).toContain("simulated registry write failure");
+    expect(result.output).toContain("do not launch a duplicate");
+    expect(result.output).not.toContain("The command did not start");
+    expect(result.backgroundJob).toMatchObject({ status: "running" });
+    await manager.stopJob(result.backgroundJob!.id, { graceMs: 300 });
   });
 });

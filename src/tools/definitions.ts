@@ -103,7 +103,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   ),
   def(
     "fs.write",
-    "Create or fully overwrite a file with complete content in one call. Prefer this over append for new files.",
+    "Create a new file or fully overwrite one with complete content. For an existing file already read, prefer fs.edit/replaceLines; if a full rewrite is necessary, preserve the complete file and inspect the returned diff before continuing.",
     {
       type: "object",
       properties: {
@@ -251,7 +251,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   ),
   def(
     "shell.exec",
-    "Run a shell command and wait for completion. Use shell.start for long-running servers.",
+    "Run a finite shell command and wait for completion. Pass cwd instead of using cd; commands run under a platform command shell, so use portable syntax. Installs/scaffolds/builds belong here with timeoutMs. Use shell.start only for processes intended to keep running.",
     {
       type: "object",
       properties: {
@@ -266,7 +266,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   ),
   def(
     "shell.start",
-    "Start a long-running command in the background; returns a job id.",
+    "Start a persistent server/watcher/listener in the background and return a job id after OS process launch succeeds. Launch success does not prove application readiness or continued liveness; inspect shell.tail and run a readiness probe. Do not use for finite installs, scaffolds, builds, or tests merely because they may take time.",
     {
       type: "object",
       properties: {

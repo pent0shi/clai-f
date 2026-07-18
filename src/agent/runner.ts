@@ -1238,6 +1238,12 @@ export async function runAgentTurn(
     let narrowNmapDispatchCount = 0;
 
     const deferredPostToolMessages: ChatMessage[] = [];
+    /**
+     * Latest plan seen during tool execution. SESSION STATE is refreshed once
+     * after the full tool batch is recorded — never mid-group (see
+     * executeSingleTool / recordResult).
+     */
+    let pendingSessionStatePlan: SessionPlan | null | undefined = activePlan;
 
 
     const analysis = analyzeTask(prompt);
@@ -1569,6 +1575,13 @@ export async function runAgentTurn(
             ) {
               taskWorkLedger = null;
             }
+          }
+
+          if (planResult.ok && planResult.plan) {
+            // Keep the batch-end SESSION STATE aligned with successful plan
+            // transitions. Otherwise a completed task can still appear open
+            // on the next model round and trigger duplicate work.
+            pendingSessionStatePlan = planResult.plan;
           }
 
           if (!alreadyPrintedIds.has(toolEventId)) {
@@ -2681,7 +2694,14 @@ export async function runAgentTurn(
             await savePlan(liveAfter).catch(() => undefined);
           }
         }
-        refreshSessionState(liveAfter);
+        // Do NOT refreshSessionState here. executeSingleTool often finishes
+        // (especially in Promise.all parallel groups) *before* recordResult
+        // appends role:tool rows. Upserting SESSION STATE between
+        // assistant.toolCalls and those results breaks native tool protocol;
+        // repairToolProtocol then drops the live bodies and injects
+        // "No stored body" placeholders — models thrash re-running tools
+        // that already succeeded in the UI. Refresh once after the batch.
+        pendingSessionStatePlan = liveAfter ?? pendingSessionStatePlan;
       }
 
 
@@ -4642,6 +4662,10 @@ export async function runAgentTurn(
             "Cancelled — not executed this turn.",
           );
         }
+
+        // SESSION STATE only after the assistant→tool group is closed.
+        // Mid-group upserts were the root cause of "No stored body" thrash.
+        refreshSessionState(pendingSessionStatePlan);
 
         if (deferredPostToolMessages.length > 0) {
           messages.push(...deferredPostToolMessages.splice(0));

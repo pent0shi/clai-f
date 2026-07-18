@@ -11,7 +11,10 @@ import {
   pickReducer,
   reduceToolOutput,
 } from "../src/tools/policies/output-policy.js";
-import { formatToolContext } from "../src/agent/tool-output-formatting.js";
+import {
+  failureSummaryLine,
+  formatToolContext,
+} from "../src/agent/tool-output-formatting.js";
 
 const ctx = { command: "test" } as const;
 
@@ -184,6 +187,23 @@ describe("output policy — no generic keyword reducer", () => {
     );
     expect(result.summary).toMatch(/nmap reduced summary/);
   });
+  it("failureSummaryLine prefers command-not-found over echo banners", () => {
+    const line = failureSummaryLine({
+      ok: false,
+      exitCode: 127,
+      output: [
+        "=== cwd contents ===",
+        "total 32",
+        "=== yarn ===",
+        "/bin/sh: yarn: command not found",
+      ].join("\n"),
+    });
+    expect(line).toMatch(/exit=127/);
+    expect(line).toMatch(/command not found/i);
+    expect(line).toMatch(/yarn/);
+    expect(line).not.toMatch(/=== cwd contents ===/);
+  });
+
   it("formatToolContext keeps ordinary shell bodies without omit headers", () => {
     const body = Array.from({ length: 40 }, (_, i) => `line ${i}`).join("\n");
     const ctxOut = formatToolContext(

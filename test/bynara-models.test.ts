@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { bynaraProvider } from "../src/llm/bynara.js";
+import { getToolDefinitions } from "../src/tools/definitions.js";
 
 describe("Bynara model discovery", () => {
   afterEach(() => {
@@ -67,5 +68,43 @@ describe("Bynara model discovery", () => {
     const result = await bynaraProvider.listModels!({});
     expect(result).toEqual(["mimo-v2.5-free"]);
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("sends complete tool-result content to Tencent HY3", async () => {
+    const output = `BEGIN-${"x".repeat(16_000)}-END`;
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      choices: [{ message: { content: "ok" }, finish_reason: "stop" }],
+    }), { status: 200, headers: { "content-type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await bynaraProvider.complete(
+      {
+        model: "tencent-hy3",
+        messages: [
+          { role: "user", content: "Read the file." },
+          {
+            role: "assistant",
+            content: "",
+            toolCalls: [
+              { id: "call_read", name: "fs.read", args: { path: "/tmp/a.txt" } },
+            ],
+          },
+          {
+            role: "tool",
+            toolCallId: "call_read",
+            name: "fs.read",
+            content: output,
+          },
+        ],
+        tools: getToolDefinitions({ names: ["fs.read"] }),
+      },
+      { apiKey: "test-key" },
+    );
+
+    const request = fetchMock.mock.calls[0]![1] as RequestInit;
+    const body = JSON.parse(String(request.body)) as {
+      messages: Array<{ role: string; content?: string }>;
+    };
+    expect(body.messages.find((message) => message.role === "tool")?.content).toBe(output);
   });
 });

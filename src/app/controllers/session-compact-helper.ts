@@ -15,10 +15,10 @@ export async function summarizeForSessionCompact(
     purpose?: "default" | "plan-implement" | undefined;
   },
 ): Promise<string> {
-  const maxTokens = opts.purpose === "plan-implement" ? 4_096 : 2_048;
+  const maxTokens = 2_048;
   const systemContent =
     opts.purpose === "plan-implement"
-      ? "You write dense, complete handoff memory for an agent that will execute an approved plan. State clearly that this context is from plan-mode research used to build the comprehensive plan and tasks the agent is seeing. Preserve findings, coverage, negatives, artifacts, and open work. Never invent. Never cut a fact mid-token."
+      ? "Write concise, non-redundant research memory for an agent executing an approved plan. Do not add framing: the PLAN MODE HANDOFF wrapper and active plan are injected separately. For coding target 600–1000 tokens; preserve only verified state, reusable research/artifacts, decisions, blockers, and risks. Security handoffs may be longer to preserve findings and coverage. Never invent or cut a fact mid-token."
       : "You compress conversation history into accurate continuation memory.";
 
   const completeSummary = async (p: string): Promise<string> => {

@@ -128,7 +128,7 @@ describe("session-scoped jobs", () => {
         `[abc${i}] exited health=terminal exit=0 ${i}s  npm run build`,
     );
     const body = [
-      "Session background jobs (12 total, session deadbeef…):",
+      "Session background jobs (12 total, session sess-deadbeef-abc123):",
       ...lines,
       "None currently running.",
     ].join("\n");

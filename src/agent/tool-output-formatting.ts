@@ -10,9 +10,9 @@
  */
 
 import { mkdir, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
 import { join } from "node:path";
-import { fixOwner, handlePermissionError } from "../os/permissions.js";
+import { fixOwner } from "../os/permissions.js";
+import { getArtifactDir } from "../store/paths.js";
 import {
   hasStructuredReducer,
   reduceToolOutput,
@@ -32,7 +32,7 @@ export async function saveToolOutput(
   output: string,
 ): Promise<string | undefined> {
   if (!output.trim()) return undefined;
-  const dir = join(homedir(), ".clai", "outputs");
+  const dir = getArtifactDir();
   try {
     await mkdir(dir, { recursive: true });
     await fixOwner(dir);
@@ -41,8 +41,8 @@ export async function saveToolOutput(
     await writeFile(path, `${output}\n`, "utf8");
     await fixOwner(path);
     return path;
-  } catch (err: any) {
-    handlePermissionError(err);
+  } catch {
+    return undefined;
   }
 }
 
@@ -125,6 +125,26 @@ export function summarizeOutput(
   };
 }
 
+/** Prefer real error lines over banner/echo headers when summarizing failures. */
+function failureSnippetFromOutput(output: string | undefined): string {
+  const lines = (output ?? "")
+    .split(/\r?\n/)
+    .map((l) => l.replace(/\s+/g, " ").trim())
+    .filter(Boolean);
+  if (lines.length === 0) return "";
+
+  const errorLike =
+    /command not found|not found|No such file|permission denied|EACCES|ENOENT|error:|fatal:|Traceback|Exception|FAILED|exit code|cannot|can't |couldn't |denied|refused|timed out|timeout|killed|segmentation fault|usage:/i;
+  // Scan from the end — probe chains (`a && b && c`) print success noise first
+  // and the actual failure last (e.g. `yarn: command not found`).
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    const line = lines[i]!;
+    if (errorLike.test(line)) return line.slice(0, 120);
+  }
+  // No explicit error pattern: last non-empty line is usually the failing step.
+  return lines[lines.length - 1]!.slice(0, 120);
+}
+
 /** One-line failure cue prepended when a tool returns ok=false. */
 export function failureSummaryLine(result: {
   ok: boolean;
@@ -134,11 +154,18 @@ export function failureSummaryLine(result: {
   if (result.ok) return undefined;
   const exit =
     typeof result.exitCode === "number" ? `exit=${result.exitCode}` : "failed";
-  const head = (result.output ?? "").split(/\r?\n/).find((l) => l.trim()) ?? "";
-  const snippet = head.replace(/\s+/g, " ").trim().slice(0, 120);
-  return snippet
-    ? `FAILURE SUMMARY: ${exit}; ${snippet}`
-    : `FAILURE SUMMARY: ${exit}`;
+  // Exit 127 is almost always "command not found" in POSIX shells.
+  const hint =
+    result.exitCode === 127
+      ? "command not found"
+      : result.exitCode === 126
+        ? "not executable"
+        : undefined;
+  const snippet = failureSnippetFromOutput(result.output);
+  const parts = [exit, hint, snippet && snippet !== hint ? snippet : undefined].filter(
+    Boolean,
+  );
+  return `FAILURE SUMMARY: ${parts.join("; ")}`;
 }
 
 /** Legacy hard ceiling; effective cap comes from reliability policy (E2). */

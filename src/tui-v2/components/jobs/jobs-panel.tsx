@@ -103,10 +103,9 @@ export function JobsPanel(props: JobsPanelProps): ReactNode {
     }
   });
 
-  const sessionShort = services.session.sessionId.slice(0, 8);
-  // ASCII-only chrome: Unicode arrows are double-width in many terminals and
-  // ghost into "selectd" / "obenter" when rows re-paint without fixed height.
-  const titleLine = `Background jobs · session ${sessionShort}…`;
+  // Full session id — these are short (`sess-<time36>-<rand6>`) and truncation
+  // made history/jobs look like broken ids (`sess-mrq…`).
+  const titleLine = `Background jobs · session ${services.session.sessionId}`;
   const helpLine =
     "up/down:select · enter/t:tail · k:kill · q/esc:close";
 

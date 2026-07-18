@@ -79,4 +79,20 @@ describe("phase 3 — bounded shell capture", () => {
     expect(result.stats?.bytesRead).toBeGreaterThan(0);
     expect(result.stats?.elapsedMs).toBeGreaterThanOrEqual(0);
   });
+
+  it("reports an invalid cwd as a launch error without running the command", async () => {
+    const missingCwd = join(tmpdir(), `clai-missing-cwd-${process.pid}-${Date.now()}`);
+    const result = await shellExec({
+      command: "echo must-not-run",
+      cwd: missingCwd,
+      noArtifact: true,
+      timeoutMs: 5_000,
+    });
+
+    expect(result).toMatchObject({ ok: false, exitCode: 127 });
+    expect(result.output).toContain("Command launch error [INVALID_CWD]");
+    expect(result.output).toContain(`cwd=${JSON.stringify(missingCwd)}`);
+    expect(result.output).toContain("The command did not start");
+    expect(result.output).not.toContain("must-not-run\n");
+  });
 });

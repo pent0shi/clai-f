@@ -110,6 +110,16 @@ export function inferNextHint(s: SessionStateSnapshot): string | undefined {
 }
 
 /**
+ * True when a system message is SESSION STATE / WORKING MEMORY.
+ * Used so tool-protocol repair never treats these as interrupting an open
+ * assistant/tool group (that used to drop live tool bodies and inject
+ * "No stored body" placeholders).
+ */
+export function isSessionStateMessage(content: string): boolean {
+  return content.startsWith(SESSION_STATE_PREFIX);
+}
+
+/**
  * Upsert SESSION STATE as a **trailing** system message (suffix of history).
  *
  * Why trailing (not after messages[0]):
@@ -121,6 +131,13 @@ export function inferNextHint(s: SessionStateSnapshot): string | undefined {
  *
  * Trailing placement keeps system + user + prior turns byte-stable so
  * only the new suffix (latest tools + this block) is uncached.
+ *
+ * CRITICAL: call this only after the current assistant tool-call group has
+ * all role:tool results recorded. Inserting SESSION STATE between
+ * assistant.toolCalls and its results breaks native tool protocol: repair
+ * then injects "No stored body" placeholders and drops the real bodies —
+ * models thrash re-running tools that already succeeded in the UI.
+ *
  * Mutates the messages array in place.
  */
 export function upsertSessionStateMessage(
@@ -144,9 +161,6 @@ export function upsertSessionStateMessage(
   }
 
   // Always append: updates change only the request suffix.
+  // Never splice into the middle of an open assistant→tool group.
   messages.push({ role: "system", content });
-}
-
-export function isSessionStateMessage(content: string): boolean {
-  return content.startsWith(SESSION_STATE_PREFIX);
 }

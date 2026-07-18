@@ -7,6 +7,7 @@ import type { ToolResult } from "../types.js";
 import { redactSecrets } from "../llm/provider.js";
 import { safeCwd } from "../os/cwd.js";
 import { getJobsDir } from "../store/paths.js";
+import { resolveShell } from "./shell.js";
 
 export type JobStatus = "starting" | "running" | "exited" | "failed" | "stopping" | "killed" | "lost";
 
@@ -274,6 +275,36 @@ export class JobManager {
     }
     const id = randomUUID().slice(0, 8);
     const cwd = options?.cwd ?? safeCwd();
+    try {
+      const cwdStat = await stat(cwd);
+      if (!cwdStat.isDirectory()) {
+        return {
+          ok: false,
+          output:
+            `Background command launch error [INVALID_CWD]: working directory is not a directory.\n` +
+            `cwd=${JSON.stringify(cwd)}\nThe command did not start; correct shell.start cwd instead of changing command syntax.`,
+          exitCode: 127,
+        };
+      }
+    } catch (error) {
+      return {
+        ok: false,
+        output:
+          `Background command launch error [INVALID_CWD]: ${error instanceof Error ? error.message : String(error)}\n` +
+          `cwd=${JSON.stringify(cwd)}\nThe command did not start; correct shell.start cwd instead of changing command syntax.`,
+        exitCode: 127,
+      };
+    }
+    const shell = typeof command === "string" ? resolveShell() : undefined;
+    if (typeof command === "string" && !shell) {
+      return {
+        ok: false,
+        output:
+          `Background command launch error [SHELL_NOT_FOUND]: no usable command shell was found.\n` +
+          `cwd=${JSON.stringify(cwd)}\nThe command did not start.`,
+        exitCode: 127,
+      };
+    }
     await mkdir(this.jobsDir, { recursive: true });
     const prefix = `${new Date().toISOString().replace(/[:.]/g, "-")}-${id}`;
     const stdoutArtifact = join(this.jobsDir, `${prefix}.stdout.log`);
@@ -301,23 +332,100 @@ export class JobManager {
     this.pruneTerminalJobs();
     await this.persist();
 
+    let launchConfirmed = false;
     try {
       const detached = process.platform !== "win32";
-      const child = typeof command === "string"
-        ? spawn(command, {
-            cwd,
-            detached,
-            shell: true,
-            stdio: ["ignore", "pipe", "pipe"],
-          })
-        : spawn(command.command, command.argv, {
-            cwd,
-            detached,
-            shell: false,
-            stdio: [command.stdinText === undefined ? "ignore" : "pipe", "pipe", "pipe"],
-          });
+      const spawnChild = (): ChildProcess =>
+        typeof command === "string"
+          ? spawn(command, {
+              cwd,
+              detached,
+              shell: shell!,
+              stdio: ["ignore", "pipe", "pipe"],
+            })
+          : spawn(command.command, command.argv, {
+              cwd,
+              detached,
+              shell: false,
+              stdio: [command.stdinText === undefined ? "ignore" : "pipe", "pipe", "pipe"],
+            });
+      let child = spawnChild();
+      const stdout = new RotatingRedactedWriter(job.artifacts.stdout);
+      const stderr = new RotatingRedactedWriter(job.artifacts.stderr);
+      stdout.append(`$ ${job.commandDisplay}\n\n`);
+
+      // A ChildProcess object is returned before the OS confirms launch. Wait
+      // for `spawn` (or `error`) so shell.start never reports a phantom running
+      // job whose pid is absent and whose eventual status is opaque exit=-2.
+      const waitForLaunch = (
+        candidate: ChildProcess,
+      ): Promise<NodeJS.ErrnoException | undefined> =>
+        new Promise((resolve) => {
+          const onSpawn = (): void => {
+            candidate.off("error", onError);
+            resolve(undefined);
+          };
+          const onError = (error: Error): void => {
+            candidate.off("spawn", onSpawn);
+            resolve(error as NodeJS.ErrnoException);
+          };
+          candidate.once("spawn", onSpawn);
+          candidate.once("error", onError);
+        });
+      let launchError = await waitForLaunch(child);
+      let launchRetried = false;
+      if (
+        launchError?.code === "ENOENT" &&
+        typeof command === "string" &&
+        existsSync(shell!) &&
+        existsSync(cwd)
+      ) {
+        // Safe: the first child never started, so no command side effects are
+        // duplicated. Own this transient retry in the runtime, not the model.
+        launchRetried = true;
+        await new Promise((resolve) => setTimeout(resolve, 75));
+        child = spawnChild();
+        launchError = await waitForLaunch(child);
+      }
+      if (launchError) {
+        const target = typeof command === "string" ? shell! : command.command;
+        const code = launchError.code ?? "UNKNOWN";
+        const fields = [
+          `target=${JSON.stringify(target)}`,
+          `cwd=${JSON.stringify(cwd)}`,
+          launchError.syscall ? `syscall=${JSON.stringify(launchError.syscall)}` : undefined,
+          launchError.path ? `path=${JSON.stringify(launchError.path)}` : undefined,
+        ].filter((value): value is string => Boolean(value));
+        const detail =
+          `${launchRetried ? "Automatic retry after a transient launch ENOENT also failed.\n" : ""}` +
+          `Background command launch error [${code}]: ${launchError.message}\n` +
+          `${fields.join("; ")}\n` +
+          "The command did not start. Do not rewrite its syntax to work around this infrastructure error; verify the target and cwd.";
+        stderr.append(`${detail}\n`);
+        stdout.close();
+        stderr.close();
+        job.status = "failed";
+        job.exitCode = 127;
+        job.endedAt = new Date().toISOString();
+        await this.persist();
+        return {
+          ok: false,
+          output: detail,
+          exitCode: 127,
+          outputPath: stdoutArtifact,
+          backgroundJob: {
+            id,
+            status: "failed",
+            exitCode: 127,
+            artifactPath: stdoutArtifact,
+            nextOffset: 0,
+          },
+        };
+      }
+      launchConfirmed = true;
+
       // Sensitive input is never copied into the job record, display, logs, or
-      // artifacts. Write it once to the child and close stdin immediately.
+      // artifacts. Write it once only after launch has been confirmed.
       if (typeof command !== "string" && command.stdinText !== undefined) {
         child.stdin?.end(command.stdinText);
       }
@@ -326,9 +434,6 @@ export class JobManager {
       job.status = "running";
       job.heartbeatAt = new Date().toISOString();
       job.processIdentity = processIdentity(child.pid);
-      const stdout = new RotatingRedactedWriter(job.artifacts.stdout);
-      const stderr = new RotatingRedactedWriter(job.artifacts.stderr);
-      stdout.append(`$ ${job.commandDisplay}\n\n`);
       this.processes.set(id, child);
       this.writers.set(id, { stdout, stderr });
       const expiresAt = options?.authorization?.expiresAt ? Date.parse(options.authorization.expiresAt) : Number.NaN;
@@ -348,20 +453,64 @@ export class JobManager {
         this.processes.delete(id); this.writers.delete(id);
         void this.persist();
       });
-      child.on("error", () => {
+      child.on("error", (error: NodeJS.ErrnoException) => {
         if (expiryTimer) clearTimeout(expiryTimer);
-        job.status = "failed"; job.endedAt = new Date().toISOString();
+        const code = error.code ?? "UNKNOWN";
+        stderr.append(`Background process error [${code}]: ${error.message}\n`);
+        job.status = "failed";
+        job.exitCode = 127;
+        job.endedAt = new Date().toISOString();
         stdout.close(); stderr.close();
         this.processes.delete(id); this.writers.delete(id);
         void this.persist();
       });
+
+      // Best-effort detection for shell-level failures such as command-not-found
+      // immediately after the command shell launches. This bounded window is
+      // not an application readiness guarantee; callers must tail/probe.
+      await new Promise<void>((resolve) => {
+        if (!this.isLive(job)) {
+          resolve();
+          return;
+        }
+        const onClose = (): void => {
+          clearTimeout(timer);
+          resolve();
+        };
+        const timer = setTimeout(() => {
+          child.off("close", onClose);
+          resolve();
+        }, 30);
+        child.once("close", onClose);
+      });
+      const earlyStatus = this.getJob(id)?.status;
+      if (earlyStatus === "failed") {
+        await this.persist();
+        return {
+          ok: false,
+          output:
+            `Background job failed immediately: id=${id} exit=${job.exitCode ?? "?"}\n` +
+            `Command: ${job.commandDisplay}\nUse shell.tail {"id":"${id}"} for captured stderr; do not retry unchanged.`,
+          exitCode: job.exitCode ?? 1,
+          outputPath: stdoutArtifact,
+          backgroundJob: {
+            id,
+            status: "failed",
+            exitCode: job.exitCode,
+            artifactPath: stdoutArtifact,
+            nextOffset: 0,
+          },
+        };
+      }
+
       child.unref();
       await this.persist();
       return {
         ok: true,
         output:
-          `Background job started: id=${id} (canonical job ID) pid=${child.pid ?? "?"}\n` +
-          `Use shell.tail {"id":"${id}"} or shell.jobs; do not use the artifact filename as the id.\n` +
+          `OS process launch confirmed: id=${id} (canonical job ID) pid=${child.pid ?? "?"}\n` +
+          `This does not prove application readiness or continued liveness; use shell.tail {"id":"${id}"} and a readiness probe.\n` +
+          `Use shell.jobs for status; do not use the artifact filename as the id.\n` +
           `Command: ${job.commandDisplay}\nArtifact: ${stdoutArtifact}`,
         outputPath: stdoutArtifact,
         backgroundJob: {
@@ -374,8 +523,42 @@ export class JobManager {
         },
       };
     } catch (error) {
-      job.status = "failed"; job.endedAt = new Date().toISOString(); await this.persist();
-      return { ok: false, output: `Failed to start job: ${error instanceof Error ? error.message : String(error)}`, exitCode: 1 };
+      const detail = error instanceof Error ? error.message : String(error);
+      if (launchConfirmed) {
+        const alive = processAlive(job.pid);
+        job.status = alive ? "running" : "failed";
+        if (!alive) {
+          job.exitCode ??= 1;
+          job.endedAt ??= new Date().toISOString();
+        }
+        await this.persist().catch(() => undefined);
+        return {
+          ok: alive,
+          output:
+            `Background command launched as pid=${job.pid ?? "?"}, but job setup/persistence failed: ${detail}\n` +
+            `${alive ? `The process is still running as job ${id}; do not launch a duplicate. Use shell.jobs/tail/stop.` : "The process is no longer running; inspect its artifacts before deciding whether to retry."}`,
+          exitCode: alive ? undefined : job.exitCode,
+          outputPath: stdoutArtifact,
+          backgroundJob: {
+            id,
+            status: job.status,
+            exitCode: job.exitCode,
+            artifactPath: stdoutArtifact,
+            nextOffset: 0,
+          },
+        };
+      }
+      job.status = "failed";
+      job.exitCode = 127;
+      job.endedAt = new Date().toISOString();
+      await this.persist().catch(() => undefined);
+      return {
+        ok: false,
+        output:
+          `Background command launch error [UNKNOWN]: ${detail}\n` +
+          `cwd=${JSON.stringify(cwd)}\nThe command did not start.`,
+        exitCode: 127,
+      };
     }
   }
 
@@ -392,7 +575,7 @@ export class JobManager {
       return {
         ok: true,
         output: sessionId
-          ? `No background jobs for this session (${sessionId.slice(0, 8)}…).`
+          ? `No background jobs for this session (${sessionId}).`
           : "No background jobs.",
       };
     }
@@ -423,7 +606,7 @@ export class JobManager {
       return `[${job.id}] ${job.status} health=${health} exit=${job.exitCode ?? "?"} ${elapsed}s  ${job.commandDisplay.slice(0, 80)}`;
     };
     const header = sessionId
-      ? `Session background jobs (${durable.length} total, session ${sessionId.slice(0, 8)}…):`
+      ? `Session background jobs (${durable.length} total, session ${sessionId}):`
       : `Background jobs (${durable.length} total):`;
     const lines = [header, ...shown.map(format)];
     if (omitted > 0) {

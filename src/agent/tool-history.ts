@@ -1,6 +1,7 @@
 import type { ChatMessage, NativeToolCall } from "../types.js";
 import { syntheticToolCallId } from "../llm/tool-protocol.js";
 import { slimToolArgs } from "./message-slim.js";
+import { isSessionStateMessage } from "./session-state.js";
 
 /**
  * Ensure every tool call has a unique non-empty id before history append.
@@ -304,6 +305,17 @@ export function repairToolProtocol(messages: ChatMessage[]): number {
   let repairs = 0;
   /** Open tool call ids → name (best-effort). */
   let pending = new Map<string, string | undefined>();
+  /**
+   * Benign system rows (SESSION STATE) that landed mid tool-group. Park them
+   * and re-append after the group closes so real tool bodies are not dropped.
+   */
+  let parkedBenignSystem: ChatMessage[] = [];
+
+  const flushParkedBenign = (): void => {
+    if (parkedBenignSystem.length === 0) return;
+    out.push(...parkedBenignSystem);
+    parkedBenignSystem = [];
+  };
 
   const flushPending = (_reason: string): void => {
     for (const [id, name] of pending) {
@@ -317,12 +329,15 @@ export function repairToolProtocol(messages: ChatMessage[]): number {
       repairs += 1;
     }
     pending = new Map();
+    flushParkedBenign();
   };
 
   for (const message of messages) {
     if (message.role === "assistant" && message.toolCalls?.length) {
       if (pending.size > 0) {
         flushPending("Interrupted — later assistant tool group started without results.");
+      } else {
+        flushParkedBenign();
       }
       out.push(message);
       pending = new Map();
@@ -345,6 +360,20 @@ export function repairToolProtocol(messages: ChatMessage[]): number {
       }
       pending.delete(id);
       out.push(message);
+      if (pending.size === 0) flushParkedBenign();
+      continue;
+    }
+
+    // SESSION STATE (and similar) must never close an open tool group —
+    // that path replaced live tool bodies with "No stored body" placeholders.
+    if (
+      pending.size > 0 &&
+      message.role === "system" &&
+      typeof message.content === "string" &&
+      isSessionStateMessage(message.content)
+    ) {
+      parkedBenignSystem.push(message);
+      repairs += 1; // reordered relative to the broken history
       continue;
     }
 
@@ -353,12 +382,16 @@ export function repairToolProtocol(messages: ChatMessage[]): number {
       flushPending(
         "Interrupted — conversation continued before tool results arrived (repaired).",
       );
+    } else {
+      flushParkedBenign();
     }
     out.push(message);
   }
 
   if (pending.size > 0) {
     flushPending("Missing tool result at end of history (repaired).");
+  } else {
+    flushParkedBenign();
   }
 
   if (repairs === 0 && out.length === messages.length) {

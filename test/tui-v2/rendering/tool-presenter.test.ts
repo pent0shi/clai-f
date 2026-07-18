@@ -53,6 +53,13 @@ describe("presentTool (CHAT-004)", () => {
     expect(p.detail).toBeUndefined();
   });
 
+  it("labels exit 127 as not found", () => {
+    const p = presentTool(
+      toolItem({ status: "failed", exitCode: 127, summary: "yarn missing" }),
+    );
+    expect(p.statusLabel).toBe("failed · 127 · not found");
+  });
+
   it("shows the block reason instead of a summary when blocked", () => {
     const p = presentTool(
       toolItem({ status: "blocked", reason: "unsafe command", summary: "ignored" }),

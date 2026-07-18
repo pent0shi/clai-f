@@ -51,6 +51,39 @@ describe("command-intent — looksLongRunning", () => {
 
   it("detects vite but not vite build", () => {
     expect(looksLongRunning("vite")).toBe(true);
+    expect(looksLongRunning("npx vite --host 0.0.0.0")).toBe(true);
+    expect(looksLongRunning("cd app && vite --port 5173")).toBe(true);
     expect(looksLongRunning("vite build")).toBe(false);
+  });
+
+  it("keeps Vite package operations, file paths, and finite pipelines in the foreground", () => {
+    expect(looksLongRunning("npm install vite")).toBe(false);
+    expect(looksLongRunning("npm install -D @vitejs/plugin-react")).toBe(false);
+    expect(looksLongRunning("npm view vite version")).toBe(false);
+    expect(looksLongRunning("cat src/vite.config.ts")).toBe(false);
+    expect(looksLongRunning("rm -rf .vite-tmp && ls -la")).toBe(false);
+    expect(
+      looksLongRunning("npm install vite 2>&1 | tail -20"),
+    ).toBe(false);
+  });
+
+  it("does not confuse server-named dependency arguments with running servers", () => {
+    expect(looksLongRunning("npm install nodemon postgres")).toBe(false);
+    expect(looksLongRunning("pnpm add redis-server")).toBe(false);
+    expect(looksLongRunning("yarn add uvicorn")).toBe(false);
+    expect(looksLongRunning("bun add vite")).toBe(false);
+  });
+
+  it("keeps wrapped and option-prefixed package operations in the foreground", () => {
+    expect(looksLongRunning("npm --silent install nodemon")).toBe(false);
+    expect(looksLongRunning("npm --workspace web install postgres")).toBe(false);
+    expect(looksLongRunning("env CI=1 npm install redis-server")).toBe(false);
+    expect(looksLongRunning("sudo -u root npm install uvicorn")).toBe(false);
+    expect(looksLongRunning("corepack pnpm add postgres")).toBe(false);
+  });
+
+  it("still backgrounds a persistent segment after a finite install", () => {
+    expect(looksLongRunning("npm install && npm run dev")).toBe(true);
+    expect(looksLongRunning("npm install vite && npx vite")).toBe(true);
   });
 });

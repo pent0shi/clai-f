@@ -120,13 +120,23 @@ export function presentTool(item: ToolItem): ToolPresentation {
   }
   // Keep the badge short so "done (exit 0)" never overflows the card border.
   // Non-zero exit is still shown; success exit is implied by green "done".
+  // 126/127 are the common POSIX "can't run this" codes — spell them out so a
+  // probe chain that dies on a missing binary doesn't look like a mystery fail.
   let statusLabel = STATUS_LABEL[item.status];
   if (
     item.exitCode !== undefined &&
     item.exitCode !== 0 &&
     (item.status === "failed" || item.status === "ok")
   ) {
-    statusLabel = `${statusLabel} · ${item.exitCode}`;
+    const why =
+      item.exitCode === 127
+        ? "not found"
+        : item.exitCode === 126
+          ? "not executable"
+          : undefined;
+    statusLabel = why
+      ? `${statusLabel} · ${item.exitCode} · ${why}`
+      : `${statusLabel} · ${item.exitCode}`;
   }
   return {
     glyph: STATUS_GLYPH[item.status],

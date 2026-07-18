@@ -1,6 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentPort } from "../../src/app/ports/agent-port.js";
 import type { PersistencePort } from "../../src/app/ports/persistence-port.js";
+import {
+  isCompactionMemoryMessage,
+} from "../../src/agent/context-manager.js";
 import { SessionController } from "../../src/app/controllers/session-controller.js";
 import type { AnyAppEvent } from "../../src/app/events/app-event.js";
 
@@ -188,5 +191,53 @@ describe("SessionController parity helpers (V2-080)", () => {
       ),
     ).toBe(true);
     expect(events.some((e) => e.type === "compacted")).toBe(true);
+  });
+
+  it("emits the PLAN MODE HANDOFF memory instead of a generic compacted label", async () => {
+    completeWithProvider.mockResolvedValueOnce({
+      text: "## Research evidence\nVerified React project state\n## Current state\nReady to implement",
+    });
+    const events: AnyAppEvent[] = [];
+    const session = new SessionController({
+      agent: fakeAgent(),
+      persistence: fakePersistence(),
+      emit: (event) => events.push(event),
+      sessionId: "sess-plan-handoff",
+    });
+    session.loadHistory(
+      [
+        {
+          role: "system",
+          content:
+            "Session memory from compacted earlier turns:\n\nstale resumed memory",
+        },
+        { role: "user", content: "research the app" },
+        { role: "assistant", content: "research result" },
+        { role: "user", content: "use glassmorphism" },
+        { role: "assistant", content: "plan revised" },
+      ],
+      { sessionId: "sess-plan-handoff" },
+    );
+
+    await session.compact(undefined, 2, undefined, {
+      purpose: "plan-implement",
+    });
+
+    const systemPrompt = String(
+      completeWithProvider.mock.calls.at(-1)?.[0]?.messages?.[0]?.content ?? "",
+    );
+    expect(systemPrompt).toContain("Do not add framing");
+    expect(systemPrompt).not.toContain("State clearly that this context");
+    const compacted = events.find((event) => event.type === "compacted");
+    expect(compacted?.type).toBe("compacted");
+    if (compacted?.type === "compacted") {
+      expect(compacted.payload.summary).toContain("PLAN MODE HANDOFF");
+      expect(compacted.payload.summary).toContain("Verified React project state");
+      expect(compacted.payload.summary).not.toContain("stale resumed memory");
+      expect(compacted.payload.summary).not.toBe("Compacted context");
+    }
+    const memories = session.messages.filter(isCompactionMemoryMessage);
+    expect(memories).toHaveLength(1);
+    expect(memories[0]?.content).toContain("Verified React project state");
   });
 });

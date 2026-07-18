@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ChatImage, CompletionRequest, CompletionResult } from "../../src/types.js";
@@ -118,6 +118,109 @@ describe("native tool loop integration", () => {
     }
     // No fence protocol required in first model response
     expect(streamMock.mock.calls[0]![0].tools?.length).toBeGreaterThan(0);
+  });
+
+  it("preserves parallel tool bodies and session-state ordering for the next model call", async () => {
+    const evidencePath = join(cwd, "evidence.txt");
+    const appPath = join(cwd, "index.js");
+    const body = `BEGIN-${"x".repeat(16_000)}-END`;
+    await writeFile(evidencePath, body, "utf8");
+    let turn = 0;
+
+    streamMock.mockImplementation(
+      async (request: CompletionRequest): Promise<CompletionResult> => {
+        turn += 1;
+        if (turn === 1) {
+          return {
+            text: "",
+            provider: "openai",
+            model: "gpt-test",
+            toolCalls: [
+              { id: "call_list", name: "fs.list", args: { path: cwd } },
+              { id: "call_read", name: "fs.read", args: { path: evidencePath } },
+              { id: "call_check", name: "tool.check", args: { tools: ["node"] } },
+            ],
+            finishReason: "tool_calls",
+          };
+        }
+
+        if (turn === 2) {
+          const groupStart = request.messages.findIndex(
+            (message) =>
+              message.role === "assistant" && message.toolCalls?.length === 3,
+          );
+          expect(groupStart).toBeGreaterThanOrEqual(0);
+          const toolGroup = request.messages.slice(groupStart + 1, groupStart + 4);
+          expect(toolGroup.map((message) => message.role)).toEqual([
+            "tool",
+            "tool",
+            "tool",
+          ]);
+          expect(toolGroup.map((message) => message.toolCallId)).toEqual([
+            "call_list",
+            "call_read",
+            "call_check",
+          ]);
+          expect(toolGroup[0]?.content).toContain("evidence.txt");
+          expect(toolGroup[1]?.content).toContain(body);
+          expect(toolGroup[2]?.content).toMatch(/node/i);
+          expect(toolGroup.map((message) => message.content).join("\n")).not.toMatch(
+            /No stored body|\[context-note\]/i,
+          );
+          expect(request.messages[groupStart + 4]).toMatchObject({
+            role: "system",
+          });
+
+          return {
+            text: "",
+            provider: "openai",
+            model: "gpt-test",
+            toolCalls: [
+              {
+                id: "call_write",
+                name: "fs.write",
+                args: { path: appPath, content: 'console.log("ok");\n' },
+              },
+            ],
+            finishReason: "tool_calls",
+          };
+        }
+
+        if (turn === 3) {
+          return {
+            text: "",
+            provider: "openai",
+            model: "gpt-test",
+            toolCalls: [
+              {
+                id: "call_verify",
+                name: "shell.exec",
+                args: { command: "node --check index.js", cwd },
+              },
+            ],
+            finishReason: "tool_calls",
+          };
+        }
+
+        return {
+          text: "done",
+          provider: "openai",
+          model: "gpt-test",
+          finishReason: "stop",
+        };
+      },
+    );
+
+    const { runAgentLoop } = await import("../../src/agent/runner.js");
+    await expect(
+      runAgentLoop("create a tiny JavaScript app after inspecting the project and tools", {
+        provider: "openai",
+        model: "gpt-4o-mini",
+        maxSteps: 8,
+      }),
+    ).resolves.toContain("done");
+    await expect(readFile(appPath, "utf8")).resolves.toBe('console.log("ok");\n');
+    expect(streamMock).toHaveBeenCalledTimes(4);
   });
 
   it("passes exact image bytes, MIME, and mode to the provider", async () => {

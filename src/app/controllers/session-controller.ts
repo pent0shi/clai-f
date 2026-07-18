@@ -2,6 +2,7 @@ import type { ChatMessage, Mode, ProviderId, TokenUsage } from "../../types.js";
 import {
   compactMessagesWithSummary,
   estimateMessagesTokens,
+  isCompactionMemoryMessage,
   type CompactResult,
 } from "../../agent/context-manager.js";
 import { repairToolProtocol } from "../../agent/tool-history.js";
@@ -438,10 +439,13 @@ export class SessionController implements Disposable {
       if (result.summarized) this.noteContextCompacted(result.afterTokens);
       this.notifyState();
       if (persist && result.summarized && result.after !== result.before) {
+        // Re-compaction can encounter legacy memory in resumed histories.
+        // Emit the newest inserted memory, never an older retained snapshot.
         const memo =
-          result.messages.find(
-            (m) => m.role === "system" && m.content.startsWith("Session memory"),
-          )?.content ?? "Compacted context";
+          [...result.messages]
+            .reverse()
+            .find((message) => isCompactionMemoryMessage(message))?.content ??
+          "Compacted context";
         this.deps.emit(
           this.sequencer.build(
             "compacted",

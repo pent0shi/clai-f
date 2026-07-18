@@ -207,6 +207,62 @@ describe("tool-history", () => {
     expect(new Set(fixed.map((c) => c.id)).size).toBe(3);
   });
 
+  it("repairToolProtocol keeps live tool bodies when SESSION STATE interleaved mid-group", async () => {
+    // Regression: refreshSessionState used to upsert SESSION STATE during
+    // executeSingleTool (before recordResult), especially under Promise.all.
+    // History became: assistant.toolCalls → SESSION STATE → real tool results.
+    // Old repair treated SESSION as interrupting the group, injected
+    // "No stored body" placeholders, and dropped the real bodies — models
+    // thrash-retried tools that already succeeded in the UI.
+    const { SESSION_STATE_PREFIX } = await import("../../src/agent/session-state.js");
+    const calls: NativeToolCall[] = [
+      { id: "chatcmpl-tool-a", name: "fs.list", args: { path: "/tmp" } },
+      { id: "chatcmpl-tool-b", name: "tool.check", args: { tools: ["node"] } },
+      { id: "chatcmpl-tool-c", name: "web.search", args: { query: "vite" } },
+    ];
+    const messages: ChatMessage[] = [
+      { role: "system", content: "constitution" },
+      { role: "user", content: "build blog" },
+    ];
+    appendAssistantWithTools(messages, "researching", calls);
+    messages.push({
+      role: "system",
+      content: `${SESSION_STATE_PREFIX}\ngoal: build blog\nflags: feature_needed=true`,
+    });
+    for (const call of calls) {
+      appendToolResult(
+        messages,
+        call.id,
+        `Tool ${call.name} result (exit=0, ok=true):\nREAL BODY for ${call.name}`,
+        call.name,
+        true,
+      );
+    }
+    expect(validateToolProtocol(messages).length).toBeGreaterThan(0);
+    repairToolProtocol(messages);
+    expect(validateToolProtocol(messages)).toEqual([]);
+    for (const call of calls) {
+      const tool = messages.find(
+        (m) => m.role === "tool" && m.toolCallId === call.id,
+      );
+      expect(tool?.content).toContain(`REAL BODY for ${call.name}`);
+      expect(tool?.content).not.toMatch(/No stored body/i);
+      expect(tool?.content).not.toMatch(/\[context-note\]/i);
+    }
+    // SESSION STATE kept, but after the tool group (not mid-group).
+    const sessionIdx = messages.findIndex(
+      (m) =>
+        m.role === "system" &&
+        typeof m.content === "string" &&
+        m.content.startsWith(SESSION_STATE_PREFIX),
+    );
+    const lastToolIdx = messages
+      .map((m, i) => (m.role === "tool" ? i : -1))
+      .filter((i) => i >= 0)
+      .pop();
+    expect(sessionIdx).toBeGreaterThan(lastToolIdx ?? -1);
+  });
+
   it("accepts complete parallel native groups in any result order", () => {
     const calls: NativeToolCall[] = Array.from({ length: 16 }, (_, index) => ({
       id: `call-${index}`,
