@@ -9,8 +9,11 @@ import { formatToolArgs } from "./tool-call-parser.js";
 export interface ConfirmPort {
   confirmTool(call: ToolCall): Promise<boolean>;
   confirmPentest(): Promise<boolean>;
-  /** Ask the user whether to continue after hitting the step budget. */
-  confirmContinue?(steps: number): Promise<boolean>;
+  /**
+   * Ask whether to continue after a progress-governor pause (or similar).
+   * `reason` is shown when present so the user knows why work stalled.
+   */
+  confirmContinue?(steps: number, reason?: string): Promise<boolean>;
   /**
    * Ask whether to leave ask mode and run an action task in agent mode.
    * Optional so existing ports keep working; ask-mode handoff falls back to a
@@ -58,11 +61,18 @@ export const inquirerConfirmPort: ConfirmPort = {
       default: false,
     });
   },
-  async confirmContinue(steps: number): Promise<boolean> {
-    return confirm({
-      message: chalk.yellow(`  ${steps} steps reached — continue?`),
-      default: true,
-    });
+  async confirmContinue(steps: number, reason?: string): Promise<boolean> {
+    const why = reason?.trim() ? ` (${reason.trim()})` : "";
+    try {
+      return await confirm({
+        message: chalk.yellow(
+          `  pause after ${steps} step${steps === 1 ? "" : "s"}${why} — continue or stop?`,
+        ),
+        default: true,
+      });
+    } finally {
+      restoreInteractiveStdin();
+    }
   },
   async confirmAgentSwitch(info: {
     reason: string;

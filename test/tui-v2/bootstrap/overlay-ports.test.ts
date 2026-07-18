@@ -28,9 +28,13 @@ describe("overlay-backed confirm/secret ports (CORE-002, V2-073)", () => {
     overlay.answerConfirm(false);
     expect(await pentest).toBe(false);
 
-    const cont = port.confirmContinue(70);
+    const cont = port.confirmContinue(70, "repetitive work produced no evidence");
     const contState = overlay.getState();
-    if (contState.kind === "confirm") expect(contState.request.prompt).toContain("70 steps");
+    if (contState.kind === "confirm") {
+      expect(contState.request.prompt).toMatch(/70 step/);
+      expect(contState.request.prompt).toMatch(/Continue working|stop/i);
+      expect(contState.request.prompt).toContain("repetitive work");
+    }
     overlay.answerConfirm(true);
     expect(await cont).toBe(true);
 

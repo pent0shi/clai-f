@@ -159,6 +159,8 @@ export function fsPassthroughCapChars(): number {
 // web.fetch is for reading pages — slightly larger.
 const HTTP_FETCH_CAP_CHARS = 8_000;
 const WEB_FETCH_CAP_CHARS = 14_000;
+/** web.search listings are already bounded by maxResults; generous passthrough. */
+const WEB_SEARCH_CAP_CHARS = 24_000;
 
 export function formatToolContext(call: ToolCall, result: ToolResult): string {
   const output = result.output.trim();
@@ -168,6 +170,23 @@ export function formatToolContext(call: ToolCall, result: ToolResult): string {
   }
   const preferErrors = !result.ok;
   const failLine = failureSummaryLine(result);
+
+  // web.search must NEVER go through the pentest genericReducer: that ranks
+  // lines by CVE/port keywords and drops mid-list hits, so models see
+  // "N lines omitted" and re-run the same search as if it were interrupted.
+  if (call.name === "web.search") {
+    const { text, truncated } = summarizeOutput(output, WEB_SEARCH_CAP_CHARS, {
+      preferErrors,
+    });
+    const body = truncated
+      ? `${text}${
+          result.outputPath
+            ? `\n\n[Listing exceeds ${WEB_SEARCH_CAP_CHARS.toLocaleString()} chars; head/tail shown. Full: ${result.outputPath}. Search completed successfully — do not re-run the same query solely because this view is capped.]`
+            : `\n\n[Listing exceeds ${WEB_SEARCH_CAP_CHARS.toLocaleString()} chars; head/tail shown. Search completed successfully — do not re-run the same query solely because this view is capped.]`
+        }`
+      : text;
+    return [failLine, body].filter(Boolean).join("\n").trim();
+  }
 
   if (call.name === "web.fetch" || call.name === "http.fetch") {
     const cap =

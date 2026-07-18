@@ -153,7 +153,7 @@ describe("web.search DuckDuckGo -> keyed-provider fallback", () => {
     );
 
     expect(result.ok).toBe(true);
-    expect(result.output).toContain("tavily:");
+    expect(result.output).toMatch(/web\.search complete · tavily/i);
     expect(result.output).toContain("https://tavily.example/one");
     expect(tavily.state.calls).toBe(1);
   });

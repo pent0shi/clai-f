@@ -335,7 +335,10 @@ export function planModeDirective(): string {
     "- goal + rich detail (context found, approach, architecture/threat model, risks, how each phase is verified)",
     "- a complete ordered task list (any count; only real work; no filler) covering remaining build/test/verify or test→exploit→report work as appropriate",
     "- for software: implement, automated checks, and live/runtime verification as separate tasks when they are distinct work",
+    "- for software: target latest stable packages/frameworks; note web.search for current setup docs when versions/APIs may have moved",
     "After plan.create, STOP for accept / discard / view / suggest. Prefer evidence-based plans.",
+    "On suggest/revision feedback: rewrite with one plan.create that includes the COMPLETE updated task list " +
+      "(omit obsolete steps; do not keep backend/DB tasks when the user asked for frontend-only). Be decisive, then STOP again.",
   ].join("\n");
 }
 
@@ -353,9 +356,12 @@ export function agentModeDirective(): string {
     "- Do not stop at thin proxies (scaffold without the feature, ports without tested findings, build without the requested behavior).",
     "",
     "Build / ship software:",
+    "- Prefer the latest stable packages, frameworks, and tooling for new apps (current majors, not outdated templates).",
+    "- If setup/config for a current stack may be stale in your knowledge, web.search or web.fetch official docs first — then scaffold with the modern path.",
     "- After implementing: run stack checks that apply (typecheck, build, unit/integration tests). Fix failures before claiming success.",
     "- Then live/runtime verification when applicable (start app, probe routes/UI, leave server running, report URL + job id).",
     "- Only then tell the user it works — with what you actually observed.",
+    "- Do not stop mid-build for a continue prompt; keep working until the success condition is evidenced or you are truly blocked.",
     "",
     "Long jobs: background them and continue other useful work. Prefer fixing failures over narrating them. Change approach after repeated identical failures.",
   ].join("\n");

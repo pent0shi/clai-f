@@ -24,9 +24,13 @@ export function buildPlanRevisionPrompt(
   const text = feedback.trim();
   return (
     `Plan revision request from the user (plan mode). Current plan version: ${version}. ` +
-    "Treat task ids, dependencies, resource locks, and completed states as structured authority; preserve stable ids. " +
-    "If the feedback is clear and possible without ambiguity, apply the smallest add/edit/remove/supersede/split/merge/dependency change that satisfies it, then persist one revised plan.create snapshot and stop for the next user decision. " +
-    "If the feedback is unclear or has multiple valid interpretations, ask concise clarifying questions instead of guessing — do not implement yet. " +
+    "This is still a DRAFT awaiting accept — rewrite decisively. " +
+    "Emit ONE plan.create with the COMPLETE intended goal, detail, and ordered tasks (full checklist, not a partial delta). " +
+    "Omit obsolete tasks entirely (e.g. drop Prisma/JWT/API when the user wants frontend-only). " +
+    "Reuse a prior task title only when that step still has the same intent (so ids can stay stable); otherwise use a clear new title. " +
+    "Pick one coherent interpretation of the feedback and apply it — do not monologue long chains of alternatives. " +
+    "If a foundational choice is truly ambiguous, ask ONE short clarifying question instead of plan.create. " +
+    "Do not implement yet. After plan.create, STOP for accept / suggest / discard. " +
     `User feedback:\n${text}`
   );
 }

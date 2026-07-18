@@ -104,13 +104,18 @@ describe("Property 1: search→fetch URL round-trip", () => {
           // its own arguments (we passed valid `query` and `maxResults`).
           expect(search.ok).toBe(true);
 
-          // Extract the JSON `results` block — empty searches return
-          // the literal "No results found." string with no JSON.
+          // Extract the JSON `results` appendix — empty searches return
+          // the literal "No results found." string with no JSON. Success
+          // listings end with a single-line `{"results":[...]}` block.
           if (search.output === "No results found.") return;
 
-          const lines = search.output.split("\n\n");
-          const json = lines.slice(1).join("\n\n");
-          const parsed = JSON.parse(json) as {
+          const jsonLine = search.output
+            .split("\n")
+            .map((line) => line.trim())
+            .reverse()
+            .find((line) => line.startsWith("{") && line.includes('"results"'));
+          expect(jsonLine).toBeDefined();
+          const parsed = JSON.parse(jsonLine!) as {
             results: Array<{ title: string; url: string; snippet: string }>;
           };
 

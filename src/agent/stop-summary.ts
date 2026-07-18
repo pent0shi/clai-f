@@ -16,7 +16,11 @@ export async function buildRichStopSummary(
   const plan = await loadPlan(session.sessionId).catch(() => undefined);
   const parts: string[] = [];
 
-  parts.push(`Session paused after ${steps} steps.\n`);
+  parts.push(
+    `Session paused after ${steps} steps` +
+      (steps > 0 ? " (user chose stop, or a hard limit was reached)." : ".") +
+      "\n",
+  );
 
   if (plan) {
     parts.push("## Plan Status");

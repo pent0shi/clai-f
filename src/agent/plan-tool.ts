@@ -478,7 +478,8 @@ export function planContextMessage(plan: SessionPlan, approved: boolean): string
     lines.push(
       "This plan is NOT yet approved — do not execute tasks (no scaffold/write/install/exploit). " +
         "User free-text is PLAN REVISION feedback, not approval — even if it sounds like an instruction. " +
-        "Refine with plan.create and/or read-only explore/research, then STOP. " +
+        "On revision: call plan.create with the COMPLETE intended checklist (drop obsolete tasks; " +
+        "matching titles keep stable ids). Be decisive — one coherent rewrite, then STOP. " +
         "User may Accept, Discard, View, or Suggest changes (or /implement / /discard).",
     );
   }
@@ -609,13 +610,15 @@ export async function handlePlanTool(
     if (existingPlan) {
       plan.version = (existingPlan.version ?? 1) + 1;
       const usedOldIds = new Set<string>();
-      const mappedNewTasks = plan.tasks.map((task) => {
+      const matchedIndices = new Set<number>();
+      const mappedNewTasks = plan.tasks.map((task, index) => {
         const match = existingPlan.tasks.find(
           (t) =>
             !usedOldIds.has(t.id) && titlesMatchForPlan(t.title, task.title),
         );
         if (match) {
           usedOldIds.add(match.id);
+          matchedIndices.add(index);
           return {
             ...task,
             id: match.id,
@@ -627,41 +630,73 @@ export async function handlePlanTool(
         return task;
       });
 
-      // Free ids for brand-new tasks (avoid clobbering preserved ids).
-      const taken = new Set(mappedNewTasks.map((t) => t.id));
-      for (const task of mappedNewTasks) {
-        if (usedOldIds.has(task.id)) continue;
-        if (
-          existingPlan.tasks.some((t) => t.id === task.id) ||
-          mappedNewTasks.filter((t) => t.id === task.id).length > 1
-        ) {
+      // Free ids for unmatched tasks only. Matched tasks keep prior ids;
+      // new createPlan ids must not collide (e.g. t3 new step vs remapped Verify→t3).
+      const taken = new Set(
+        [...matchedIndices].map((i) => mappedNewTasks[i]!.id),
+      );
+      for (let i = 0; i < mappedNewTasks.length; i++) {
+        if (matchedIndices.has(i)) continue;
+        const task = mappedNewTasks[i]!;
+        if (taken.has(task.id)) {
           let id = nextTaskId([...taken]);
           while (taken.has(id)) id = nextTaskId([...taken, id]);
           task.id = id;
-          taken.add(id);
-        } else {
-          taken.add(task.id);
         }
+        taken.add(task.id);
       }
 
-      const oldTasksToKeep = existingPlan.tasks.filter(
-        (oldTask) =>
-          !isBareTaskIdTitle(oldTask.title) &&
-          !mappedNewTasks.some((newTask) =>
-            titlesMatchForPlan(oldTask.title, newTask.title),
-          ),
-      );
+      // Draft (awaiting accept): plan.create is an authoritative rewrite.
+      // Keeping unmatched old pending tasks made "suggest changes" leave
+      // obsolete steps (e.g. Prisma/JWT) beside the revised frontend list.
+      const isDraftRewrite =
+        existingPlan.status === "draft" && !session.planApproved.value;
 
-      plan.tasks = [...oldTasksToKeep, ...mappedNewTasks].filter(
-        (t) => !isBareTaskIdTitle(t.title),
-      );
+      if (isDraftRewrite) {
+        plan.tasks = mappedNewTasks.filter((t) => !isBareTaskIdTitle(t.title));
+      } else {
+        // Post-approval / mid-execution: preserve finished work not re-listed;
+        // drop unmatched pending; soft-skip unmatched in_progress.
+        const oldTasksToKeep = existingPlan.tasks
+          .filter(
+            (oldTask) =>
+              !isBareTaskIdTitle(oldTask.title) &&
+              !mappedNewTasks.some((newTask) =>
+                titlesMatchForPlan(oldTask.title, newTask.title),
+              ),
+          )
+          .map((oldTask) => {
+            if (
+              oldTask.state === "done" ||
+              oldTask.state === "skipped" ||
+              oldTask.state === "failed"
+            ) {
+              return oldTask;
+            }
+            if (oldTask.state === "in_progress") {
+              return {
+                ...oldTask,
+                state: "skipped" as const,
+                note: oldTask.note ?? "superseded by plan revision",
+              };
+            }
+            // Unmatched pending → obsolete after rewrite; drop.
+            return null;
+          })
+          .filter((t): t is NonNullable<typeof t> => Boolean(t));
 
-      
+        plan.tasks = [...oldTasksToKeep, ...mappedNewTasks].filter(
+          (t) => !isBareTaskIdTitle(t.title),
+        );
+      }
+
+      // Map input-facing references (positional t1.., aliases, titles) → final ids.
+      // Positional keys must win over identity: a remapped task may keep id "t3"
+      // while input "t3" still means "third item in this plan.create call".
       const finalIdByInputReference = new Map<string, string>();
       for (let index = 0; index < mappedNewTasks.length; index += 1) {
         const task = mappedNewTasks[index]!;
         const entry = taskEntries[index];
-        finalIdByInputReference.set(`t${index + 1}`, task.id);
         finalIdByInputReference.set(task.id, task.id);
         finalIdByInputReference.set(slugifyTaskId(task.title), task.id);
         for (const alias of entry?.aliases ?? []) {
@@ -669,19 +704,30 @@ export async function handlePlanTool(
         }
       }
       for (let index = 0; index < mappedNewTasks.length; index += 1) {
+        finalIdByInputReference.set(`t${index + 1}`, mappedNewTasks[index]!.id);
+      }
+      for (let index = 0; index < mappedNewTasks.length; index += 1) {
         const task = mappedNewTasks[index]!;
         const entry = taskEntries[index];
+        // Default chain: depend on the previous task in THIS create call by
+        // its final id (not positional tN, which collides after id remap).
         const references = entry?.dependenciesSpecified
           ? entry.dependencies
           : index > 0
-            ? [`t${index}`]
+            ? [mappedNewTasks[index - 1]!.id]
             : [];
-        task.dependencies = [...new Set(references.map(
-          (reference) =>
-            finalIdByInputReference.get(reference) ??
-            resolvePlanTaskId(plan, reference) ??
-            reference,
-        ))];
+        task.dependencies = [
+          ...new Set(
+            references
+              .map(
+                (reference) =>
+                  finalIdByInputReference.get(reference) ??
+                  resolvePlanTaskId(plan, reference) ??
+                  reference,
+              )
+              .filter((id) => id !== task.id),
+          ),
+        ];
       }
 
       // X7: keep approval when only additive pending work remains.
@@ -795,7 +841,9 @@ export async function handlePlanTool(
             "task.update in_progress → work → verify → done. When run/verify completes: report URL, port, job id, server still running."
           : `Plan saved with ${plan.tasks.length} task(s). STOP here and wait — produce NO other tool calls now. ` +
             "Do NOT start executing until the user accepts the plan. " +
-            "If the user's next message gives feedback, that is a REVISION: call plan.create again with the updated plan and STOP again. " +
+            "If the user's next message gives feedback, that is a REVISION: call plan.create once with the COMPLETE " +
+            "updated goal/detail/tasks (full list — omit obsolete steps; do not leave old backend/DB tasks when " +
+            "the user dropped them). Then STOP again. Be decisive; do not monologue alternatives. " +
             "The user may discard the plan. After acceptance: task.update in_progress → work → verify → done. " +
             "When run/verify completes: report URL, port, job id, and that the server is still running.",
     };

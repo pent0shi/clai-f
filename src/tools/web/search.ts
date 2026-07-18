@@ -618,11 +618,32 @@ function successResult(outcome: WebSearchOutcome): ToolResult {
       exitCode: 0,
     };
   }
-  const summary = `${outcome.provider}: ${outcome.results.length} result${outcome.results.length === 1 ? "" : "s"}`;
-  const json = JSON.stringify({ results: outcome.results }, null, 2);
+  // Compact human listing for the model + UI card. Pretty-printed JSON made
+  // tool cards show "··· N lines more ···" and the generic reducer then
+  // dropped the middle hits — models misread that as "search interrupted".
+  const n = outcome.results.length;
+  const lines: string[] = [
+    `web.search complete · ${outcome.provider} · ${n} result${n === 1 ? "" : "s"}`,
+    `Status: complete (all ${n} hits listed below; not truncated or interrupted).`,
+    "",
+  ];
+  for (let i = 0; i < n; i++) {
+    const hit = outcome.results[i]!;
+    lines.push(`${i + 1}. ${hit.title}`);
+    lines.push(`   ${hit.url}`);
+    if (hit.snippet.trim()) {
+      const snip = hit.snippet.replace(/\s+/g, " ").trim();
+      lines.push(
+        `   ${snip.length > 320 ? `${snip.slice(0, 317)}…` : snip}`,
+      );
+    }
+    lines.push("");
+  }
+  // Single-line JSON appendix for tests/tooling (not pretty-printed).
+  lines.push(JSON.stringify({ results: outcome.results }));
   return {
     ok: true,
-    output: `${summary}\n\n${json}`,
+    output: lines.join("\n"),
     exitCode: 0,
   };
 }

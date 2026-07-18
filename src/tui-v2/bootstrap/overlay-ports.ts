@@ -106,8 +106,14 @@ export function createOverlayConfirmPort(overlay: OverlayController): Confirmati
           "This is a security/pentest action. Confirm you are authorized to run it against this target.",
       });
     },
-    async confirmContinue(steps: number): Promise<boolean> {
-      return overlay.openConfirm({ kind: "continue", prompt: `${steps} steps reached — continue running?` });
+    async confirmContinue(steps: number, reason?: string): Promise<boolean> {
+      const why = reason?.trim() ? `\nReason: ${reason.trim()}` : "";
+      return overlay.openConfirm({
+        kind: "continue",
+        prompt:
+          `Paused after ${steps} step${steps === 1 ? "" : "s"}.${why}\n\n` +
+          `Continue working, or stop here?`,
+      });
     },
     async confirmAgentSwitch(info: { reason: string; tools: string[] }): Promise<boolean> {
       const tools = info.tools.length > 0 ? ` (${info.tools.join(", ")})` : "";
