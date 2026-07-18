@@ -58,8 +58,8 @@ describe("scratch directory transparency", () => {
 
   it("rendered agent prompt preserves the scratch-space guardrails", () => {
     const prompt = renderAgentSystemPrompt("shell.exec");
-    expect(prompt).toContain("create ONE folder under the system temp directory");
-    expect(prompt).toContain("keep ALL temporary files there");
+    expect(prompt).toContain("Scratch only under");
+    expect(prompt).toContain("Keep ALL temporary/engagement files there");
     expect(prompt).toContain("never write into the current/project directory");
   });
 

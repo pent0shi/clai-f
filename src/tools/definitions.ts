@@ -371,7 +371,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   ),
   def(
     "http.fetch",
-    "Raw HTTP evidence for pentest/protocol/private targets: status, redirect chain, headers/cookies, body. Default no status-retries (pass retries to retry 5xx). TLS cert fingerprint: web.fetch includeTls. Not for casual public-page reading (prefer web.fetch).",
+    "Raw HTTP evidence for pentest/protocol/private targets: status, redirect chain, headers/cookies, body. Default no status-retries (pass retries to retry 5xx). For https://IP or self-signed lab certs use insecureTls=true (records that verification was off). TLS fingerprint: web.fetch includeTls. Not for casual public-page reading (prefer web.fetch).",
     {
       type: "object",
       properties: {
@@ -392,6 +392,15 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         timeoutMs: {
           type: "integer",
           description: "Request timeout ms (default 15000, clamp 3000-60000)",
+        },
+        insecureTls: {
+          type: "boolean",
+          description:
+            "Skip TLS cert/hostname verification (https://IP, self-signed labs). Authorized testing only; evidence notes verification was disabled.",
+        },
+        tlsInsecure: {
+          type: "boolean",
+          description: "Alias of insecureTls",
         },
       },
       required: ["url"],

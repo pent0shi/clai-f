@@ -4,10 +4,13 @@
  *
  * Formatted by default:
  *  - compacted context, help / shortcuts / system docs
- *  - markdown files that are read-only or pure creates (only green adds)
+ *  - markdown **reads** (fs.read of .md)
  *
- * Raw by default:
- *  - mixed red+green file edits, overwrites with deletions
+ * Raw by default (green/red editor view):
+ *  - all file mutations (create / append / edit / write / writeMany) —
+ *    including pure-green .md appends/creates so the user sees the real
+ *    hunks, not a formatted doc preview
+ *  - mixed red+green file edits
  *  - shell / http / web / net / scans / other tools
  */
 
@@ -61,16 +64,10 @@ export function shouldDefaultFormattedView(
     return true;
   }
 
+  // File mutations always open raw (green/red editor). Press `f` for
+  // formatted markdown if desired — never auto-format appends/creates of .md.
   if (input.fileChange || kind === "file-change") {
-    const change = input.fileChange;
-    if (!change) return false;
-    const path = change.path;
-    const text = change.afterText ?? "";
-    const md =
-      isMarkdownPath(path) ||
-      (text.length > 0 && looksLikeMarkdown(text));
-    if (!md) return false;
-    return isPureAddFileChange(change);
+    return false;
   }
 
   const tool = (input.toolName ?? "").toLowerCase();

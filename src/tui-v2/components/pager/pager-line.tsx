@@ -124,6 +124,7 @@ export function PagerLine(props: {
           content={styled}
           selectable
           wrapMode="none"
+          style={{ width: "100%" }}
         />
       );
     }
@@ -138,6 +139,7 @@ export function PagerLine(props: {
         selectable
         wrapMode="none"
         style={{
+          width: "100%",
           fg: isActiveLine ? theme.background : theme.foreground,
           ...(isActiveLine
             ? {
@@ -203,7 +205,7 @@ export function PagerLine(props: {
             ...(codeBg ? { backgroundColor: codeBg } : {}),
           }}
         >
-          <text selectable style={{ height: 1 }}>
+          <text selectable style={{ height: 1, width: "100%" }}>
             {segs
               ? segs.map((seg, i) => {
                   if (seg.kind === "plain") {
@@ -266,6 +268,7 @@ export function PagerLine(props: {
         id={`pager-line-${index}`}
         selectable
         style={{
+          width: "100%",
           fg: baseFg,
           ...(isActiveLine ? { bg: theme.rowA } : {}),
         }}
@@ -281,6 +284,7 @@ export function PagerLine(props: {
       id={`pager-line-${index}`}
       selectable
       style={{
+        width: "100%",
         fg: baseFg,
         ...(isActiveLine ? { bg: theme.rowA } : {}),
       }}

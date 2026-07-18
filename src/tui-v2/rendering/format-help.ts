@@ -26,7 +26,7 @@ function sectionFor(command: string): string {
     return "Credentials";
   }
   if (
-    ["permissions", "allow", "disallow", "freeonly", "fallback", "mouse", "scope", "privacy"].includes(
+    ["permissions", "allow", "disallow", "freeonly", "fallback", "scope", "privacy"].includes(
       name,
     )
   ) {

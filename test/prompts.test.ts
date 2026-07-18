@@ -31,7 +31,7 @@ describe("prompt rendering", () => {
     expect(prompt).not.toContain("{{os}}");
     expect(prompt).not.toContain("{{shell}}");
     expect(prompt).not.toContain("{{datetime}}");
-    expect(prompt).toContain("(ISO:");
+    expect(prompt).toMatch(/\(ISO hour:/);
   });
 
   it("agent prompt includes tool list", () => {
@@ -67,9 +67,19 @@ describe("prompt rendering", () => {
     expect(prompt).toContain("summarize the concrete findings");
   });
 
-  it("formats date/time context with an ISO timestamp", () => {
+  it("formats date/time context with an hour-stable ISO stamp", () => {
     const when = new Date("2026-05-29T12:34:56.000Z");
-    expect(currentDateTimeContext(when)).toContain("2026-05-29T12:34:56.000Z");
+    const text = currentDateTimeContext(when);
+    // Hour-stable: seconds must not appear in the ISO hour marker.
+    expect(text).toMatch(/ISO hour:/);
+    expect(text).toMatch(/T\d{2}:00:00\.000Z/);
+    expect(text).not.toContain("12:34:56");
+  });
+
+  it("keeps system datetime stable within the same local hour", () => {
+    const a = new Date("2026-05-29T15:01:02.000");
+    const b = new Date("2026-05-29T15:59:58.000");
+    expect(currentDateTimeContext(a)).toBe(currentDateTimeContext(b));
   });
 
   it("agent prompt distinguishes agent tasks vs plan tasks and verify-before-done", () => {

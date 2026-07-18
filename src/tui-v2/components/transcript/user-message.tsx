@@ -46,7 +46,7 @@ export function UserMessage(props: {
         {" YOU "}
       </text>
       <text content=" " selectable />
-      <box style={{ flexGrow: 1 }}>
+      <box style={{ flexGrow: 1, width: "100%", minWidth: 0 }}>
         <LinkableText text={item.text} theme={theme} selectable />
       </box>
     </box>

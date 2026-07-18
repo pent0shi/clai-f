@@ -8,6 +8,8 @@ import {
 describe("sanitizeDisplayText", () => {
   it("strips CSI color sequences", () => {
     expect(stripAnsiSequences("\x1b[31mred\x1b[0m")).toBe("red");
+    // SGR mouse reports must not leak into chat/report text.
+    expect(stripAnsiSequences("hello\x1b[<35;67;37Mworld")).toBe("helloworld");
   });
 
   it("strips OSC title sequences", () => {

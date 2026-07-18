@@ -9,7 +9,10 @@
 import { useRef } from "react";
 import type { MouseEvent } from "@opentui/core";
 
-const CLICK_SLOP = 2;
+/** Cells of movement still counted as a click (not a drag). Generous so
+ *  trackpad jitter / imprecise touch does not cancel intended opens, while
+ *  real drag-select still starts on mouse-down over selectable text. */
+const CLICK_SLOP = 4;
 
 export interface ClickWithoutDragHandlers {
   readonly onMouseDown: (event: MouseEvent) => void;

@@ -189,6 +189,35 @@ describe("phase 12 — tool.batch", () => {
     expect(result.output).toMatch(/#2 sysinfo \[ok/);
   });
 
+  it("streams labeled section bodies as each child finishes (live nested UI)", async () => {
+    const live: string[] = [];
+    const result = await runToolCall(
+      {
+        name: "tool.batch",
+        args: {
+          calls: [
+            { name: "sysinfo", args: {} },
+            { name: "sysinfo", args: {} },
+          ],
+          concurrency: 1,
+        },
+      },
+      {
+        onOutput: (chunk) => {
+          live.push(chunk);
+        },
+      },
+    );
+    expect(result.ok).toBe(true);
+    const streamed = live.join("");
+    // Full section headers (not only [batch] ticks) must appear during the run.
+    expect(streamed).toMatch(/── #1 sysinfo \[ok/);
+    expect(streamed).toMatch(/── #2 sysinfo \[ok/);
+    // Final authoritative body still has both sections.
+    expect(result.output).toMatch(/#1 sysinfo \[ok/);
+    expect(result.output).toMatch(/#2 sysinfo \[ok/);
+  });
+
   it("aborts pending calls when the parent signal aborts", async () => {
     const ac = new AbortController();
     ac.abort();

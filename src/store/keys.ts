@@ -331,7 +331,116 @@ export async function unsetSecret(
   }
 }
 
-// Provider-facing helpers
+// Provider-facing helpers (multi-key envelope)
+
+/** One stored API key slot for an LLM provider. */
+export interface ProviderKeySlot {
+  readonly id: string;
+  readonly value: string;
+  readonly createdAt: number;
+}
+
+/** Resolved multi-key view for a provider (storage or env). */
+export interface ProviderKeysResult {
+  readonly keys: ProviderKeySlot[];
+  /** Sticky index used as the next rotation start (clamped). */
+  readonly activeIndex: number;
+  readonly source: ProviderStatus['source'];
+}
+
+/** On-disk multi-key payload stored as JSON under `llm:<provider>`. */
+interface ProviderKeysEnvelopeV1 {
+  v: 1;
+  keys: Array<{ id: string; value: string; createdAt: number }>;
+  activeIndex: number;
+}
+
+const MAX_PROVIDER_KEYS = 10;
+
+function newKeyId(): string {
+  return `k_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function clampActiveIndex(index: number, len: number): number {
+  if (len <= 0) return 0;
+  if (!Number.isFinite(index)) return 0;
+  const i = Math.floor(index);
+  if (i < 0) return 0;
+  if (i >= len) return len - 1;
+  return i;
+}
+
+function isEnvelopeV1(value: unknown): value is ProviderKeysEnvelopeV1 {
+  if (!value || typeof value !== 'object') return false;
+  const rec = value as Record<string, unknown>;
+  if (rec.v !== 1 || !Array.isArray(rec.keys)) return false;
+  return rec.keys.every(
+    (k) =>
+      k &&
+      typeof k === 'object' &&
+      typeof (k as { id?: unknown }).id === 'string' &&
+      typeof (k as { value?: unknown }).value === 'string' &&
+      typeof (k as { createdAt?: unknown }).createdAt === 'number',
+  );
+}
+
+/**
+ * Parse a stored secret string into slots. Legacy plain API keys become a
+ * single-slot list. Invalid JSON that looks like a key is treated as legacy.
+ */
+export function parseProviderKeysPayload(
+  raw: string | undefined,
+): { keys: ProviderKeySlot[]; activeIndex: number } {
+  if (!raw || !raw.trim()) {
+    return { keys: [], activeIndex: 0 };
+  }
+  const trimmed = raw.trim();
+  if (trimmed.startsWith('{')) {
+    try {
+      const parsed: unknown = JSON.parse(trimmed);
+      if (isEnvelopeV1(parsed) && parsed.keys.length > 0) {
+        const keys = parsed.keys
+          .map((k) => ({
+            id: k.id || newKeyId(),
+            value: k.value,
+            createdAt: k.createdAt || Date.now(),
+          }))
+          .filter((k) => k.value.trim().length > 0)
+          .slice(0, MAX_PROVIDER_KEYS);
+        return {
+          keys,
+          activeIndex: clampActiveIndex(parsed.activeIndex ?? 0, keys.length),
+        };
+      }
+    } catch {
+      // Fall through to legacy single-string treatment.
+    }
+  }
+  return {
+    keys: [{ id: newKeyId(), value: trimmed, createdAt: Date.now() }],
+    activeIndex: 0,
+  };
+}
+
+export function serializeProviderKeysPayload(
+  keys: readonly ProviderKeySlot[],
+  activeIndex: number,
+): string {
+  const cleaned = keys
+    .map((k) => ({
+      id: k.id || newKeyId(),
+      value: k.value.trim(),
+      createdAt: k.createdAt || Date.now(),
+    }))
+    .filter((k) => k.value.length > 0)
+    .slice(0, MAX_PROVIDER_KEYS);
+  const envelope: ProviderKeysEnvelopeV1 = {
+    v: 1,
+    keys: cleaned,
+    activeIndex: clampActiveIndex(activeIndex, cleaned.length),
+  };
+  return JSON.stringify(envelope);
+}
 
 export function envValue(provider: ProviderId): string | undefined {
   const envVar = envVars[provider];
@@ -340,6 +449,48 @@ export function envValue(provider: ProviderId): string | undefined {
   }
   const value = process.env[envVar];
   return value && value.length > 0 ? value : undefined;
+}
+
+/**
+ * Resolve all API keys for a provider.
+ *
+ * Precedence:
+ *   1. Stored multi/single key under `llm:<provider>` (keychain / fallback)
+ *   2. Env var as a single synthetic slot when nothing is stored
+ *
+ * `ollama` returns the host URL as a single local "key" for listing only.
+ */
+export async function getProviderKeys(provider: ProviderId): Promise<ProviderKeysResult> {
+  if (provider === 'ollama') {
+    const local = envValue(provider) ?? getConfig().ollamaHost;
+    if (!local) return { keys: [], activeIndex: 0, source: 'missing' };
+    return {
+      keys: [{ id: 'ollama-host', value: local, createdAt: 0 }],
+      activeIndex: 0,
+      source: 'local',
+    };
+  }
+
+  const stored = await getSecret('llm', provider);
+  if (stored.value) {
+    const parsed = parseProviderKeysPayload(stored.value);
+    return {
+      keys: parsed.keys,
+      activeIndex: parsed.activeIndex,
+      source: stored.source,
+    };
+  }
+
+  const env = envValue(provider);
+  if (env) {
+    return {
+      keys: [{ id: 'env', value: env, createdAt: 0 }],
+      activeIndex: 0,
+      source: 'env',
+    };
+  }
+
+  return { keys: [], activeIndex: 0, source: 'missing' };
 }
 
 /**
@@ -353,42 +504,129 @@ export function envValue(provider: ProviderId): string | undefined {
  *      been explicitly stored, so a stale ambient export can never override
  *      a key the user deliberately set with `clai set`.
  *
+ * Returns the **active** (sticky) key when multiple are configured.
+ *
  * `ollama` is special-cased: it has no API key, only a base URL drawn from
  * `OLLAMA_HOST` or the user-config `ollamaHost`.
  */
 export async function getProviderSecret(provider: ProviderId): Promise<{ value?: string; source: ProviderStatus['source'] }> {
-  if (provider === 'ollama') {
-    const local = envValue(provider) ?? getConfig().ollamaHost;
-    return { value: local, source: 'local' };
+  const multi = await getProviderKeys(provider);
+  if (multi.keys.length === 0) {
+    return { source: 'missing' };
   }
-
-  // A key the user explicitly stored via `clai set` takes precedence over
-  // an ambient env-var export. This matters in practice: a stale
-  // `export OPENAI_API_KEY=...` in a shell rc file would otherwise shadow
-  // a freshly-set keychain entry and surface as an opaque 401.
-  const stored = await getSecret('llm', provider);
-  if (stored.value) {
-    return stored;
-  }
-
-  const env = envValue(provider);
-  if (env) {
-    return { value: env, source: 'env' };
-  }
-
-  return { source: 'missing' };
+  const idx = clampActiveIndex(multi.activeIndex, multi.keys.length);
+  return { value: multi.keys[idx]!.value, source: multi.source };
 }
 
-export async function setProviderSecret(provider: ProviderId, secret: string): Promise<'keychain' | 'fallback'> {
+/**
+ * Replace the full key list for a provider (Keys editor Save).
+ * Empty list clears storage (same as unset).
+ */
+export async function setProviderKeys(
+  provider: ProviderId,
+  values: readonly string[],
+  activeIndex = 0,
+): Promise<'keychain' | 'fallback'> {
   if (provider === 'ollama') {
     return 'fallback';
   }
-  return setSecret('llm', provider, secret);
+  const cleaned = values.map((v) => v.trim()).filter(Boolean);
+  // Dedupe exact values while preserving order.
+  const seen = new Set<string>();
+  const unique: string[] = [];
+  for (const v of cleaned) {
+    if (seen.has(v)) continue;
+    seen.add(v);
+    unique.push(v);
+    if (unique.length >= MAX_PROVIDER_KEYS) break;
+  }
+  if (unique.length === 0) {
+    await unsetSecret('llm', provider);
+    return 'fallback';
+  }
+  const now = Date.now();
+  const slots: ProviderKeySlot[] = unique.map((value) => ({
+    id: newKeyId(),
+    value,
+    createdAt: now,
+  }));
+  const payload = serializeProviderKeysPayload(slots, activeIndex);
+  return setSecret('llm', provider, payload);
+}
+
+/**
+ * Append one API key (CLI `/set provider key`). Dedupes exact matches.
+ * Creates a multi-key envelope, migrating a legacy single string if needed.
+ */
+export async function appendProviderKey(
+  provider: ProviderId,
+  secret: string,
+): Promise<'keychain' | 'fallback'> {
+  if (provider === 'ollama') {
+    return 'fallback';
+  }
+  const trimmed = secret.trim();
+  if (!trimmed) {
+    throw new Error('empty API key');
+  }
+  const current = await getProviderKeys(provider);
+  // Env-only is not "stored" — writing creates stored keys and overrides env.
+  const base =
+    current.source === 'env'
+      ? []
+      : current.keys.map((k) => ({ ...k }));
+  if (base.some((k) => k.value === trimmed)) {
+    // Already present — keep list, optionally move active to that index.
+    const idx = base.findIndex((k) => k.value === trimmed);
+    const payload = serializeProviderKeysPayload(base, idx >= 0 ? idx : current.activeIndex);
+    return setSecret('llm', provider, payload);
+  }
+  if (base.length >= MAX_PROVIDER_KEYS) {
+    throw new Error(`at most ${MAX_PROVIDER_KEYS} API keys per provider`);
+  }
+  base.push({ id: newKeyId(), value: trimmed, createdAt: Date.now() });
+  const payload = serializeProviderKeysPayload(
+    base,
+    base.length === 1 ? 0 : current.activeIndex,
+  );
+  return setSecret('llm', provider, payload);
+}
+
+/**
+ * Compat: append a key (multi-key era). Prefer `appendProviderKey` or
+ * `setProviderKeys` at new call sites.
+ */
+export async function setProviderSecret(provider: ProviderId, secret: string): Promise<'keychain' | 'fallback'> {
+  return appendProviderKey(provider, secret);
 }
 
 export async function unsetProviderSecret(provider: ProviderId): Promise<void> {
   await unsetSecret('llm', provider);
 }
+
+/**
+ * Remember which key last succeeded so the next request starts there.
+ * No-op for env-only / ollama / missing storage.
+ */
+export async function markProviderKeySuccess(
+  provider: ProviderId,
+  index: number,
+): Promise<void> {
+  if (provider === 'ollama') return;
+  const stored = await getSecret('llm', provider);
+  if (!stored.value) return;
+  const parsed = parseProviderKeysPayload(stored.value);
+  if (parsed.keys.length === 0) return;
+  const next = clampActiveIndex(index, parsed.keys.length);
+  if (next === parsed.activeIndex && stored.value.trim().startsWith('{')) {
+    // Already sticky on this index and in envelope form.
+    return;
+  }
+  const payload = serializeProviderKeysPayload(parsed.keys, next);
+  await setSecret('llm', provider, payload);
+}
+
+export { MAX_PROVIDER_KEYS };
 
 /**
  * Resolve a search-provider's API key using the precedence required by
@@ -435,17 +673,30 @@ export async function probeKeychain(): Promise<KeychainStatus> {
 export async function listProviderStatuses(activeProvider: ProviderId): Promise<ProviderStatus[]> {
   const statuses: ProviderStatus[] = [];
   for (const provider of providerIds) {
-    const secret = await getProviderSecret(provider);
-    const configured = Boolean(secret.value) || provider === 'ollama';
+    const multi = await getProviderKeys(provider);
+    const configured = multi.keys.length > 0 || provider === 'ollama';
+    const activeIdx = clampActiveIndex(multi.activeIndex, multi.keys.length);
+    const activeValue = multi.keys[activeIdx]?.value;
+    const maskedKeys =
+      provider !== 'ollama' && multi.keys.length > 0
+        ? multi.keys.map((k) => maskSecret(k.value))
+        : undefined;
     statuses.push({
       provider,
       label: provider,
       active: provider === activeProvider,
       configured,
-      source: secret.value ? secret.source : 'missing',
-      maskedKey: secret.value && provider !== 'ollama' ? maskSecret(secret.value) : undefined,
+      source: multi.keys.length > 0 ? multi.source : 'missing',
+      maskedKey:
+        activeValue && provider !== 'ollama' ? maskSecret(activeValue) : undefined,
+      keyCount: provider === 'ollama' ? undefined : multi.keys.length || undefined,
+      maskedKeys,
+      activeMaskedKey:
+        activeValue && provider !== 'ollama' && multi.keys.length > 1
+          ? maskSecret(activeValue)
+          : undefined,
       model: getDefaultModel(provider),
-      note: provider === 'ollama' ? secret.value : undefined,
+      note: provider === 'ollama' ? activeValue : undefined,
     });
   }
   return statuses;

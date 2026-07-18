@@ -2,16 +2,21 @@
  * Parse and present tool.batch output as nested sub-tool sections
  * (classic TUI parity).
  *
- * Batch runners emit labeled sections:
+ * Batch runners emit labeled sections (streamed as each child finishes, and
+ * again as the final body):
  *   ── #1 dns.lookup [ok exit=0]
  *   …
  *   ── #2 web.fetch [fail exit=1]
  *   …
+ *
+ * Live progress also includes `[batch] …` ticks. While the parent is still
+ * running we merge settled sections with running placeholders so nested cards
+ * appear expanded from the first start — same shape as single tool cards.
  */
 
 import { cleanToolOutputLines, presentOutput } from "./tool-presenter.js";
 
-export type BatchSectionStatus = "ok" | "fail" | "cancelled";
+export type BatchSectionStatus = "ok" | "fail" | "cancelled" | "running";
 
 export interface BatchSection {
   readonly index: number;
@@ -24,14 +29,21 @@ export interface BatchSection {
 }
 
 const HEADER_RE =
-  /^──\s+#(\d+)\s+([\w.]+)\s+\[(ok|fail|cancelled)(?:\s+exit=(\d+))?\]/;
+  /^──\s+#(\d+)\s+([\w.]+)\s+\[(ok|fail|cancelled|running)(?:\s+exit=(\d+))?\]/;
+
+/** Progress ticks are never part of a sub-tool body. */
+function isBatchProgressLine(line: string): boolean {
+  return /^\[batch\]/i.test(line.trim());
+}
 
 /**
  * Split a completed tool.batch output into per-sub-tool sections.
  * Returns [] when the body is not in the labeled batch format.
+ * If the same index appears twice (live re-stream), the last header wins.
  */
 export function parseBatchSections(output: string): BatchSection[] {
-  const sections: BatchSection[] = [];
+  const ordered: BatchSection[] = [];
+  const byIndex = new Map<number, number>(); // index → position in ordered
   let current: {
     index: number;
     name: string;
@@ -41,16 +53,31 @@ export function parseBatchSections(output: string): BatchSection[] {
   } | null = null;
   const bodyLines: string[] = [];
 
+  const flush = (): void => {
+    if (current === null) return;
+    const section: BatchSection = {
+      ...current,
+      body: bodyLines.join("\n").trim(),
+    };
+    bodyLines.length = 0;
+    const prev = byIndex.get(section.index);
+    if (prev !== undefined) {
+      ordered[prev] = section;
+    } else {
+      byIndex.set(section.index, ordered.length);
+      ordered.push(section);
+    }
+    current = null;
+  };
+
   for (const line of output.replace(/\r/g, "").split("\n")) {
+    if (isBatchProgressLine(line)) {
+      // Progress ticks never belong in a section body.
+      continue;
+    }
     const m = HEADER_RE.exec(line);
     if (m) {
-      if (current !== null) {
-        sections.push({
-          ...current,
-          body: bodyLines.join("\n").trim(),
-        });
-        bodyLines.length = 0;
-      }
+      flush();
       const exitCode = m[4] !== undefined ? parseInt(m[4], 10) : undefined;
       const status = m[3] as BatchSectionStatus;
       current = {
@@ -64,13 +91,10 @@ export function parseBatchSections(output: string): BatchSection[] {
       bodyLines.push(line);
     }
   }
-  if (current !== null) {
-    sections.push({
-      ...current,
-      body: bodyLines.join("\n").trim(),
-    });
-  }
-  return sections;
+  flush();
+  // Drop pure running placeholders from final parse when a settled sibling
+  // replaced them — callers that need live stubs use buildBatchCardsFromSpool.
+  return ordered.filter((s) => s.status !== "running" || s.body.length > 0);
 }
 
 export interface BatchSectionPresentation {
@@ -87,13 +111,19 @@ export function presentBatchSection(
   section: BatchSection,
   expanded: boolean,
 ): BatchSectionPresentation {
-  const presented = presentOutput(section.body, undefined, expanded);
-  // Prefer cleaned body even when presentOutput samples ends for huge text.
-  const hasBody = section.body.trim().length > 0;
   const status = section.status ?? (section.ok ? "ok" : "fail");
+  const bodyForPresent =
+    status === "running" && !section.body.trim()
+      ? "running…"
+      : section.body;
+  const presented = presentOutput(bodyForPresent, undefined, expanded);
+  const hasBody = bodyForPresent.trim().length > 0;
   let glyph = "✗";
   let statusLabel = "failed";
-  if (status === "ok") {
+  if (status === "running") {
+    glyph = "●";
+    statusLabel = "running";
+  } else if (status === "ok") {
     glyph = "✓";
     statusLabel =
       section.exitCode !== undefined
@@ -121,12 +151,19 @@ export function presentBatchSection(
 /** Human summary line under the parent batch header. */
 export function batchSummaryLine(sections: readonly BatchSection[]): string {
   if (sections.length === 0) return "";
+  const running = sections.filter((s) => s.status === "running").length;
   const failed = sections.filter(
     (s) => (s.status ?? (s.ok ? "ok" : "fail")) === "fail",
   ).length;
   const cancelled = sections.filter(
     (s) => (s.status ?? (s.ok ? "ok" : "fail")) === "cancelled",
   ).length;
+  const ok = sections.filter(
+    (s) => (s.status ?? (s.ok ? "ok" : "fail")) === "ok",
+  ).length;
+  if (running > 0) {
+    return `${ok} done · ${running} running · ${sections.length} total`;
+  }
   if (failed === 0 && cancelled === 0) {
     return `${sections.length} sub-tool(s) — all ok`;
   }
@@ -147,76 +184,143 @@ export interface BatchLiveLine {
 }
 
 /**
- * Present live `[batch] …` progress ticks as compact status lines while the
- * parent card is still running (no nested section headers yet).
+ * Parse live `[batch] …` progress ticks (kept for tests / summary).
+ * Prefer {@link buildBatchCardsFromSpool} for the live nested-card UI.
  */
 export function parseBatchLiveProgress(raw: string): {
   readonly lines: readonly BatchLiveLine[];
   readonly summary: string;
 } {
+  const cards = buildBatchCardsFromSpool(raw);
+  if (cards.length === 0) {
+    const ticks = raw
+      .replace(/\r/g, "")
+      .split("\n")
+      .map((l) => l.trim())
+      .filter((l) => /^\[batch\]/i.test(l));
+    const header = ticks.find((t) => /starting\b/i.test(t));
+    return {
+      lines: header
+        ? [{ text: header.replace(/^\[batch\]\s*/i, ""), tone: "info" as const }]
+        : [],
+      summary: header
+        ? header.replace(/^\[batch\]\s*/i, "")
+        : ticks.length
+          ? "batch running…"
+          : "",
+    };
+  }
+  const lines: BatchLiveLine[] = cards.map((c) => ({
+    text: `#${c.index} ${c.name} · ${c.status}`,
+    tone:
+      c.status === "ok"
+        ? ("ok" as const)
+        : c.status === "running"
+          ? ("running" as const)
+          : c.status === "fail"
+            ? ("fail" as const)
+            : ("info" as const),
+  }));
+  return { lines, summary: batchSummaryLine(cards) };
+}
+
+interface TickState {
+  name: string;
+  status: BatchSectionStatus;
+  exitCode: number | undefined;
+}
+
+/**
+ * Merge streamed `── #N` sections with `[batch]` start/running ticks into an
+ * ordered list of nested cards for live (and final) batch UI.
+ */
+export function buildBatchCardsFromSpool(raw: string): BatchSection[] {
+  const settled = parseBatchSections(raw);
+  const byIndex = new Map<number, BatchSection>();
+  for (const s of settled) {
+    // Prefer settled over running if both exist.
+    if (s.status !== "running" || !byIndex.has(s.index)) {
+      byIndex.set(s.index, s);
+    }
+  }
+
   const ticks = raw
     .replace(/\r/g, "")
     .split("\n")
     .map((l) => l.trim())
     .filter((l) => /^\[batch\]/i.test(l));
-  if (ticks.length === 0) {
-    return { lines: [], summary: "" };
-  }
 
-  // Prefer the latest status per call index so the card stays short.
-  const byKey = new Map<string, BatchLiveLine>();
-  let header: BatchLiveLine | undefined;
-  let progress: BatchLiveLine | undefined;
+  const tickState = new Map<number, TickState>();
   for (const tick of ticks) {
     const body = tick.replace(/^\[batch\]\s*/i, "");
     const start = /^#(\d+)\s+([\w.]+)\s+starting/i.exec(body);
-    const done = /^#(\d+)\s+([\w.]+)\s+(ok|fail|cancelled)/i.exec(body);
+    const done =
+      /^#(\d+)\s+([\w.]+)\s+(ok|fail|cancelled)(?:\s+exit=(\d+))?/i.exec(body);
     const running = /^#(\d+)\s+([\w.]+)\s+still running/i.exec(body);
-    const still = /^still running/i.test(body);
+    const err = /^#(\d+)\s+([\w.]+)\s+error:/i.exec(body);
     if (start) {
-      byKey.set(start[1]!, {
-        text: `#${start[1]} ${start[2]} · running`,
-        tone: "running",
-      });
-    } else if (done) {
-      const st = done[3]!.toLowerCase();
-      const ok = st === "ok";
-      byKey.set(done[1]!, {
-        text: `#${done[1]} ${done[2]} · ${st}`,
-        tone: ok ? "ok" : "fail",
-      });
-    } else if (running) {
-      // Keep "running" only if not already terminal.
-      const prev = byKey.get(running[1]!);
-      if (!prev || prev.tone === "running") {
-        byKey.set(running[1]!, {
-          text: `#${running[1]} ${running[2]} · running…`,
-          tone: "running",
+      const idx = parseInt(start[1]!, 10);
+      const prev = tickState.get(idx);
+      if (!prev || prev.status === "running") {
+        tickState.set(idx, {
+          name: start[2]!,
+          status: "running",
+          exitCode: undefined,
         });
       }
-    } else if (still) {
-      progress = { text: body, tone: "info" };
-    } else if (/^starting\b/i.test(body)) {
-      header = { text: body, tone: "info" };
+    } else if (done) {
+      const idx = parseInt(done[1]!, 10);
+      const st = done[3]!.toLowerCase() as BatchSectionStatus;
+      const exit =
+        done[4] !== undefined ? parseInt(done[4], 10) : undefined;
+      tickState.set(idx, {
+        name: done[2]!,
+        status: st,
+        exitCode: Number.isFinite(exit) ? exit : undefined,
+      });
+    } else if (running) {
+      const idx = parseInt(running[1]!, 10);
+      const prev = tickState.get(idx);
+      if (!prev || prev.status === "running") {
+        tickState.set(idx, {
+          name: running[2]!,
+          status: "running",
+          exitCode: undefined,
+        });
+      }
+    } else if (err) {
+      const idx = parseInt(err[1]!, 10);
+      tickState.set(idx, {
+        name: err[2]!,
+        status: "fail",
+        exitCode: undefined,
+      });
     }
   }
 
-  const lines: BatchLiveLine[] = [];
-  if (header) lines.push(header);
-  const ordered = [...byKey.entries()].sort(
-    (a, b) => Number(a[0]) - Number(b[0]),
-  );
-  for (const [, line] of ordered) lines.push(line);
-  if (progress) lines.push(progress);
+  // Fill running (or tick-only settled) stubs for indices not yet sectioned.
+  for (const [idx, st] of tickState) {
+    const existing = byIndex.get(idx);
+    if (existing && existing.status !== "running") continue;
+    if (existing && st.status === "running") continue;
+    // Prefer full section body when we already have one.
+    if (existing && existing.body.trim().length > 0 && st.status !== "running") {
+      // Section may lack exit; prefer section.
+      continue;
+    }
+    if (st.status === "running" || !existing) {
+      byIndex.set(idx, {
+        index: idx,
+        name: st.name,
+        status: st.status === "running" ? "running" : st.status,
+        ok: st.status === "ok",
+        exitCode: st.exitCode,
+        body: existing?.body ?? "",
+      });
+    }
+  }
 
-  const runningN = ordered.filter(([, l]) => l.tone === "running").length;
-  const doneN = ordered.filter(([, l]) => l.tone !== "running").length;
-  const summary =
-    ordered.length > 0
-      ? `${doneN} settled · ${runningN} running · ${ordered.length} total`
-      : header?.text ?? "batch running…";
-
-  return { lines, summary };
+  return [...byIndex.values()].sort((a, b) => a.index - b.index);
 }
 
 /**

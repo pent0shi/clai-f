@@ -58,12 +58,14 @@ const RENDERER_ALLOWED = new Set<string>([
   join(tuiV2Root, "components", "modal", "secret-modal.tsx"),
   join(tuiV2Root, "components", "modal", "scope-modal.tsx"),
   join(tuiV2Root, "components", "modal", "prompt-actions-modal.tsx"),
+  join(tuiV2Root, "components", "modal", "keys-modal.tsx"),
   join(tuiV2Root, "components", "pager", "pager.tsx"),
   join(tuiV2Root, "components", "pager", "pager-line.tsx"),
   join(tuiV2Root, "components", "jobs", "jobs-panel.tsx"),
   join(tuiV2Root, "components", "plan", "plan-view.tsx"),
   join(tuiV2Root, "components", "plan", "use-pane-presence.ts"),
   join(tuiV2Root, "components", "overlay", "overlay-host.tsx"),
+  join(tuiV2Root, "components", "transcript", "selectable-line.tsx"),
 ]);
 
 function walk(dir: string): string[] {

@@ -121,7 +121,11 @@ export const geminiProvider: LlmProvider = {
   displayName: "Google Gemini",
   defaultModel: defaultModels.gemini,
   envVar: "GEMINI_API_KEY",
-  validateKey: (key: string) => /^AIza[0-9A-Za-z_-]{12,}$/.test(key),
+  // Classic AI Studio keys start with AIza…; newer Google AI / GenAI keys often
+  // use AQ.… (e.g. from Google AI Studio / Cloud). Both must pass multi-key save.
+  validateKey: (key: string) =>
+    /^AIza[0-9A-Za-z_-]{12,}$/.test(key) ||
+    /^AQ\.[A-Za-z0-9_-]{20,}$/.test(key),
   async listModels(auth: ProviderAuth): Promise<string[]> {
     if (!auth.apiKey) throw new Error("Gemini API key is required");
     const response = await fetch(

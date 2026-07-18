@@ -4,9 +4,20 @@ import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { detectSystem } from "../os/detect.js";
 import { EMBEDDED_PROMPTS } from "./embedded.js";
+import { getActiveSessionScratchDir } from "../store/session-workspace.js";
 
 
+/**
+ * Absolute path the agent should use for scratch / engagement notes.
+ *
+ * When a session workspace is bound (normal TUI/REPL), this is the unique
+ * per-session folder under `{tmpdir}/clai/{code}-{dd}-{mm}-{yyyy}-…}`.
+ * Without a bound session (unit tests, early boot), fall back to a
+ * project-name path so existing callers stay stable.
+ */
 export function scratchDirFor(cwd: string): string {
+  const active = getActiveSessionScratchDir();
+  if (active) return active;
   const name =
     (basename(cwd) || "session").replace(/[^A-Za-z0-9._-]/g, "-").slice(0, 48) ||
     "session";
@@ -104,18 +115,33 @@ const agentToolsCatalog = (() => {
   return agentPrompt.slice(start, end);
 })();
 
-const agentPromptNative =
-  sectionBefore(agentPrompt, "# TOOL CALLS — HOW TO USE TOOLS") +
-  `# TOOLS
+const agentNativeToolsHeader = `# TOOLS
 
 You have structured tools provided by the API. Call them via the platform tool interface. Do not invent tool names. Prefer the most specific tool. Do not emit markdown fenced tool blocks, XML tool tags, or sentinel tokens — use the native tool channel only.
+
+Available tool names: {{tool_list}}
 
 # FILE POLICY
 
 Read: small files → fs.read {path}. Large/unknown → expect auto-head; if hasMore, continue with footer next offset/limit (never path-only again). Need a symbol → pattern or fs.search then offset around hits. Lines are 1-indexed (N: text). Write: prefer one complete fs.write for new/full rewrites; fs.writeMany for scaffolds; fs.edit for surgical edits; fs.append only after truncation with expectedPriorBytes. Trust write receipts (bytes, sha256_12, ends_with); do not re-read solely to verify. Never claim a write without a successful tool result.
 
-` +
+`;
+
+/** Full native prompt: short native tool protocol + full argument encyclopedia. */
+const agentPromptNative =
+  sectionBefore(agentPrompt, "# TOOL CALLS — HOW TO USE TOOLS") +
+  agentNativeToolsHeader +
   agentToolsCatalog +
+  sectionFrom(agentPrompt, "# OPERATING RULES");
+
+/**
+ * E6 slim native: rely on API tool schemas for argument names; keep FILE POLICY
+ * and OPERATING RULES. Omits the long fence-protocol tool encyclopedia so the
+ * stable system prefix is smaller and cache-friendlier when native tools are on.
+ */
+const agentPromptNativeSlim =
+  sectionBefore(agentPrompt, "# TOOL CALLS — HOW TO USE TOOLS") +
+  agentNativeToolsHeader +
   sectionFrom(agentPrompt, "# OPERATING RULES");
 
 const compactAgentPromptNative = `# ROLE
@@ -179,18 +205,36 @@ function render(template: string, values: Record<string, string>): string {
   );
 }
 
+/**
+ * Environment clock for system prompts.
+ *
+ * Hour-stable on purpose: agent loops re-render the system prompt every step.
+ * Second-precision ISO timestamps busted provider prompt-cache prefixes with no
+ * capability gain (models only need current day/year for freshness queries).
+ * Minutes/seconds are omitted so consecutive steps within the same local hour
+ * produce an identical constitution string when nothing else changed.
+ */
 export function currentDateTimeContext(now = new Date()): string {
-  const local = now.toLocaleString(undefined, {
+  const floored = floorToLocalHour(now);
+  const local = floored.toLocaleString(undefined, {
     weekday: "long",
     year: "numeric",
     month: "long",
     day: "numeric",
     hour: "2-digit",
     minute: "2-digit",
-    second: "2-digit",
     timeZoneName: "short",
   });
-  return `${local} (ISO: ${now.toISOString()})`;
+  // Floor ISO to the hour (UTC) so the string is stable across re-renders.
+  const isoHour = `${floored.toISOString().slice(0, 13)}:00:00.000Z`;
+  return `${local} (ISO hour: ${isoHour})`;
+}
+
+/** Local-hour floor used by {@link currentDateTimeContext} (exported for tests). */
+export function floorToLocalHour(now: Date): Date {
+  const d = new Date(now.getTime());
+  d.setMinutes(0, 0, 0);
+  return d;
 }
 
 
@@ -212,10 +256,26 @@ export function renderAskSystemPrompt(options?: {
 
 export function renderAgentSystemPrompt(
   toolList: string,
-  options?: { nativeTools?: boolean },
+  options?: {
+    nativeTools?: boolean;
+    /**
+     * E6: omit long tool-arg encyclopedia when native schemas are attached.
+     * Defaults to true when nativeTools is true (overridable via config /
+     * CLAI_SLIM_NATIVE_PROMPT when callers pass nothing).
+     */
+    slimNative?: boolean;
+  },
 ): string {
   const system = detectSystem();
-  return render(options?.nativeTools ? agentPromptNative : agentPrompt, {
+  let template = agentPrompt;
+  if (options?.nativeTools) {
+    const slim =
+      options.slimNative !== undefined
+        ? options.slimNative
+        : true;
+    template = slim ? agentPromptNativeSlim : agentPromptNative;
+  }
+  return render(template, {
     os: `${system.osName} ${system.release} ${system.arch}`,
     shell: system.shell,
     cwd: system.cwd,

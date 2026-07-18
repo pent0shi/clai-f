@@ -281,7 +281,7 @@ async function main(): Promise<void> {
 
   program
     .command("set")
-    .description("store an API key or Ollama URL")
+    .description("store or append an API key (multi-key) or Ollama URL")
     .argument("<provider>", "provider id")
     .argument("[apiKey]", "API key")
     .option("--from-env <envVar>", "import key from environment variable")
@@ -305,7 +305,7 @@ async function main(): Promise<void> {
 
   program
     .command("unset")
-    .description("remove a stored API key")
+    .description("remove all stored API keys for a provider")
     .argument("<provider>", "provider id")
     .action(async (provider: string) => {
       await unsetProviderKey(provider);
@@ -618,7 +618,9 @@ async function main(): Promise<void> {
 
   privacyCommand
     .command("clear-artifacts")
-    .description("delete all saved tool artifacts under ~/.clai/outputs")
+    .description(
+      "delete saved tool artifacts (~/.clai/outputs and per-session temp folders)",
+    )
     .action(async () => {
       const { clearArtifacts } = await import("./store/logs.js");
       const r = await clearArtifacts();

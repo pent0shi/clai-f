@@ -44,15 +44,26 @@ describe("pager-view-policy", () => {
     ).toBe(false);
   });
 
-  it("formats compacted / help / pure md create; raw for edits and shell", () => {
+  it("formats compacted / help / md reads; raw for all file mutations and shell", () => {
     expect(shouldDefaultFormattedView({ kind: "compacted" })).toBe(true);
     expect(shouldDefaultFormattedView({ kind: "help" })).toBe(true);
+    // Pure-green .md create/append: raw green editor (not formatted doc).
     expect(
       shouldDefaultFormattedView({
         kind: "file-change",
         fileChange: change({ kind: "create", path: "/tmp/report.md" }),
       }),
-    ).toBe(true);
+    ).toBe(false);
+    expect(
+      shouldDefaultFormattedView({
+        kind: "file-change",
+        fileChange: change({
+          kind: "append",
+          path: "/tmp/report.md",
+          stats: { oldLines: 20, newLines: 30, added: 10, removed: 0 },
+        }),
+      }),
+    ).toBe(false);
     expect(
       shouldDefaultFormattedView({
         kind: "file-change",
@@ -74,6 +85,14 @@ describe("pager-view-policy", () => {
     expect(
       shouldDefaultFormattedView({
         kind: "tool",
+        toolName: "fs.append",
+        path: "/tmp/notes.md",
+        body: "# hi",
+      }),
+    ).toBe(false);
+    expect(
+      shouldDefaultFormattedView({
+        kind: "tool",
         toolName: "shell.exec",
         body: "# not really md context",
       }),
@@ -85,6 +104,12 @@ describe("pager-view-policy", () => {
       defaultPagerMarkdownMode({
         kind: "tool",
         toolName: "http.fetch",
+      }),
+    ).toBe("plain");
+    expect(
+      defaultPagerMarkdownMode({
+        kind: "file-change",
+        fileChange: change({ kind: "append", path: "/tmp/notes.md" }),
       }),
     ).toBe("plain");
   });

@@ -102,7 +102,6 @@ describe("command parity (V2-080)", () => {
       "cwd",
       "freeonly",
       "fallback",
-      "mouse",
       "help",
       "allow",
       "disallow",
@@ -226,14 +225,9 @@ describe("command parity (V2-080)", () => {
     expect(getConfig().privateMode).toBe(false);
   });
 
-  it("/mouse reports unified selection status (no dual-mode design)", async () => {
+  it("slash catalog no longer registers /mouse", () => {
     const services = buildServices();
-    await services.commands.dispatch({ name: "mouse", args: "" });
-    expect(
-      notices(services).some(
-        (t) => t.includes("mouse=on") || t.includes("pane-scoped selection"),
-      ),
-    ).toBe(true);
+    expect(services.commands.has("mouse")).toBe(false);
   });
 
   it("/help opens the command reference pager", async () => {

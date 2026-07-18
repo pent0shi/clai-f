@@ -40,6 +40,7 @@ import {
   clearAllHistory,
   getSession,
 } from "./store/history.js";
+import { beginSessionWorkspace } from "./store/session-workspace.js";
 import { assertProvider, defaultModels, getProviderInfoText } from "./llm/provider.js";
 import { getProvider, providerAuth } from "./llm/router.js";
 import { clearTextOnlyModels } from "./llm/tool-protocol.js";
@@ -146,9 +147,16 @@ export interface ReplOptions {
 export function resetClassicSessionContext(
   state: { session: SessionPolicy },
   sessionId?: string,
+  workspace?: { folderName?: string | undefined; code?: string | undefined },
 ): void {
   clearActiveProjectRoot();
   state.session = createSessionPolicy(sessionId);
+  // Isolate scratch + tool outputs per session (restore on history resume).
+  beginSessionWorkspace(
+    workspace?.folderName
+      ? { folderName: workspace.folderName, code: workspace.code }
+      : undefined,
+  );
 }
 
 function splitCommand(line: string): string[] {
@@ -1123,7 +1131,10 @@ async function handleSlash(
         }
       }
 
-      resetClassicSessionContext(state, session.id);
+      resetClassicSessionContext(state, session.id, {
+        folderName: session.workspaceFolder,
+        code: session.workspaceCode,
+      });
 
       // Replay messages
       console.log(chalk.dim(`\n  ── resuming session ──\n`));
@@ -1640,6 +1651,8 @@ export async function startRepl(options: ReplOptions = {}): Promise<void> {
   const provider = options.provider
     ? assertProvider(options.provider)
     : config.defaultProvider;
+  // Bind a unique session workspace before any tool/scratch path is resolved.
+  beginSessionWorkspace();
   const state = {
     mode: options.mode ?? config.defaultMode,
     provider,

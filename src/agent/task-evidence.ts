@@ -716,6 +716,14 @@ export function toolStallBudgetMs(call: {
   if (call.name === "web.search" || call.name === "web.fetch" || call.name === "http.fetch") {
     return 60_000;
   }
+  // Multi-request workflows emit progress ticks; allow quieter stretches between hops.
+  if (
+    call.name === "pentest.webDiscover" ||
+    call.name === "pentest.apiEnumerate" ||
+    call.name === "pentest.authCompare"
+  ) {
+    return 90_000;
+  }
   return 60_000;
 }
 
@@ -748,6 +756,10 @@ export function toolHardBudgetMs(call: {
   if (call.name === "web.fetch") return 45_000;
   if (call.name === "http.fetch") return 90_000;
   if (call.name === "net.scan" || call.name === "pentest.recon") return 15 * 60_000;
+  // webDiscover: up to 100 paths × ~15s HTTP timeout / concurrency 4 ≈ ~6+ min worst case.
+  if (call.name === "pentest.webDiscover") return 8 * 60_000;
+  if (call.name === "pentest.apiEnumerate") return 2 * 60_000;
+  if (call.name === "pentest.authCompare") return 3 * 60_000;
   if (call.name === "shell.start") return 120_000; // should background quickly
   // Default hard cap so a silent hung tool cannot freeze the session forever.
   return 5 * 60_000;

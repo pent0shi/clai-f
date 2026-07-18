@@ -39,6 +39,7 @@ import {
   buildSessionStateBlock,
   inferNextHint,
   SESSION_STATE_PREFIX,
+  upsertSessionStateMessage,
 } from "../src/agent/session-state.js";
 import { isProjectLocalNodeBin } from "../src/tools/capabilities.js";
 
@@ -249,6 +250,19 @@ describe("coding plan requirement helpers", () => {
     expect(
       toolHardBudgetMs({ name: "shell.exec", args: { command: "echo hi" } }),
     ).toBe(5 * 60_000);
+    // Multi-path webDiscover needs more than default 5m silence-style budgets.
+    expect(
+      toolStallBudgetMs({
+        name: "pentest.webDiscover",
+        args: { baseUrl: "https://x" },
+      }),
+    ).toBe(90_000);
+    expect(
+      toolHardBudgetMs({
+        name: "pentest.webDiscover",
+        args: { baseUrl: "https://x" },
+      }),
+    ).toBe(8 * 60_000);
   });
 
   it("picks install task for npm install, not localStorage", () => {
@@ -466,6 +480,82 @@ describe("session state block", () => {
     expect(inferNextHint({ featureAppRequired: true, featureSeen: false })).toMatch(
       /feature/i,
     );
+  });
+
+  it("upserts SESSION STATE at the end so history prefix stays cacheable", () => {
+    const messages: Array<{ role: string; content: string }> = [
+      { role: "system", content: "CONSTITUTION stable" },
+      { role: "user", content: "scan the target" },
+      { role: "assistant", content: "running recon" },
+      { role: "tool", content: "open ports: 80, 443" },
+    ];
+    const blockA = buildSessionStateBlock({
+      goal: "pentest",
+      lastOkTool: "http.fetch",
+      openTask: "[t1] recon",
+    });
+    upsertSessionStateMessage(messages, blockA);
+    expect(messages).toHaveLength(5);
+    expect(messages[0]!.content).toBe("CONSTITUTION stable");
+    expect(messages[1]!.role).toBe("user");
+    expect(messages[4]!.content).toContain("last_ok_tool: http.fetch");
+    expect(
+      messages.filter((m) => m.content.startsWith(SESSION_STATE_PREFIX)),
+    ).toHaveLength(1);
+
+    // Simulate another tool turn, then refresh state (last_ok_tool changes).
+    messages.push(
+      { role: "assistant", content: "next probe" },
+      { role: "tool", content: "403 on /admin" },
+    );
+    const prefixBefore = messages
+      .slice(0, 4)
+      .map((m) => m.content)
+      .join("\0");
+    const blockB = buildSessionStateBlock({
+      goal: "pentest",
+      lastOkTool: "shell.exec",
+      openTask: "[t2] auth",
+    });
+    upsertSessionStateMessage(messages, blockB);
+
+    // Long history prefix must remain byte-identical (prompt-cache friendly).
+    const prefixAfter = messages
+      .slice(0, 4)
+      .map((m) => m.content)
+      .join("\0");
+    expect(prefixAfter).toBe(prefixBefore);
+    expect(
+      messages.filter((m) => m.content.startsWith(SESSION_STATE_PREFIX)),
+    ).toHaveLength(1);
+    expect(messages[messages.length - 1]!.content).toContain(
+      "last_ok_tool: shell.exec",
+    );
+    expect(messages[messages.length - 1]!.content).toContain("open_task:");
+  });
+
+  it("migrates a legacy early SESSION STATE insert to the trailing position", () => {
+    const messages: Array<{ role: string; content: string }> = [
+      { role: "system", content: "CONSTITUTION" },
+      {
+        role: "system",
+        content: `${SESSION_STATE_PREFIX}\ngoal: old\nlast_ok_tool: web.search`,
+      },
+      { role: "user", content: "continue" },
+      { role: "assistant", content: "ok" },
+    ];
+    upsertSessionStateMessage(
+      messages,
+      buildSessionStateBlock({ goal: "new", lastOkTool: "http.fetch" }),
+    );
+    expect(messages[0]!.content).toBe("CONSTITUTION");
+    expect(messages[1]!.role).toBe("user");
+    expect(messages[messages.length - 1]!.content).toContain(
+      "last_ok_tool: http.fetch",
+    );
+    expect(
+      messages.filter((m) => m.content.startsWith(SESSION_STATE_PREFIX)),
+    ).toHaveLength(1);
   });
 });
 

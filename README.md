@@ -220,7 +220,7 @@ Coding and general sysadmin work use the same agent (scaffold, debug, packages) 
 | Provider | Default model | Free tier | Key prefix |
 |----------|---------------|-----------|------------|
 | Groq | `llama-3.3-70b-versatile` | ✓ | `gsk_` |
-| Gemini | `gemini-2.0-flash` | ✓ | `AIza` |
+| Gemini | `gemini-2.0-flash` | ✓ | `AIza` / `AQ.` |
 | OpenRouter | `meta-llama/llama-3.3-70b-instruct:free` | ✓ | `sk-or-` |
 | OpenAI | `gpt-4o-mini` | — | `sk-` |
 | Anthropic | `claude-3-5-haiku-latest` | — | `sk-ant-` |
@@ -232,15 +232,18 @@ Coding and general sysadmin work use the same agent (scaffold, debug, packages) 
 | Bynara | `mimo-v2.5-free` | ✓ | `sk_nry_` |
 
 ```sh
-clai set groq gsk_...
+clai set groq gsk_...              # store / append an API key (multi-key supported)
+clai set groq gsk_another_...      # add a second key for the same provider
 clai set gemini --from-env GEMINI_API_KEY
 echo "gsk_..." | clai set groq --stdin
 clai set ollama --url http://localhost:11434
-clai keys
+clai keys                          # lists each key (masked) + sticky active ★
 clai use groq
-clai provider          # picker shows selected model per provider
-clai unset groq
+clai provider                      # picker shows selected model per provider
+clai unset groq                    # removes ALL keys for that provider
 ```
+
+In the TUI, **`/set`** opens a multi-row key editor (like `/scope`): add with `+`, remove rows, **Save**, or **Reset all**. **`/unset`** clears every key for the chosen provider. When several keys are stored, clai **rotates** on rate limits / auth / transient errors (one retry per key, then the next key in a circle) and shows a non-stacking toast (`using groq · …ab12` / `switching …`).
 
 Env overrides: `GROQ_API_KEY`, `GEMINI_API_KEY`, `OPENROUTER_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `NVIDIA_API_KEY`, `OLLAMA_HOST`, …
 

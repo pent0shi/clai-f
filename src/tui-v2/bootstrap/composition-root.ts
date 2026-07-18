@@ -142,11 +142,15 @@ export function createCompositionRoot(
     // session.notice / agent notices → toast only (not chat items).
     if (event.type === "notice") {
       const level = event.payload.level === "warn" ? "warn" : "info";
-      toast.show(event.payload.text, {
-        level,
-        key: `notice-${level}`,
-        // Hold 2s at rest; enter/exit animation is added by ToastController.
-        durationMs: level === "info" ? 2000 : 2500,
+      const text = event.payload.text;
+      // Multi-API-key rotation: only *switch* / exhausted toasts (never "using"
+      // every step). Same replace-key so chips never stack.
+      const apiKeyRotation =
+        /^switching /i.test(text.trim()) || /API keys failed/i.test(text);
+      toast.show(text, {
+        level: apiKeyRotation ? "warn" : level,
+        key: apiKeyRotation ? "api-key-rotation" : `notice-${level}`,
+        durationMs: apiKeyRotation ? 3000 : level === "info" ? 2000 : 2500,
       });
     }
     if (externalEmit) externalEmit(event);

@@ -50,6 +50,26 @@ export interface ScopeEditorRequest {
   readonly initialTargets: readonly string[];
 }
 
+/** One existing key shown masked in the multi-key editor (/set). */
+export interface KeysEditorSlotView {
+  readonly id: string;
+  readonly masked: string;
+}
+
+/** Multi-row API key editor for a single LLM provider. */
+export interface KeysEditorRequest {
+  readonly provider: string;
+  readonly initialKeys: readonly KeysEditorSlotView[];
+}
+
+/**
+ * Save rows: empty `value` + `slotId` keeps the stored secret; non-empty value
+ * is a new/replacement plaintext key. Reset clears all keys for the provider.
+ */
+export type KeysEditorAnswer =
+  | { readonly action: "save"; readonly rows: readonly { slotId?: string; value: string }[] }
+  | { readonly action: "reset" };
+
 export interface PromptActionsRequest {
   readonly prompt: string;
   readonly onResend: () => void;
@@ -74,6 +94,12 @@ export type OverlayState =
       readonly request: ScopeEditorRequest;
       /** undefined = cancel; [] = clear/disable; non-empty = save targets. */
       readonly resolve: (targets: string[] | undefined) => void;
+    }
+  | {
+      readonly kind: "keys-editor";
+      readonly request: KeysEditorRequest;
+      /** undefined = cancel. */
+      readonly resolve: (answer: KeysEditorAnswer | undefined) => void;
     }
   | { readonly kind: "prompt-actions"; readonly request: PromptActionsRequest }
   | {
@@ -239,6 +265,29 @@ export class OverlayController {
     resolve(targets);
   }
 
+  /**
+   * Multi-row API key editor. Resolves:
+   * - `undefined` cancel / overlay busy
+   * - `{ action: "reset" }` clear all keys
+   * - `{ action: "save", rows }` keep/replace/add keys
+   */
+  openKeysEditor(request: KeysEditorRequest): Promise<KeysEditorAnswer | undefined> {
+    return new Promise((resolve) => {
+      const opened = this.open(
+        { kind: "keys-editor", request, resolve },
+        "modal",
+      );
+      if (!opened) resolve(undefined);
+    });
+  }
+
+  answerKeys(answer: KeysEditorAnswer | undefined): void {
+    if (this.state.kind !== "keys-editor") return;
+    const { resolve } = this.state;
+    this.forceClose();
+    resolve(answer);
+  }
+
   answerConfirm(ok: boolean): void {
     const confirm = this.activeConfirm();
     if (!confirm) return;
@@ -293,6 +342,10 @@ export class OverlayController {
       this.answerScope(undefined);
       return true;
     }
+    if (this.state.kind === "keys-editor") {
+      this.answerKeys(undefined);
+      return true;
+    }
     return false;
   }
 
@@ -326,6 +379,8 @@ export class OverlayController {
         this.state.resolve(false);
       }
     } else if (this.state.kind === "secret") this.state.resolve(undefined);
+    else if (this.state.kind === "scope-editor") this.state.resolve(undefined);
+    else if (this.state.kind === "keys-editor") this.state.resolve(undefined);
     this.suspended = undefined;
     this.forceClose();
     this.listeners.clear();

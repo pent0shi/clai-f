@@ -37,6 +37,7 @@ export interface PreparePagerDisplayOptions {
  * Strip file-diff / modal line gutters (`  12 │ ` / `     │ ± `) so format
  * mode can render real markdown instead of gutter-polluted source.
  * Leaves non-guttered lines unchanged (help, compact cards, tool dumps).
+ * For fs.read `N: ` prefixes use {@link extractFsReadFileBody} instead.
  */
 export function stripPagerLineGutters(body: string): string {
   if (!body) return body;
@@ -52,6 +53,41 @@ export function stripPagerLineGutters(body: string): string {
       return line;
     })
     .join("\n");
+}
+
+/**
+ * Extract clean markdown source from an fs.read tool dump for formatted
+ * preview (chat card + pager). Strips:
+ *  - `# fs.read path=…` / `# hasMore=…` chrome headers/footers
+ *  - `N: ` line-number prefixes the tool adds for model navigation
+ *  - optional `Tool fs.read result (…):` wrappers
+ */
+export function extractFsReadFileBody(raw: string): string {
+  if (!raw) return "";
+  const lines = raw.replace(/\r\n/g, "\n").split("\n");
+  const body: string[] = [];
+  for (const line of lines) {
+    // Tool / receipt chrome
+    if (/^(ok|failed)$/i.test(line.trim())) continue;
+    if (/^Tool\s+\S+\s+result\s*\(/i.test(line)) continue;
+    if (/^full output saved to /i.test(line)) continue;
+    if (/^artifact: /i.test(line)) continue;
+    // fs.read meta headers (not markdown ATX titles)
+    if (/^#\s*fs\.read\b/i.test(line)) continue;
+    if (/^#\s*hasMore=/i.test(line)) continue;
+    if (/^#\s*next:/i.test(line)) continue;
+    if (/^#\s*file is empty\b/i.test(line)) continue;
+    if (/^#\s*requested lines\b/i.test(line)) continue;
+    if (/^#\s*path=/i.test(line)) continue;
+    // Numbered content: `12: ## Heading` → `## Heading`
+    const num = /^(\d+):\s?(.*)$/.exec(line);
+    if (num) {
+      body.push(num[2] ?? "");
+      continue;
+    }
+    body.push(line);
+  }
+  return body.join("\n").replace(/^\n+/, "").replace(/\n+$/, "");
 }
 
 /**

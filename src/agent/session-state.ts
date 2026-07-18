@@ -110,7 +110,17 @@ export function inferNextHint(s: SessionStateSnapshot): string | undefined {
 }
 
 /**
- * Upsert SESSION STATE as a system message after the primary system prompt.
+ * Upsert SESSION STATE as a **trailing** system message (suffix of history).
+ *
+ * Why trailing (not after messages[0]):
+ * Provider prompt caches key off a stable *prefix*. The old layout put
+ * SESSION STATE at index 1 and rewrote it every successful tool
+ * (`last_ok_tool`, open task, …). That single early mutation invalidated
+ * the entire conversation prefix — matching the Bynara pattern of
+ * ~10–11k cache (constitution only) with 45–70k fresh input.
+ *
+ * Trailing placement keeps system + user + prior turns byte-stable so
+ * only the new suffix (latest tools + this block) is uncached.
  * Mutates the messages array in place.
  */
 export function upsertSessionStateMessage(
@@ -120,22 +130,21 @@ export function upsertSessionStateMessage(
   const content = block.startsWith(SESSION_STATE_PREFIX)
     ? block
     : `${SESSION_STATE_PREFIX}\n${block}`;
-  const idx = messages.findIndex(
-    (m) =>
+
+  // Drop every prior SESSION STATE copy (legacy early inserts included).
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const m = messages[i]!;
+    if (
       m.role === "system" &&
       typeof m.content === "string" &&
-      m.content.startsWith(SESSION_STATE_PREFIX),
-  );
-  if (idx >= 0) {
-    messages[idx]!.content = content;
-    return;
+      m.content.startsWith(SESSION_STATE_PREFIX)
+    ) {
+      messages.splice(i, 1);
+    }
   }
-  // Insert after first system message if present, else at front.
-  if (messages[0]?.role === "system") {
-    messages.splice(1, 0, { role: "system", content });
-  } else {
-    messages.unshift({ role: "system", content });
-  }
+
+  // Always append: updates change only the request suffix.
+  messages.push({ role: "system", content });
 }
 
 export function isSessionStateMessage(content: string): boolean {

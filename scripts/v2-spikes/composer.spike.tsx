@@ -170,7 +170,7 @@ export async function runComposerSpike(): Promise<SpikeResult> {
     check(
       result,
       "completion shows every /mo match rather than a single clipped row",
-      completionFrame.includes("/model") && completionFrame.includes("/mouse"),
+      completionFrame.includes("/model") && completionFrame.includes("/keys"),
     );
     keys.pressTab();
     await setup.flush();

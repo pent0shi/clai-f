@@ -414,6 +414,12 @@ export async function handleHistory(services: AppServices): Promise<void> {
         ...(session.contextUsage
           ? { contextUsage: session.contextUsage }
           : {}),
+        ...(session.workspaceFolder
+          ? {
+              workspaceFolder: session.workspaceFolder,
+              workspaceCode: session.workspaceCode,
+            }
+          : {}),
       });
 
       // Prefer the richer of visual transcript vs model messages (tools often

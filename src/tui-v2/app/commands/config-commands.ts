@@ -1,5 +1,5 @@
 /**
- * Config/toggles/scope/privacy/help/exit/update/mouse (V2-080).
+ * Config/toggles/scope/privacy/help/exit/update (V2-080).
  */
 
 import { getConfig, updateConfig } from "../../../store/config.js";
@@ -47,21 +47,6 @@ export function handleFallback(services: AppServices, invocation: CommandInvocat
   }
   updateConfig({ providerFallback: flag });
   notice(services, "info", `providerFallback=${flag}`);
-}
-
-export function handleMouse(services: AppServices, invocation: CommandInvocation): void {
-  const arg = invocation.args.trim().toLowerCase();
-  // v2 is fullscreen with pane-scoped selection — there is no broken dual mode
-  // (FEATURE_PARITY /mouse). Report status; on/off is informational only.
-  if (!arg || parseOnOff(arg) !== undefined) {
-    notice(
-      services,
-      "info",
-      "mouse=on · touch/click scroll + open tools/prompts (drag-select disabled so interactions work)",
-    );
-    return;
-  }
-  notice(services, "warn", "usage: /mouse [on|off]");
 }
 
 export async function handleScope(

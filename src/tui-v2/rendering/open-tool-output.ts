@@ -14,7 +14,7 @@ import type { ToolItem } from "../state/transcript-types.js";
 import type { FileChange } from "../../tools/file-diff.js";
 import { formatModalPlainText } from "./file-diff-view.js";
 import { defaultPagerMarkdownMode } from "./pager-view-policy.js";
-import { stripPagerLineGutters } from "./pager-markdown.js";
+import { extractFsReadFileBody, stripPagerLineGutters } from "./pager-markdown.js";
 
 interface SearchHit {
   readonly title?: string | undefined;
@@ -221,8 +221,8 @@ export async function openToolOutputPager(
         path: fileChange.path,
         body: fileChange.afterText,
       });
-      // Pure-create / green-only markdown: open clean text for format default.
-      // Mixed red+green edits: keep guttered raw body.
+      // Always open the guttered green/red editor body by default.
+      // (mdMode is plain for file mutations; `f` still formats if the user wants.)
       const body =
         mdMode === "force"
           ? stripPagerLineGutters(guttered) ||
@@ -234,7 +234,7 @@ export async function openToolOutputPager(
         title,
         body,
         undefined,
-        // highlightPath only for raw syntax path (edits); pure md uses format
+        // Keep path for raw syntax highlighting of the green editor view.
         mdMode === "force" ? undefined : fileChange.path,
         mdMode,
       );
@@ -391,10 +391,13 @@ export async function openToolOutputPager(
       path: highlightPath ?? pathFromArgsDisplay(item.argsDisplay),
       body: body,
     });
-    // Formatted md reads: prefer clean file text without path chrome for render.
+    // Formatted md reads: pure file markdown (no `N: ` gutters / # fs.read chrome).
+    // Prefer on-disk file when available; otherwise strip the spool dump.
     const finalBody =
-      mdMode === "force" && openedSourceFile
-        ? body || "(no output)"
+      mdMode === "force"
+        ? openedSourceFile
+          ? body || "(no output)"
+          : extractFsReadFileBody(body) || body || "(no output)"
         : pagerBody;
     const opened = services.overlay.openPager(
       title,

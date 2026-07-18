@@ -4,7 +4,8 @@ import { fixOwner, handlePermissionError } from '../os/permissions.js';
 import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { redactSecrets } from '../llm/provider.js';
-import { getArtifactDir, getLogsDirRoot } from './paths.js';
+import { getGlobalArtifactDir, getLogsDirRoot } from './paths.js';
+import { getSessionWorkspaceParent } from './session-workspace.js';
 
 const logsDir = getLogsDirRoot();
 const maxLogBytes = 10 * 1024 * 1024;
@@ -63,23 +64,51 @@ export function getLogsDir(): string {
 }
 
 export async function clearArtifacts(): Promise<{ removed: number }> {
-  const dir = getArtifactDir();
-  if (!existsSync(dir)) return { removed: 0 };
-  const entries = await readdir(dir).catch(() => []);
   let removed = 0;
-  for (const entry of entries) {
-    try {
-      await rm(join(dir, entry), { force: true, recursive: true });
-      removed += 1;
-    } catch {
-      // best-effort
+
+  // 1) Global ~/.clai/outputs (or CLAI_ARTIFACT_DIR override)
+  const globalDir = getGlobalArtifactDir();
+  if (existsSync(globalDir)) {
+    const entries = await readdir(globalDir).catch(() => []);
+    for (const entry of entries) {
+      try {
+        await rm(join(globalDir, entry), { force: true, recursive: true });
+        removed += 1;
+      } catch {
+        // best-effort
+      }
     }
   }
+
+  // 2) Per-session tool outputs under {tmpdir}/clai/*/temp
+  const sessionsParent = getSessionWorkspaceParent();
+  if (existsSync(sessionsParent)) {
+    const sessionFolders = await readdir(sessionsParent).catch(() => []);
+    for (const folder of sessionFolders) {
+      const tempDir = join(sessionsParent, folder, "temp");
+      if (!existsSync(tempDir)) continue;
+      const entries = await readdir(tempDir).catch(() => []);
+      for (const entry of entries) {
+        try {
+          await rm(join(tempDir, entry), { force: true, recursive: true });
+          removed += 1;
+        } catch {
+          // best-effort
+        }
+      }
+    }
+  }
+
   return { removed };
 }
 
 const diagnosticKeyAllowed = (key: string): boolean =>
-  /(?:id|ids|status|state|reason|level|phase|capability|allowed|ok|exitCode|signal|bytes|count|duration|freshness|revision|version)$/i.test(key);
+  /(?:id|ids|status|state|reason|level|phase|capability|allowed|ok|exitCode|signal|bytes|count|duration|freshness|revision|version|tokens|Tokens|provider|model|dialect|step|protocol)$/i.test(
+    key,
+  ) ||
+  /^(?:estimatedTotalTokens|systemTokens|userTokens|assistantTokens|toolResultTokens|toolSchemaTokens|messageCount|systemMessageCount|userMessageCount|assistantMessageCount|toolMessageCount|constitutionTokens|planTokens|scopeTokens|sessionStateTokens|compactionMemoryTokens|otherSystemTokens|toolDefinitionCount|tool_protocol)$/i.test(
+    key,
+  );
 
 function diagnosticMetadata(value: unknown): unknown {
   if (Array.isArray(value)) return value.slice(0, 100).map(diagnosticMetadata);

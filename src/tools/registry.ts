@@ -456,6 +456,10 @@ export const toolRegistry: Record<string, ToolHandler> = {
         /* invalid URL handled inside httpFetch */
       }
     }
+    const insecureTls =
+      args.insecureTls === true ||
+      args.tlsInsecure === true ||
+      args.insecure === true;
     return httpFetch(url, {
       method: optionalString(args, "method"),
       body: optionalString(args, "body"),
@@ -464,6 +468,7 @@ export const toolRegistry: Record<string, ToolHandler> = {
       iOwnThis,
       retries: optionalNumber(args, "retries"),
       timeoutMs: optionalNumber(args, "timeoutMs"),
+      insecureTls,
       signal: options?.signal,
       // Never attach engagement hop checks for owned loopback — leftover
       // pentest scope must not fail local app verify.
@@ -1321,6 +1326,18 @@ async function runToolBatch(
     // previously aborted silent batches mid-flight and left no tool-result.
     options?.onOutput?.(line.endsWith("\n") ? line : `${line}\n`, "stdout");
   };
+  /** Stream a finished child as a nested `── #N` section so the live UI can
+   * expand sub-cards with real output (not just "ok" status ticks). */
+  const streamSection = (outcome: BatchOutcome): void => {
+    const status = outcome.status;
+    const head = `── #${outcome.index + 1} ${outcome.name} [${status}${
+      outcome.exitCode !== undefined ? ` exit=${outcome.exitCode}` : ""
+    }]`;
+    const body = outcome.error
+      ? `error: ${outcome.error}`
+      : (outcome.output ?? "").trim();
+    tick(body ? `${head}\n${body}\n\n` : `${head}\n\n`);
+  };
   const modeLabel =
     failMode.kind === "continue"
       ? "continue"
@@ -1387,6 +1404,7 @@ async function runToolBatch(
         };
         finished += 1;
         tick(`[batch] #${index + 1} ${spec.name} cancelled`);
+        streamSection(outcomes[index]!);
         return;
       }
 
@@ -1401,6 +1419,7 @@ async function runToolBatch(
           exitCode: 130,
         };
         finished += 1;
+        streamSection(outcomes[index]!);
         return;
       }
 
@@ -1419,6 +1438,7 @@ async function runToolBatch(
         };
         finished += 1;
         tick(`[batch] #${index + 1} ${spec.name} cancelled`);
+        streamSection(outcomes[index]!);
         return;
       }
 
@@ -1434,8 +1454,9 @@ async function runToolBatch(
         try {
           result = await runToolCall(
             { name: spec.name, args: spec.args },
-            // Do not fan full child stdout into the card (keeps final sections
-            // clean). Progress ticks above drive the live UI + stall watchdog.
+            // Do not fan full child stdout into the parent spool (parallel
+            // interleaving). Settled section bodies are streamed below so the
+            // live UI can show expanded nested cards immediately.
             // Forward confirmed so approved mutates inside a batch still run.
             {
               signal: childSignal,
@@ -1480,6 +1501,7 @@ async function runToolBatch(
           };
           cancelledIds.add(spec.id);
           tick(`[batch] #${index + 1} ${spec.name} cancelled`);
+          streamSection(outcomes[index]!);
         } else if (result.ok) {
           outcomes[index] = {
             index,
@@ -1496,6 +1518,7 @@ async function runToolBatch(
                 ? ` exit=${result.exitCode}`
                 : ""),
           );
+          streamSection(outcomes[index]!);
         } else {
           outcomes[index] = {
             index,
@@ -1512,6 +1535,7 @@ async function runToolBatch(
                 ? ` exit=${result.exitCode}`
                 : ""),
           );
+          streamSection(outcomes[index]!);
           applyFailPolicy(spec.id);
         }
       } catch (error) {
@@ -1532,6 +1556,7 @@ async function runToolBatch(
           };
           cancelledIds.add(spec.id);
           tick(`[batch] #${index + 1} ${spec.name} cancelled`);
+          streamSection(outcomes[index]!);
         } else {
           outcomes[index] = {
             index,
@@ -1543,6 +1568,7 @@ async function runToolBatch(
             error: message,
           };
           tick(`[batch] #${index + 1} ${spec.name} error: ${message}`);
+          streamSection(outcomes[index]!);
           applyFailPolicy(spec.id);
         }
       } finally {

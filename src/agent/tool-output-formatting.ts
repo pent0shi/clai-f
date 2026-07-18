@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { fixOwner, handlePermissionError } from "../os/permissions.js";
 import { reduceToolOutput } from "../tools/policies/output-policy.js";
 import type { ToolCall, ToolResult } from "../types.js";
+import { getReliabilityPolicy } from "./reliability-policy.js";
 
 function safeArtifactName(name: string): string {
   return (
@@ -140,7 +141,13 @@ const PASSTHROUGH_TOOLS = new Set<string>([
   "fs.append",
   "pdf.read",
 ]);
-const PASSTHROUGH_CAP_CHARS = 400_000;
+/** Legacy hard ceiling; effective cap comes from reliability policy (E2). */
+export const PASSTHROUGH_CAP_CHARS_LEGACY = 400_000;
+
+/** Effective fs passthrough cap (E2 tiered policy, config/env overridable). */
+export function fsPassthroughCapChars(): number {
+  return getReliabilityPolicy().fsPassthroughCapChars;
+}
 // web.fetch/http.fetch pull in arbitrary third-party pages/API responses that
 // can be hundreds of KB (e.g. a large OpenAPI spec). Unlike local files the
 // model asked to read, this content is never bounded by the user's own
@@ -179,14 +186,17 @@ export function formatToolContext(call: ToolCall, result: ToolResult): string {
   }
 
   if (PASSTHROUGH_TOOLS.has(call.name)) {
-    const { text, truncated } = summarizeOutput(output, PASSTHROUGH_CAP_CHARS, {
+    // E2: tiered cap (default 64k). Full content remains on disk when truncated;
+    // model is instructed to continue with offset/limit or open the artifact.
+    const cap = fsPassthroughCapChars();
+    const { text, truncated } = summarizeOutput(output, cap, {
       preferErrors,
     });
     const body = truncated
       ? `${text}${
           result.outputPath
-            ? `\n\n[File content exceeds ${PASSTHROUGH_CAP_CHARS.toLocaleString()} chars; head/tail shown. Full: ${result.outputPath}]`
-            : `\n\n[File content exceeds ${PASSTHROUGH_CAP_CHARS.toLocaleString()} chars; only head and tail shown.]`
+            ? `\n\n[File content exceeds ${cap.toLocaleString()} chars; head/tail shown. Full artifact: ${result.outputPath}. Continue with fs.read offset/limit or pattern — do not re-issue path-only hoping for more.]`
+            : `\n\n[File content exceeds ${cap.toLocaleString()} chars; only head and tail shown. Re-read with offset/limit or pattern for the rest.]`
         }`
       : text;
     return [failLine, body].filter(Boolean).join("\n").trim();

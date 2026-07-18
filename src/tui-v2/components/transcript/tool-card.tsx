@@ -7,9 +7,11 @@
  * full cleaned body; click does not toggle expand (classic: keyboard expands,
  * click opens the unbounded viewer).
  *
- * tool.batch: parent card nests one mini-card per sub-tool. Click the parent
- * (header/footer) for the full batch; click a sub-card for that call only.
- * Ctrl+O expands sub-bodies in place the same as a normal tool.
+ * tool.batch: parent card nests one mini-card per sub-tool **while live and
+ * after completion**. As each child settles, its full section body streams in
+ * so nested cards look like normal expanded tool output (not a compact
+ * "x ok, y ok" status list). Click the parent for the full batch; click a
+ * sub-card for that call only. Ctrl+O expands sub-bodies in place.
  *
  * File diffs: compact single-height rows; chevron collapses hunks to a one-line
  * title (verb + relative path). Collapse-all applies to every file-diff card.
@@ -24,10 +26,9 @@ import type { ToolItem } from "../../state/transcript-types.js";
 import type { Theme } from "../../rendering/theme.js";
 import {
   batchSummaryLine,
+  buildBatchCardsFromSpool,
   formatBatchSectionForPager,
   isBatchToolName,
-  parseBatchLiveProgress,
-  parseBatchSections,
   presentBatchSection,
   type BatchSection,
 } from "../../rendering/batch-sections.js";
@@ -45,6 +46,8 @@ import { useClickWithoutDrag } from "./use-click-without-drag.js";
 import { DiffActionButton, FileDiffBody } from "./file-diff-card.js";
 import { renderMarkdownLines } from "../../rendering/render-markdown-lines.js";
 import { shouldDefaultFormattedView } from "../../rendering/pager-view-policy.js";
+import { extractFsReadFileBody } from "../../rendering/pager-markdown.js";
+import { SELECTABLE_LINE_STYLE } from "./selectable-line.js";
 
 /** Border / status accent: green ok · yellow running · red failed. */
 const STATUS_COLOR: Record<ToolItem["status"], keyof Theme> = {
@@ -68,8 +71,8 @@ function OutputLines(props: {
       {lines.map((line, i) => {
         const isGap = line.startsWith("···");
         return (
-          // Selectable so drag-select includes tool output in the copy range.
-          <text key={i} selectable style={{ height: 1 }}>
+          // Full-width row so drag-select does not require pixel-perfect aim.
+          <text key={i} selectable style={{ height: 1, width: "100%" }}>
             <span style={{ fg: isGap ? theme.muted : gutterFg }}>{"│ "}</span>
             <span
               style={{
@@ -95,7 +98,15 @@ function BatchSubCard(props: {
 }): ReactNode {
   const { section, theme, expanded, parentExpanded, onOpen } = props;
   const presented = presentBatchSection(section, expanded);
-  const borderFg = section.ok ? theme.success : theme.diffDel;
+  const status = section.status ?? (section.ok ? "ok" : "fail");
+  const borderFg =
+    status === "running"
+      ? theme.activity
+      : status === "ok"
+        ? theme.success
+        : status === "cancelled"
+          ? theme.muted
+          : theme.diffDel;
   const statusFg = borderFg;
 
   // Click (no drag) opens pager; drag-select copies output lines.
@@ -207,16 +218,15 @@ export function ToolCard(props: {
   const isMutation = isFileMutationTool(item.name);
 
   const isBatchName = isBatchToolName(item.name);
+  // Live + finished: merge streamed `── #N` sections with running placeholders
+  // so nested cards appear as soon as the first child starts (expanded form).
   const batchSections =
-    isBatchName && item.status !== "running" && tail
-      ? parseBatchSections(tail)
-      : [];
-  const isBatch = batchSections.length > 0;
-  const liveBatch =
-    isBatchName && item.status === "running" && tail
-      ? parseBatchLiveProgress(tail)
-      : { lines: [] as const, summary: "" };
+    isBatchName && tail ? buildBatchCardsFromSpool(tail) : [];
+  const isBatch = isBatchName && batchSections.length > 0;
   const isBatchLive = isBatchName && item.status === "running";
+  // Nested batch bodies prefer expanded presentation so live output matches
+  // single-tool cards (Ctrl+O still toggles global expand for huge dumps).
+  const batchExpanded = expanded || isBatchLive;
 
   const { width: termWidth } = useTerminalDimensions();
   const readPath = pathFromArgsDisplay(item.argsDisplay);
@@ -234,8 +244,11 @@ export function ToolCard(props: {
     });
   const mdPreview = useMemo(() => {
     if (!formatMdRead || !tail.trim()) return null;
+    // Spool is tool chrome + `N: ` line numbers — strip to real markdown first.
+    const clean = extractFsReadFileBody(tail);
+    if (!clean.trim()) return null;
     const budget = expanded ? 60 : 10;
-    return renderMarkdownLines(tail, {
+    return renderMarkdownLines(clean, {
       width: Math.max(24, termWidth - 12),
       defaultFg: theme.toolOutput,
       stripOuterIndent: true,
@@ -331,18 +344,18 @@ export function ToolCard(props: {
       footerHint = "click for full · Ctrl+O to expand";
     }
   } else if (isBatchLive) {
-    footerHint = "live sub-calls · finishes into nested cards";
+    footerHint =
+      "live nested sub-tools · outputs appear as each call finishes · Ctrl+O expands further";
   } else if (item.status === "running" && hasBody && !expanded) {
     footerHint = "click for full · Ctrl+O to expand";
   }
 
-  const summary = isBatch
-    ? batchSummaryLine(batchSections)
-    : isBatchLive
-      ? liveBatch.summary
-      : undefined;
+  const summary = isBatch ? batchSummaryLine(batchSections) : undefined;
   const summaryFg =
-    isBatch && batchSections.some((s) => !s.ok) ? theme.mode : theme.muted;
+    isBatch &&
+    batchSections.some((s) => s.status === "fail" || s.status === "cancelled")
+      ? theme.mode
+      : theme.muted;
 
   return (
     <box
@@ -467,36 +480,15 @@ export function ToolCard(props: {
         <text selectable style={{ fg: summaryFg, attributes: TextAttributes.DIM }}>{summary}</text>
       ) : null}
 
-      {/* Live batch progress (compact, no collapsed “N lines more” log). */}
-      {isBatchLive && liveBatch.lines.length > 0 ? (
-        <box style={{ flexDirection: "column", width: "100%", marginTop: 0 }}>
-          {liveBatch.lines.map((line, i) => {
-            const fg =
-              line.tone === "ok"
-                ? theme.success
-                : line.tone === "fail"
-                  ? theme.diffDel
-                  : line.tone === "running"
-                    ? theme.activity
-                    : theme.muted;
-            return (
-              <text key={`live-${i}`} selectable style={{ fg }}>
-                {`  ${line.tone === "ok" ? "✓" : line.tone === "fail" ? "✗" : line.tone === "running" ? "●" : "·"} ${line.text}`}
-              </text>
-            );
-          })}
-        </box>
-      ) : null}
-
-      {/* Nested sub-tools for tool.batch */}
+      {/* Nested sub-tools for tool.batch — live and finished (expanded form). */}
       {isBatch
         ? batchSections.map((section) => (
             <BatchSubCard
               key={`${item.id}-sub-${section.index}`}
               section={section}
               theme={theme}
-              expanded={expanded}
-              parentExpanded={expanded}
+              expanded={batchExpanded}
+              parentExpanded={batchExpanded}
               onOpen={openSection}
             />
           ))
@@ -566,6 +558,7 @@ export function ToolCard(props: {
                 content={content ?? " "}
                 selectable
                 wrapMode="none"
+                style={SELECTABLE_LINE_STYLE}
               />
             ))
           ) : (

@@ -147,10 +147,18 @@ export function maskSecret(secret: string): string {
   return secret.slice(0, 4) + "••••" + secret.slice(-4);
 }
 
+/** Short tail for toast/status lines (`…ab12`). Never exposes the full secret. */
+export function maskSecretTail(secret: string): string {
+  const n = secret.length;
+  if (n < 4) return "••••";
+  return `…${secret.slice(-4)}`;
+}
+
 export function redactSecrets(value: string): string {
   return value
     .replace(/gsk_[A-Za-z0-9_-]+/g, "gsk_••••••")
     .replace(/AIza[0-9A-Za-z_-]+/g, "AIza••••••")
+    .replace(/AQ\.[A-Za-z0-9_-]+/g, "AQ.••••••")
     .replace(/sk-[A-Za-z0-9._-]+/g, "sk-••••••")
     .replace(/sk-or-[A-Za-z0-9_-]+/g, "sk-or-••••••")
     .replace(/sk-ant-[A-Za-z0-9_-]+/g, "sk-ant-••••••")

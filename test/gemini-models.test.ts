@@ -1,6 +1,20 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { geminiProvider } from "../src/llm/gemini.js";
 
+describe("Gemini key validation", () => {
+  it("accepts classic AIza and newer AQ. API keys", () => {
+    // Synthetic fixtures only — must match validateKey shape, not real secrets.
+    expect(
+      geminiProvider.validateKey("AIzaSyTEST_fixture_key_not_real_0001"),
+    ).toBe(true);
+    expect(
+      geminiProvider.validateKey("AQ.test_fixture_key_not_a_real_secret"),
+    ).toBe(true);
+    expect(geminiProvider.validateKey("sk-not-gemini")).toBe(false);
+    expect(geminiProvider.validateKey("AQ.short")).toBe(false);
+  });
+});
+
 describe("Gemini model discovery", () => {
   afterEach(() => {
     vi.unstubAllGlobals();

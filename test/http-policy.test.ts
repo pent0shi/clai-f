@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { httpFetch } from "../src/tools/http.js";
+import { httpFetch, isTlsCertNameError } from "../src/tools/http.js";
 import { runToolCall } from "../src/tools/registry.js";
 
 afterEach(() => vi.unstubAllGlobals());
@@ -112,6 +112,59 @@ describe("http.fetch network policy", () => {
     expect(result.ok).toBe(false);
     expect(result.output).toMatch(/iOwnThis/i);
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("explains TLS cert altname failures for https://IP with remediation", async () => {
+    const err = Object.assign(new Error("fetch failed"), {
+      cause: { code: "ERR_TLS_CERT_ALTNAME_INVALID", message: "ERR_TLS_CERT_ALTNAME_INVALID" },
+    });
+    // Surface code in message the way undici often does.
+    const tlsErr = new Error(
+      'Network error: ERR_TLS_CERT_ALTNAME_INVALID fetching "https://64.29.17.1/"',
+    );
+    expect(isTlsCertNameError(tlsErr)).toBe(true);
+    expect(isTlsCertNameError(err)).toBe(true);
+
+    const fetchMock = vi.fn().mockRejectedValue(tlsErr);
+    vi.stubGlobal("fetch", fetchMock);
+    const result = await httpFetch("https://64.29.17.1/", { retries: 0 });
+    expect(result.ok).toBe(false);
+    expect(result.output).toMatch(/ERR_TLS_CERT_ALTNAME_INVALID/);
+    expect(result.output).toMatch(/insecureTls=true/i);
+    expect(result.output).toMatch(/hostname that matches the cert/i);
+  });
+
+  it("passes insecureTls via undici dispatcher and records verification off", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response("<html>lab</html>", {
+        status: 200,
+        statusText: "OK",
+        headers: { "content-type": "text/html" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const result = await httpFetch("https://64.29.17.1/", {
+      retries: 0,
+      insecureTls: true,
+    });
+    expect(result.ok).toBe(true);
+    expect(result.output).toMatch(/verification DISABLED|insecureTls/i);
+    expect(fetchMock).toHaveBeenCalled();
+    const init = fetchMock.mock.calls[0]?.[1] as { dispatcher?: unknown };
+    expect(init?.dispatcher).toBeDefined();
+  });
+
+  it("registry accepts tlsInsecure alias for insecureTls", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response("ok", { status: 200, statusText: "OK" }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const result = await runToolCall({
+      name: "http.fetch",
+      args: { url: "https://203.0.113.10/", tlsInsecure: true },
+    });
+    expect(result.ok).toBe(true);
+    expect(result.output).toMatch(/insecureTls|verification DISABLED/i);
   });
 
   it("registry auto-owns loopback GET so local app probes work without iOwnThis", async () => {

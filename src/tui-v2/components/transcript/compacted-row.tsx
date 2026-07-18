@@ -138,14 +138,18 @@ export function CompactedRow(props: {
           </text>
           {preview.map((content, i) => (
             <box key={`l-${i}`} style={{ flexDirection: "row", width: "100%" }}>
-              <text selectable style={{ fg: theme.muted }}>
+              <text selectable style={{ fg: theme.muted, flexShrink: 0 }}>
                 {"│ "}
               </text>
-              <text content={content ?? " "} selectable />
+              <text
+                content={content ?? " "}
+                selectable
+                style={{ width: "100%", flexGrow: 1 }}
+              />
             </box>
           ))}
           {hidden > 0 ? (
-            <text selectable>
+            <text selectable style={{ width: "100%" }}>
               <span style={{ fg: theme.muted }}>{"│ "}</span>
               <span style={{ fg: theme.muted, attributes: TextAttributes.DIM }}>
                 {`··· ${hidden} more lines ···`}

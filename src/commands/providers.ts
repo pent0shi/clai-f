@@ -1,4 +1,4 @@
-import { confirm, password, select } from "@inquirer/prompts";
+import { password, select } from "@inquirer/prompts";
 import chalk from "chalk";
 import { getProvider, pingProvider } from "../llm/router.js";
 import { assertProvider, maskSecret } from "../llm/provider.js";
@@ -9,11 +9,12 @@ import {
   updateConfig,
 } from "../store/config.js";
 import {
+  appendProviderKey,
   envValue,
   getFallbackKeysPath,
+  getProviderKeys,
   getProviderSecret,
   listProviderStatuses,
-  setProviderSecret,
   unsetProviderSecret,
 } from "../store/keys.js";
 import type { ProviderId } from "../types.js";
@@ -43,7 +44,8 @@ async function promptForSecret(provider: ProviderId): Promise<string> {
 
 function invalidFormatHint(provider: ProviderId): string {
   if (provider === "groq") return "Groq keys usually start with gsk_";
-  if (provider === "gemini") return "Gemini keys usually start with AIza";
+  if (provider === "gemini")
+    return "Gemini keys usually start with AIza or AQ.";
   if (provider === "openrouter")
     return "OpenRouter keys usually start with sk-or-";
   if (provider === "openai") return "OpenAI keys usually start with sk- or sk-proj-";
@@ -118,7 +120,7 @@ export async function setProviderKey(
     updateConfig({ ollamaHost: secret });
     setDefaultProvider(provider);
   } else {
-    const storage = await setProviderSecret(provider, secret);
+    const storage = await appendProviderKey(provider, secret);
     if (storage === "fallback") {
       process.exitCode = 3;
       console.warn(
@@ -143,9 +145,17 @@ export async function setProviderKey(
     }
   }
 
-  console.log(
-    `saved ${provider} ${provider === "ollama" ? secret : maskSecret(secret)}`,
-  );
+  if (provider === "ollama") {
+    console.log(`saved ollama ${secret}`);
+  } else {
+    const multi = await getProviderKeys(provider);
+    const count = multi.source === "env" ? 1 : multi.keys.length;
+    console.log(
+      count > 1
+        ? `added ${provider} ${maskSecret(secret)} · ${count} keys total`
+        : `saved ${provider} ${maskSecret(secret)}`,
+    );
+  }
 }
 
 export async function unsetProviderKey(providerValue: string): Promise<void> {
@@ -159,31 +169,52 @@ export async function unsetProviderKey(providerValue: string): Promise<void> {
     return;
   }
   const provider = assertProvider(providerValue);
+  const multi = await getProviderKeys(provider);
+  const count = multi.source === "env" ? 0 : multi.keys.length;
   await unsetProviderSecret(provider);
-  console.log(`unset ${provider}`);
+  console.log(
+    count > 1 ? `unset all ${count} keys for ${provider}` : `unset ${provider}`,
+  );
 }
 
 export async function printProviderKeys(): Promise<void> {
   const config = getConfig();
   const statuses = await listProviderStatuses(config.defaultProvider);
-  
+
   console.log(chalk.bold("LLM Providers:"));
-  console.log(chalk.dim("  PROVIDER      SOURCE    KEY           MODEL"));
-  
+  console.log(chalk.dim("  PROVIDER      SOURCE    KEYS          MODEL"));
+
   for (const s of statuses) {
     const mark = s.configured ? chalk.green("✓") : chalk.red("✗");
     const tag = s.active ? chalk.cyan(" ◀") : "";
-    const key = s.maskedKey || (s.configured ? "••••••••" : "—");
+    const count = s.keyCount ?? (s.maskedKey ? 1 : 0);
+    const keySummary =
+      s.provider === "ollama"
+        ? s.note || "local"
+        : count === 0
+          ? "—"
+          : count === 1
+            ? s.maskedKey || "••••••••"
+            : `${count} keys`;
     const source = (s.source === "missing" ? "no key" : s.source).padEnd(9);
     console.log(
-      `  ${mark} ${s.provider.padEnd(13)} ${source} ${key.padEnd(13)} ${s.model}${tag}`
+      `  ${mark} ${s.provider.padEnd(13)} ${source} ${String(keySummary).padEnd(13)} ${s.model}${tag}`,
     );
+    if (s.maskedKeys && s.maskedKeys.length > 1) {
+      let activeIdx = 0;
+      if (s.activeMaskedKey) {
+        const found = s.maskedKeys.indexOf(s.activeMaskedKey);
+        if (found >= 0) activeIdx = found;
+      }
+      s.maskedKeys.forEach((masked, i) => {
+        const star = i === activeIdx ? chalk.cyan(" ★ active") : "";
+        console.log(`      [${i + 1}] ${masked}${star}`);
+      });
+    }
   }
 
   console.log("");
-  const { printSearchProviderKeys } = await import(
-    "./search-providers.js"
-  );
+  const { printSearchProviderKeys } = await import("./search-providers.js");
   await printSearchProviderKeys();
 }
 
@@ -249,28 +280,34 @@ export async function setKeyPicker(
   const statuses = await listProviderStatuses(config.defaultProvider);
   const pageSize = 15;
   const selected = await select({
-    message: "Set API key for provider:",
+    message: "Set / add API key for provider:",
     pageSize,
-    choices: statuses.map((status) => ({
-      name: `${status.provider.padEnd(12)} ${status.configured ? chalk.green("✓ key set") : chalk.red("✗ no key")}${status.active ? chalk.cyan(" (active)") : ""}`,
-      value: status.provider,
-    })),
+    choices: statuses.map((status) => {
+      const count = status.keyCount ?? (status.configured ? 1 : 0);
+      const label =
+        count > 1
+          ? chalk.green(`✓ ${count} keys`)
+          : status.configured
+            ? chalk.green("✓ key set")
+            : chalk.red("✗ no key");
+      return {
+        name: `${status.provider.padEnd(12)} ${label}${status.active ? chalk.cyan(" (active)") : ""}`,
+        value: status.provider,
+      };
+    }),
     loop: false,
   });
 
-  const secret = await getProviderSecret(selected);
-  if (secret.value) {
-    // Key already set — ask whether to reset
-    const reset = await confirm({
-      message: `${selected} already has a key (${maskSecret(secret.value)}). Reset it?`,
-      default: false,
-    });
-    if (!reset) {
-      console.log(chalk.dim("cancelled"));
-      return;
-    }
+  const multi = await getProviderKeys(selected);
+  const storedCount = multi.source === "env" ? 0 : multi.keys.length;
+  if (storedCount > 0) {
+    console.log(
+      chalk.dim(
+        `${selected} has ${storedCount} key(s). New key will be added (multi-key).`,
+      ),
+    );
   }
-  // Prompt for the new key
+  // Prompt for another key (append)
   await setProviderKey(selected, undefined, {});
 }
 

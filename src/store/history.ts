@@ -22,6 +22,7 @@ import { getConfig } from "./config.js";
 import { safeCwd } from "../os/cwd.js";
 import { fixOwner, fixOwnerSync, handlePermissionError, safeExists } from "../os/permissions.js";
 import { getHistoryDir } from "./paths.js";
+import { getActiveSessionWorkspace } from "./session-workspace.js";
 
 /** Live paths so CLAI_DATA_DIR / CLAI_HISTORY_DIR always apply (and tests work). */
 function historyDirPath(): string {
@@ -80,6 +81,37 @@ export interface HistoryRecord {
    * falls back to a cheap estimate that under-counts vs live turns.
    */
   contextUsage?: PersistedContextUsage | undefined;
+  /**
+   * Session workspace folder name under `{tmpdir}/clai/`
+   * (e.g. `a3f9c1-18-07-2026-14-24-23`). Bound on resume so scratch +
+   * tool outputs stay isolated per history session.
+   */
+  workspaceFolder?: string | undefined;
+  /** 6-digit hex code that prefixes {@link workspaceFolder}. */
+  workspaceCode?: string | undefined;
+}
+
+/** Snapshot the active session workspace for history persistence. */
+function workspaceFieldsFromActive(existing?: HistoryRecord): {
+  workspaceFolder?: string | undefined;
+  workspaceCode?: string | undefined;
+} {
+  // Prefer the already-persisted folder so rebinding mid-session never
+  // renames a live workspace out from under open artifact paths.
+  if (existing?.workspaceFolder) {
+    return {
+      workspaceFolder: existing.workspaceFolder,
+      workspaceCode: existing.workspaceCode,
+    };
+  }
+  const active = getActiveSessionWorkspace();
+  if (active) {
+    return {
+      workspaceFolder: active.folderName,
+      workspaceCode: active.code,
+    };
+  }
+  return {};
 }
 
 export interface ToolCallRecord {
@@ -553,6 +585,7 @@ export async function saveSession(
   }
 
   const now = new Date().toISOString();
+  const workspace = workspaceFieldsFromActive();
   const record: HistoryRecord = {
     id: newId(),
     name,
@@ -562,6 +595,7 @@ export async function saveSession(
     messages: scrubMessages(messages),
     transcript: scrubTranscript(transcript),
     ...(contextUsage ? { contextUsage } : {}),
+    ...workspace,
   };
 
   // Private mode: never persist chat content. Caller still gets a record
@@ -584,6 +618,12 @@ export async function saveSession(
         messages: record.messages,
         transcript: record.transcript,
         ...(contextUsage ? { contextUsage } : {}),
+        ...(record.workspaceFolder
+          ? {
+              workspaceFolder: record.workspaceFolder,
+              workspaceCode: record.workspaceCode,
+            }
+          : {}),
       }),
     );
     await enforceSqliteRetention(db);
@@ -609,6 +649,7 @@ export async function upsertSession(
     ? firstUser.content.slice(0, 60).replace(/\n/g, " ").trim() + (firstUser.content.length > 60 ? "…" : "")
     : undefined;
   const now = new Date().toISOString();
+  const workspace = workspaceFieldsFromActive(existing);
   const record: HistoryRecord = {
     id,
     name: name ?? existing?.name ?? derivedName,
@@ -622,6 +663,7 @@ export async function upsertSession(
       : existing?.contextUsage
         ? { contextUsage: existing.contextUsage }
         : {}),
+    ...workspace,
   };
 
   if (getConfig().privateMode) return record;
@@ -640,6 +682,12 @@ export async function upsertSession(
         messages: record.messages,
         transcript: record.transcript,
         ...(record.contextUsage ? { contextUsage: record.contextUsage } : {}),
+        ...(record.workspaceFolder
+          ? {
+              workspaceFolder: record.workspaceFolder,
+              workspaceCode: record.workspaceCode,
+            }
+          : {}),
       }),
     );
     await enforceSqliteRetention(db);
@@ -729,6 +777,8 @@ function rowToSession(row: unknown): HistoryRecord {
         messages?: ChatMessage[];
         transcript?: TranscriptItem[];
         contextUsage?: PersistedContextUsage;
+        workspaceFolder?: string;
+        workspaceCode?: string;
       };
   const messages = Array.isArray(parsed) ? parsed : parsed.messages ?? [];
   return {
@@ -740,6 +790,8 @@ function rowToSession(row: unknown): HistoryRecord {
     messages,
     transcript: Array.isArray(parsed) ? undefined : parsed.transcript,
     contextUsage: Array.isArray(parsed) ? undefined : parsed.contextUsage,
+    workspaceFolder: Array.isArray(parsed) ? undefined : parsed.workspaceFolder,
+    workspaceCode: Array.isArray(parsed) ? undefined : parsed.workspaceCode,
   };
 }
 

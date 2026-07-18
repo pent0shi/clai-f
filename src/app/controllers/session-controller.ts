@@ -4,6 +4,7 @@ import {
   estimateMessagesTokens,
   type CompactResult,
 } from "../../agent/context-manager.js";
+import { repairToolProtocol } from "../../agent/tool-history.js";
 import {
   applyUsageToSnapshot,
   formatContextChip,
@@ -16,6 +17,11 @@ import { resolveTurnInput } from "../../attachments/service.js";
 import { generateSessionTitle } from "../../agent/session-title.js";
 import { clearTextOnlyModels } from "../../llm/tool-protocol.js";
 import { getConfig, getProviderModel } from "../../store/config.js";
+import {
+  beginSessionWorkspace,
+  getActiveSessionWorkspace,
+  type SessionWorkspace,
+} from "../../store/session-workspace.js";
 import { summarizeForSessionCompact } from "./session-compact-helper.js";
 import type { TranscriptItem as ClassicTranscriptItem } from "../../tui/state.js";
 import {
@@ -135,6 +141,8 @@ export class SessionController implements Disposable {
     this.model = deps.model;
     this.mode = deps.mode ?? "agent";
     this.policy = createSessionPolicy(this.sessionIdValue);
+    // Isolate scratch + tool outputs for this session immediately.
+    beginSessionWorkspace();
     this.sequencer = new EventSequencer(
       this.sessionIdValue,
       deps.idFactory,
@@ -149,6 +157,11 @@ export class SessionController implements Disposable {
         mintTurnId: deps.mintTurnId,
       }),
     );
+  }
+
+  /** Current per-session scratch/output workspace (always bound while live). */
+  get workspace(): SessionWorkspace | undefined {
+    return getActiveSessionWorkspace();
   }
 
   get sessionId(): SessionId {
@@ -284,10 +297,17 @@ export class SessionController implements Disposable {
             exact: boolean;
           }
         | undefined;
+      /** Per-session scratch/output folder (restored with history). */
+      workspaceFolder?: string | undefined;
+      workspaceCode?: string | undefined;
     } = {},
   ): void {
     if (this.turn.running) this.turn.abort();
-    this.history = [...messages];
+    // Deep-copy then heal broken assistant/tool pairs from aborted turns so
+    // /history resume + "continue" never dies on invalid native tool protocol.
+    const healed: ChatMessage[] = messages.map((m) => ({ ...m }));
+    repairToolProtocol(healed);
+    this.history = healed;
     this.queue.length = 0;
     this.priorityPrompt = undefined;
     this.spool.clear();
@@ -323,6 +343,12 @@ export class SessionController implements Disposable {
       this.sequencer.rebind(this.sessionIdValue);
       this.policy = createSessionPolicy(this.sessionIdValue);
     }
+    // Rebind (or mint) the per-session workspace so scratch + outputs
+    // continue under the same folder when resuming history.
+    beginSessionWorkspace({
+      folderName: options.workspaceFolder,
+      code: options.workspaceCode,
+    });
     this.notifyState();
   }
 
@@ -360,6 +386,8 @@ export class SessionController implements Disposable {
     if (options.mintNewId) {
       this.sessionIdValue = asSessionId(mintSessionId());
       this.sequencer.rebind(this.sessionIdValue);
+      // Fresh session identity → fresh isolated workspace.
+      beginSessionWorkspace();
     }
     this.policy = createSessionPolicy(this.sessionIdValue);
     this.notifyState();

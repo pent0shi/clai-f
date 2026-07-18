@@ -1,8 +1,86 @@
 import net from "node:net";
 import { lookup } from "node:dns/promises";
+import { Agent } from "undici";
 import type { ToolResult } from "../types.js";
 import { isBlockedAddress } from "./web/ssrf-guard.js";
 import { toReadableText } from "./web/readable.js";
+
+/** Shared undici agent that skips cert verification (authorized pentest only). */
+let insecureTlsAgent: Agent | undefined;
+function getInsecureTlsAgent(): Agent {
+  if (!insecureTlsAgent) {
+    insecureTlsAgent = new Agent({
+      connect: {
+        rejectUnauthorized: false,
+      },
+    });
+  }
+  return insecureTlsAgent;
+}
+
+/** Flatten error + nested cause(s) for TLS code matching. */
+function errorText(error: unknown, depth = 0): string {
+  if (depth > 4 || error == null) return "";
+  if (typeof error === "string") return error;
+  if (error instanceof Error) {
+    const cause = error.cause !== undefined ? errorText(error.cause, depth + 1) : "";
+    const code =
+      "code" in error && typeof (error as { code?: unknown }).code === "string"
+        ? String((error as { code: string }).code)
+        : "";
+    return `${error.message} ${code} ${cause}`;
+  }
+  if (typeof error === "object") {
+    const rec = error as Record<string, unknown>;
+    const code = typeof rec.code === "string" ? rec.code : "";
+    const message = typeof rec.message === "string" ? rec.message : "";
+    const cause = rec.cause !== undefined ? errorText(rec.cause, depth + 1) : "";
+    try {
+      return `${message} ${code} ${cause} ${JSON.stringify(error)}`;
+    } catch {
+      return `${message} ${code} ${cause}`;
+    }
+  }
+  return String(error);
+}
+
+/** True when the error is a TLS hostname/cert mismatch (common for https://IP). */
+export function isTlsCertNameError(error: unknown): boolean {
+  const text = errorText(error);
+  return (
+    /ERR_TLS_CERT_ALTNAME_INVALID/i.test(text) ||
+    /Hostname\/IP does not match certificate/i.test(text) ||
+    /certificate.*altname/i.test(text) ||
+    /UNABLE_TO_VERIFY_LEAF_SIGNATURE/i.test(text) ||
+    /DEPTH_ZERO_SELF_SIGNED_CERT/i.test(text) ||
+    /SELF_SIGNED_CERT/i.test(text) ||
+    /unable to verify the first certificate/i.test(text)
+  );
+}
+
+function formatTlsNetworkError(error: unknown, url: string): string {
+  const base = error instanceof Error ? error.message : String(error);
+  if (!isTlsCertNameError(error)) return base;
+  let host = url;
+  try {
+    host = new URL(url).hostname;
+  } catch {
+    /* keep raw */
+  }
+  const byIp = net.isIP(host.replace(/^\[|\]$/g, "")) !== 0;
+  return (
+    `${base}\n\n` +
+    `TLS certificate did not validate for this URL` +
+    (byIp
+      ? ` (you connected by IP ${host}; the cert is almost always issued for a hostname, not the IP).`
+      : `.`) +
+    `\nAuthorized testing options:\n` +
+    `  1. Retry with the hostname that matches the cert (from SAN/CN), or\n` +
+    `  2. http.fetch with insecureTls=true (or tlsInsecure=true) to skip verification and still capture evidence, or\n` +
+    `  3. shell: curl -k -i ${url}\n` +
+    `Evidence taken with insecureTls is still valid for recon; record that TLS verification was disabled.`
+  );
+}
 
 /** Capture budget for body bytes (artifact + evidence build). Model context is capped later. */
 const DEFAULT_MAX_BYTES = 128 * 1024;
@@ -160,6 +238,12 @@ interface FetchOptions {
   retries?: number | undefined;
   /** Request timeout in ms (clamped 3s–60s). Default 15s. */
   timeoutMs?: number | undefined;
+  /**
+   * Skip TLS certificate verification (hostname mismatch / self-signed).
+   * For authorized pentest against https://IP or lab certs only. Evidence
+   * will note that verification was disabled.
+   */
+  insecureTls?: boolean | undefined;
   signal?: AbortSignal | undefined;
   authorizeHop?: ((url: string, resolvedAddresses: string[]) => Promise<{ allowed: boolean; reason: string }> | { allowed: boolean; reason: string }) | undefined;
 }
@@ -238,13 +322,18 @@ export async function httpFetch(
     headers.set("accept-language", "en-US,en;q=0.8");
   }
 
-  const init: RequestInit = {
+  const insecureTls = Boolean(options.insecureTls);
+  const init: RequestInit & { dispatcher?: Agent } = {
     method,
     headers,
     redirect: "manual",
   };
   if (options.body !== undefined && method !== "GET" && method !== "HEAD") {
     init.body = options.body;
+  }
+  // Node undici: skip cert checks for authorized IP/lab HTTPS probes.
+  if (insecureTls && target.protocol === "https:") {
+    init.dispatcher = getInsecureTlsAgent();
   }
 
   // Local dev: try localhost / 127.0.0.1 / ::1 until one accepts (Vite dual-stack).
@@ -366,9 +455,10 @@ export async function httpFetch(
       urlCandidates.length > 1
         ? ` (tried ${urlCandidates.join(" → ")})`
         : "";
+    const detail = formatTlsNetworkError(error, usedUrl || url);
     return {
       ok: false,
-      output: `Network error after ${attempts} attempt${attempts === 1 ? "" : "s"}${tried}: ${error instanceof Error ? error.message : String(error)}`,
+      output: `Network error after ${attempts} attempt${attempts === 1 ? "" : "s"}${tried}: ${detail}`,
       exitCode: 1,
     };
   }
@@ -438,6 +528,7 @@ export async function httpFetch(
     isBinary,
     redirectHops,
     lastNetworkError,
+    insecureTls,
   });
 
   return {
@@ -477,11 +568,17 @@ function formatHttpEvidence(input: {
   isBinary: boolean;
   redirectHops: RedirectHop[];
   lastNetworkError: unknown;
+  insecureTls?: boolean | undefined;
 }): string {
   const lines: string[] = [];
   lines.push(
     `${input.status} ${input.statusText} ${input.method} ${input.finalUrl}`,
   );
+  if (input.insecureTls) {
+    lines.push(
+      "TLS: verification DISABLED (insecureTls=true) — hostname/cert not validated; authorized-test only.",
+    );
+  }
 
   if (input.redirectHops.length > 0) {
     const chain = [
@@ -511,7 +608,7 @@ function formatHttpEvidence(input: {
   }
   lines.push(metaBits.join(" "));
 
-  if (input.finalUrl.startsWith("https:")) {
+  if (input.finalUrl.startsWith("https:") && !input.insecureTls) {
     lines.push(
       "TLS: leaf cert not captured by http.fetch — use web.fetch with includeTls=true for fingerprint/SAN.",
     );

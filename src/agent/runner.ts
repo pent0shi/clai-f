@@ -30,6 +30,10 @@ import {
   toolNudge,
 } from "../prompts/index.js";
 import { getConfig } from "../store/config.js";
+import {
+  beginSessionWorkspace,
+  getActiveSessionWorkspace,
+} from "../store/session-workspace.js";
 import { groqInputTokenBudget } from "../llm/groq.js";
 import {
   classifyToolCall,
@@ -53,18 +57,29 @@ import {
   appendToolResult,
   assertValidToolProtocol,
   fillMissingToolResults,
+  repairToolProtocol,
 } from "./tool-history.js";
 import { formatViewportHint, registerViewport } from "../ui/output-pane.js";
 import {
   compactMessagesWithSummary,
   estimateTokens,
   estimateMessagesTokens,
-  AUTO_COMPACT_TOKEN_BUDGET,
   shouldApplyAutoCompact,
   COMPACTION_MEMORY_PREFIX,
   PLAN_IMPLEMENT_MEMORY_PREFIX,
   isCompactionMemoryMessage,
 } from "./context-manager.js";
+import {
+  buildContextBreakdown,
+  contextBreakdownAuditPayload,
+} from "./context-breakdown.js";
+import {
+  autoCompactTriggerTokens,
+  dedupeToolContextOutput,
+  freeTierGuardNotices,
+  getReliabilityPolicy,
+  resolveStepMaxTokens,
+} from "./reliability-policy.js";
 import { auditLog } from "../store/logs.js";
 import { loadProjectContext } from "../store/project.js";
 import { loadScope, isScopeActive } from "../store/scope.js";
@@ -375,9 +390,17 @@ export async function runAgentTurn(
     ) {
       return;
     }
-    if (cleaned.length > 64) {
-      const short = cleaned.match(/^[\w./-]+/);
-      cleaned = short ? short[0]! : cleaned.slice(0, 61) + "…";
+    // API key rotation / retry lines need more room than tool-name chips.
+    const keyLine =
+      /^(using |switching |⏳ |all .+ API keys)/i.test(cleaned);
+    const maxLen = keyLine ? 96 : 64;
+    if (cleaned.length > maxLen) {
+      if (keyLine) {
+        cleaned = cleaned.slice(0, maxLen - 1) + "…";
+      } else {
+        const short = cleaned.match(/^[\w./-]+/);
+        cleaned = short ? short[0]! : cleaned.slice(0, maxLen - 3) + "…";
+      }
     }
     emit({ type: "status", text: cleaned || "working" });
     if (writesDirectly) process.stdout.write(rendered);
@@ -608,6 +631,11 @@ export async function runAgentTurn(
     };
     let lastAnswer = "";
     const session: SessionPolicy = options.session ?? createSessionPolicy();
+    // One-shot CLI / tests that never entered TUI/REPL still need an isolated
+    // scratch+output workspace. No-op when a session already bound one.
+    if (!getActiveSessionWorkspace()) {
+      beginSessionWorkspace();
+    }
 
     // Active plan context
     // If this session already has a plan, inject it so the model keeps it in
@@ -658,11 +686,16 @@ export async function runAgentTurn(
       setActiveProjectRootIfValid(discoveredProjects[0]);
     }
     const buildSystemContent = (native: boolean): string => {
+      const reliability = getReliabilityPolicy();
       const sections = [
         (useCompactSystemPrompt
           ? renderCompactAgentSystemPrompt
           : renderAgentSystemPrompt)(toolNames.join(", "), {
             nativeTools: native,
+            // E6: slim native constitution when API tool schemas are attached.
+            ...(native
+              ? { slimNative: reliability.slimNativePrompt }
+              : {}),
           }),
       ];
       if (projectContext) {
@@ -2678,6 +2711,14 @@ export async function runAgentTurn(
     // Align with /compact default: small recency + dense memory (not keepRecent=6 fat tails).
     const AUTO_COMPACT_KEEP_RECENT = 2;
     let lastCompactionMsgCount = 0;
+    /** E5: identical tool bodies within this turn → pointer instead of re-append. */
+    const toolResultHashes = new Map<
+      string,
+      { toolName: string; count: number }
+    >();
+    /** E4: consecutive free-tier stream failures this turn. */
+    let freeTierConsecutiveFailures = 0;
+    let freeTierLargeContextWarned = false;
 
     const summarizeForCompaction = async (
       summaryPrompt: string,
@@ -2702,7 +2743,9 @@ export async function runAgentTurn(
       force = false,
     ): Promise<void> {
       const beforeTokens = estimateMessagesTokens(messages);
-      if (!force && beforeTokens < AUTO_COMPACT_TOKEN_BUDGET) return;
+      // E1: soft early compact (default 70k) while hard ceiling remains 100k.
+      const compactTrigger = autoCompactTriggerTokens();
+      if (!force && beforeTokens < compactTrigger) return;
       if (messages.length <= AUTO_COMPACT_KEEP_RECENT + 2) return;
       // Avoid compaction loops: don't re-compact until enough new messages have
       // accumulated since the last compaction.
@@ -2878,24 +2921,69 @@ export async function runAgentTurn(
           ({ dialect: toolDialect, native: nativeToolsActive } =
             resolveNativeTools(provider, model));
           if (messages[0]?.role === "system") {
-            messages[0] = {
-              role: "system",
-              content: composeCurrentSystemPrompt(nativeToolsActive),
-            };
+            // Recompose only when content actually changes (hour-stable env clock
+            // keeps the constitution prefix identical across steps, which helps
+            // provider prompt caching and avoids needless object churn).
+            const nextSystem = composeCurrentSystemPrompt(nativeToolsActive);
+            if (messages[0].content !== nextSystem) {
+              messages[0] = {
+                role: "system",
+                content: nextSystem,
+              };
+            }
           }
           const turnTools = selectToolDefs(
             nativeToolsActive,
             useCompactSystemPrompt,
           );
           toolsAttached = Boolean(turnTools?.length);
+          const contextBreakdown = buildContextBreakdown(
+            messages,
+            toolsAttached ? turnTools : undefined,
+          );
+          // E4: advisory only — never blocks free-tier users.
+          if (!freeTierLargeContextWarned) {
+            const notices = freeTierGuardNotices({
+              provider,
+              estimatedInputTokens: contextBreakdown.estimatedTotalTokens,
+              consecutiveFailures: freeTierConsecutiveFailures,
+            });
+            for (const notice of notices) {
+              if (notice.includes("Large context")) {
+                freeTierLargeContextWarned = true;
+              }
+              writeNotice("info", notice, chalk.dim(`  ℹ ${notice}\n`));
+            }
+          }
           await auditLog("agent.turn", {
             provider,
             model,
             tool_protocol: toolsAttached ? "native" : "text",
             dialect: toolDialect,
             step,
+            // Metadata-only composition metrics (no prompt/tool text).
+            ...contextBreakdownAuditPayload(contextBreakdown),
+            compactTriggerTokens: autoCompactTriggerTokens(),
+            maxTokensBudget: resolveStepMaxTokens({
+              nativeToolsActive,
+              toolsAttached,
+              recoveryNudge: retryWithoutThinking,
+            }),
           });
+          // Resume / mid-turn abort can leave orphan tool rows or a user
+          // "continue" before tool results. Heal first so multi-key retry and
+          // history reloads don't hard-fail on protocol asserts.
+          // Heal once per step if needed; silent (no toast) — placeholders are
+          // ok=true so the model doesn't thrash on fake exit=130 failures.
+          repairToolProtocol(messages);
           assertValidToolProtocol(messages);
+          // E3: adaptive completion budget (still large enough for writes).
+          const stepMaxTokens = resolveStepMaxTokens({
+            nativeToolsActive,
+            toolsAttached,
+            recoveryNudge: retryWithoutThinking,
+          });
+          try {
           completion = await streamWithProvider(
             {
               provider,
@@ -2906,7 +2994,7 @@ export async function runAgentTurn(
 
               temperature: /minimax-m3/i.test(model) ? 1.0 : 0.2,
 
-              maxTokens: 32_768,
+              maxTokens: stepMaxTokens,
               signal: options.signal,
               thinking: retryWithoutThinking
                 ? { ...config.thinking, enabled: false, effort: "low" }
@@ -3053,8 +3141,31 @@ export async function runAgentTurn(
             (status) => {
               spinner.stop();
               writeStatus(status, chalk.dim(status));
+              // Toast only on key *switch* after a failure — never on sticky
+              // "using" or retry countdown ticks (those stay in composer status).
+              if (/^switching /i.test(status.trim())) {
+                writeNotice(
+                  "warn",
+                  status.trim(),
+                  chalk.yellow(`  ${status.trim()}\n`),
+                );
+              }
             },
           );
+          freeTierConsecutiveFailures = 0;
+          } catch (streamError) {
+            // E4: track free-tier failures for advisory notices (never blocks).
+            freeTierConsecutiveFailures += 1;
+            for (const notice of freeTierGuardNotices({
+              provider,
+              estimatedInputTokens: contextBreakdown.estimatedTotalTokens,
+              consecutiveFailures: freeTierConsecutiveFailures,
+            })) {
+              if (notice.includes("Large context")) continue; // already shown above
+              writeNotice("warn", notice, chalk.yellow(`  ⚠ ${notice}\n`));
+            }
+            throw streamError;
+          }
         } finally {
           // Always clear the spinner — abort, network error, or success.
           spinner.stop();
@@ -4109,9 +4220,17 @@ export async function runAgentTurn(
             planCreatedThisTurn = true;
           }
           productiveSteps += 1;
+          // E5: collapse identical large tool bodies within this turn to a pointer.
+          const deduped = dedupeToolContextOutput({
+            content: res.contextOutput,
+            toolName: res.call.name,
+            artifactPath: res.result.outputPath,
+            seenHashes: toolResultHashes,
+          });
+          const contextForHistory = deduped.content;
           // Soft plan-mode note on tool payloads only (never a user message).
           // Stop once a plan with tasks exists so we don't nag after plan.create.
-          let toolContent = `Tool ${res.call.name} result (exit=${res.result.exitCode ?? 0}, ok=${res.result.ok}):\n${res.contextOutput}`;
+          let toolContent = `Tool ${res.call.name} result (exit=${res.result.exitCode ?? 0}, ok=${res.result.ok}):\n${contextForHistory}`;
           const reminded = maybeAppendPlanModeReminder(toolContent, {
             isPlanMode,
             planApproved: session.planApproved.value,

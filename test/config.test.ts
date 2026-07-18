@@ -74,6 +74,35 @@ describe('config store', () => {
     expect(getConfig().disableKeychain).toBe(true);
   });
 
+  it('defaults reliability experiment flags (E1–E6) to safe-on', async () => {
+    const { getConfig } = await loadConfigStore();
+    const c = getConfig();
+    expect(c.softEarlyCompact).toBe(true);
+    expect(c.softCompactTokenBudget).toBe(70_000);
+    expect(c.fsPassthroughCapChars).toBe(64_000);
+    expect(c.adaptiveMaxTokens).toBe(true);
+    expect(c.freeTierContextGuard).toBe(true);
+    expect(c.toolResultDedup).toBe(true);
+    expect(c.slimNativePrompt).toBe(true);
+  });
+
+  it('allows disabling reliability experiments via updateConfig', async () => {
+    const { getConfig, updateConfig } = await loadConfigStore();
+    updateConfig({
+      softEarlyCompact: false,
+      adaptiveMaxTokens: false,
+      toolResultDedup: false,
+      slimNativePrompt: false,
+      freeTierContextGuard: false,
+    });
+    const c = getConfig();
+    expect(c.softEarlyCompact).toBe(false);
+    expect(c.adaptiveMaxTokens).toBe(false);
+    expect(c.toolResultDedup).toBe(false);
+    expect(c.slimNativePrompt).toBe(false);
+    expect(c.freeTierContextGuard).toBe(false);
+  });
+
   it('supports permissions property and defaults to default', async () => {
     const { getConfig, updateConfig } = await loadConfigStore();
     expect(getConfig().permissions).toBe('default');

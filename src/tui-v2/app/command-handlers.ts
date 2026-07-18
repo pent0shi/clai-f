@@ -28,7 +28,6 @@ import {
   handleFreeOnly,
   handleHelp,
   handleJobs,
-  handleMouse,
   handlePrivacy,
   handleScope,
   handleShortcuts,
@@ -112,7 +111,6 @@ export function attachCommandHandlers(services: AppServices): void {
   c.setHandler("cwd", (i) => handleCwd(services, i));
   c.setHandler("freeonly", (i) => handleFreeOnly(services, i));
   c.setHandler("fallback", (i) => handleFallback(services, i));
-  c.setHandler("mouse", (i) => handleMouse(services, i));
   c.setHandler("scope", (i) => void handleScope(services, i));
   c.setHandler("privacy", (i) => void handlePrivacy(services, i));
   c.setHandler("update", () => void handleUpdate(services));

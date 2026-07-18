@@ -26,9 +26,20 @@ export const slashCommands: SlashCommand[] = [
     usage: "<provider>",
     description: "alias for /provider <name>",
   },
-  { command: "/set", usage: "[provider] [key]", description: "store API key or open picker" },
-  { command: "/unset", usage: "[provider]", description: "remove key or open picker" },
-  { command: "/keys", description: "list configured providers" },
+  {
+    command: "/set",
+    usage: "[provider] [key]",
+    description: "manage multi API keys (editor) or append one key",
+  },
+  {
+    command: "/unset",
+    usage: "[provider]",
+    description: "remove all API keys for a provider",
+  },
+  {
+    command: "/keys",
+    description: "list providers and multi-keys (masked)",
+  },
   {
     command: "/info",
     usage: "[provider]",
@@ -43,11 +54,6 @@ export const slashCommands: SlashCommand[] = [
     command: "/search-provider",
     usage: "[provider]",
     description: "alias for /search",
-  },
-  {
-    command: "/mouse",
-    usage: "[on|off]",
-    description: "toggle touchpad transcript scrolling vs native selection",
   },
   {
     command: "/variants",

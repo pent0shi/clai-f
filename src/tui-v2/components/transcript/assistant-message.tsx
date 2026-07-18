@@ -16,6 +16,7 @@ import { useTerminalDimensions } from "@opentui/react";
 import type { AssistantItem } from "../../state/transcript-types.js";
 import type { Theme } from "../../rendering/theme.js";
 import { renderMarkdownLines } from "../../rendering/render-markdown-lines.js";
+import { SELECTABLE_LINE_STYLE } from "./selectable-line.js";
 
 export function AssistantMessage(props: {
   item: AssistantItem;
@@ -74,6 +75,8 @@ export function AssistantMessage(props: {
               content={content ?? " "}
               selectable
               wrapMode="none"
+              // Full-row hit target — shrink-wrapped text was nearly unselectable.
+              style={SELECTABLE_LINE_STYLE}
             />
           ))}
         </box>

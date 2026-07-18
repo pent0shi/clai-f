@@ -31,6 +31,7 @@ import {
   emptyCarry,
 } from "../../rendering/syntax-highlight.js";
 import {
+  extractFsReadFileBody,
   preparePagerDisplay,
   stripPagerLineGutters,
   type PagerMarkdownMode,
@@ -104,11 +105,15 @@ export function Pager(props: PagerProps): ReactNode {
   // Meta/footer rows (with their padding) — exact column budget for padChromeRow.
   const chromeCols = Math.max(20, contentCols - 4);
 
-  // f → strip line-number gutters + force markdown.
+  // f → strip line-number gutters / fs.read `N: ` + force markdown.
   // r → always the original body (never the post-markdown plain extract).
   const display = useMemo(() => {
     if (viewMode === "formatted") {
-      const clean = stripPagerLineGutters(displayBody);
+      const stripped = stripPagerLineGutters(displayBody);
+      const clean =
+        /^\d+:\s?/m.test(displayBody) || /^#\s*fs\.read\b/m.test(displayBody)
+          ? extractFsReadFileBody(displayBody) || stripped
+          : stripped;
       return preparePagerDisplay({
         body: clean,
         width: contentCols,

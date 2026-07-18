@@ -20,7 +20,7 @@ export interface ShellExecArgs {
   maxCaptureBytes?: number | undefined;
   /** Behavior when maxCaptureBytes is exceeded. Defaults to "terminate". */
   onLimit?: "terminate" | "continue" | undefined;
-  /** Where to save the raw artifact. When undefined, ~/.clai/outputs is used. */
+  /** Where to save the raw artifact. When undefined, the active session temp dir (or ~/.clai/outputs) is used. */
   artifactPath?: string | undefined;
   /** When true, do not allocate an artifact file (used by tests / dry runs). */
   noArtifact?: boolean | undefined;

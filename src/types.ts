@@ -169,7 +169,14 @@ export interface ProviderStatus {
   active: boolean;
   configured: boolean;
   source: "env" | "keychain" | "fallback" | "local" | "missing";
+  /** Masked active (or sole) key for compact listings. */
   maskedKey?: string | undefined;
+  /** Number of stored API keys (env-only counts as 1 when present). */
+  keyCount?: number | undefined;
+  /** All masked keys in storage order (multi-key). */
+  maskedKeys?: string[] | undefined;
+  /** Masked sticky-active key when multiple are configured. */
+  activeMaskedKey?: string | undefined;
   model: string;
   note?: string | undefined;
 }

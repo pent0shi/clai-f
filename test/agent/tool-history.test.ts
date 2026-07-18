@@ -7,6 +7,7 @@ import {
   fillMissingToolResults,
   hasOrphanToolMessages,
   missingToolResultIds,
+  repairToolProtocol,
   validateToolProtocol,
 } from "../../src/agent/tool-history.js";
 import type { ChatMessage, NativeToolCall } from "../../src/types.js";
@@ -143,6 +144,44 @@ describe("tool-history", () => {
     ];
     expect(validateToolProtocol(malformed).join("\n")).toMatch(/before results for b/);
     expect(validateToolProtocol(malformed).join("\n")).toMatch(/orphan tool result unknown/);
+  });
+
+  it("repairToolProtocol heals continue-after-partial-tools history", () => {
+    const messages: ChatMessage[] = [
+      {
+        role: "assistant",
+        content: "",
+        toolCalls: [
+          { id: "a", name: "fs.read", args: { path: "a" } },
+          { id: "b", name: "fs.read", args: { path: "b" } },
+          { id: "c", name: "http.fetch", args: { url: "x" } },
+        ],
+      },
+      { role: "tool", toolCallId: "a", content: "ok" },
+      { role: "user", content: "continue" },
+      { role: "tool", toolCallId: "a", content: "dup orphan" },
+      { role: "tool", toolCallId: "unknown", content: "bad" },
+    ];
+    expect(validateToolProtocol(messages).length).toBeGreaterThan(0);
+    const n = repairToolProtocol(messages);
+    expect(n).toBeGreaterThan(0);
+    expect(validateToolProtocol(messages)).toEqual([]);
+    // user continue is still present; missing b/c closed with synthetic results
+    expect(messages.some((m) => m.role === "user" && m.content === "continue")).toBe(
+      true,
+    );
+    expect(
+      messages.filter((m) => m.role === "tool" && m.toolCallId === "b").length,
+    ).toBe(1);
+    expect(
+      messages.filter((m) => m.role === "tool" && m.toolCallId === "unknown").length,
+    ).toBe(0);
+    // Placeholders must not look like live SIGINT failures (exit=130 thrash).
+    const repairedB = messages.find((m) => m.role === "tool" && m.toolCallId === "b");
+    expect(repairedB?.ok).toBe(true);
+    expect(String(repairedB?.content ?? "")).toMatch(/\[protocol\]/i);
+    expect(String(repairedB?.content ?? "")).not.toMatch(/exit=130/);
+    expect(String(repairedB?.content ?? "")).not.toMatch(/history-repair/i);
   });
 
   it("accepts complete parallel native groups in any result order", () => {

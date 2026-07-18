@@ -15,6 +15,7 @@ import { homedir } from "node:os";
 import type { ReactNode } from "react";
 import { detectLinks, type LinkSpan } from "../../rendering/link-detector.js";
 import type { Theme } from "../../rendering/theme.js";
+import { SELECTABLE_LINE_STYLE } from "./selectable-line.js";
 
 function resolveHref(span: LinkSpan): string | undefined {
   if (span.kind === "url") return span.value;
@@ -35,7 +36,13 @@ export function LinkableText(props: {
   const spans = detectLinks(text);
   if (spans.length === 0) {
     return (
-      <text selectable={selectable} style={{ fg: fg ?? theme.foreground }}>
+      <text
+        selectable={selectable}
+        style={{
+          fg: fg ?? theme.foreground,
+          ...(selectable ? SELECTABLE_LINE_STYLE : {}),
+        }}
+      >
         {text}
       </text>
     );
@@ -63,7 +70,13 @@ export function LinkableText(props: {
   if (cursor < text.length) nodes.push(text.slice(cursor));
 
   return (
-    <text selectable={selectable} style={{ fg: fg ?? theme.foreground }}>
+    <text
+      selectable={selectable}
+      style={{
+        fg: fg ?? theme.foreground,
+        ...(selectable ? SELECTABLE_LINE_STYLE : {}),
+      }}
+    >
       {nodes}
     </text>
   );

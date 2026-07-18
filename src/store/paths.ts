@@ -1,5 +1,6 @@
 import { homedir, tmpdir } from "node:os";
 import { join, resolve, sep } from "node:path";
+import { getActiveSessionTempDir } from "./session-workspace.js";
 
 function envPath(name: string): string | undefined {
   const value = process.env[name]?.trim();
@@ -34,8 +35,28 @@ export function getLogsDirRoot(): string {
   return envPath("CLAI_LOG_DIR") ?? join(getDataDir(), "logs");
 }
 
-export function getArtifactDir(): string {
+/**
+ * Global (non-session) tool-output root — used by `clear-artifacts` and as
+ * a fallback when no session workspace is bound (one-shot / early boot).
+ */
+export function getGlobalArtifactDir(): string {
   return envPath("CLAI_ARTIFACT_DIR") ?? join(getDataDir(), "outputs");
+}
+
+/**
+ * Tool-output directory for the current session.
+ *
+ * Prefer the active session's `{workspace}/temp` so each history session
+ * keeps its run outputs isolated. Explicit `CLAI_ARTIFACT_DIR` always wins
+ * (tests + power-user override). Falls back to the global outputs dir when
+ * no session is bound.
+ */
+export function getArtifactDir(): string {
+  const configured = envPath("CLAI_ARTIFACT_DIR");
+  if (configured) return configured;
+  const sessionTemp = getActiveSessionTempDir();
+  if (sessionTemp) return sessionTemp;
+  return getGlobalArtifactDir();
 }
 
 export function getJobsDir(): string {

@@ -17,6 +17,21 @@ describe("native prompts", () => {
     expect(p).toContain("fs.write");
   });
 
+  it("E6 full native catalog remains available when slimNative=false", () => {
+    const full = renderAgentSystemPrompt("fs.write", {
+      nativeTools: true,
+      slimNative: false,
+    });
+    expect(full).toContain("FILE POLICY");
+    // Full encyclopedia still documents exact tool argument shapes.
+    expect(full.length).toBeGreaterThan(
+      renderAgentSystemPrompt("fs.write", {
+        nativeTools: true,
+        slimNative: true,
+      }).length,
+    );
+  });
+
   it("text agent prompt still documents fences", () => {
     const p = renderAgentSystemPrompt("fs.write");
     expect(p).toContain("```tool");

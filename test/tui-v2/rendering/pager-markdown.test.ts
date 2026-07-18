@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  extractFsReadFileBody,
   looksLikeMarkdown,
   preparePagerDisplay,
   stripPagerLineGutters,
@@ -26,6 +27,25 @@ describe("stripPagerLineGutters", () => {
   it("leaves non-guttered bodies alone", () => {
     const body = "# Compacted\n\n- item one\n";
     expect(stripPagerLineGutters(body)).toBe(body);
+  });
+
+});
+
+describe("extractFsReadFileBody", () => {
+  it("strips tool chrome and line numbers for markdown render", () => {
+    const raw = [
+      "# fs.read path=/tmp/findings.md lines=1-4 of 4 bytes=99",
+      "1: # VAPT Findings",
+      "2: ",
+      "3: ## F2 — SSRF",
+      "4: - **Severity**: MEDIUM",
+      "# hasMore=false",
+    ].join("\n");
+    expect(extractFsReadFileBody(raw)).toBe(
+      ["# VAPT Findings", "", "## F2 — SSRF", "- **Severity**: MEDIUM"].join(
+        "\n",
+      ),
+    );
   });
 });
 

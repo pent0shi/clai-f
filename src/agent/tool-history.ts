@@ -224,3 +224,173 @@ export function assertValidToolProtocol(messages: readonly ChatMessage[]): void 
   const issues = validateToolProtocol(messages);
   if (issues.length > 0) throw new Error(`invalid native tool protocol: ${issues.join("; ")}`);
 }
+
+/**
+ * Heal broken assistant/tool pairing so a resume ("continue") never dies on
+ * `invalid native tool protocol` after a mid-turn abort, partial stream, or
+ * corrupted history reload.
+ *
+ * - Missing tool results for open assistant toolCalls → synthetic failed results
+ * - Orphan tool results (no open call id) → dropped
+ * - Non-tool message while results pending → close the group first
+ *
+ * Mutates `messages` in place when repairs are needed. Returns repair count.
+ */
+export function repairToolProtocol(messages: ChatMessage[]): number {
+  if (messages.length === 0) return 0;
+  if (validateToolProtocol(messages).length === 0) return 0;
+
+  const out: ChatMessage[] = [];
+  let repairs = 0;
+  /** Open tool call ids → name (best-effort). */
+  let pending = new Map<string, string | undefined>();
+
+  /**
+   * Close an open tool id without looking like a live SIGINT failure.
+   * exit=130 / ok=false made the agent thrash ("tools keep getting interrupted")
+   * and tripped the evidence governor into paused_budget.
+   */
+  const flushPending = (_reason: string): void => {
+    for (const [id, name] of pending) {
+      // Minimal placeholder — do NOT look like a live tool dump. Agents were
+      // treating older wording as "every call returns history-repair" and thrashing.
+      out.push({
+        role: "tool",
+        content:
+          `[protocol] closed incomplete ${name ?? "tool"} call after resume ` +
+          `(id=${id}). Ignore this row for evidence; use later successful tool ` +
+          `results in the conversation when you need data.`,
+        toolCallId: id,
+        ...(name ? { name } : {}),
+        ok: true,
+      });
+      repairs += 1;
+    }
+    pending = new Map();
+  };
+
+  for (const message of messages) {
+    if (message.role === "assistant" && message.toolCalls?.length) {
+      if (pending.size > 0) {
+        flushPending("Interrupted — later assistant tool group started without results.");
+      }
+      out.push(message);
+      pending = new Map();
+      for (const call of message.toolCalls) {
+        if (!call.id) {
+          repairs += 1;
+          continue;
+        }
+        pending.set(call.id, call.name);
+      }
+      continue;
+    }
+
+    if (message.role === "tool") {
+      const id = message.toolCallId ?? "";
+      if (!id || !pending.has(id)) {
+        // Orphan result — drop so providers don't reject the history.
+        repairs += 1;
+        continue;
+      }
+      pending.delete(id);
+      out.push(message);
+      continue;
+    }
+
+    // user / system / plain assistant — must not interrupt an open tool group.
+    if (pending.size > 0) {
+      flushPending(
+        "Interrupted — conversation continued before tool results arrived (repaired).",
+      );
+    }
+    out.push(message);
+  }
+
+  if (pending.size > 0) {
+    flushPending("Missing tool result at end of history (repaired).");
+  }
+
+  if (repairs === 0 && out.length === messages.length) {
+    // Structure same length but still invalid (e.g. duplicate ids) — fall through rebuild.
+    if (validateToolProtocol(out).length === 0) return 0;
+  }
+
+  messages.length = 0;
+  messages.push(...out);
+  // Second pass: if still broken (duplicate ids), strip toolCalls from broken assistants.
+  const still = validateToolProtocol(messages);
+  if (still.length > 0) {
+    // Last resort: drop toolCalls arrays that never got clean results, keep text.
+    const cleaned: ChatMessage[] = [];
+    let open: Set<string> | undefined;
+    for (const m of messages) {
+      if (m.role === "assistant" && m.toolCalls?.length) {
+        open = new Set(m.toolCalls.map((t) => t.id).filter(Boolean));
+        cleaned.push(m);
+        continue;
+      }
+      if (m.role === "tool") {
+        const id = m.toolCallId ?? "";
+        if (open?.has(id)) {
+          open.delete(id);
+          cleaned.push(m);
+          if (open.size === 0) open = undefined;
+        } else {
+          repairs += 1;
+        }
+        continue;
+      }
+      if (open && open.size > 0) {
+        // Convert incomplete assistant to plain text by clearing remaining opens via flush already done;
+        // if still open, strip the assistant's toolCalls and drop dangling.
+        const lastAsst = [...cleaned].reverse().find((x) => x.role === "assistant");
+        if (lastAsst && lastAsst.toolCalls?.length) {
+          const satisfied = new Set(
+            cleaned
+              .slice(cleaned.lastIndexOf(lastAsst) + 1)
+              .filter((x) => x.role === "tool")
+              .map((x) => x.toolCallId),
+          );
+          const remaining = lastAsst.toolCalls.filter((t) => !satisfied.has(t.id));
+          for (const tc of remaining) {
+            cleaned.push({
+              role: "tool",
+              content:
+                `[protocol] closed incomplete ${tc.name} call after resume ` +
+                `(id=${tc.id}). Ignore for evidence.`,
+              toolCallId: tc.id,
+              name: tc.name,
+              ok: true,
+            });
+            repairs += 1;
+          }
+        }
+        open = undefined;
+      }
+      cleaned.push(m);
+    }
+    if (open && open.size > 0) {
+      const lastAsst = [...cleaned].reverse().find((x) => x.role === "assistant" && x.toolCalls?.length);
+      if (lastAsst?.toolCalls) {
+        for (const tc of lastAsst.toolCalls) {
+          if (!open.has(tc.id)) continue;
+          cleaned.push({
+            role: "tool",
+            content:
+              `[protocol] closed incomplete ${tc.name} call after resume ` +
+              `(id=${tc.id}). Ignore for evidence.`,
+            toolCallId: tc.id,
+            name: tc.name,
+            ok: true,
+          });
+          repairs += 1;
+        }
+      }
+    }
+    messages.length = 0;
+    messages.push(...cleaned);
+  }
+
+  return repairs;
+}

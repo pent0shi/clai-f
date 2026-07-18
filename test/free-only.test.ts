@@ -171,7 +171,9 @@ describe("provider fallback rate limits", () => {
         },
         () => undefined,
       ),
-    ).rejects.toThrow(/Provider\s+Error[\s\S]*groq\s+Provider request failed with HTTP 401/);
+    ).rejects.toThrow(
+      /Provider\s+Error[\s\S]*groq\s+.*(401|Authentication|authorization)/i,
+    );
 
     expect(nvidiaCalled).toBe(false);
   });

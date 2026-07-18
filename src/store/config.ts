@@ -47,6 +47,27 @@ export interface ClaiConfig {
    * - text: force legacy fenced tool protocol
    */
   toolCalling?: "auto" | "native" | "text";
+
+  // --- Reliability experiments (audit E1–E6); defaults are safe/on ---
+
+  /** E1: auto-compact at softCompactTokenBudget before the hard 100k ceiling. */
+  softEarlyCompact?: boolean;
+  /** E1: soft auto-compact trigger (tokens). Clamped to ≤ hard budget. */
+  softCompactTokenBudget?: number;
+  /** E2: max chars of fs.read/list/search body kept in model context (full on disk). */
+  fsPassthroughCapChars?: number;
+  /** E3: lower maxTokens on tool steps vs legacy 32k fixed. */
+  adaptiveMaxTokens?: boolean;
+  /** E4: advisory notices for free-cloud + large context / repeated failures. */
+  freeTierContextGuard?: boolean;
+  /** E4: token estimate that triggers a free-tier large-context notice. */
+  freeTierWarnTokens?: number;
+  /** E4: consecutive free-tier failures before a stronger switch-model notice. */
+  freeTierFailThreshold?: number;
+  /** E5: collapse identical tool result bodies within a turn to a pointer. */
+  toolResultDedup?: boolean;
+  /** E6: omit long fence-protocol tool encyclopedia when native tools are active. */
+  slimNativePrompt?: boolean;
 }
 
 /**
@@ -95,6 +116,15 @@ const defaults: ClaiConfig = {
   disableKeychain: false,
   permissions: "default",
   toolCalling: "auto",
+  softEarlyCompact: true,
+  softCompactTokenBudget: 70_000,
+  fsPassthroughCapChars: 64_000,
+  adaptiveMaxTokens: true,
+  freeTierContextGuard: true,
+  freeTierWarnTokens: 40_000,
+  freeTierFailThreshold: 2,
+  toolResultDedup: true,
+  slimNativePrompt: true,
 };
 
 const store = (() => {
