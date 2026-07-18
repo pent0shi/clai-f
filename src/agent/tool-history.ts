@@ -247,16 +247,25 @@ export function assertValidToolProtocol(messages: readonly ChatMessage[]): void 
 }
 
 /**
- * Neutral pairing placeholder. Must NOT say "interrupted", "after resume",
- * "exit=130", or "history-repair" — models thrash and re-run every tool when
- * they see that language, even after live tools already succeeded.
+ * Marker prefix for history-repair tool bodies. Detected by
+ * {@link isProtocolPlaceholderOutput} so governors do not treat these as live work.
+ * Keep stable; change wording below freely.
+ */
+export const PROTOCOL_PLACEHOLDER_MARKER = "[context-note]";
+
+/**
+ * Neutral pairing placeholder when a tool result is missing from history.
+ *
+ * Must stay boring: no "synthetic", "closure", "interrupted", "after resume",
+ * "exit=130", "history-repair", or "tools are broken" — those phrases make
+ * models invent "platform artifact" stories and re-run tools that already
+ * succeeded in the live transcript.
  */
 export function formatProtocolPlaceholder(name: string, id: string): string {
   return (
-    `[internal-pairing] synthetic close for ${name} (${id}). ` +
-    `This is NOT a live tool failure and does NOT mean tools are broken. ` +
-    `If a later real "Tool ${name} result (exit=0, ok=true)" exists for this work, use that. ` +
-    `Only re-call once if you still lack the data you need; never re-call identical successful tools in a loop.`
+    `${PROTOCOL_PLACEHOLDER_MARKER} No stored body for ${name} (${id}) in earlier context. ` +
+    `Prefer any live ${name} result later in the transcript. ` +
+    `Re-call only if you still need that data.`
   );
 }
 
@@ -265,7 +274,7 @@ export function formatProtocolPlaceholder(name: string, id: string): string {
  * `invalid native tool protocol` after a mid-turn abort, partial stream, or
  * corrupted history reload.
  *
- * - Missing tool results for open assistant toolCalls → synthetic ok placeholders
+ * - Missing tool results for open assistant toolCalls → quiet ok placeholders
  * - Orphan tool results (no open call id) → dropped
  * - Non-tool message while results pending → close the group first
  *

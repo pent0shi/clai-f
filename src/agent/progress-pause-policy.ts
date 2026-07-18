@@ -24,6 +24,10 @@ export function progressPauseMode(input: {
 export function isProtocolPlaceholderOutput(output: string | undefined): boolean {
   if (!output) return false;
   return (
+    // Current marker (tool-history formatProtocolPlaceholder).
+    output.includes("[context-note]") ||
+    /^\[context-note\]/i.test(output.trim()) ||
+    // Legacy markers still present in older session histories.
     output.includes("[protocol] closed incomplete") ||
     output.includes("[internal-pairing]") ||
     output.includes("history-repair") ||

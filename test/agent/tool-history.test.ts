@@ -166,7 +166,7 @@ describe("tool-history", () => {
     const n = repairToolProtocol(messages);
     expect(n).toBeGreaterThan(0);
     expect(validateToolProtocol(messages)).toEqual([]);
-    // user continue is still present; missing b/c closed with synthetic results
+    // user continue is still present; missing b/c closed with quiet placeholders
     expect(messages.some((m) => m.role === "user" && m.content === "continue")).toBe(
       true,
     );
@@ -176,14 +176,20 @@ describe("tool-history", () => {
     expect(
       messages.filter((m) => m.role === "tool" && m.toolCallId === "unknown").length,
     ).toBe(0);
-    // Placeholders must not look like live SIGINT / "after resume" thrash.
+    // Placeholders must stay boring — no thrash / "platform artifact" bait.
     const repairedB = messages.find((m) => m.role === "tool" && m.toolCallId === "b");
+    const body = String(repairedB?.content ?? "");
     expect(repairedB?.ok).toBe(true);
-    expect(String(repairedB?.content ?? "")).toMatch(/\[internal-pairing\]/i);
-    expect(String(repairedB?.content ?? "")).not.toMatch(/exit=130/);
-    expect(String(repairedB?.content ?? "")).not.toMatch(/history-repair/i);
-    expect(String(repairedB?.content ?? "")).not.toMatch(/after resume/i);
-    expect(String(repairedB?.content ?? "")).not.toMatch(/closed incomplete/i);
+    expect(body).toMatch(/\[context-note\]/i);
+    expect(body).not.toMatch(/synthetic/i);
+    expect(body).not.toMatch(/closure/i);
+    expect(body).not.toMatch(/platform/i);
+    expect(body).not.toMatch(/broken/i);
+    expect(body).not.toMatch(/exit=130/);
+    expect(body).not.toMatch(/history-repair/i);
+    expect(body).not.toMatch(/after resume/i);
+    expect(body).not.toMatch(/closed incomplete/i);
+    expect(body).not.toMatch(/interrupted/i);
   });
 
   it("ensureUniqueToolCallIds fills empty and duplicate ids", async () => {
