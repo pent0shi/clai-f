@@ -9,6 +9,10 @@ import {
   buildCompactionUserPrompt,
   trimTranscriptForCompaction,
 } from "./compaction-summary.js";
+import {
+  measureToolCallsChars,
+  slimToolArgs,
+} from "./message-slim.js";
 
 /**
  * Per-char token estimator. Real tokenization varies by provider, but for
@@ -25,6 +29,15 @@ export function estimateMessagesTokens(messages: ChatMessage[]): number {
   let sum = 0;
   for (const message of messages) {
     sum += estimateTokens(message.content) + 4; // role overhead
+    // Native toolCalls often carry full fs.write bodies — must count them or
+    // auto-compact never fires and RAM climbs with every scaffold write.
+    if (message.toolCalls?.length) {
+      const toolChars = Math.min(
+        measureToolCallsChars(message.toolCalls),
+        2_000_000,
+      );
+      sum += Math.ceil(toolChars / 3.3);
+    }
     // Images contribute tokens too — a typical image is ~1k tokens.
     if (message.images) {
       sum += message.images.length * 1000;
@@ -412,9 +425,14 @@ function leanTailMessages(
         const visible = /<think/i.test(msg.content)
           ? stripThinking(msg.content).visible
           : msg.content;
+        const slimCalls = msg.toolCalls?.map((tc) => ({
+          ...tc,
+          args: slimToolArgs(tc.args ?? {}),
+        }));
         return {
           ...msg,
           content: preferTrimContent(visible, preferMax.assistant),
+          ...(slimCalls ? { toolCalls: slimCalls } : {}),
         };
       }
       if (msg.role === "user") {

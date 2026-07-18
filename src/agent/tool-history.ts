@@ -1,5 +1,6 @@
 import type { ChatMessage, NativeToolCall } from "../types.js";
 import { syntheticToolCallId } from "../llm/tool-protocol.js";
+import { slimToolArgs } from "./message-slim.js";
 
 /**
  * Ensure every tool call has a unique non-empty id before history append.
@@ -21,6 +22,19 @@ export function ensureUniqueToolCallIds(
   });
 }
 
+/**
+ * History copy of toolCalls: slim large write payloads so RAM and API
+ * re-sends do not retain full file bodies (tools already ran from live args).
+ */
+export function slimNativeToolCallsForHistory(
+  toolCalls: readonly NativeToolCall[],
+): NativeToolCall[] {
+  return toolCalls.map((tc) => ({
+    ...tc,
+    args: slimToolArgs(tc.args ?? {}),
+  }));
+}
+
 /** Append assistant turn that requested tools (must precede tool results). */
 export function appendAssistantWithTools(
   messages: ChatMessage[],
@@ -30,7 +44,9 @@ export function appendAssistantWithTools(
   messages.push({
     role: "assistant",
     content: text ?? "",
-    ...(toolCalls.length ? { toolCalls } : {}),
+    ...(toolCalls.length
+      ? { toolCalls: slimNativeToolCallsForHistory(toolCalls) }
+      : {}),
   });
 }
 

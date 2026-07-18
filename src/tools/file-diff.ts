@@ -71,8 +71,12 @@ export interface FileChange {
 export const DIFF_MAX_LINES = 20_000;
 /** Max UTF-8 bytes on either side for full LCS. */
 export const DIFF_MAX_BYTES = 1_000_000;
-/** Max afterText kept inline on FileChange (else snapshot only). */
-export const INLINE_AFTER_MAX_BYTES = 200_000;
+/**
+ * Max afterText kept inline on FileChange (else snapshot only).
+ * Kept modest so transcript tool cards from writeMany scaffolds do not pin
+ * multi‑MB file bodies in the TUI process for the whole session.
+ */
+export const INLINE_AFTER_MAX_BYTES = 48_000;
 /** Max diff body lines in chat preview. */
 export const PREVIEW_MAX_DIFF_LINES = 40;
 /** Context lines around each change for chat. */
@@ -372,6 +376,24 @@ export function buildFileChange(opts: BuildFileChangeOptions): FileChange {
   const keepInline =
     !opts.snapshotPath && afterBytes <= INLINE_AFTER_MAX_BYTES;
 
+  // Full line-number maps / deleted bodies are only needed for the full-file
+  // modal. Cap them so chat cards from large creates/overwrites cannot pin
+  // tens of thousands of line strings in the process heap.
+  const MAX_ADDED_LINE_MAP = 2_000;
+  const MAX_DELETED_BODY_CHARS = 32_000;
+  let addedNewLines = collectAddedNewLines(ops);
+  if (addedNewLines.length > MAX_ADDED_LINE_MAP) {
+    addedNewLines = addedNewLines.slice(0, MAX_ADDED_LINE_MAP);
+  }
+  let deletedAt = collectDeletedAt(ops);
+  let deletedChars = 0;
+  for (const seg of deletedAt) {
+    for (const line of seg.lines) deletedChars += line.length + 1;
+  }
+  if (deletedChars > MAX_DELETED_BODY_CHARS) {
+    deletedAt = [];
+  }
+
   return {
     path,
     basename: base,
@@ -383,9 +405,9 @@ export function buildFileChange(opts: BuildFileChangeOptions): FileChange {
       removed,
     },
     previewHunks: capped.hunks,
-    addedNewLines: collectAddedNewLines(ops),
-    deletedAt: collectDeletedAt(ops),
-    truncated: capped.truncated || oversized,
+    addedNewLines,
+    deletedAt,
+    truncated: capped.truncated || oversized || deletedChars > MAX_DELETED_BODY_CHARS,
     binary: false,
     ...(keepInline ? { afterText: after } : {}),
     ...(opts.snapshotPath ? { snapshotPath: opts.snapshotPath } : {}),

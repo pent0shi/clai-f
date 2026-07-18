@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { createWriteStream, existsSync, type WriteStream } from "node:fs";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { ToolResult, ToolStats } from "../types.js";
 import { redactSecrets } from "../llm/provider.js";
@@ -309,8 +309,13 @@ export class RingBuffer {
  * never receives the unredacted content (that path runs through
  * redactSecrets() too).
  */
+/** Skip full-file redaction above this size (avoids multi‑hundred‑MB heap spikes). */
+const MAX_REDACT_IN_MEMORY_BYTES = 8 * 1024 * 1024;
+
 async function redactArtifactInPlace(path: string): Promise<boolean> {
   try {
+    const st = await stat(path);
+    if (st.size > MAX_REDACT_IN_MEMORY_BYTES) return false;
     const raw = await readFile(path, "utf8");
     const redacted = redactSecrets(raw);
     if (redacted === raw) return false;

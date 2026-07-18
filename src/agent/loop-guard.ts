@@ -1,4 +1,5 @@
 import type { ToolCall } from "../types.js";
+import { slimToolArgs } from "./message-slim.js";
 
 export interface ToolAttempt {
   step: number;
@@ -7,6 +8,9 @@ export interface ToolAttempt {
   ok: boolean;
   exitCode?: number | undefined;
 }
+
+/** Bound attempt history so long thrash turns cannot retain thousands of sigs. */
+const MAX_ATTEMPT_HISTORY = 400;
 
 /**
  * Non-mutating tools that may legitimately need re-calling after context
@@ -67,22 +71,20 @@ export class LoopGuard {
    * Produce a canonical string for a (name, args) pair so that calls
    * with identical semantics match even if arg order differs or
    * command whitespace varies.
+   *
+   * Large string values (file contents) are fingerprinted — never kept
+   * verbatim — so writeMany scaffolds cannot pin multi-MB strings in Maps.
    */
   canonicalize(name: string, args: Record<string, unknown>): string {
-    const sorted: Record<string, unknown> = {};
-    for (const key of Object.keys(args).sort()) {
-      let value = args[key];
-      // Normalize command whitespace for shell.exec
-      if (
-        (name === "shell.exec" || name === "shell.start") &&
-        key === "command" &&
-        typeof value === "string"
-      ) {
-        value = value.trim().replace(/\s+/g, " ");
-      }
-      sorted[key] = value;
+    const slimmed = slimToolArgs(args);
+    // Normalize shell command whitespace after slim (commands stay full when short).
+    if (
+      (name === "shell.exec" || name === "shell.start") &&
+      typeof slimmed.command === "string"
+    ) {
+      slimmed.command = slimmed.command.trim().replace(/\s+/g, " ");
     }
-    return `${name}::${JSON.stringify(sorted)}`;
+    return `${name}::${JSON.stringify(slimmed)}`;
   }
 
   recordAttempt(
@@ -101,6 +103,9 @@ export class LoopGuard {
       ok,
       exitCode,
     });
+    if (this.attempts.length > MAX_ATTEMPT_HISTORY) {
+      this.attempts.splice(0, this.attempts.length - MAX_ATTEMPT_HISTORY);
+    }
     this.signatureCount.set(sig, (this.signatureCount.get(sig) ?? 0) + 1);
     if (ok) {
       this.signatureSuccess.set(sig, true);
