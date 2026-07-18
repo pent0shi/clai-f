@@ -31,20 +31,26 @@ export function LinkableText(props: {
   fg?: string;
   /** Default true; set false on clickable chrome (YOU bubble). */
   selectable?: boolean;
+  /**
+   * OpenTUI wrap. Use `"none"` when the caller already soft-wrapped to a
+   * column budget (user prompts beside the tasks pane).
+   */
+  wrapMode?: "none" | "char" | "word" | undefined;
 }): ReactNode {
-  const { text, theme, fg, selectable = true } = props;
+  const { text, theme, fg, selectable = true, wrapMode } = props;
   const spans = detectLinks(text);
+  const style = {
+    fg: fg ?? theme.foreground,
+    ...(selectable ? SELECTABLE_LINE_STYLE : {}),
+  };
   if (spans.length === 0) {
     return (
       <text
+        content={text.length === 0 ? " " : text}
         selectable={selectable}
-        style={{
-          fg: fg ?? theme.foreground,
-          ...(selectable ? SELECTABLE_LINE_STYLE : {}),
-        }}
-      >
-        {text}
-      </text>
+        {...(wrapMode ? { wrapMode } : {})}
+        style={style}
+      />
     );
   }
 
@@ -72,10 +78,8 @@ export function LinkableText(props: {
   return (
     <text
       selectable={selectable}
-      style={{
-        fg: fg ?? theme.foreground,
-        ...(selectable ? SELECTABLE_LINE_STYLE : {}),
-      }}
+      {...(wrapMode ? { wrapMode } : {})}
+      style={style}
     >
       {nodes}
     </text>

@@ -62,7 +62,14 @@ export function TranscriptRow(props: {
   let body: ReactNode;
   switch (item.kind) {
     case "user":
-      body = <UserMessage item={item} theme={theme} onOpen={onOpenUserPrompt} />;
+      body = (
+        <UserMessage
+          item={item}
+          theme={theme}
+          onOpen={onOpenUserPrompt}
+          contentWidth={contentWidth}
+        />
+      );
       break;
     case "assistant":
       body = (
