@@ -10,9 +10,7 @@ export interface ToolAttempt {
 
 /**
  * Non-mutating tools that may legitimately need re-calling after context
- * compaction removes their earlier results. These get a higher dedup
- * threshold (3 vs 2 for write tools) and their counters can be reset when
- * context is compacted.
+ * compaction removes their earlier results.
  */
 const READ_ONLY_TOOLS = new Set([
   "web.fetch",
@@ -32,8 +30,9 @@ const READ_ONLY_TOOLS = new Set([
 ]);
 
 /**
- * Track and detect tool-call repetition patterns so the agent doesn't
- * waste steps in loops.
+ * Track tool attempts for failure reflection. Successful re-calls are always
+ * allowed (no "already succeeded / use prior results" nagging — that caused
+ * model thrash and false "tool failed" behavior).
  */
 export interface LoopGuardOptions {
   /** @deprecated Retry authorization belongs in RetryContext passed to shouldBlock. */
@@ -58,8 +57,6 @@ export class LoopGuard {
   private attempts: ToolAttempt[] = [];
   private signatureCount = new Map<string, number>();
   private signatureSuccess = new Map<string, boolean>();
-  /** First successful output body per signature (for thrash-safe reuse). */
-  private successOutputs = new Map<string, string>();
   /** Failed read-only signatures that already used their one free env-change retry. */
   private failedReadRetryUsed = new Set<string>();
   private lastSuccessfulNonMetaStep = -1;
@@ -94,18 +91,19 @@ export class LoopGuard {
     args: Record<string, unknown>,
     ok: boolean,
     exitCode?: number | undefined,
-    output?: string | undefined,
+    _output?: string | undefined,
   ): void {
     const sig = this.canonicalize(name, args);
-    this.attempts.push({ step, callName: name, canonicalSignature: sig, ok, exitCode });
+    this.attempts.push({
+      step,
+      callName: name,
+      canonicalSignature: sig,
+      ok,
+      exitCode,
+    });
     this.signatureCount.set(sig, (this.signatureCount.get(sig) ?? 0) + 1);
-    // Remember whether this exact call has EVER succeeded.
     if (ok) {
       this.signatureSuccess.set(sig, true);
-      if (typeof output === "string" && output.length > 0 && !this.successOutputs.has(sig)) {
-        // Cap cache size so identical re-calls stay cheap.
-        this.successOutputs.set(sig, output.slice(0, 48_000));
-      }
       if (name !== "task.update" && name !== "plan.create") {
         this.lastSuccessfulNonMetaStep = step;
       }
@@ -113,26 +111,9 @@ export class LoopGuard {
       if (!this.signatureSuccess.has(sig)) this.signatureSuccess.set(sig, false);
     }
 
-    // After successful *mutates* (not reads), allow re-list/re-read of those paths.
-    // Never invalidate on fs.read/list themselves — that wiped the dedup counter
-    // on every successful read and disabled loop detection.
     if (ok && this.isPathMutatingTool(name)) {
       this.invalidateReadsAfterSuccess(name, args);
     }
-  }
-
-  /** Prior successful body for this exact call, if any. */
-  getCachedSuccessOutput(
-    name: string,
-    args: Record<string, unknown>,
-  ): string | undefined {
-    const sig = this.canonicalize(name, args);
-    if (!this.signatureSuccess.get(sig)) return undefined;
-    return this.successOutputs.get(sig);
-  }
-
-  hasSucceeded(name: string, args: Record<string, unknown>): boolean {
-    return this.signatureSuccess.get(this.canonicalize(name, args)) === true;
   }
 
   private isPathMutatingTool(name: string): boolean {
@@ -157,7 +138,11 @@ export class LoopGuard {
     if (typeof args.path === "string") paths.push(args.path);
     if (name === "fs.writeMany" && Array.isArray(args.files)) {
       for (const f of args.files) {
-        if (f && typeof f === "object" && typeof (f as { path?: string }).path === "string") {
+        if (
+          f &&
+          typeof f === "object" &&
+          typeof (f as { path?: string }).path === "string"
+        ) {
           paths.push((f as { path: string }).path);
         }
       }
@@ -167,7 +152,6 @@ export class LoopGuard {
       typeof args.command === "string"
     ) {
       const cmd = args.command;
-      // mkdir -p path, create-vite name, cd path
       for (const m of cmd.matchAll(
         /(?:mkdir\s+(?:-p\s+)?|cd\s+|create-[\w@./-]+\s+|vite@\S+\s+)(['"]?)([^\s;'"]+)\1/gi,
       )) {
@@ -175,11 +159,7 @@ export class LoopGuard {
       }
       if (typeof args.cwd === "string") paths.push(args.cwd);
     }
-    if (paths.length === 0) {
-      // Any successful shell still clears failed fs.list of unknown paths once
-      // via the generic read-only retry path in shouldBlock.
-      return;
-    }
+    if (paths.length === 0) return;
     for (const sig of [...this.signatureCount.keys()]) {
       if (!sig.startsWith("fs.read::") && !sig.startsWith("fs.list::")) continue;
       if (paths.some((p) => p.length > 1 && sig.includes(p))) {
@@ -191,16 +171,9 @@ export class LoopGuard {
   }
 
   /**
-   * Check whether the proposed call should be blocked as a repeat.
-   *
-   * Returns `{ block: false }` if the call is fine, or
-   * `{ block: false, reason: "..." }` for a warning (first repeat), or
-   * `{ block: true, reason: "..." }` to force summary (second+ repeat).
-   *
-   * Failed read-only tools may retry once after any successful intervening
-   * non-meta work (e.g. list missing dir → scaffold → list again). Failed
-   * mutates still need structured retry context or a changed path.
-   * Successful identical mutates are still deduped.
+   * Only blocks *failed* identical re-tries without changed context.
+   * Successful re-calls always pass through with no warning — no
+   * "already succeeded / use prior results" messaging.
    */
   shouldBlock(
     name: string,
@@ -212,81 +185,42 @@ export class LoopGuard {
     }
     const sig = this.canonicalize(name, args);
     const count = this.signatureCount.get(sig) ?? 0;
-
     if (count === 0) return { block: false };
+
+    // Prior success (or never failed): always allow free re-execution.
+    if (this.signatureSuccess.get(sig) !== false) {
+      return { block: false };
+    }
 
     // Previously-failed signature: allow structured retry, or one free retry
     // for read-only tools after environment-changing successful work.
-    if (this.signatureSuccess.get(sig) === false) {
-      const structuredReason = retryContext?.retryReason;
-      const authorized =
-        retryContext?.dependenciesChanged === true ||
-        retryContext?.environmentChanged === true ||
-        Boolean(structuredReason?.code.trim() && structuredReason.detail.trim());
-      if (authorized) {
-        return {
-          block: false,
-          reason: `${name} retry authorized by changed context or structured rationale.`,
-        };
-      }
-      if (READ_ONLY_TOOLS.has(name) && !this.failedReadRetryUsed.has(sig)) {
-        // Permit one retry after any successful non-meta tool since the fail.
-        const lastFailStep = [...this.attempts]
-          .reverse()
-          .find((a) => a.canonicalSignature === sig && !a.ok)?.step;
-        if (
-          lastFailStep !== undefined &&
-          this.lastSuccessfulNonMetaStep > lastFailStep
-        ) {
-          this.failedReadRetryUsed.add(sig);
-          // Reset counters so a successful retry is clean
-          this.signatureCount.delete(sig);
-          this.signatureSuccess.delete(sig);
-          return {
-            block: false,
-            reason: `${name} retry allowed after successful work changed the environment.`,
-          };
-        }
-      }
-      return {
-        block: true,
-        reason: `${name} previously failed with identical arguments. Change dependencies/environment or provide a structured retry reason.`,
-      };
+    const structuredReason = retryContext?.retryReason;
+    const authorized =
+      retryContext?.dependenciesChanged === true ||
+      retryContext?.environmentChanged === true ||
+      Boolean(
+        structuredReason?.code.trim() && structuredReason.detail.trim(),
+      );
+    if (authorized) {
+      return { block: false };
     }
-
-    // Mutating file tools deserve tool-appropriate wording. Telling a model
-    // that just wrote a file to "use the results you already have" is
-    // nonsensical and has caused models to assume the whole task is done.
-    const isWrite =
-      name === "fs.write" ||
-      name === "fs.writeMany" ||
-      name === "fs.edit" ||
-      name === "fs.replaceLines" ||
-      name === "fs.append";
-
-    // Read-only tools get a higher threshold — they may need re-calling
-    // after context compaction removes their earlier results.
-    const threshold = READ_ONLY_TOOLS.has(name) ? 3 : 2;
-
-    if (count < threshold) {
-      return {
-        block: false,
-        reason: isWrite
-          ? `${name} already wrote this exact path/content once. If that file is finished, move on to the NEXT file or step — do NOT rewrite it.`
-          : name === "fs.read"
-            ? `${name} already succeeded with these args. Use that prior output, or pass a different offset/limit for another range. After you edit the file, re-read is allowed automatically.`
-            : `${name} has already been called with these arguments once and succeeded. Consider using the results you already have.`,
-      };
+    if (READ_ONLY_TOOLS.has(name) && !this.failedReadRetryUsed.has(sig)) {
+      const lastFailStep = [...this.attempts]
+        .reverse()
+        .find((a) => a.canonicalSignature === sig && !a.ok)?.step;
+      if (
+        lastFailStep !== undefined &&
+        this.lastSuccessfulNonMetaStep > lastFailStep
+      ) {
+        this.failedReadRetryUsed.add(sig);
+        this.signatureCount.delete(sig);
+        this.signatureSuccess.delete(sig);
+        return { block: false };
+      }
     }
-
-    // count >= threshold and at least one success: block
     return {
       block: true,
-      reason: isWrite
-        ? `${name} was already called ${count} time(s) with the identical path and content. That file is already written. Continue with the remaining files/steps or give your final answer.`
-        : name === "fs.read"
-          ? `${name} was already called ${count} time(s) with the same arguments. Use the prior read in context, or change offset/limit. After a mutating edit on this path, re-read is allowed.`
-          : `${name} was already called ${count} time(s) with the same arguments. The data is already in your context — analyze what you have and move to the next step.`,
+      reason: `${name} previously failed with identical arguments. Change the command/args, fix the environment, or provide a structured retry reason.`,
     };
   }
 
@@ -321,20 +255,15 @@ export class LoopGuard {
   /**
    * Returns a reflection prompt when recent failures suggest the agent may
    * be stuck, or null if everything looks fine.
-   *
-   * Unlike hardcoded thresholds, this provides context for the MODEL to
-   * decide whether to continue (lengthy but progressing approach) or
-   * switch/stop (genuinely stuck approach).
    */
   getFailureReflection(): string | null {
     const consecutiveFailures = this.consecutiveFailureCount();
     if (consecutiveFailures < 3) return null;
 
-    // Build context: what tools failed and what they were trying
     const recentFails = this.attempts.slice(-consecutiveFailures);
     const toolSummary = recentFails
       .map((a) => `  - ${a.callName}: ${a.canonicalSignature.slice(0, 120)}`)
-      .slice(-5) // Show last 5 max
+      .slice(-5)
       .join("\n");
 
     const severity = consecutiveFailures >= 6 ? "CRITICAL" : "WARNING";
@@ -374,9 +303,6 @@ Do NOT keep trying variations of the same failing approach without explicitly de
     );
   }
 
-  /**
-   * Get the total number of recorded attempts.
-   */
   get totalAttempts(): number {
     return this.attempts.length;
   }

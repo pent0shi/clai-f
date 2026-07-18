@@ -593,19 +593,29 @@ export function fileToolTitle(
   if (toolName === "fs.writeMany") {
     // pathOrDisplay may be "3 file(s): a, b" from formatToolArgs, a count, or
     // (legacy) raw JSON — never dump JSON into the title.
+    // Prefer structured fileChanges count from the caller when present;
+    // do not claim "Wrote 6 files" from args alone when the write failed
+    // or fileChanges is empty (ghost second card).
     const countMatch = /^(\d+)\s*file/i.exec(path);
     const count = countMatch ? Number(countMatch[1]) : 0;
     const label =
       count > 0
         ? `${count} file${count === 1 ? "" : "s"}`
-        : path && !path.startsWith("{") && path.length < 80
+        : path && !path.startsWith("{") && path.length < 80 && path !== "files"
           ? path
           : "files";
     if (status === "running" || status === "queued") {
       return { title: `Writing ${label}`, pathLine: undefined };
     }
     if (status === "failed" || status === "blocked") {
-      return { title: `Write failed · ${label}`, pathLine: undefined };
+      return {
+        title: count > 0 ? `Write failed · ${label}` : "Write failed",
+        pathLine: undefined,
+      };
+    }
+    // Success without a countable label → generic title (empty fileChanges).
+    if (count === 0 && (path === "files" || !path)) {
+      return { title: "Wrote files", pathLine: undefined };
     }
     return { title: `Wrote ${label}`, pathLine: undefined };
   }

@@ -215,11 +215,10 @@ describe("agent plan gate enforcement", () => {
     expect(confirmTool).toHaveBeenCalledTimes(1);
   });
 
-  it("turns a repeated successful read into non-terminal model feedback", async () => {
+  it("allows repeated successful reads to re-execute without nags", async () => {
     const repeated =
       '```tool\n{"name":"fs.list","args":{"path":"/test"}}\n```';
     stream
-      .mockImplementationOnce(streamReply(repeated))
       .mockImplementationOnce(streamReply(repeated))
       .mockImplementationOnce(streamReply(repeated))
       .mockImplementationOnce(streamReply(repeated))
@@ -236,10 +235,10 @@ describe("agent plan gate enforcement", () => {
       maxSteps: 8,
     });
 
-    // Identical successful reads are reused from cache (not re-executed) so
-    // thrash-retries after "tools failed" hallucinations stay non-terminal.
-    expect(runTool).toHaveBeenCalledTimes(1);
+    // Successful identical calls always re-run (no "use prior results" short-circuit).
+    expect(runTool).toHaveBeenCalledTimes(3);
     expect(answer).toContain("Inspection complete.");
     expect(answer).not.toMatch(/Blocked or Cancelled|Status: blocked/i);
+    expect(answer).not.toMatch(/already been called|results you already have/i);
   });
 });

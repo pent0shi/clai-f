@@ -9,35 +9,42 @@ describe("LoopGuard", () => {
     expect(result.reason).toBe(undefined);
   });
 
-  it("warns on the first repeat", () => {
+  it("never warns or blocks successful identical re-calls", () => {
     const guard = new LoopGuard();
     guard.recordAttempt(0, "shell.exec", { command: "whoami" }, true);
-    const result = guard.shouldBlock("shell.exec", { command: "whoami" });
-    expect(result.block).toBe(false);
-    expect(result.reason).toBeTruthy();
-  });
+    const once = guard.shouldBlock("shell.exec", { command: "whoami" });
+    expect(once.block).toBe(false);
+    expect(once.reason).toBeUndefined();
 
-  it("blocks on the second repeat (third call)", () => {
-    const guard = new LoopGuard();
-    guard.recordAttempt(0, "shell.exec", { command: "whoami" }, true);
     guard.recordAttempt(1, "shell.exec", { command: "whoami" }, true);
-    const result = guard.shouldBlock("shell.exec", { command: "whoami" });
-    expect(result.block).toBe(true);
-    expect(result.reason).toContain("2 time(s)");
+    guard.recordAttempt(2, "shell.exec", { command: "whoami" }, true);
+    const thrice = guard.shouldBlock("shell.exec", { command: "whoami" });
+    expect(thrice.block).toBe(false);
+    expect(thrice.reason).toBeUndefined();
   });
 
-  it("treats whitespace-normalized commands as equivalent", () => {
+  it("never nags successful fs.list / tool.check repeats", () => {
     const guard = new LoopGuard();
-    guard.recordAttempt(0, "shell.exec", { command: "  ls   -la  " }, true);
-    guard.recordAttempt(1, "shell.exec", { command: "ls -la" }, true);
-    const result = guard.shouldBlock("shell.exec", { command: "ls  -la" });
+    const args = { path: "/tmp/blog" };
+    guard.recordAttempt(0, "fs.list", args, true, 0, "a\nb\n");
+    for (let i = 0; i < 5; i++) {
+      const r = guard.shouldBlock("fs.list", args);
+      expect(r.block).toBe(false);
+      expect(r.reason).toBeUndefined();
+      guard.recordAttempt(i + 1, "fs.list", args, true, 0, "a\nb\n");
+    }
+  });
+
+  it("treats whitespace-normalized commands as equivalent for failure tracking", () => {
+    const guard = new LoopGuard();
+    guard.recordAttempt(0, "shell.exec", { command: "  ls   -la  " }, false);
+    const result = guard.shouldBlock("shell.exec", { command: "ls -la" });
     expect(result.block).toBe(true);
   });
 
   it("does not confuse different arguments", () => {
     const guard = new LoopGuard();
-    guard.recordAttempt(0, "shell.exec", { command: "whoami" }, true);
-    guard.recordAttempt(1, "shell.exec", { command: "whoami" }, true);
+    guard.recordAttempt(0, "shell.exec", { command: "whoami" }, false);
     const result = guard.shouldBlock("shell.exec", { command: "hostname" });
     expect(result.block).toBe(false);
   });
@@ -67,27 +74,16 @@ describe("LoopGuard", () => {
     expect(sig1).toBe(sig2);
   });
 
-  it("uses move-on wording for repeated file writes, not summarize", () => {
+  it("blocks identical failed mutates without structured retry context", () => {
     const guard = new LoopGuard();
     const args = { path: "src/App.jsx", content: "x" };
-    guard.recordAttempt(0, "fs.write", args, true);
-    const warn = guard.shouldBlock("fs.write", args);
-    expect(warn.block).toBe(false);
-    expect(warn.reason).toMatch(/NEXT file|move on/i);
-    expect(warn.reason).not.toMatch(/summarize/i);
-
-    guard.recordAttempt(1, "fs.write", args, true);
-    const blocked = guard.shouldBlock("fs.write", args);
-    expect(blocked.block).toBe(true);
-    expect(blocked.reason).toMatch(/already written|remaining files/i);
-  });
-
-  it("applies the same move-on wording to fs.writeMany", () => {
-    const guard = new LoopGuard();
-    const args = { files: [{ path: "a.txt", content: "x" }] };
-    guard.recordAttempt(0, "fs.writeMany", args, true);
-    const warn = guard.shouldBlock("fs.writeMany", args);
-    expect(warn.reason).toMatch(/NEXT file|move on/i);
+    guard.recordAttempt(0, "fs.write", args, false);
+    expect(guard.shouldBlock("fs.write", args).block).toBe(true);
+    expect(
+      guard.shouldBlock("fs.write", args, {
+        dependenciesChanged: true,
+      }).block,
+    ).toBe(false);
   });
 
   it("does not block or warn for task.update or plan.create", () => {
@@ -112,13 +108,14 @@ describe("LoopGuard", () => {
     const guard = new LoopGuard();
     const listArgs = { path: "/Users/me/Desktop/blogging-app" };
     guard.recordAttempt(0, "fs.list", listArgs, false);
-    // Without intervening success, still blocked
     expect(guard.shouldBlock("fs.list", listArgs).block).toBe(true);
-    // Scaffold/create success invalidates or allows retry
     guard.recordAttempt(
       1,
       "shell.exec",
-      { command: 'mkdir -p "/Users/me/Desktop/blogging-app" && npm create vite@latest .' },
+      {
+        command:
+          'mkdir -p "/Users/me/Desktop/blogging-app" && npm create vite@latest .',
+      },
       true,
     );
     const retry = guard.shouldBlock("fs.list", listArgs);

@@ -1400,63 +1400,27 @@ export async function runAgentTurn(
             detail: String((retryReasonRaw as Record<string, unknown>).detail ?? ""),
           }
           : undefined;
+      // Only block identical *failed* re-tries without changed context.
+      // Successful re-calls always run for real — no "already succeeded /
+      // use prior results" nags (those caused model abnormalities).
       const loopCheck = loopGuard.shouldBlock(call.name, call.args, {
         dependenciesChanged: retryDependenciesChanged,
         environmentChanged: retryEnvironmentChanged,
         ...(retryReason ? { retryReason } : {}),
       });
-      // Reuse prior SUCCESS instead of re-running or returning ok=false.
-      // Models often thrash "tools failed after resume" and re-call the same
-      // tool.check/fs.list; answering with a fake failure made the thrash worse.
-      const cachedSuccess = loopGuard.getCachedSuccessOutput(
-        call.name,
-        call.args,
-      );
-      if (cachedSuccess !== undefined && loopGuard.hasSucceeded(call.name, call.args)) {
-        const reuseNote =
-          loopCheck.reason ??
-          `${call.name} already succeeded with identical arguments earlier this turn — reusing that result. Do not re-call it; proceed to the next step.`;
-        writeNotice("info", reuseNote, chalk.dim(`  ℹ ${reuseNote}\n`));
-        const body =
-          `Prior successful ${call.name} result (reused; identical args — tools are working):\n` +
-          cachedSuccess;
-        const result = { ok: true, output: body, exitCode: 0 };
-        emitToolResult(toolEventId, result, reuseNote);
-        return {
-          ok: true,
-          call,
-          result,
-          contextOutput: body,
-        };
-      }
       if (loopCheck.block) {
         const reason =
           loopCheck.reason ??
-          `${call.name} was already called with the same arguments. Use the prior result and choose a different next step.`;
-
+          `${call.name} previously failed with identical arguments. Change the command/args and retry.`;
         writeNotice("warn", reason, chalk.yellow(`  ⚠ ${reason}\n`));
-        // Prefer ok=true when we previously succeeded but have no cache body,
-        // so the model does not treat loop-guard as a tool outage.
-        const softOk = loopGuard.hasSucceeded(call.name, call.args);
-        const result = {
-          ok: softOk,
-          output: reason,
-          exitCode: softOk ? 0 : 1,
-        };
+        const result = { ok: false, output: reason, exitCode: 1 };
         emitToolResult(toolEventId, result, reason);
         return {
-          ok: softOk,
+          ok: false,
           call,
           result,
           contextOutput: reason,
         };
-      }
-      if (loopCheck.reason) {
-        writeNotice(
-          "info",
-          loopCheck.reason,
-          chalk.dim(`  ℹ ${loopCheck.reason}\n`),
-        );
       }
 
       if (call.name === "plan.create" || call.name === "task.update") {

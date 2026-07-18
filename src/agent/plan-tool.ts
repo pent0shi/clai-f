@@ -9,6 +9,7 @@ import {
   isPlanSuccessful,
   readyPlanTasks,
   validateSessionPlan,
+  normalizeTaskDependencies,
   type SessionPlan,
   type TaskState,
 } from "../store/plan.js";
@@ -772,14 +773,27 @@ export async function handlePlanTool(
       }
     }
 
+    // After id remaps, re-derive a sane sequential DAG from list order so
+    // remapped ids never leave edges like t2 → t9 (forward / circular mess).
+    normalizeTaskDependencies(plan.tasks);
+
     const dag = validateSessionPlan(plan);
     if (!dag.ok) {
-      return {
-        handled: true,
-        ok: false,
-        display: chalk.red(`  ✗ plan.create: invalid dependency graph — ${dag.reason}\n`),
-        modelNote: `plan.create failed: ${dag.reason}. Use only declared task ids/aliases and remove dependency cycles.`,
-      };
+      // Last resort: pure linear chain by list order, then re-validate.
+      for (let i = 0; i < plan.tasks.length; i++) {
+        plan.tasks[i]!.dependencies = i > 0 ? [plan.tasks[i - 1]!.id] : [];
+      }
+      const again = validateSessionPlan(plan);
+      if (!again.ok) {
+        return {
+          handled: true,
+          ok: false,
+          display: chalk.red(
+            `  ✗ plan.create: invalid dependency graph — ${again.reason}\n`,
+          ),
+          modelNote: `plan.create failed: ${again.reason}. Use only declared task ids/aliases and remove dependency cycles.`,
+        };
+      }
     }
 
     if (additiveOnly) {
@@ -861,6 +875,11 @@ export async function handlePlanTool(
       modelNote:
         "task.update failed: there is no active plan. Call plan.create first.",
     };
+  }
+  // Heal broken forward edges (e.g. t2 → t9) left by older id remaps so the
+  // agent can progress without re-planning mid-build.
+  if (normalizeTaskDependencies(plan.tasks)) {
+    await savePlan(plan).catch(() => undefined);
   }
   const taskIdRaw =
     typeof call.args.taskId === "string"

@@ -24,15 +24,14 @@ describe("loop guard semantics", () => {
     expect(guard.shouldBlock("shell.exec", { command: "build" }, { retryReason: { code: "", detail: "" } }).block).toBe(true);
   });
 
-  it("canonicalizes command whitespace and de-duplicates only the successful call", () => {
+  it("canonicalizes command whitespace and never blocks successful re-reads", () => {
     const guard = new LoopGuard();
     guard.recordAttempt(1, "fs.read", { path: "a" }, true);
     guard.recordAttempt(2, "fs.read", { path: "a" }, true);
     guard.recordAttempt(3, "fs.read", { path: "a" }, true);
     const decision = guard.shouldBlock("fs.read", { path: "a" });
-    expect(decision.block).toBe(true);
-    expect(decision.reason).toMatch(/prior read|same arguments/i);
-    expect(decision.reason).not.toMatch(/turn|cancel/i);
+    expect(decision.block).toBe(false);
+    expect(decision.reason).toBeUndefined();
 
     guard.recordAttempt(4, "shell.exec", { command: " npm   test " }, true);
     expect(guard.getAttemptCount("shell.exec", { command: "npm test" })).toBe(1);

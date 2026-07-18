@@ -278,11 +278,13 @@ export function ToolCard(props: {
           ? theme.activityBg
           : theme.chip;
 
+  const hasWriteManyBody =
+    isWriteMany && Boolean(fileChanges && fileChanges.length > 0);
   const hasBody =
     isBatch ||
     isBatchLive ||
-    isFileDiff ||
-    isWriteMany ||
+    (isFileDiff && !isWriteMany) ||
+    hasWriteManyBody ||
     lines.length > 0 ||
     Boolean(mdPreview && mdPreview.length > 0) ||
     item.outputBytes > 0 ||
@@ -323,9 +325,16 @@ export function ToolCard(props: {
   // Footer: shorter for file diffs (title already carries the path).
   let footerHint: string | undefined;
   if (isWriteMany && item.status !== "running") {
-    footerHint = fileDiffExpanded
-      ? `${fileChanges?.length ?? 0} file${fileChanges?.length === 1 ? "" : "s"} · click hunk · open file`
-      : `${fileChanges?.length ?? 0} file${fileChanges?.length === 1 ? "" : "s"} · expand for diffs · click for full`;
+    const n = fileChanges?.length ?? 0;
+    // Hide the ghost "0 files" footer on empty/failed multi-writes.
+    footerHint =
+      n > 0
+        ? fileDiffExpanded
+          ? `${n} file${n === 1 ? "" : "s"} · click hunk · open file`
+          : `${n} file${n === 1 ? "" : "s"} · expand for diffs · click for full`
+        : item.status === "failed" || item.status === "blocked"
+          ? "write failed · click for details"
+          : undefined;
   } else if (isFileDiff && !isWriteMany && item.status !== "running") {
     footerHint = fileDiffExpanded
       ? "click hunk · open file"

@@ -216,6 +216,42 @@ export function tasksFromTitles(titles: string[]): PlanTask[] {
     }));
 }
 
+/**
+ * Heal dependency edges so the checklist order is the authority.
+ *
+ * After id remaps (merge/rewrite), auto-generated chains often point at the
+ * wrong ids (e.g. t2 depends on t9). Drop self-deps and any dependency that
+ * appears later in the list (forward edges). If nothing valid remains, chain
+ * to the previous task in list order.
+ *
+ * Returns true when any task's dependencies changed.
+ */
+export function normalizeTaskDependencies(tasks: PlanTask[]): boolean {
+  let changed = false;
+  for (let i = 0; i < tasks.length; i++) {
+    const task = tasks[i]!;
+    const earlier = new Set(tasks.slice(0, i).map((t) => t.id));
+    const cleaned = [
+      ...new Set(
+        (task.dependencies ?? []).filter(
+          (dep) => dep !== task.id && earlier.has(dep),
+        ),
+      ),
+    ];
+    const next =
+      cleaned.length > 0 ? cleaned : i > 0 ? [tasks[i - 1]!.id] : [];
+    const prev = task.dependencies ?? [];
+    if (
+      prev.length !== next.length ||
+      prev.some((id, idx) => id !== next[idx])
+    ) {
+      task.dependencies = next;
+      changed = true;
+    }
+  }
+  return changed;
+}
+
 export function createPlan(input: {
   sessionId: string;
   goal: string;

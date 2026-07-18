@@ -222,16 +222,15 @@ describe("X9 CSI strip", () => {
 });
 
 describe("X11 loop-guard re-read after mutate", () => {
-  it("allows fs.read again after successful write on same path", () => {
+  it("allows fs.read freely after successful reads and after write", () => {
     const guard = new LoopGuard();
     const path = "src/App.jsx";
     const readArgs = { path };
     guard.recordAttempt(1, "fs.read", readArgs, true);
     guard.recordAttempt(2, "fs.read", readArgs, true);
     guard.recordAttempt(3, "fs.read", readArgs, true);
-    // Would block without invalidate
-    expect(guard.shouldBlock("fs.read", readArgs).block).toBe(true);
-    // Mutate clears
+    // Successful re-reads are never blocked.
+    expect(guard.shouldBlock("fs.read", readArgs).block).toBe(false);
     guard.recordAttempt(4, "fs.write", { path, content: "x" }, true);
     expect(guard.shouldBlock("fs.read", readArgs).block).toBe(false);
   });

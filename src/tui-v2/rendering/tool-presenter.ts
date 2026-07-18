@@ -87,11 +87,15 @@ export function presentTool(item: ToolItem): ToolPresentation {
       pathOrDisplay = `${item.fileChanges.length} file(s)`;
     } else if (item.fileChanges?.[0]?.path) {
       pathOrDisplay = item.fileChanges[0].path;
+    } else if (item.name === "fs.writeMany") {
+      // No fileChanges — do not invent a count from argsDisplay ("6 file(s)")
+      // or the card title becomes "Wrote 6 files" with a "0 files" footer.
+      pathOrDisplay =
+        item.status === "failed" || item.status === "blocked" ? "files" : "";
     } else {
       pathOrDisplay = pathFromArgsDisplay(item.name, item.argsDisplay);
       if (!pathOrDisplay) {
-        pathOrDisplay =
-          item.name === "fs.writeMany" ? "files" : item.name.replace(/^fs\./, "");
+        pathOrDisplay = item.name.replace(/^fs\./, "");
       }
     }
     const titled = fileToolTitle(item.name, item.status, pathOrDisplay, kind);
