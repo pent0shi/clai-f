@@ -759,7 +759,12 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     {
       type: "object",
       properties: {
-        goal: { type: "string" },
+        goal: {
+          type: "string",
+          description:
+            "Short plan title (max ~8 words, one line). Not a full sentence or restatement of the user's request — put context/approach in `detail` instead.",
+          maxLength: 80,
+        },
         detail: { type: "string" },
         tasks: {
           type: "array",

@@ -212,7 +212,9 @@ export function PlanView(props: PlanViewProps): ReactNode {
             style={{
               fg: theme.foreground,
               height: 1,
-              attributes: i === 0 ? TextAttributes.BOLD : TextAttributes.NONE,
+              // Bold every wrapped line of the goal — a title's formatting
+              // shouldn't change mid-sentence just because it wrapped.
+              attributes: TextAttributes.BOLD,
             }}
           />
         ))}

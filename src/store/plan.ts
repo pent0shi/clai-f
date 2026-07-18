@@ -252,6 +252,57 @@ export function normalizeTaskDependencies(tasks: PlanTask[]): boolean {
   return changed;
 }
 
+/** Plan header goal: keep it a short title, never a full paragraph. */
+const PLAN_GOAL_MAX_CHARS = 80;
+/** Hard ceiling — beyond this even a clause-boundary cut still applies. */
+const PLAN_GOAL_HARD_CHARS = 140;
+
+/**
+ * Collapse whitespace and shorten an overlong plan goal to a title.
+ * Models sometimes echo the user's full multi-clause request as the goal.
+ * Prefer cutting at a natural boundary (sentence end, then comma/paren/dash)
+ * so the result still reads as a sensible phrase — never a mid-word or
+ * mid-clause fragment with a dangling ellipsis.
+ */
+export function shortenPlanGoal(raw: string): string {
+  const goal = raw.replace(/\s+/g, " ").trim();
+  if (!goal || goal.length <= PLAN_GOAL_MAX_CHARS) return goal;
+
+  // 1) First full sentence, if it's already a reasonable title length.
+  const firstSentence = goal.match(/^.+?[.!?](?:\s|$)/);
+  if (firstSentence) {
+    const candidate = firstSentence[0].trim();
+    if (candidate.length >= 12 && candidate.length <= PLAN_GOAL_HARD_CHARS) {
+      return candidate;
+    }
+  }
+
+  // 2) Cut at the last clause boundary (, ; : ( — –) at or before the max
+  // length, so we keep as much of the meaningful phrase as fits — not the
+  // first comma we see (which can land after just 2-3 words).
+  const window = goal.slice(0, PLAN_GOAL_MAX_CHARS);
+  const boundaryRe = /[,;:]|\s[-–—(]/g;
+  let lastBoundaryEnd = -1;
+  let m: RegExpExecArray | null;
+  while ((m = boundaryRe.exec(window)) !== null) {
+    lastBoundaryEnd = m.index;
+  }
+  if (lastBoundaryEnd >= 24) {
+    const candidate = window.slice(0, lastBoundaryEnd).trim();
+    if (candidate.length >= 24) return candidate;
+  }
+
+  // 3) No good boundary within range — leave it as-is rather than risk a
+  // mangled, meaningless fragment. Only hard-cut if truly excessive.
+  if (goal.length <= PLAN_GOAL_HARD_CHARS) return goal;
+  let cut = goal.slice(0, PLAN_GOAL_HARD_CHARS);
+  const lastSpace = cut.lastIndexOf(" ");
+  if (lastSpace > Math.floor(PLAN_GOAL_HARD_CHARS * 0.5)) {
+    cut = cut.slice(0, lastSpace);
+  }
+  return `${cut.trimEnd()}…`;
+}
+
 export function createPlan(input: {
   sessionId: string;
   goal: string;
@@ -265,7 +316,7 @@ export function createPlan(input: {
     schemaVersion: 2,
     version: 1,
     sessionId: input.sessionId,
-    goal: input.goal.trim() || "Untitled plan",
+    goal: shortenPlanGoal(input.goal) || "Untitled plan",
     detail: input.detail.trim(),
     tasks: tasksFromTitles(input.taskTitles),
     status: "draft",
