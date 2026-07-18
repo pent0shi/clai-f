@@ -174,7 +174,14 @@ export function formatToolContext(call: ToolCall, result: ToolResult): string {
   const output = result.output.trim();
   if (!output) {
     const fail = failureSummaryLine(result);
-    return fail ?? "";
+    // Never return a bare empty body — models invent "tools returned nothing /
+    // platform issue" when they only see "Tool X result (ok=true):\n".
+    return (
+      fail ??
+      (result.ok
+        ? "(no output — command succeeded with an empty body)"
+        : "(no output — command failed with an empty body)")
+    );
   }
   const preferErrors = !result.ok;
   const failLine = failureSummaryLine(result);

@@ -156,4 +156,18 @@ describe("session-scoped jobs", () => {
     expect(ctx).toContain("Desktop/blog");
     expect(ctx).not.toMatch(/Reduced output/i);
   });
+
+  it("formatToolContext never returns an empty body", () => {
+    const okEmpty = formatToolContext(
+      { name: "shell.exec", args: { command: "true" } },
+      { ok: true, output: "   \n", exitCode: 0 },
+    );
+    expect(okEmpty.length).toBeGreaterThan(0);
+    expect(okEmpty).toMatch(/no output/i);
+    const failEmpty = formatToolContext(
+      { name: "shell.exec", args: { command: "false" } },
+      { ok: false, output: "", exitCode: 1 },
+    );
+    expect(failEmpty.length).toBeGreaterThan(0);
+  });
 });

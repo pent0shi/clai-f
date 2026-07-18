@@ -48,7 +48,14 @@ function elapsedLabel(job: BackgroundJob): string {
 
 export function JobsPanel(props: JobsPanelProps): ReactNode {
   const { services, theme } = props;
-  const readJobs = (): BackgroundJob[] => services.ports.jobs.recent?.(100) ?? services.ports.jobs.running();
+  // Session-scoped durable jobs only (same filter as shell.jobs).
+  const readJobs = (): BackgroundJob[] => {
+    const sessionId = services.session.sessionId;
+    return (
+      services.ports.jobs.recent?.(100, sessionId) ??
+      services.ports.jobs.running(sessionId)
+    );
+  };
   const [jobs, setJobs] = useState<BackgroundJob[]>(readJobs);
   const [selected, setSelected] = useState(0);
   const [note, setNote] = useState("");
@@ -56,7 +63,7 @@ export function JobsPanel(props: JobsPanelProps): ReactNode {
   useEffect(() => {
     const interval = setInterval(() => setJobs(readJobs()), POLL_MS);
     return () => clearInterval(interval);
-  }, [services.ports.jobs]);
+  }, [services.ports.jobs, services.session.sessionId]);
 
   async function tail(job: BackgroundJob): Promise<void> {
     const result = await services.ports.jobs.tail(job.id);
@@ -109,7 +116,9 @@ export function JobsPanel(props: JobsPanelProps): ReactNode {
         paddingRight: 1,
       }}
     >
-      <text style={{ fg: theme.accent }}>Background jobs</text>
+      <text style={{ fg: theme.accent }}>
+        {`Background jobs · session ${services.session.sessionId.slice(0, 8)}…`}
+      </text>
       <text style={{ fg: theme.muted }}>↑↓:select  ·  enter/t:tail  ·  k:kill  ·  q/esc:close</text>
       <text style={{ fg: theme.border }}>{"─".repeat(40)}</text>
       <text content=" " />
