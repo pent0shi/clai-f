@@ -1,4 +1,25 @@
 import type { ChatMessage, NativeToolCall } from "../types.js";
+import { syntheticToolCallId } from "../llm/tool-protocol.js";
+
+/**
+ * Ensure every tool call has a unique non-empty id before history append.
+ * Empty/duplicate ids make results look orphaned, then repair injects
+ * placeholders and models thrash re-running successful tools.
+ */
+export function ensureUniqueToolCallIds(
+  calls: readonly NativeToolCall[],
+): NativeToolCall[] {
+  const seen = new Set<string>();
+  return calls.map((tc, index) => {
+    let id = typeof tc.id === "string" ? tc.id.trim() : "";
+    if (!id || seen.has(id)) {
+      id = syntheticToolCallId(index);
+      while (seen.has(id)) id = syntheticToolCallId(index);
+    }
+    seen.add(id);
+    return id === tc.id ? tc : { ...tc, id };
+  });
+}
 
 /** Append assistant turn that requested tools (must precede tool results). */
 export function appendAssistantWithTools(
@@ -226,11 +247,25 @@ export function assertValidToolProtocol(messages: readonly ChatMessage[]): void 
 }
 
 /**
+ * Neutral pairing placeholder. Must NOT say "interrupted", "after resume",
+ * "exit=130", or "history-repair" — models thrash and re-run every tool when
+ * they see that language, even after live tools already succeeded.
+ */
+export function formatProtocolPlaceholder(name: string, id: string): string {
+  return (
+    `[internal-pairing] synthetic close for ${name} (${id}). ` +
+    `This is NOT a live tool failure and does NOT mean tools are broken. ` +
+    `If a later real "Tool ${name} result (exit=0, ok=true)" exists for this work, use that. ` +
+    `Only re-call once if you still lack the data you need; never re-call identical successful tools in a loop.`
+  );
+}
+
+/**
  * Heal broken assistant/tool pairing so a resume ("continue") never dies on
  * `invalid native tool protocol` after a mid-turn abort, partial stream, or
  * corrupted history reload.
  *
- * - Missing tool results for open assistant toolCalls → synthetic failed results
+ * - Missing tool results for open assistant toolCalls → synthetic ok placeholders
  * - Orphan tool results (no open call id) → dropped
  * - Non-tool message while results pending → close the group first
  *
@@ -245,21 +280,11 @@ export function repairToolProtocol(messages: ChatMessage[]): number {
   /** Open tool call ids → name (best-effort). */
   let pending = new Map<string, string | undefined>();
 
-  /**
-   * Close an open tool id without looking like a live SIGINT failure.
-   * exit=130 / ok=false made the agent thrash ("tools keep getting interrupted")
-   * and tripped the evidence governor into paused_budget.
-   */
   const flushPending = (_reason: string): void => {
     for (const [id, name] of pending) {
-      // Minimal placeholder — do NOT look like a live tool dump. Agents were
-      // treating older wording as "every call returns history-repair" and thrashing.
       out.push({
         role: "tool",
-        content:
-          `[protocol] closed incomplete ${name ?? "tool"} call after resume ` +
-          `(id=${id}). Ignore this row for evidence; use later successful tool ` +
-          `results in the conversation when you need data.`,
+        content: formatProtocolPlaceholder(name ?? "tool", id),
         toolCallId: id,
         ...(name ? { name } : {}),
         ok: true,
@@ -356,9 +381,7 @@ export function repairToolProtocol(messages: ChatMessage[]): number {
           for (const tc of remaining) {
             cleaned.push({
               role: "tool",
-              content:
-                `[protocol] closed incomplete ${tc.name} call after resume ` +
-                `(id=${tc.id}). Ignore for evidence.`,
+              content: formatProtocolPlaceholder(tc.name, tc.id),
               toolCallId: tc.id,
               name: tc.name,
               ok: true,
@@ -377,9 +400,7 @@ export function repairToolProtocol(messages: ChatMessage[]): number {
           if (!open.has(tc.id)) continue;
           cleaned.push({
             role: "tool",
-            content:
-              `[protocol] closed incomplete ${tc.name} call after resume ` +
-              `(id=${tc.id}). Ignore for evidence.`,
+            content: formatProtocolPlaceholder(tc.name, tc.id),
             toolCallId: tc.id,
             name: tc.name,
             ok: true,

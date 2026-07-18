@@ -58,6 +58,8 @@ export class LoopGuard {
   private attempts: ToolAttempt[] = [];
   private signatureCount = new Map<string, number>();
   private signatureSuccess = new Map<string, boolean>();
+  /** First successful output body per signature (for thrash-safe reuse). */
+  private successOutputs = new Map<string, string>();
   /** Failed read-only signatures that already used their one free env-change retry. */
   private failedReadRetryUsed = new Set<string>();
   private lastSuccessfulNonMetaStep = -1;
@@ -92,6 +94,7 @@ export class LoopGuard {
     args: Record<string, unknown>,
     ok: boolean,
     exitCode?: number | undefined,
+    output?: string | undefined,
   ): void {
     const sig = this.canonicalize(name, args);
     this.attempts.push({ step, callName: name, canonicalSignature: sig, ok, exitCode });
@@ -99,6 +102,10 @@ export class LoopGuard {
     // Remember whether this exact call has EVER succeeded.
     if (ok) {
       this.signatureSuccess.set(sig, true);
+      if (typeof output === "string" && output.length > 0 && !this.successOutputs.has(sig)) {
+        // Cap cache size so identical re-calls stay cheap.
+        this.successOutputs.set(sig, output.slice(0, 48_000));
+      }
       if (name !== "task.update" && name !== "plan.create") {
         this.lastSuccessfulNonMetaStep = step;
       }
@@ -112,6 +119,20 @@ export class LoopGuard {
     if (ok && this.isPathMutatingTool(name)) {
       this.invalidateReadsAfterSuccess(name, args);
     }
+  }
+
+  /** Prior successful body for this exact call, if any. */
+  getCachedSuccessOutput(
+    name: string,
+    args: Record<string, unknown>,
+  ): string | undefined {
+    const sig = this.canonicalize(name, args);
+    if (!this.signatureSuccess.get(sig)) return undefined;
+    return this.successOutputs.get(sig);
+  }
+
+  hasSucceeded(name: string, args: Record<string, unknown>): boolean {
+    return this.signatureSuccess.get(this.canonicalize(name, args)) === true;
   }
 
   private isPathMutatingTool(name: string): boolean {

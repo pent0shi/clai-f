@@ -54,6 +54,7 @@ import {
 } from "../tools/definitions.js";
 import {
   appendAssistantWithTools,
+  ensureUniqueToolCallIds,
   appendToolResult,
   assertValidToolProtocol,
   fillMissingToolResults,
@@ -1404,15 +1405,47 @@ export async function runAgentTurn(
         environmentChanged: retryEnvironmentChanged,
         ...(retryReason ? { retryReason } : {}),
       });
+      // Reuse prior SUCCESS instead of re-running or returning ok=false.
+      // Models often thrash "tools failed after resume" and re-call the same
+      // tool.check/fs.list; answering with a fake failure made the thrash worse.
+      const cachedSuccess = loopGuard.getCachedSuccessOutput(
+        call.name,
+        call.args,
+      );
+      if (cachedSuccess !== undefined && loopGuard.hasSucceeded(call.name, call.args)) {
+        const reuseNote =
+          loopCheck.reason ??
+          `${call.name} already succeeded with identical arguments earlier this turn — reusing that result. Do not re-call it; proceed to the next step.`;
+        writeNotice("info", reuseNote, chalk.dim(`  ℹ ${reuseNote}\n`));
+        const body =
+          `Prior successful ${call.name} result (reused; identical args — tools are working):\n` +
+          cachedSuccess;
+        const result = { ok: true, output: body, exitCode: 0 };
+        emitToolResult(toolEventId, result, reuseNote);
+        return {
+          ok: true,
+          call,
+          result,
+          contextOutput: body,
+        };
+      }
       if (loopCheck.block) {
         const reason =
           loopCheck.reason ??
           `${call.name} was already called with the same arguments. Use the prior result and choose a different next step.`;
 
         writeNotice("warn", reason, chalk.yellow(`  ⚠ ${reason}\n`));
-        const result = { ok: false, output: reason, exitCode: 1 };
+        // Prefer ok=true when we previously succeeded but have no cache body,
+        // so the model does not treat loop-guard as a tool outage.
+        const softOk = loopGuard.hasSucceeded(call.name, call.args);
+        const result = {
+          ok: softOk,
+          output: reason,
+          exitCode: softOk ? 0 : 1,
+        };
+        emitToolResult(toolEventId, result, reason);
         return {
-          ok: false,
+          ok: softOk,
           call,
           result,
           contextOutput: reason,
@@ -2567,6 +2600,7 @@ export async function runAgentTurn(
         call.args,
         result.ok,
         result.exitCode,
+        result.output,
       );
 
       // Evidence for verify-before-done: only successful real work counts.
@@ -4207,6 +4241,26 @@ export async function runAgentTurn(
         // in_progress transition ahead of the preceding work or done receipt;
         // doing so inverts dependency order and desynchronizes the task pane.
 
+        // Re-id empty/duplicate native ids BEFORE building toRun/history so
+        // assistant toolCalls and role:tool results always share the same id.
+        // Mismatched ids make results look orphaned → repair injects placeholders
+        // → model thrash-retries tools that already succeeded in the UI.
+        const historyNativeCalls = ensureUniqueToolCallIds(
+          bound.map((b) => b.native),
+        );
+        for (let i = 0; i < bound.length; i++) {
+          const fixed = historyNativeCalls[i]!;
+          bound[i] = {
+            ...bound[i]!,
+            id: fixed.id,
+            native: fixed,
+          };
+        }
+        // Re-bind toRun to the rewritten bound entries (by original call identity).
+        toRun = toRun.map((old) => {
+          const match = bound.find((b) => b.call === old.call);
+          return match ?? old;
+        });
         // Re-index toRun positions for UI callIds[] (0..n-1 this turn).
         toRun = toRun.map((b, index) => ({ ...b, index }));
         const allCalls = toRun.map((b) => b.call);
@@ -4214,7 +4268,6 @@ export async function runAgentTurn(
         const callToBound = new Map<ToolCall, BoundCall>(
           toRun.map((b) => [b.call, b]),
         );
-        const historyNativeCalls = bound.map((b) => b.native);
         const runIds = new Set(toRun.map((b) => b.id));
 
         // Notice BEFORE tool cards so the transcript reads:

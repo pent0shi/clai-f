@@ -176,12 +176,29 @@ describe("tool-history", () => {
     expect(
       messages.filter((m) => m.role === "tool" && m.toolCallId === "unknown").length,
     ).toBe(0);
-    // Placeholders must not look like live SIGINT failures (exit=130 thrash).
+    // Placeholders must not look like live SIGINT / "after resume" thrash.
     const repairedB = messages.find((m) => m.role === "tool" && m.toolCallId === "b");
     expect(repairedB?.ok).toBe(true);
-    expect(String(repairedB?.content ?? "")).toMatch(/\[protocol\]/i);
+    expect(String(repairedB?.content ?? "")).toMatch(/\[internal-pairing\]/i);
     expect(String(repairedB?.content ?? "")).not.toMatch(/exit=130/);
     expect(String(repairedB?.content ?? "")).not.toMatch(/history-repair/i);
+    expect(String(repairedB?.content ?? "")).not.toMatch(/after resume/i);
+    expect(String(repairedB?.content ?? "")).not.toMatch(/closed incomplete/i);
+  });
+
+  it("ensureUniqueToolCallIds fills empty and duplicate ids", async () => {
+    const { ensureUniqueToolCallIds } = await import(
+      "../../src/agent/tool-history.js"
+    );
+    const fixed = ensureUniqueToolCallIds([
+      { id: "", name: "fs.list", args: {} },
+      { id: "same", name: "fs.read", args: { path: "a" } },
+      { id: "same", name: "tool.check", args: { tools: ["node"] } },
+    ]);
+    expect(fixed[0]!.id.length).toBeGreaterThan(0);
+    expect(fixed[1]!.id).toBe("same");
+    expect(fixed[2]!.id).not.toBe("same");
+    expect(new Set(fixed.map((c) => c.id)).size).toBe(3);
   });
 
   it("accepts complete parallel native groups in any result order", () => {

@@ -25,8 +25,10 @@ export function isProtocolPlaceholderOutput(output: string | undefined): boolean
   if (!output) return false;
   return (
     output.includes("[protocol] closed incomplete") ||
+    output.includes("[internal-pairing]") ||
     output.includes("history-repair") ||
-    /^\[protocol\]/i.test(output.trim())
+    /^\[protocol\]/i.test(output.trim()) ||
+    /^\[internal-pairing\]/i.test(output.trim())
   );
 }
 

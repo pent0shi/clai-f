@@ -236,9 +236,9 @@ describe("agent plan gate enforcement", () => {
       maxSteps: 8,
     });
 
-    // The fourth identical read is deduplicated by the loop guard, but that
-    // controller signal must not become a user-facing blocked/cancelled turn.
-    expect(runTool).toHaveBeenCalledTimes(3);
+    // Identical successful reads are reused from cache (not re-executed) so
+    // thrash-retries after "tools failed" hallucinations stay non-terminal.
+    expect(runTool).toHaveBeenCalledTimes(1);
     expect(answer).toContain("Inspection complete.");
     expect(answer).not.toMatch(/Blocked or Cancelled|Status: blocked/i);
   });
