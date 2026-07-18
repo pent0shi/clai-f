@@ -6,6 +6,8 @@ export interface ToolRunOptions {
   requestSecret?: ((request: { title: string; prompt: string }) => Promise<string | undefined>) | undefined;
   confirmed?: boolean | undefined;
   userPrompt?: string | undefined;
+  /** Active clai session — scopes shell.jobs and tags durable background jobs. */
+  sessionId?: string | undefined;
   authorizeNetworkHop?: ((url: string, resolvedAddresses: string[]) => Promise<{ allowed: boolean; reason: string }> | { allowed: boolean; reason: string }) | undefined;
   engagementAuthorization?: { target: string; expiresAt?: string | undefined } | undefined;
 }

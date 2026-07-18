@@ -19,6 +19,12 @@ export interface JobArtifactReceipt {
   sha256: string;
 }
 
+/**
+ * durable  — shell.start / auto-backgrounded servers (listed by shell.jobs, persisted)
+ * ephemeral — per-tool stall tracking in the agent runner (never listed, never persisted)
+ */
+export type JobKind = "durable" | "ephemeral";
+
 export interface BackgroundJob {
   id: string;
   command: string;
@@ -39,6 +45,8 @@ export interface BackgroundJob {
   artifacts: { stdout: JobArtifactReceipt; stderr: JobArtifactReceipt };
   redactionProfile: string;
   ownerSessionId: string;
+  /** Default durable for registry records; ephemeral for tool-stall tracking. */
+  kind?: JobKind | undefined;
   name?: string | undefined;
   authorization?: { target: string; expiresAt?: string | undefined } | undefined;
 }
@@ -79,6 +87,12 @@ const PER_FILE_BYTES = 1024 * 1024;
 const TOTAL_STREAM_BYTES = 16 * 1024 * 1024;
 const DEFAULT_TAIL_BYTES = 8_000;
 const REGISTRY_FILE = "registry-v1.json";
+/** Cap durable terminal jobs kept on disk/in memory (per process). */
+const MAX_DURABLE_TERMINAL_JOBS = 80;
+/** Drop terminal durable jobs older than this on load/list. */
+const TERMINAL_JOB_MAX_AGE_MS = 48 * 60 * 60 * 1000;
+/** Max lines shell.jobs returns to the model (running first, then recent). */
+const LIST_JOBS_MAX_LINES = 40;
 
 function processAlive(pid: number | undefined): boolean {
   if (!pid) return false;
@@ -95,6 +109,23 @@ function processIdentity(pid: number | undefined): string | undefined {
     }).trim();
     return value ? createHash("sha256").update(value).digest("hex") : undefined;
   } catch { return undefined; }
+}
+
+/**
+ * Heuristic for legacy registry rows that were actually agent tool-stall
+ * trackers (commandDisplay = "fs.list /path", "shell.jobs {}", …), not real
+ * shell.start / auto-backgrounded processes.
+ */
+function looksLikeEphemeralToolTrack(job: BackgroundJob): boolean {
+  if (job.kind === "ephemeral") return true;
+  const cmd = (job.commandDisplay || job.command || "").trim();
+  // Real OS commands rarely look like "tool.name …" dotted tool registry names.
+  if (/^(fs|shell|tool|web|http|net|pdf|image|pkg|dns|whois|plan|task|pentest|sysinfo)\.[a-zA-Z]+(\s|$)/.test(cmd)) {
+    return true;
+  }
+  // Empty artifact paths = never a real background process capture.
+  if (!job.stdoutArtifact && !job.artifactPath && !job.pid) return true;
+  return false;
 }
 
 class RotatingRedactedWriter {
@@ -178,11 +209,39 @@ export class JobManager {
     this.loadAndReconcile();
   }
 
+  private isDurable(job: BackgroundJob): boolean {
+    return job.kind !== "ephemeral";
+  }
+
+  private isLive(job: BackgroundJob): boolean {
+    return (
+      job.status === "running" ||
+      job.status === "starting" ||
+      job.status === "stopping"
+    );
+  }
+
+  private matchesSession(
+    job: BackgroundJob,
+    sessionId: string | undefined,
+  ): boolean {
+    if (!sessionId) return true;
+    // Strict: only this session's durable jobs (never leak other sessions).
+    return job.ownerSessionId === sessionId;
+  }
+
+  /**
+   * Register an in-flight tool for stall tracking only.
+   * Never appears in shell.jobs and never touches the durable registry.
+   */
   registerJob(id: string, job: BackgroundJob, ac?: AbortController, child?: ChildProcess): void {
-    this.jobs.set(id, job);
+    const tracked: BackgroundJob = { ...job, kind: job.kind ?? "ephemeral" };
+    this.jobs.set(id, tracked);
     if (ac) this.abortControllers.set(id, ac);
     if (child) this.processes.set(id, child);
-    void this.persist();
+    // Ephemeral tool-track rows must not bloat registry-v1.json (was the
+    // root cause of 1000+ fake "jobs" and multi-GB RAM).
+    if (this.isDurable(tracked)) void this.persist();
   }
 
   updateJobStatus(id: string, status: JobStatus, exitCode?: number): void {
@@ -190,10 +249,20 @@ export class JobManager {
     if (!job) return;
     job.status = status;
     if (exitCode !== undefined) job.exitCode = exitCode;
-    if (!["running", "starting", "stopping"].includes(status)) job.endedAt = new Date().toISOString();
+    if (!["running", "starting", "stopping"].includes(status)) {
+      job.endedAt = new Date().toISOString();
+    }
     this.abortControllers.delete(id);
     this.processes.delete(id);
-    void this.persist();
+    // Drop finished tool-track rows immediately — they are not background jobs.
+    if (!this.isDurable(job) && !this.isLive(job)) {
+      this.jobs.delete(id);
+      return;
+    }
+    if (this.isDurable(job)) {
+      this.pruneTerminalJobs();
+      void this.persist();
+    }
   }
 
   async startJob(command: string | BackgroundSpawnSpec, options?: StartJobOptions): Promise<ToolResult> {
@@ -224,10 +293,12 @@ export class JobManager {
       artifacts: { stdout: makeReceipt(stdoutArtifact), stderr: makeReceipt(stderrArtifact) },
       redactionProfile: "provider-secrets-v1",
       ownerSessionId: options?.ownerSessionId ?? "unknown",
+      kind: "durable",
       ...(options?.name ? { name: options.name } : {}),
       ...(options?.authorization ? { authorization: options.authorization } : {}),
     };
     this.jobs.set(id, job);
+    this.pruneTerminalJobs();
     await this.persist();
 
     try {
@@ -308,14 +379,61 @@ export class JobManager {
     }
   }
 
-  listJobs(): ToolResult {
-    if (this.jobs.size === 0) return { ok: true, output: "No background jobs." };
-    const lines = [...this.jobs.values()].map((job) => {
-      const elapsedEnd = job.endedAt ? new Date(job.endedAt).getTime() : Date.now();
-      const elapsed = Math.max(0, Math.round((elapsedEnd - new Date(job.startedAt).getTime()) / 1000));
-      const health = job.status === "running" ? (processAlive(job.pid) ? "alive" : "unresponsive") : "terminal";
-      return `[${job.id}] ${job.status} health=${health} exit=${job.exitCode ?? "?"} ${elapsed}s  ${job.commandDisplay.slice(0, 60)}`;
-    });
+  /**
+   * List durable background jobs for this session only.
+   * Ephemeral tool-stall rows and other sessions' jobs are excluded.
+   */
+  listJobs(sessionId?: string): ToolResult {
+    this.pruneTerminalJobs();
+    const durable = [...this.jobs.values()].filter(
+      (job) => this.isDurable(job) && this.matchesSession(job, sessionId),
+    );
+    if (durable.length === 0) {
+      return {
+        ok: true,
+        output: sessionId
+          ? `No background jobs for this session (${sessionId.slice(0, 8)}…).`
+          : "No background jobs.",
+      };
+    }
+    const live = durable
+      .filter((j) => this.isLive(j))
+      .sort((a, b) => b.startedAt.localeCompare(a.startedAt));
+    const done = durable
+      .filter((j) => !this.isLive(j))
+      .sort((a, b) => b.startedAt.localeCompare(a.startedAt));
+    const ordered = [...live, ...done];
+    const shown = ordered.slice(0, LIST_JOBS_MAX_LINES);
+    const omitted = ordered.length - shown.length;
+    const format = (job: BackgroundJob): string => {
+      const elapsedEnd = job.endedAt
+        ? new Date(job.endedAt).getTime()
+        : Date.now();
+      const elapsed = Math.max(
+        0,
+        Math.round(
+          (elapsedEnd - new Date(job.startedAt).getTime()) / 1000,
+        ),
+      );
+      const health = this.isLive(job)
+        ? processAlive(job.pid)
+          ? "alive"
+          : "unresponsive"
+        : "terminal";
+      return `[${job.id}] ${job.status} health=${health} exit=${job.exitCode ?? "?"} ${elapsed}s  ${job.commandDisplay.slice(0, 80)}`;
+    };
+    const header = sessionId
+      ? `Session background jobs (${durable.length} total, session ${sessionId.slice(0, 8)}…):`
+      : `Background jobs (${durable.length} total):`;
+    const lines = [header, ...shown.map(format)];
+    if (omitted > 0) {
+      lines.push(
+        `… ${omitted} older terminal job(s) omitted — use shell.tail with a known id if needed.`,
+      );
+    }
+    if (live.length === 0) {
+      lines.push("None currently running.");
+    }
     return { ok: true, output: lines.join("\n") };
   }
 
@@ -431,8 +549,48 @@ export class JobManager {
     return { ok: true, output: `Job "${id}" stopped and termination verified (${actualSignal}).` };
   }
 
-  getRunningJobs(): BackgroundJob[] { return [...this.jobs.values()].filter((job) => job.status === "running" || job.status === "starting" || job.status === "stopping"); }
-  getRecentJobs(limit = 50): BackgroundJob[] { return [...this.jobs.values()].sort((a, b) => b.startedAt.localeCompare(a.startedAt)).slice(0, limit); }
+  getRunningJobs(sessionId?: string): BackgroundJob[] {
+    return [...this.jobs.values()].filter(
+      (job) =>
+        this.isDurable(job) &&
+        this.isLive(job) &&
+        this.matchesSession(job, sessionId),
+    );
+  }
+
+  getRecentJobs(limit = 50, sessionId?: string): BackgroundJob[] {
+    return [...this.jobs.values()]
+      .filter(
+        (job) => this.isDurable(job) && this.matchesSession(job, sessionId),
+      )
+      .sort((a, b) => b.startedAt.localeCompare(a.startedAt))
+      .slice(0, limit);
+  }
+
+  /** Drop stale terminal durable jobs and all leftover ephemeral rows. */
+  pruneTerminalJobs(): void {
+    const now = Date.now();
+    const durableTerminal: BackgroundJob[] = [];
+    for (const [id, job] of this.jobs) {
+      if (!this.isDurable(job)) {
+        // Safety: never keep ephemeral rows that are not live.
+        if (!this.isLive(job)) this.jobs.delete(id);
+        continue;
+      }
+      if (this.isLive(job)) continue;
+      const ended = job.endedAt ? Date.parse(job.endedAt) : Date.parse(job.startedAt);
+      if (Number.isFinite(ended) && now - ended > TERMINAL_JOB_MAX_AGE_MS) {
+        this.jobs.delete(id);
+        continue;
+      }
+      durableTerminal.push(job);
+    }
+    if (durableTerminal.length <= MAX_DURABLE_TERMINAL_JOBS) return;
+    durableTerminal.sort((a, b) => b.startedAt.localeCompare(a.startedAt));
+    for (const job of durableTerminal.slice(MAX_DURABLE_TERMINAL_JOBS)) {
+      this.jobs.delete(job.id);
+    }
+  }
 
   private loadAndReconcile(): void {
     try {
@@ -440,6 +598,11 @@ export class JobManager {
       const parsed = JSON.parse(readFileSync(this.registryPath, "utf8")) as PersistedRegistry;
       if (parsed.schemaVersion !== 1 || !Array.isArray(parsed.jobs)) return;
       for (const job of parsed.jobs) {
+        // Historical pollution: tool-stall rows were persisted as if they were
+        // background jobs (command like "fs.list /path"). Drop them on load.
+        if (job.kind === "ephemeral") continue;
+        if (looksLikeEphemeralToolTrack(job)) continue;
+        job.kind = "durable";
         if (["starting", "running", "stopping"].includes(job.status)) {
           const identity = processIdentity(job.pid);
           if (!processAlive(job.pid) || !identity || !job.processIdentity || identity !== job.processIdentity) {
@@ -452,11 +615,18 @@ export class JobManager {
         }
         this.jobs.set(job.id, job);
       }
+      this.pruneTerminalJobs();
       this.persistSync();
     } catch { /* Corrupt registries are ignored, never trusted as running. */ }
   }
 
-  private registry(): PersistedRegistry { return { schemaVersion: 1, jobs: [...this.jobs.values()] }; }
+  /** Only durable jobs are written to disk. */
+  private registry(): PersistedRegistry {
+    return {
+      schemaVersion: 1,
+      jobs: [...this.jobs.values()].filter((j) => this.isDurable(j)),
+    };
+  }
   private persistSync(): void {
     try {
       mkdirSync(this.jobsDir, { recursive: true });

@@ -55,6 +55,7 @@ export async function buildRichStopSummary(
     parts.push(`\nProgress: ${doneCount}/${plan.tasks.length} tasks done.`);
   }
 
+  // Prefer session-scoped durable jobs only (never ephemeral tool-track rows).
   const running = jobManager.getRunningJobs();
   const recent = jobManager.getRecentJobs(8);
   if (running.length > 0 || recent.length > 0) {

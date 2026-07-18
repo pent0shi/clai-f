@@ -140,6 +140,14 @@ const PASSTHROUGH_TOOLS = new Set<string>([
   "fs.edit",
   "fs.append",
   "pdf.read",
+  // Structured / short tools — genericReducer was dropping shell.jobs lines
+  // (no CVE keywords → "N lines omitted") so models invented "empty tool" stories.
+  "shell.jobs",
+  "shell.tail",
+  "shell.stop",
+  "sysinfo",
+  "tool.check",
+  "wordlist.find",
 ]);
 /** Legacy hard ceiling; effective cap comes from reliability policy (E2). */
 export const PASSTHROUGH_CAP_CHARS_LEGACY = 400_000;

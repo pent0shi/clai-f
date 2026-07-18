@@ -321,13 +321,16 @@ export async function handleHistory(services: AppServices): Promise<void> {
   const liveVisualCount = conversationItemCount(
     services.transcript.getState(),
   );
+  const shortSessionId = (id: string): string =>
+    id.length <= 12 ? id : `${id.slice(0, 8)}…${id.slice(-4)}`;
+
   const options: PickerOption[] = [
     {
       value: "__current__",
       label: currentTitle?.trim() || "Current session",
       description: currentMessages.length
-        ? `now  ·  ${liveVisualCount} items  ·  ${currentMessages.length} model msgs  ·  this window`
-        : "now  ·  empty session  ·  this window",
+        ? `id ${shortSessionId(currentId)}  ·  now  ·  ${liveVisualCount} items  ·  ${currentMessages.length} model msgs  ·  this window`
+        : `id ${shortSessionId(currentId)}  ·  now  ·  empty session  ·  this window`,
       active: true,
     },
     ...otherSessions.map((session) => {
@@ -349,8 +352,9 @@ export async function handleHistory(services: AppServices): Promise<void> {
       const where = shortCwd(session.cwd);
       const title =
         (session.name && session.name.trim()) || "Untitled chat";
-      // Two-line card: title on top; meta chips underneath.
+      // Two-line card: title on top; meta chips underneath (always show session id).
       const meta = [
+        `id ${shortSessionId(session.id)}`,
         when,
         stamp,
         `${count} item${count === 1 ? "" : "s"}`,

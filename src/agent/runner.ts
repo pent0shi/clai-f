@@ -777,8 +777,8 @@ export async function runAgentTurn(
         prompt,
         history: options.history,
         plan: activePlan,
-        runningJobs: jobManager.getRunningJobs(),
-        recentJobs: jobManager.getRecentJobs(12),
+        runningJobs: jobManager.getRunningJobs(session.sessionId),
+        recentJobs: jobManager.getRecentJobs(12, session.sessionId),
         informationalQuery,
         idleOrSocial: idleOrSocialPrompt,
       });
@@ -1179,7 +1179,7 @@ export async function runAgentTurn(
 
     refreshSessionState = (plan?: SessionPlan | null | undefined): void => {
       if (idleOrSocialPrompt || informationalQuery) return;
-      const runningJobs = jobManager.getRunningJobs();
+      const runningJobs = jobManager.getRunningJobs(session.sessionId);
       const p = plan ?? activePlan;
       if (
         !buildLikeTurn &&
@@ -2101,6 +2101,8 @@ export async function runAgentTurn(
         artifacts: { stdout: emptyJobArtifact(), stderr: emptyJobArtifact() },
         redactionProfile: "provider-secrets-v1",
         ownerSessionId: session.sessionId,
+        // Tool-stall tracker only — must never show up in shell.jobs.
+        kind: "ephemeral",
       };
       jobManager.registerJob(jobId, backgroundJob, toolAc);
 
@@ -2151,6 +2153,7 @@ export async function runAgentTurn(
           },
           confirmed: true,
           userPrompt: prompt,
+          sessionId: session.sessionId,
           ...(engagementAction && scope
             ? {
               engagementAuthorization: {

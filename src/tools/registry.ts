@@ -213,7 +213,12 @@ export const toolRegistry: Record<string, ToolHandler> = {
       if (elevated && !elevated.prepared) return elevated.result;
       const job = await jobManager.startJob(
         elevated?.prepared ? elevated.spec : command,
-        { cwd: optionalString(args, "cwd") },
+        {
+          cwd: optionalString(args, "cwd"),
+          ...(options?.sessionId
+            ? { ownerSessionId: options.sessionId }
+            : {}),
+        },
       );
       if (job.ok) {
         return {
@@ -417,6 +422,9 @@ export const toolRegistry: Record<string, ToolHandler> = {
         name: `nmap-${estimate.profile}-${host.value}`,
         profile: estimate.profile,
         estimatedSeconds: estimate.estimatedSeconds,
+        ...(options?.sessionId
+          ? { ownerSessionId: options.sessionId }
+          : {}),
         ...(options?.engagementAuthorization ? { authorization: options.engagementAuthorization } : {}),
       });
     }
@@ -698,6 +706,9 @@ export const toolRegistry: Record<string, ToolHandler> = {
                   name: `recon-${estimate.profile}-${host.value}`,
                   profile: estimate.profile,
                   estimatedSeconds: estimate.estimatedSeconds,
+                  ...(options?.sessionId
+                    ? { ownerSessionId: options.sessionId }
+                    : {}),
                   ...(options?.engagementAuthorization ? { authorization: options.engagementAuthorization } : {}),
                 })
               : prepared.result;
@@ -854,10 +865,13 @@ export const toolRegistry: Record<string, ToolHandler> = {
     return jobManager.startJob(elevated?.prepared ? elevated.spec : command, {
       cwd: optionalString(args, "cwd"),
       name: optionalString(args, "name"),
+      ...(options?.sessionId
+        ? { ownerSessionId: options.sessionId }
+        : {}),
     });
   },
-  async "shell.jobs"() {
-    return jobManager.listJobs();
+  async "shell.jobs"(_args, options) {
+    return jobManager.listJobs(options?.sessionId);
   },
   async "shell.tail"(args) {
     return jobManager.tailJob(

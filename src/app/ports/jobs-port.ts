@@ -5,14 +5,18 @@ export type { BackgroundJob };
 
 
 export interface JobsPort {
-  list(): ToolResult;
-  running(): BackgroundJob[];
-  recent?(limit?: number): BackgroundJob[];
+  list(sessionId?: string): ToolResult;
+  running(sessionId?: string): BackgroundJob[];
+  recent?(limit?: number, sessionId?: string): BackgroundJob[];
   get(id: string): BackgroundJob | undefined;
   tail(id: string, bytes?: number): Promise<ToolResult>;
   stop(id: string): Promise<ToolResult>;
   start(
     command: string,
-    options?: { cwd?: string | undefined; name?: string | undefined },
+    options?: {
+      cwd?: string | undefined;
+      name?: string | undefined;
+      ownerSessionId?: string | undefined;
+    },
   ): Promise<ToolResult>;
 }

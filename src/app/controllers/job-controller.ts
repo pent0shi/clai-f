@@ -6,12 +6,12 @@ import type { Disposable } from "./disposable.js";
 export class JobController implements Disposable {
   constructor(private readonly jobs: JobsPort) {}
 
-  list(): ToolResult {
-    return this.jobs.list();
+  list(sessionId?: string): ToolResult {
+    return this.jobs.list(sessionId);
   }
 
-  running(): BackgroundJob[] {
-    return this.jobs.running();
+  running(sessionId?: string): BackgroundJob[] {
+    return this.jobs.running(sessionId);
   }
 
   get(id: string): BackgroundJob | undefined {
@@ -28,13 +28,17 @@ export class JobController implements Disposable {
 
   start(
     command: string,
-    options?: { cwd?: string | undefined; name?: string | undefined },
+    options?: {
+      cwd?: string | undefined;
+      name?: string | undefined;
+      ownerSessionId?: string | undefined;
+    },
   ): Promise<ToolResult> {
     return this.jobs.start(command, options);
   }
 
-  hasRunning(): boolean {
-    return this.running().length > 0;
+  hasRunning(sessionId?: string): boolean {
+    return this.running(sessionId).length > 0;
   }
 
   dispose(): void {
