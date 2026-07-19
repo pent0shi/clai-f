@@ -6,6 +6,9 @@ export interface SearchKeyStatus {
   configured: boolean;
   source: string;
   maskedKey?: string | undefined;
+  keyCount?: number | undefined;
+  maskedKeys?: readonly string[] | undefined;
+  activeMaskedKey?: string | undefined;
 }
 
 /** Render credential metadata without ever including an unmasked secret. */
@@ -45,12 +48,29 @@ export function formatKeyStatus(llm: ProviderStatus[], search: SearchKeyStatus[]
     }
   }
 
-  const searchRows = search.map((s) => {
+  const searchRows: string[] = [];
+  for (const s of search) {
     const mark = s.configured ? "✓" : "✗";
     const tag = s.active ? " ◀" : "";
-    const key = s.maskedKey || (s.configured ? "••••••••" : "—");
-    return `  ${mark} ${s.provider.padEnd(13)} ${(s.source === "missing" ? "no key" : s.source).padEnd(9)} ${key}${tag}`;
-  });
+    const count = s.keyCount ?? (s.maskedKey ? 1 : 0);
+    const keySummary =
+      count === 0 ? "—" : count === 1 ? s.maskedKey || "••••••••" : `${count} keys`;
+    searchRows.push(
+      `  ${mark} ${s.provider.padEnd(13)} ${(s.source === "missing" ? "no key" : s.source).padEnd(9)} ${keySummary}${tag}`,
+    );
+    if (s.maskedKeys && s.maskedKeys.length > 1) {
+      let activeIdx = 0;
+      if (s.activeMaskedKey) {
+        const found = s.maskedKeys.indexOf(s.activeMaskedKey);
+        if (found >= 0) activeIdx = found;
+      }
+      s.maskedKeys.forEach((masked, index) => {
+        searchRows.push(
+          `      [${index + 1}] ${masked}${index === activeIdx ? " ★ active" : ""}`,
+        );
+      });
+    }
+  }
 
   return [
     "LLM PROVIDERS",
@@ -58,7 +78,7 @@ export function formatKeyStatus(llm: ProviderStatus[], search: SearchKeyStatus[]
     ...llmRows,
     "",
     "SEARCH PROVIDERS",
-    "  PROVIDER      SOURCE    KEY",
+    "  PROVIDER      SOURCE    KEYS",
     ...searchRows,
     "",
     "◀ = active provider · ★ = sticky key used first on the next request",

@@ -629,22 +629,132 @@ export async function markProviderKeySuccess(
 export { MAX_PROVIDER_KEYS };
 
 /**
- * Resolve a search-provider's API key using the precedence required by
- * Requirement 3.3: env var → keychain `search:<id>` → fallback file →
- * `undefined`. DuckDuckGo has no env var and no key, so it returns
- * `{ source: 'missing' }` unless a key has been explicitly set.
+ * Resolve every API key for a keyed search provider.
+ *
+ * This intentionally mirrors LLM key semantics: stored multi/single keys
+ * win over an ambient environment variable, and an environment value is only
+ * a synthetic single-key fallback when nothing has been stored. DuckDuckGo
+ * is keyless and therefore never exposes stored key slots.
  */
+export async function getSearchProviderKeys(
+  id: SearchProviderId,
+): Promise<ProviderKeysResult> {
+  if (id === 'duckduckgo') {
+    return { keys: [], activeIndex: 0, source: 'missing' };
+  }
+
+  const stored = await getSecret('search', id);
+  if (stored.value) {
+    const parsed = parseProviderKeysPayload(stored.value);
+    if (parsed.keys.length > 0) {
+      return {
+        keys: parsed.keys,
+        activeIndex: parsed.activeIndex,
+        source: stored.source,
+      };
+    }
+  }
+
+  const envVar = searchProviderEnvVars[id];
+  const env = envVar ? process.env[envVar] : undefined;
+  if (env && env.length > 0) {
+    return {
+      keys: [{ id: 'env', value: env, createdAt: 0 }],
+      activeIndex: 0,
+      source: 'env',
+    };
+  }
+
+  return { keys: [], activeIndex: 0, source: 'missing' };
+}
+
+/** Resolve the sticky active key for compatibility with single-key callers. */
 export async function getSearchProviderKey(
   id: SearchProviderId,
 ): Promise<{ value?: string; source: SecretSource }> {
-  const envVar = searchProviderEnvVars[id];
-  if (envVar) {
-    const fromEnv = process.env[envVar];
-    if (fromEnv && fromEnv.length > 0) {
-      return { value: fromEnv, source: 'env' };
-    }
+  const multi = await getSearchProviderKeys(id);
+  if (multi.keys.length === 0) return { source: multi.source };
+  const index = clampActiveIndex(multi.activeIndex, multi.keys.length);
+  return { value: multi.keys[index]!.value, source: multi.source };
+}
+
+/** Replace all stored keys for a search provider (the shared keys editor). */
+export async function setSearchProviderKeys(
+  id: SearchProviderId,
+  values: readonly string[],
+  activeIndex = 0,
+): Promise<'keychain' | 'fallback'> {
+  if (id === 'duckduckgo') return 'fallback';
+  const cleaned = values.map((value) => value.trim()).filter(Boolean);
+  const seen = new Set<string>();
+  const unique: string[] = [];
+  for (const value of cleaned) {
+    if (seen.has(value)) continue;
+    seen.add(value);
+    unique.push(value);
+    if (unique.length >= MAX_PROVIDER_KEYS) break;
   }
-  return getSecret('search', id);
+  if (unique.length === 0) {
+    await unsetSecret('search', id);
+    return 'fallback';
+  }
+  const now = Date.now();
+  const slots: ProviderKeySlot[] = unique.map((value) => ({
+    id: newKeyId(),
+    value,
+    createdAt: now,
+  }));
+  return setSecret('search', id, serializeProviderKeysPayload(slots, activeIndex));
+}
+
+/** Append a search API key, preserving the existing sticky active key. */
+export async function appendSearchProviderKey(
+  id: SearchProviderId,
+  secret: string,
+): Promise<'keychain' | 'fallback'> {
+  if (id === 'duckduckgo') return 'fallback';
+  const trimmed = secret.trim();
+  if (!trimmed) throw new Error('empty API key');
+
+  const current = await getSearchProviderKeys(id);
+  // Like LLM providers, saving any explicit key replaces env-only resolution.
+  const base = current.source === 'env' ? [] : current.keys.map((key) => ({ ...key }));
+  if (base.some((key) => key.value === trimmed)) {
+    const index = base.findIndex((key) => key.value === trimmed);
+    return setSecret(
+      'search',
+      id,
+      serializeProviderKeysPayload(base, index >= 0 ? index : current.activeIndex),
+    );
+  }
+  if (base.length >= MAX_PROVIDER_KEYS) {
+    throw new Error(`at most ${MAX_PROVIDER_KEYS} API keys per provider`);
+  }
+  base.push({ id: newKeyId(), value: trimmed, createdAt: Date.now() });
+  return setSecret(
+    'search',
+    id,
+    serializeProviderKeysPayload(base, base.length === 1 ? 0 : current.activeIndex),
+  );
+}
+
+export async function unsetSearchProviderSecret(id: SearchProviderId): Promise<void> {
+  if (id !== 'duckduckgo') await unsetSecret('search', id);
+}
+
+/** Persist the key that last completed a search successfully as the sticky key. */
+export async function markSearchProviderKeySuccess(
+  id: SearchProviderId,
+  index: number,
+): Promise<void> {
+  if (id === 'duckduckgo') return;
+  const stored = await getSecret('search', id);
+  if (!stored.value) return;
+  const parsed = parseProviderKeysPayload(stored.value);
+  if (parsed.keys.length === 0) return;
+  const next = clampActiveIndex(index, parsed.keys.length);
+  if (next === parsed.activeIndex && stored.value.trim().startsWith('{')) return;
+  await setSecret('search', id, serializeProviderKeysPayload(parsed.keys, next));
 }
 
 export type KeychainStatus =

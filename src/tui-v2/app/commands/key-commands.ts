@@ -11,16 +11,18 @@ import {
 } from "../../../llm/provider.js";
 import { getConfig, updateConfig } from "../../../store/config.js";
 import {
+  appendSearchProviderKey,
   getProviderKeys,
-  getSearchProviderKey,
+  getSearchProviderKeys,
   listProviderStatuses,
   setProviderKeys,
-  setSecret,
+  setSearchProviderKeys,
   unsetProviderSecret,
+  unsetSearchProviderSecret,
 } from "../../../store/keys.js";
 import { searchProviderIds, type SearchProviderId } from "../../../tools/web/types.js";
 import type { ProviderId } from "../../../types.js";
-import { formatKeyStatus } from "../../../tui/format-keys.js";
+import { formatKeyStatus, type SearchKeyStatus } from "../../../tui/format-keys.js";
 import type { CommandInvocation } from "../../../app/commands/command.js";
 import type { AppServices } from "../../bootstrap/composition-root.js";
 import type { PickerOption } from "../../rendering/picker-filter.js";
@@ -29,6 +31,30 @@ const SEARCH_IDS = new Set(["brave", "tavily", "duckduckgo"]);
 
 function notice(services: AppServices, level: "info" | "warn", text: string): void {
   services.session.notice(level, text);
+}
+
+async function getSearchKeyStatuses(): Promise<SearchKeyStatus[]> {
+  const activeSearch = getConfig().activeSearchProvider;
+  return Promise.all(
+    searchProviderIds.map(async (id) => {
+      const keyless = id === "duckduckgo";
+      const multi = await getSearchProviderKeys(id);
+      const count = multi.keys.length;
+      const activeIndex = count > 0 ? multi.activeIndex : 0;
+      const activeValue = multi.keys[activeIndex]?.value;
+      return {
+        provider: id,
+        active: id === activeSearch,
+        configured: keyless || count > 0,
+        source: keyless ? "keyless" : multi.source,
+        maskedKey: activeValue ? maskSecret(activeValue) : undefined,
+        keyCount: keyless ? undefined : count || undefined,
+        maskedKeys: count > 0 ? multi.keys.map((key) => maskSecret(key.value)) : undefined,
+        activeMaskedKey:
+          count > 1 && activeValue ? maskSecret(activeValue) : undefined,
+      };
+    }),
+  );
 }
 
 export async function handleInfo(
@@ -52,21 +78,7 @@ export async function handleKeys(services: AppServices): Promise<void> {
   try {
     const active = services.session.getState().provider ?? getConfig().defaultProvider;
     const llm = await listProviderStatuses(active);
-    const activeSearch = getConfig().activeSearchProvider;
-    const search = await Promise.all(
-      searchProviderIds.map(async (id) => {
-        const secret = await getSearchProviderKey(id);
-        const keyless = id === "duckduckgo";
-        return {
-          provider: id,
-          active: id === activeSearch,
-          configured: keyless || Boolean(secret.value),
-          source: keyless ? "keyless" : secret.source,
-          maskedKey: secret.value ? maskSecret(secret.value) : undefined,
-        };
-      }),
-    );
-    services.overlay.openPager("Credential status", formatKeyStatus(llm, search));
+    services.overlay.openPager("Credential status", formatKeyStatus(llm, await getSearchKeyStatuses()));
   } catch (error) {
     notice(
       services,
@@ -96,7 +108,6 @@ export async function handleSet(
     }
     const id = assertProvider(providerVal);
     if (keyVal) {
-      // Non-interactive append of one key.
       await appendLlmKey(services, id, keyVal);
       return;
     }
@@ -129,19 +140,7 @@ export async function handleUnset(
 async function openSetPicker(services: AppServices): Promise<void> {
   const active = services.session.getState().provider ?? getConfig().defaultProvider;
   const llm = await listProviderStatuses(active);
-  const activeSearch = getConfig().activeSearchProvider;
-  const search = await Promise.all(
-    searchProviderIds.map(async (id) => {
-      const secret = await getSearchProviderKey(id);
-      const keyless = id === "duckduckgo";
-      return {
-        provider: id,
-        configured: keyless || Boolean(secret.value),
-        maskedKey: secret.value ? maskSecret(secret.value) : undefined,
-        keyCount: secret.value ? 1 : 0,
-      };
-    }),
-  );
+  const search = await getSearchKeyStatuses();
   const options: PickerOption[] = [
     ...llm.map((status) => {
       const count = status.keyCount ?? (status.configured ? 1 : 0);
@@ -161,18 +160,29 @@ async function openSetPicker(services: AppServices): Promise<void> {
         description: status.model,
       };
     }),
-    ...search.map((status) => ({
-      value: `search:${status.provider}`,
-      label: `${status.provider} ${status.configured ? "✓ key set" : "✗ no key"}`,
-      description: `Search provider${status.provider === activeSearch ? " (active)" : ""}`,
-    })),
+    ...search.map((status) => {
+      const count = status.keyCount ?? 0;
+      const keyLabel =
+        status.provider === "duckduckgo"
+          ? "✓ keyless"
+          : count === 0
+            ? "✗ no key"
+            : count === 1
+              ? `✓ ${status.maskedKey ?? "1 key"}`
+              : `✓ ${count} keys`;
+      return {
+        value: `search:${status.provider}`,
+        label: `${status.provider} ${keyLabel}${status.active ? " (active)" : ""}`,
+        description: "Search provider",
+      };
+    }),
   ];
   services.overlay.openPicker({ title: "Set API key for provider", options }, (value) => {
     services.overlay.close();
     void (async () => {
       const isSearch = value.startsWith("search:");
       const id = value.split(":")[1]!;
-      if (isSearch) await setSearchKey(services, id as SearchProviderId);
+      if (isSearch) await openSearchKeysEditor(services, id as SearchProviderId);
       else await openLlmKeysEditor(services, id as ProviderId);
     })();
   });
@@ -181,18 +191,7 @@ async function openSetPicker(services: AppServices): Promise<void> {
 async function openUnsetPicker(services: AppServices): Promise<void> {
   const active = services.session.getState().provider ?? getConfig().defaultProvider;
   const llm = await listProviderStatuses(active);
-  const activeSearch = getConfig().activeSearchProvider;
-  const search = await Promise.all(
-    searchProviderIds.map(async (id) => {
-      const secret = await getSearchProviderKey(id);
-      const keyless = id === "duckduckgo";
-      return {
-        provider: id,
-        configured: keyless || Boolean(secret.value),
-        maskedKey: secret.value ? maskSecret(secret.value) : undefined,
-      };
-    }),
-  );
+  const search = await getSearchKeyStatuses();
   const options: PickerOption[] = [
     ...llm.map((status) => {
       const count = status.keyCount ?? (status.configured ? 1 : 0);
@@ -210,11 +209,22 @@ async function openUnsetPicker(services: AppServices): Promise<void> {
         description: status.model,
       };
     }),
-    ...search.map((status) => ({
-      value: `search:${status.provider}`,
-      label: `${status.provider} ${status.configured ? `✓ ${status.maskedKey ?? "keyless"}` : "✗ no key"}`,
-      description: `Search provider${status.provider === activeSearch ? " (active)" : ""}`,
-    })),
+    ...search.map((status) => {
+      const count = status.keyCount ?? 0;
+      const keyLabel =
+        status.provider === "duckduckgo"
+          ? "keyless"
+          : count === 0
+            ? "✗ no key"
+            : count === 1
+              ? `✓ ${status.maskedKey ?? "1 key"}`
+              : `✓ ${count} keys — reset all`;
+      return {
+        value: `search:${status.provider}`,
+        label: `${status.provider} ${keyLabel}${status.active ? " (active)" : ""}`,
+        description: "Search provider",
+      };
+    }),
   ];
   services.overlay.openPicker({ title: "Unset API key for provider", options }, (value) => {
     services.overlay.close();
@@ -232,7 +242,7 @@ async function openLlmKeysEditor(
   id: ProviderId,
 ): Promise<void> {
   if (id === "ollama") {
-    let host = await services.overlay.openSecret({
+    const host = await services.overlay.openSecret({
       title: "Ollama host URL",
       prompt: "Enter host URL for Ollama:",
     });
@@ -249,11 +259,11 @@ async function openLlmKeysEditor(
   const stored =
     multi.source === "env"
       ? []
-      : multi.keys.map((k) => ({ id: k.id, masked: maskSecret(k.value), value: k.value }));
+      : multi.keys.map((key) => ({ id: key.id, masked: maskSecret(key.value), value: key.value }));
 
   const answer = await services.overlay.openKeysEditor({
     provider: id,
-    initialKeys: stored.map((k) => ({ id: k.id, masked: k.masked })),
+    initialKeys: stored.map((key) => ({ id: key.id, masked: key.masked })),
   });
   if (!answer) {
     notice(services, "info", "cancelled");
@@ -265,22 +275,8 @@ async function openLlmKeysEditor(
     return;
   }
 
-  // Resolve save rows → final plaintext list.
-  const byId = new Map(stored.map((k) => [k.id, k.value]));
-  const resolved: string[] = [];
-  for (const row of answer.rows) {
-    if (row.slotId) {
-      if (row.value.trim()) {
-        resolved.push(row.value.trim());
-      } else {
-        const keep = byId.get(row.slotId);
-        if (keep) resolved.push(keep);
-      }
-    } else if (row.value.trim()) {
-      resolved.push(row.value.trim());
-    }
-  }
-
+  const byId = new Map(stored.map((key) => [key.id, key.value]));
+  const resolved = resolveEditorRows(answer.rows, byId);
   if (resolved.length === 0) {
     await unsetProviderSecret(id);
     notice(services, "info", `unset all keys for ${id}`);
@@ -299,22 +295,88 @@ async function openLlmKeysEditor(
     return;
   }
 
-  // Preserve sticky active when possible (first kept slot that matches prior active).
   let activeIndex = 0;
   if (multi.source !== "env" && multi.keys.length > 0) {
-    const prevActive = multi.keys[multi.activeIndex]?.value;
-    if (prevActive) {
-      const found = resolved.indexOf(prevActive);
+    const previous = multi.keys[multi.activeIndex]?.value;
+    if (previous) {
+      const found = resolved.indexOf(previous);
       if (found >= 0) activeIndex = found;
     }
   }
 
   await setProviderKeys(id, resolved, activeIndex);
-  const label =
-    resolved.length === 1
-      ? maskSecret(resolved[0]!)
-      : `${resolved.length} keys`;
+  const label = resolved.length === 1 ? maskSecret(resolved[0]!) : `${resolved.length} keys`;
   notice(services, "info", `saved ${id} · ${label}`);
+}
+
+async function openSearchKeysEditor(
+  services: AppServices,
+  id: SearchProviderId,
+): Promise<void> {
+  if (id === "duckduckgo") {
+    notice(services, "info", "duckduckgo is keyless and requires no setup");
+    return;
+  }
+
+  const multi = await getSearchProviderKeys(id);
+  const stored =
+    multi.source === "env"
+      ? []
+      : multi.keys.map((key) => ({ id: key.id, masked: maskSecret(key.value), value: key.value }));
+  const answer = await services.overlay.openKeysEditor({
+    provider: id,
+    initialKeys: stored.map((key) => ({ id: key.id, masked: key.masked })),
+  });
+  if (!answer) {
+    notice(services, "info", "cancelled");
+    return;
+  }
+  if (answer.action === "reset") {
+    await unsetSearchProviderSecret(id);
+    notice(services, "info", `unset all keys for ${id}`);
+    return;
+  }
+
+  const resolved = resolveEditorRows(answer.rows, new Map(stored.map((key) => [key.id, key.value])));
+  if (resolved.length === 0) {
+    await unsetSearchProviderSecret(id);
+    notice(services, "info", `unset all keys for ${id}`);
+    return;
+  }
+  if (resolved.length > MAX_PROVIDER_KEYS) {
+    notice(services, "warn", `at most ${MAX_PROVIDER_KEYS} API keys per provider`);
+    return;
+  }
+
+  let activeIndex = 0;
+  if (multi.source !== "env" && multi.keys.length > 0) {
+    const previous = multi.keys[multi.activeIndex]?.value;
+    if (previous) {
+      const found = resolved.indexOf(previous);
+      if (found >= 0) activeIndex = found;
+    }
+  }
+
+  await setSearchProviderKeys(id, resolved, activeIndex);
+  const label = resolved.length === 1 ? maskSecret(resolved[0]!) : `${resolved.length} keys`;
+  notice(services, "info", `saved ${id} · ${label}`);
+}
+
+function resolveEditorRows(
+  rows: readonly { slotId?: string; value: string }[],
+  byId: ReadonlyMap<string, string>,
+): string[] {
+  const resolved: string[] = [];
+  for (const row of rows) {
+    if (row.slotId) {
+      const value = row.value.trim();
+      const keep = value || byId.get(row.slotId);
+      if (keep) resolved.push(keep);
+    } else if (row.value.trim()) {
+      resolved.push(row.value.trim());
+    }
+  }
+  return resolved;
 }
 
 async function appendLlmKey(
@@ -354,30 +416,25 @@ async function setSearchKey(
     notice(services, "info", "duckduckgo is keyless and requires no setup");
     return;
   }
-  let key = keyVal;
-  if (!key) {
-    const secret = await getSearchProviderKey(id);
-    if (secret.value) {
-      const ok = await services.overlay.openConfirm({
-        kind: "reset",
-        prompt: `${id} already has a key (${maskSecret(secret.value)}). Reset it?`,
-      });
-      if (!ok) {
-        notice(services, "info", "cancelled");
-        return;
-      }
-    }
-    key = await services.overlay.openSecret({
-      title: `${id} API key`,
-      prompt: `Enter API key for ${id}:`,
-    });
-    if (!key) {
-      notice(services, "info", "cancelled");
-      return;
-    }
+  if (!keyVal) {
+    await openSearchKeysEditor(services, id);
+    return;
   }
-  await setSecret("search", id, key.trim());
-  notice(services, "info", `saved ${id} ${maskSecret(key.trim())}`);
+  const key = keyVal.trim();
+  if (!key) {
+    notice(services, "warn", "API key cannot be empty");
+    return;
+  }
+  await appendSearchProviderKey(id, key);
+  const multi = await getSearchProviderKeys(id);
+  const count = multi.source === "env" ? 1 : multi.keys.length;
+  notice(
+    services,
+    "info",
+    count > 1
+      ? `added ${id} ${maskSecret(key)} · ${count} keys total`
+      : `saved ${id} ${maskSecret(key)}`,
+  );
 }
 
 async function unsetSearchKey(services: AppServices, id: SearchProviderId): Promise<void> {
@@ -385,14 +442,18 @@ async function unsetSearchKey(services: AppServices, id: SearchProviderId): Prom
     notice(services, "info", "duckduckgo requires no credentials and cannot be unset");
     return;
   }
-  const secret = await getSearchProviderKey(id);
-  if (!secret.value) {
+  const multi = await getSearchProviderKeys(id);
+  const storedCount = multi.source === "env" ? 0 : multi.keys.length;
+  if (storedCount === 0) {
     notice(services, "warn", `${id} has no key to unset`);
     return;
   }
-  const { unsetSearchProviderKey } = await import("../../../commands/search-providers.js");
-  await unsetSearchProviderKey(id);
-  notice(services, "info", `unset ${id}`);
+  await unsetSearchProviderSecret(id);
+  notice(
+    services,
+    "info",
+    storedCount > 1 ? `unset all ${storedCount} keys for ${id}` : `unset ${id}`,
+  );
 }
 
 async function unsetLlmKey(services: AppServices, id: ProviderId): Promise<void> {
