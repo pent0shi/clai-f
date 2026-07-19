@@ -70,8 +70,9 @@ const PAGER_HELP_FULL =
   "↑↓:scroll  ·  pg↑↓:page  ·  ^r:search  ·  n/N:next  ·  f:format  ·  r:raw  ·  c:copy  ·  s:scrollback  ·  e:editor  ·  q/esc:close";
 const PAGER_HELP_MED =
   "↑↓:scroll  ·  ^r:search  ·  f:format  ·  r:raw  ·  c:copy  ·  e:editor  ·  q/esc:close";
-const PAGER_HELP_SHORT = "↑↓  ·  ^r  ·  f:format  ·  r:raw  ·  c:copy  ·  q/esc:close";
-const PAGER_HELP_MIN = "↑↓  ·  f  ·  r  ·  q/esc:close";
+const PAGER_HELP_SHORT =
+  "↑↓:scroll  ·  ^r:search  ·  f:format  ·  r:raw  ·  c:copy  ·  q/esc:close";
+const PAGER_HELP_MIN = "^r:search  ·  q/esc:close";
 
 const PAGER_FOOTER_FULL =
   "f:format  ·  r:raw  ·  c:copy  ·  drag:select  ·  s:scrollback  ·  e:editor";
@@ -526,7 +527,7 @@ export function Pager(props: PagerProps): ReactNode {
           PAGER_HELP_MED,
           PAGER_HELP_SHORT,
           PAGER_HELP_MIN,
-          "↑↓ · ^r · q",
+          "^r:search · q:close",
         ],
         Math.max(8, Math.floor(chromeCols * 0.65)),
       );

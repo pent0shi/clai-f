@@ -2800,11 +2800,25 @@ export async function runAgentTurn(
       return response.text;
     };
 
+    /**
+     * Estimate the complete next model request, including attached native-tool
+     * schemas. This must match the request-context accounting used by the UI
+     * and audit trail: large schemas can otherwise push an actual request past
+     * the compaction threshold while message-only accounting says it is safe.
+     */
+    const estimateNextRequestTokens = (
+      contextMessages: readonly ChatMessage[],
+    ): number => {
+      const { native } = resolveNativeTools(provider, model);
+      const nextTools = selectToolDefs(native, useCompactSystemPrompt);
+      return buildContextBreakdown(contextMessages, nextTools).estimatedTotalTokens;
+    };
+
     async function maybeAutoCompact(
       reason: string,
       force = false,
     ): Promise<void> {
-      const beforeTokens = estimateMessagesTokens(messages);
+      const beforeTokens = estimateNextRequestTokens(messages);
       // E1: soft early compact (default 70k) while hard ceiling remains 100k.
       const compactTrigger = autoCompactTriggerTokens();
       if (!force && beforeTokens < compactTrigger) return;
@@ -2834,8 +2848,8 @@ export async function runAgentTurn(
         }
         messages.splice(0, messages.length, ...result.messages);
         loopGuard.resetReadOnly();
-        // Token stats BEFORE plan re-injection so the reduction is accurate.
-        const compactedTokens = estimateMessagesTokens(messages);
+        // Token stats use the same complete request estimate as the trigger.
+        const compactedTokens = estimateNextRequestTokens(messages);
         // Re-inject the live plan so the model keeps full plan awareness even
         // after older turns (which carried the plan context) were summarized.
         const livePlan = await loadPlan(session.sessionId).catch(
@@ -2850,8 +2864,8 @@ export async function runAgentTurn(
         // Re-inject live SESSION STATE after compaction (older flags survive).
         refreshSessionState(livePlan);
         lastCompactionMsgCount = messages.length;
-        // Final count the model actually receives (may include re-injected plan).
-        const afterTokens = estimateMessagesTokens(messages);
+        // Final request count the model receives (may include re-injected plan).
+        const afterTokens = estimateNextRequestTokens(messages);
         await auditLog("agent.compact", {
           newLength: messages.length,
           estimatedTokens: afterTokens,

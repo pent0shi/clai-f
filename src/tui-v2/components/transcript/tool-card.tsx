@@ -58,6 +58,19 @@ const STATUS_COLOR: Record<ToolItem["status"], keyof Theme> = {
   blocked: "diffDel",
 };
 
+function fileChangeLineStats(
+  changes: readonly FileChange[] | undefined,
+): { added: number; removed: number } | undefined {
+  if (!changes?.length) return undefined;
+  return changes.reduce(
+    (totals, change) => ({
+      added: totals.added + change.stats.added,
+      removed: totals.removed + change.stats.removed,
+    }),
+    { added: 0, removed: 0 },
+  );
+}
+
 function OutputLines(props: {
   lines: readonly string[];
   theme: Theme;
@@ -212,6 +225,7 @@ export function ToolCard(props: {
   const tail = spool.tail(item.toolCallId);
   const spoolState = spool.state(item.toolCallId);
   const fileChanges = item.fileChanges;
+  const fileChangeStats = fileChangeLineStats(fileChanges);
   const isWriteMany = item.name === "fs.writeMany";
   // File mutations never show the spool receipt ("Tool fs.write result…") —
   // that is what made history cards look broken when fileChanges was missing.
@@ -419,6 +433,27 @@ export function ToolCard(props: {
             }}
           />
         </box>
+        {isFileDiff && fileChangeStats ? (
+          <box
+            style={{
+              flexDirection: "row",
+              flexShrink: 0,
+              alignItems: "center",
+            }}
+          >
+            <text
+              selectable={false}
+              content={`+${fileChangeStats.added}`}
+              style={{ fg: theme.success, attributes: TextAttributes.BOLD }}
+            />
+            <text content=" " selectable={false} />
+            <text
+              selectable={false}
+              content={`-${fileChangeStats.removed}`}
+              style={{ fg: theme.diffDel, attributes: TextAttributes.BOLD }}
+            />
+          </box>
+        ) : null}
         <text content=" " selectable={false} style={{ flexShrink: 0 }} />
         <text
           selectable={false}
