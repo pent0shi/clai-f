@@ -74,11 +74,14 @@ jobs:
           retention-days: 7
 
   process-platforms:
+    # ubuntu is intentionally omitted: the `node` job already runs the full
+    # suite (incl. privilege-boundary + jobs-durable) on ubuntu. This matrix
+    # exists only for cross-OS coverage that ubuntu cannot provide.
     name: Process and privilege (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     env:
       CLAI_DATA_DIR: ${{ runner.temp }}/clai/data

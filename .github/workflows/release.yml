@@ -7,10 +7,36 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
+  # Platform-independent gate. Runs ONCE (not per build-matrix target) so
+  # typecheck / tests / prompt-budget / release:verify are not repeated 5×.
+  validate:
+    runs-on: ubuntu-latest
+    env:
+      CLAI_CONFIG_DIR: ${{ runner.temp }}/clai/config
+      CLAI_DATA_DIR: ${{ runner.temp }}/clai/data
+      CLAI_ARTIFACT_DIR: ${{ runner.temp }}/clai/artifacts
+      CLAI_LOG_DIR: ${{ runner.temp }}/clai/logs
+    steps:
+      - uses: actions/checkout@v6
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run prompt-budget
+      - run: npm run release:verify
+      - run: bun run test:bun:v2
+
   build:
+    needs: validate
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -31,16 +57,10 @@ jobs:
           node-version: 20
           cache: npm
       - run: npm ci --ignore-scripts
-      - run: npm run release:verify
-      - run: npm pack --dry-run --json > npm-pack-manifest.json
       # Platform packages declare os/cpu; without --force, npm skips non-host
       # targets and `bun build --compile --target …` fails to resolve imports.
       - name: Install all @opentui/core platform binaries for cross-compile
         run: node scripts/install-opentui-platforms.mjs
-      - run: npm run typecheck
-      - run: npm test
-      - run: npm run prompt-budget
-      - run: bun run test:bun:v2
       - name: Build binary
         run: bun build ./src/index.ts --compile --target ${{ matrix.target }} --outfile release/clai-${{ matrix.target }}${{ contains(matrix.target, 'windows') && '.exe' || '' }}
       - name: Compute SHA256 sidecar
@@ -62,6 +82,8 @@ jobs:
   publish:
     needs: build
     if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v8
@@ -74,6 +96,8 @@ jobs:
           generate_release_notes: true
 
   publish-npm:
+    # validate already ran typecheck + tests once; build produced verified
+    # binaries. This job only checks version/publish-state and publishes.
     needs: build
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
@@ -133,12 +157,6 @@ jobs:
         if: steps.gate.outputs.skip != 'true' && steps.exists.outputs.already != 'true'
         run: npm ci
 
-      - name: Run typecheck and tests
-        if: steps.gate.outputs.skip != 'true' && steps.exists.outputs.already != 'true'
-        run: |
-          npm run typecheck
-          npm test
-
       - name: Publish to npm
         if: steps.gate.outputs.skip != 'true' && steps.exists.outputs.already != 'true'
         env:
@@ -147,6 +165,8 @@ jobs:
           # (not "auth and writes"). Enable it by setting the repo VARIABLE
           # NPM_PROVENANCE=true once your account is configured for it.
           NPM_PROVENANCE: ${{ vars.NPM_PROVENANCE }}
+        # `npm publish` runs the prepublishOnly lifecycle (npm run build), so
+        # dist/ is compiled here from the validated source.
         run: |
           set -euo pipefail
           if [ "${NPM_PROVENANCE:-}" = "true" ]; then
@@ -158,6 +178,8 @@ jobs:
   sync-tap:
     needs: publish
     if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     steps:
       - name: Skip if tap token is missing
