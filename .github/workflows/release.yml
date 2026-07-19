@@ -14,13 +14,16 @@ jobs:
   # typecheck / tests / prompt-budget / release:verify are not repeated 5×.
   validate:
     runs-on: ubuntu-latest
-    env:
-      CLAI_CONFIG_DIR: ${{ runner.temp }}/clai/config
-      CLAI_DATA_DIR: ${{ runner.temp }}/clai/data
-      CLAI_ARTIFACT_DIR: ${{ runner.temp }}/clai/artifacts
-      CLAI_LOG_DIR: ${{ runner.temp }}/clai/logs
     steps:
       - uses: actions/checkout@v6
+      # `runner` context isn't available in job-level `env:` (GitHub Actions
+      # only resolves it inside steps), so derive these from $RUNNER_TEMP here.
+      - name: Set CI directories
+        run: |
+          echo "CLAI_CONFIG_DIR=${RUNNER_TEMP}/clai/config" >> "$GITHUB_ENV"
+          echo "CLAI_DATA_DIR=${RUNNER_TEMP}/clai/data" >> "$GITHUB_ENV"
+          echo "CLAI_ARTIFACT_DIR=${RUNNER_TEMP}/clai/artifacts" >> "$GITHUB_ENV"
+          echo "CLAI_LOG_DIR=${RUNNER_TEMP}/clai/logs" >> "$GITHUB_ENV"
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.3.14
