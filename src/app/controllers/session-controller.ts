@@ -43,6 +43,10 @@ import type { ConfirmationPort } from "../ports/confirm-port.js";
 import type { SecretPort } from "../ports/secret-port.js";
 import { TurnController, type TurnResult } from "./turn-controller.js";
 import { CompositeDisposable, type Disposable } from "./disposable.js";
+import {
+  persistedContextUsage,
+  SessionPersistenceQueue,
+} from "./session-persistence.js";
 
 export interface SessionState {
   readonly sessionId: SessionId;
@@ -132,12 +136,15 @@ export class SessionController implements Disposable {
   /** Throttle mid-turn history autosaves so abort/crash still keep tools on disk. */
   private lastAutosaveAt = 0;
   private autosaveInFlight = false;
+  /** Orders autosave, terminal, compaction, title, switch, and shutdown writes. */
+  private readonly persistence: SessionPersistenceQueue;
   private static readonly AUTOSAVE_MIN_MS = 15_000;
   /** Last known context / session token totals for the status strip. */
   private contextUsage: ContextUsageSnapshot | undefined;
 
   constructor(private readonly deps: SessionControllerDeps) {
     this.sessionIdValue = asSessionId(deps.sessionId ?? mintSessionId());
+    this.persistence = new SessionPersistenceQueue(deps.persistence);
     this.provider = deps.provider;
     this.model = deps.model;
     this.mode = deps.mode ?? "agent";
@@ -298,6 +305,8 @@ export class SessionController implements Disposable {
             exact: boolean;
           }
         | undefined;
+      /** Loaded durable revision; resume advances to a fresh writer generation. */
+      persistenceRevision?: number | undefined;
       /** Per-session scratch/output folder (restored with history). */
       workspaceFolder?: string | undefined;
       workspaceCode?: string | undefined;
@@ -343,6 +352,7 @@ export class SessionController implements Disposable {
       this.sessionIdValue = asSessionId(options.sessionId);
       this.sequencer.rebind(this.sessionIdValue);
       this.policy = createSessionPolicy(this.sessionIdValue);
+      this.persistence.rebind(options.persistenceRevision);
     }
     // Rebind (or mint) the per-session workspace so scratch + outputs
     // continue under the same folder when resuming history.
@@ -387,6 +397,7 @@ export class SessionController implements Disposable {
     if (options.mintNewId) {
       this.sessionIdValue = asSessionId(mintSessionId());
       this.sequencer.rebind(this.sessionIdValue);
+      this.persistence.newSession();
       // Fresh session identity → fresh isolated workspace.
       beginSessionWorkspace();
     }
@@ -395,9 +406,16 @@ export class SessionController implements Disposable {
   }
 
   /** Roll back history after a rejected plan-implement compaction. */
-  restoreMessages(messages: readonly ChatMessage[]): void {
+  restoreMessages(
+    messages: readonly ChatMessage[],
+    contextUsage?: ContextUsageSnapshot | undefined,
+  ): void {
     this.history = [...messages];
-    this.refreshEstimatedContext();
+    if (contextUsage) {
+      this.contextUsage = { ...contextUsage };
+    } else {
+      this.refreshEstimatedContext();
+    }
     this.notifyState();
   }
 
@@ -466,31 +484,19 @@ export class SessionController implements Disposable {
     }
   }
 
-  /** Persist current messages (+ optional visual transcript) under this session id. */
+  /** Persist one immutable snapshot behind every previously captured save. */
   async persistNow(name?: string): Promise<void> {
     if (this.deps.noHistory || getConfig().privateMode) return;
     if (this.history.length === 0) return;
-    // Only sessions with a real user turn belong in /history (classic parity).
-    if (!this.history.some((m) => m.role === "user")) return;
+    if (!this.history.some((message) => message.role === "user")) return;
     if (name) this.sessionTitle = name;
-    const transcript = this.deps.getTranscriptSnapshot?.();
-    const snap = this.resolveContextUsage();
-    await this.deps.persistence.saveSession(this.history, {
+
+    const contextUsage = persistedContextUsage(this.resolveContextUsage());
+    return this.persistence.save(this.history, {
       sessionId: this.sessionIdValue,
       name: name ?? this.sessionTitle,
-      transcript,
-      ...(snap && snap.contextTokens > 0
-        ? {
-            contextUsage: {
-              contextTokens: snap.contextTokens,
-              contextLimit: snap.contextLimit,
-              lastCompletionTokens: snap.lastCompletionTokens,
-              sessionPromptTokens: snap.sessionPromptTokens,
-              sessionCompletionTokens: snap.sessionCompletionTokens,
-              exact: snap.exact,
-            },
-          }
-        : {}),
+      transcript: this.deps.getTranscriptSnapshot?.(),
+      ...(contextUsage ? { contextUsage } : {}),
     });
   }
 

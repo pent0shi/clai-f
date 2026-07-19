@@ -3,8 +3,11 @@ import {
   copyFile,
   mkdir,
   readdir,
+  open,
   readFile,
   rm,
+  stat,
+  utimes,
   writeFile,
   chown,
   rename,
@@ -34,6 +37,12 @@ function dbFilePath(): string {
 function jsonlFilePath(): string {
   return join(historyDirPath(), "history.jsonl");
 }
+function jsonlLockFilePath(): string {
+  return join(historyDirPath(), "history.jsonl.lock");
+}
+function jsonlLockReaperPath(): string {
+  return join(historyDirPath(), "history.jsonl.lock.reaper");
+}
 /** Sessions pruned by retention land here — never hard-deleted on autosave. */
 function archiveFilePath(): string {
   return join(historyDirPath(), "history-archive.jsonl");
@@ -44,14 +53,7 @@ function backupDirPath(): string {
 }
 /** Max rolling backups kept under history-backups/. */
 const MAX_HISTORY_BACKUPS = 12;
-// We keep this string here (not as a literal) so the bundler doesn't try
-// to statically resolve a module that may not be installed. If a user has
-// `better-sqlite3` available (eg they explicitly added it for a richer
-// history experience) we'll happily use it; otherwise we transparently
-// fall back to the always-available JSONL log. This lets us drop
-// `better-sqlite3` from our optional dependencies — and with it the
-// deprecated `prebuild-install` warning — without losing functionality
-// for users who already had a SQLite-backed history.
+
 const sqliteModuleName = "better-sqlite3";
 
 /** Persisted token/context footer snapshot (survives /history resume). */
@@ -66,6 +68,13 @@ export interface PersistedContextUsage {
 
 export interface HistoryRecord {
   id: string;
+  /** Unique writer generation, compared before the per-writer revision. */
+  writerGeneration?: string | undefined;
+  /**
+   * Monotonic whole-snapshot revision within one writer generation. Unlike
+   * updatedAt, this records capture order rather than I/O completion order.
+   */
+  revision?: number | undefined;
   name?: string | undefined;
   createdAt: string;
   updatedAt: string;
@@ -170,6 +179,8 @@ async function loadDatabase(): Promise<DatabaseLike | undefined> {
         name TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
+        writer_generation TEXT,
+        revision INTEGER NOT NULL DEFAULT 0,
         cwd TEXT NOT NULL,
         messages_json TEXT NOT NULL
       );
@@ -187,6 +198,17 @@ async function loadDatabase(): Promise<DatabaseLike | undefined> {
       CREATE INDEX IF NOT EXISTS idx_sessions_updated_at ON sessions(updated_at);
       CREATE INDEX IF NOT EXISTS idx_tool_calls_session_id ON tool_calls(session_id);
     `);
+    const sessionColumns = cachedDb
+      .prepare("PRAGMA table_info(sessions)")
+      .all() as Array<{ name?: string }>;
+    if (!sessionColumns.some((column) => column.name === "writer_generation")) {
+      cachedDb.exec("ALTER TABLE sessions ADD COLUMN writer_generation TEXT;");
+    }
+    if (!sessionColumns.some((column) => column.name === "revision")) {
+      cachedDb.exec(
+        "ALTER TABLE sessions ADD COLUMN revision INTEGER NOT NULL DEFAULT 0;",
+      );
+    }
     return cachedDb;
   } catch (err: any) {
     if (err && err.code === "EACCES") {
@@ -249,11 +271,110 @@ function scrubTranscript(items?: TranscriptItem[] | undefined): TranscriptItem[]
   });
 }
 
-async function appendJsonl(record: HistoryRecord): Promise<void> {
-  await mutateJsonl((records) => {
-    records.push(record);
-    return records;
-  });
+const JSONL_LOCK_STALE_MS = 60_000;
+const JSONL_LOCK_RETRIES = 200;
+
+/** Serialize stale-lock reclamation and recheck the owner while holding it. */
+async function reapStaleJsonlLock(): Promise<void> {
+  let reaper: Awaited<ReturnType<typeof open>>;
+  const reaperToken = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  try {
+    reaper = await open(jsonlLockReaperPath(), "wx", 0o600);
+    try {
+      await reaper.writeFile(reaperToken);
+    } catch (error) {
+      await reaper.close().catch(() => undefined);
+      await rm(jsonlLockReaperPath(), { force: true }).catch(() => undefined);
+      throw error;
+    }
+  } catch (error: any) {
+    if (error?.code !== "EEXIST") throw error;
+    const existingToken = await readFile(jsonlLockReaperPath(), "utf8").catch(
+      () => undefined,
+    );
+    const reaperStat = await stat(jsonlLockReaperPath()).catch(() => undefined);
+    if (
+      !reaperStat ||
+      Date.now() - reaperStat.mtimeMs <= JSONL_LOCK_STALE_MS
+    ) {
+      return;
+    }
+    const confirmed = await readFile(jsonlLockReaperPath(), "utf8").catch(
+      () => undefined,
+    );
+    if (confirmed !== undefined && confirmed === existingToken) {
+      await rm(jsonlLockReaperPath(), { force: true }).catch(() => undefined);
+    }
+    return;
+  }
+  try {
+    const token = await readFile(jsonlLockFilePath(), "utf8").catch(
+      () => undefined,
+    );
+    const lockStat = await stat(jsonlLockFilePath()).catch(() => undefined);
+    if (!lockStat || Date.now() - lockStat.mtimeMs <= JSONL_LOCK_STALE_MS) {
+      return;
+    }
+    // The live owner refreshes mtime periodically. A stale marker—including
+    // an empty marker left between open/write—is therefore safe to reclaim.
+    const confirmed = await readFile(jsonlLockFilePath(), "utf8").catch(
+      () => undefined,
+    );
+    if (confirmed !== undefined && confirmed === token) {
+      await rm(jsonlLockFilePath(), { force: true });
+    }
+  } finally {
+    await reaper.close().catch(() => undefined);
+    const currentReaper = await readFile(jsonlLockReaperPath(), "utf8").catch(
+      () => undefined,
+    );
+    if (currentReaper === reaperToken) {
+      await rm(jsonlLockReaperPath(), { force: true }).catch(() => undefined);
+    }
+  }
+}
+
+/**
+ * Cross-process lock around JSONL read/modify/rename. Atomic rename protects
+ * readers, but without this lock two clai processes can both read the same
+ * base file and then each replace it, dropping whichever session they did not
+ * observe. The lock is transient and stale crash leftovers self-heal.
+ */
+async function acquireJsonlWriteLock(): Promise<() => Promise<void>> {
+  await mkdir(historyDirPath(), { recursive: true });
+  for (let attempt = 0; attempt < JSONL_LOCK_RETRIES; attempt += 1) {
+    try {
+      const token = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      const handle = await open(jsonlLockFilePath(), "wx", 0o600);
+      try {
+        await handle.writeFile(token);
+      } catch (error) {
+        await handle.close().catch(() => undefined);
+        await rm(jsonlLockFilePath(), { force: true }).catch(() => undefined);
+        throw error;
+      }
+      const heartbeat = setInterval(() => {
+        const now = new Date();
+        void utimes(jsonlLockFilePath(), now, now).catch(() => undefined);
+      }, JSONL_LOCK_STALE_MS / 3);
+      heartbeat.unref();
+      return async () => {
+        clearInterval(heartbeat);
+        await handle.close().catch(() => undefined);
+        const currentToken = await readFile(jsonlLockFilePath(), "utf8").catch(
+          () => undefined,
+        );
+        if (currentToken === token) {
+          await rm(jsonlLockFilePath(), { force: true }).catch(() => undefined);
+        }
+      };
+    } catch (error: any) {
+      if (error?.code !== "EEXIST") throw error;
+      await reapStaleJsonlLock();
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+  }
+  throw new Error("timed out waiting for history write lock");
 }
 
 /**
@@ -273,12 +394,17 @@ function mutateJsonl(
   const run = jsonlWriteChain.then(async () => {
     try {
       await ensureHistoryRecovered();
-      const current = await readJsonlRecordsFrom(jsonlFilePath());
-      const next = update(current);
-      await writeJsonlAtomic(next);
-      // A list may have been loaded after the pre-write invalidation but
-      // before the atomic rename completed. Never leave that snapshot cached.
-      invalidateSessionListCache();
+      const releaseLock = await acquireJsonlWriteLock();
+      try {
+        const current = await readJsonlRecordsFrom(jsonlFilePath());
+        const next = update(current);
+        await writeJsonlAtomic(next);
+        // A list may have been loaded after the pre-write invalidation but
+        // before the atomic rename completed. Never leave that snapshot cached.
+        invalidateSessionListCache();
+      } finally {
+        await releaseLock();
+      }
     } catch (err: any) {
       handlePermissionError(err);
     }
@@ -296,7 +422,60 @@ function updatedAtMs(record: HistoryRecord): number {
   return Number.isFinite(t) ? t : 0;
 }
 
-/** Keep the newest version of each session id. */
+function historyRevision(record: HistoryRecord | undefined): number {
+  const revision = record?.revision;
+  return typeof revision === "number" &&
+    Number.isSafeInteger(revision) &&
+    revision > 0
+    ? revision
+    : 0;
+}
+
+function historyWriterGeneration(
+  record: HistoryRecord | undefined,
+): string | undefined {
+  const generation = record?.writerGeneration;
+  return typeof generation === "string" && generation.length > 0
+    ? generation
+    : undefined;
+}
+
+/**
+ * Compare snapshots by writer generation, then capture revision. Legacy rows
+ * without a generation retain revision/timestamp fallback for compatibility.
+ */
+export function compareHistoryFreshness(
+  left: HistoryRecord,
+  right: HistoryRecord,
+): number {
+  const leftGeneration = historyWriterGeneration(left);
+  const rightGeneration = historyWriterGeneration(right);
+  if (leftGeneration || rightGeneration) {
+    if (!leftGeneration) return -1;
+    if (!rightGeneration) return 1;
+    const generationDelta = leftGeneration.localeCompare(rightGeneration);
+    if (generationDelta !== 0) return generationDelta;
+  }
+
+  const revisionDelta = historyRevision(left) - historyRevision(right);
+  if (revisionDelta !== 0) return revisionDelta;
+  if (historyRevision(left) > 0) return 0;
+  return updatedAtMs(left) - updatedAtMs(right);
+}
+
+function freshestHistoryRecord(
+  records: readonly HistoryRecord[],
+): HistoryRecord | undefined {
+  let freshest: HistoryRecord | undefined;
+  for (const record of records) {
+    if (!freshest || compareHistoryFreshness(record, freshest) > 0) {
+      freshest = record;
+    }
+  }
+  return freshest;
+}
+
+/** Keep the newest captured version of each session id. */
 export function dedupeHistoryById(
   records: readonly HistoryRecord[],
 ): HistoryRecord[] {
@@ -304,7 +483,9 @@ export function dedupeHistoryById(
   for (const record of records) {
     if (!record?.id) continue;
     const prev = byId.get(record.id);
-    if (!prev || updatedAtMs(record) >= updatedAtMs(prev)) {
+    // Preserve the first source on an exact tie. JSONL is passed first during
+    // cross-backend merge and is the durable canonical copy.
+    if (!prev || compareHistoryFreshness(record, prev) > 0) {
       byId.set(record.id, record);
     }
   }
@@ -405,6 +586,8 @@ export async function recoverOrphanedHistory(): Promise<{
 }> {
   const sources: string[] = [];
   const extras: HistoryRecord[] = [];
+  const releaseLock = await acquireJsonlWriteLock();
+  try {
 
   try {
     const names = await readdir(historyDirPath());
@@ -461,10 +644,13 @@ export async function recoverOrphanedHistory(): Promise<{
   if (extras.length === 0) return { recovered: 0, sources: [] };
 
   const active = await readJsonlRecordsFrom(jsonlFilePath());
-  const beforeIds = new Set(active.map((r) => r.id));
+  const activeById = new Map(active.map((record) => [record.id, record]));
   const merged = dedupeHistoryById([...active, ...extras]);
-  const newCount = merged.filter((r) => !beforeIds.has(r.id)).length;
-  if (newCount === 0 && merged.length <= active.length) {
+  const recoveredCount = merged.filter((record) => {
+    const previous = activeById.get(record.id);
+    return !previous || compareHistoryFreshness(record, previous) > 0;
+  }).length;
+  if (recoveredCount === 0) {
     return { recovered: 0, sources };
   }
 
@@ -495,7 +681,10 @@ export async function recoverOrphanedHistory(): Promise<{
     }
   }
 
-  return { recovered: newCount, sources };
+    return { recovered: recoveredCount, sources };
+  } finally {
+    await releaseLock();
+  }
 }
 
 function startHistoryRecovery(): Promise<void> {
@@ -593,11 +782,59 @@ async function writeJsonlAtomic(records: HistoryRecord[]): Promise<void> {
   await fixOwner(jsonlFilePath());
 }
 
+function serializeSessionPayload(record: HistoryRecord): string {
+  return JSON.stringify({
+    messages: record.messages,
+    transcript: record.transcript,
+    ...(record.contextUsage ? { contextUsage: record.contextUsage } : {}),
+    ...(record.workspaceFolder
+      ? {
+          workspaceFolder: record.workspaceFolder,
+          workspaceCode: record.workspaceCode,
+        }
+      : {}),
+  });
+}
+
+/** SQLite mirror write with atomic generation/revision rejection. */
+function upsertSqlite(db: DatabaseLike, record: HistoryRecord): void {
+  db.prepare(
+    `INSERT INTO sessions
+       (id, name, created_at, updated_at, writer_generation, revision, cwd, messages_json)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET
+       name = excluded.name,
+       created_at = excluded.created_at,
+       updated_at = excluded.updated_at,
+       writer_generation = excluded.writer_generation,
+       revision = excluded.revision,
+       cwd = excluded.cwd,
+       messages_json = excluded.messages_json
+     WHERE (sessions.writer_generation IS NULL AND excluded.writer_generation IS NOT NULL)
+        OR excluded.writer_generation > sessions.writer_generation
+        OR (excluded.writer_generation = sessions.writer_generation
+            AND excluded.revision >= sessions.revision)
+        OR (sessions.writer_generation IS NULL AND excluded.writer_generation IS NULL
+            AND excluded.revision >= sessions.revision)`,
+  ).run(
+    record.id,
+    record.name ?? null,
+    record.createdAt,
+    record.updatedAt,
+    historyWriterGeneration(record) ?? null,
+    historyRevision(record),
+    record.cwd,
+    serializeSessionPayload(record),
+  );
+}
+
 export async function saveSession(
   messages: ChatMessage[],
   name?: string | undefined,
   transcript?: TranscriptItem[] | undefined,
   contextUsage?: PersistedContextUsage | undefined,
+  revision?: number | undefined,
+  writerGeneration?: string | undefined,
 ): Promise<HistoryRecord> {
   // Auto-derive a readable name from the first real user message if none provided
   if (!name) {
@@ -614,6 +851,11 @@ export async function saveSession(
   const workspace = workspaceFieldsFromActive();
   const record: HistoryRecord = {
     id: newId(),
+    ...(writerGeneration ? { writerGeneration } : {}),
+    revision:
+      typeof revision === "number" && Number.isSafeInteger(revision) && revision > 0
+        ? revision
+        : 1,
     name,
     createdAt: now,
     updatedAt: now,
@@ -626,40 +868,18 @@ export async function saveSession(
 
   // Private mode: never persist chat content. Caller still gets a record
   // back (so /save echoes a usable id) but nothing hits disk.
-  if (getConfig().privateMode) {
-    return record;
-  }
+  if (getConfig().privateMode) return record;
 
   invalidateSessionListCache();
   const db = await loadDatabase();
+
+  const canonical = await upsertJsonl(record);
   if (db) {
-    db.prepare(
-      "INSERT INTO sessions (id, name, created_at, updated_at, cwd, messages_json) VALUES (?, ?, ?, ?, ?, ?)",
-    ).run(
-      record.id,
-      record.name ?? null,
-      record.createdAt,
-      record.updatedAt,
-      record.cwd,
-      JSON.stringify({
-        messages: record.messages,
-        transcript: record.transcript,
-        ...(contextUsage ? { contextUsage } : {}),
-        ...(record.workspaceFolder
-          ? {
-              workspaceFolder: record.workspaceFolder,
-              workspaceCode: record.workspaceCode,
-            }
-          : {}),
-      }),
-    );
+    upsertSqlite(db, canonical);
     await enforceSqliteRetention(db);
     invalidateSessionListCache();
-  } else {
-    await appendJsonl(record);
   }
-
-  return record;
+  return canonical;
 }
 
 export async function upsertSession(
@@ -668,18 +888,33 @@ export async function upsertSession(
   name?: string | undefined,
   transcript?: TranscriptItem[] | undefined,
   contextUsage?: PersistedContextUsage | undefined,
+  revision?: number | undefined,
+  writerGeneration?: string | undefined,
 ): Promise<HistoryRecord> {
   const existing = await getSession(id);
+  const requestedRevision =
+    typeof revision === "number" && Number.isSafeInteger(revision) && revision > 0
+      ? revision
+      : undefined;
   const firstUser = messages.find(
-    (m) => m.role === "user" && !isInternalChatMessage(m),
+    (message) => message.role === "user" && !isInternalChatMessage(message),
   );
   const derivedName = firstUser
-    ? firstUser.content.slice(0, 60).replace(/\n/g, " ").trim() + (firstUser.content.length > 60 ? "…" : "")
+    ? firstUser.content.slice(0, 60).replace(/\n/g, " ").trim() +
+      (firstUser.content.length > 60 ? "…" : "")
     : undefined;
   const now = new Date().toISOString();
   const workspace = workspaceFieldsFromActive(existing);
+  const effectiveWriterGeneration =
+    writerGeneration ?? existing?.writerGeneration;
   const record: HistoryRecord = {
     id,
+    ...(effectiveWriterGeneration
+      ? { writerGeneration: effectiveWriterGeneration }
+      : {}),
+    revision:
+      requestedRevision ??
+      (writerGeneration ? 1 : historyRevision(existing) + 1),
     name: name ?? existing?.name ?? derivedName,
     createdAt: existing?.createdAt ?? now,
     updatedAt: now,
@@ -694,38 +929,24 @@ export async function upsertSession(
     ...workspace,
   };
 
+  if (
+    existing &&
+    requestedRevision !== undefined &&
+    compareHistoryFreshness(record, existing) <= 0
+  ) {
+    return existing;
+  }
   if (getConfig().privateMode) return record;
 
   invalidateSessionListCache();
   const db = await loadDatabase();
+  const canonical = await upsertJsonl(record);
   if (db) {
-    db.prepare(
-      "INSERT OR REPLACE INTO sessions (id, name, created_at, updated_at, cwd, messages_json) VALUES (?, ?, ?, ?, ?, ?)",
-    ).run(
-      record.id,
-      record.name ?? null,
-      record.createdAt,
-      record.updatedAt,
-      record.cwd,
-      JSON.stringify({
-        messages: record.messages,
-        transcript: record.transcript,
-        ...(record.contextUsage ? { contextUsage: record.contextUsage } : {}),
-        ...(record.workspaceFolder
-          ? {
-              workspaceFolder: record.workspaceFolder,
-              workspaceCode: record.workspaceCode,
-            }
-          : {}),
-      }),
-    );
+    upsertSqlite(db, canonical);
     await enforceSqliteRetention(db);
     invalidateSessionListCache();
-  } else {
-    await upsertJsonl(record);
   }
-
-  return record;
+  return canonical;
 }
 
 async function enforceSqliteRetention(db: DatabaseLike): Promise<void> {
@@ -736,7 +957,7 @@ async function enforceSqliteRetention(db: DatabaseLike): Promise<void> {
   try {
     const doomed = db
       .prepare(
-        `SELECT id, name, created_at, updated_at, cwd, messages_json FROM sessions
+        `SELECT id, name, created_at, updated_at, writer_generation, revision, cwd, messages_json FROM sessions
          WHERE id NOT IN (SELECT id FROM sessions ORDER BY updated_at DESC LIMIT ?)`,
       )
       .all(Math.floor(limit)) as unknown[];
@@ -750,13 +971,23 @@ async function enforceSqliteRetention(db: DatabaseLike): Promise<void> {
   );
 }
 
-async function upsertJsonl(record: HistoryRecord): Promise<void> {
+async function upsertJsonl(record: HistoryRecord): Promise<HistoryRecord> {
+  let canonical = record;
   await mutateJsonl((records) => {
     const idx = records.findIndex((item) => item.id === record.id);
-    if (idx >= 0) records[idx] = record;
-    else records.push(record);
+    if (idx >= 0) {
+      const current = records[idx];
+      if (current && compareHistoryFreshness(record, current) > 0) {
+        records[idx] = record;
+      } else if (current) {
+        canonical = current;
+      }
+    } else {
+      records.push(record);
+    }
     return records;
   });
+  return canonical;
 }
 
 export async function saveToolCall(
@@ -799,6 +1030,8 @@ function rowToSession(row: unknown): HistoryRecord {
     name: string | null;
     created_at: string;
     updated_at: string;
+    writer_generation?: string | null | undefined;
+    revision?: number | undefined;
     cwd: string;
     messages_json: string;
   };
@@ -814,6 +1047,11 @@ function rowToSession(row: unknown): HistoryRecord {
   const messages = Array.isArray(parsed) ? parsed : parsed.messages ?? [];
   return {
     id: data.id,
+    writerGeneration: data.writer_generation ?? undefined,
+    revision:
+      typeof data.revision === "number" && data.revision > 0
+        ? data.revision
+        : undefined,
     name: data.name ?? undefined,
     createdAt: data.created_at,
     updatedAt: data.updated_at,
@@ -841,10 +1079,7 @@ async function listJsonlSessions(limit: number): Promise<HistoryRecord[]> {
   }
 }
 
-/**
- * Merge SQLite + JSONL sources so enabling better-sqlite3 never hides an
- * existing JSONL history (or vice versa). Prefer the newer updatedAt per id.
- */
+
 function mergeSessionLists(
   ...lists: readonly (readonly HistoryRecord[])[]
 ): HistoryRecord[] {
@@ -875,9 +1110,6 @@ export async function listSessions(
   // Every mutation increments this generation before and after persistence.
   const loadGeneration = sessionListGeneration;
 
-  // JSONL parsing and optional SQLite startup are independent. Running them
-  // concurrently removes dynamic SQLite import latency from /history's
-  // critical path instead of paying both costs serially.
   const [fromJsonl, db] = await Promise.all([
     listJsonlSessions(0),
     loadDatabase(),
@@ -887,7 +1119,7 @@ export async function listSessions(
     try {
       const rows = db
         .prepare(
-          "SELECT id, name, created_at, updated_at, cwd, messages_json FROM sessions ORDER BY updated_at DESC",
+          "SELECT id, name, created_at, updated_at, writer_generation, revision, cwd, messages_json FROM sessions ORDER BY updated_at DESC",
         )
         .all();
       fromDb = rows.map(rowToSession);
@@ -919,7 +1151,7 @@ export async function getSession(
   if (db) {
     const row = db
       .prepare(
-        "SELECT id, name, created_at, updated_at, cwd, messages_json FROM sessions WHERE id = ?",
+        "SELECT id, name, created_at, updated_at, writer_generation, revision, cwd, messages_json FROM sessions WHERE id = ?",
       )
       .get(sessionId);
     if (row) fromDb = rowToSession(row);
@@ -932,11 +1164,23 @@ export async function getSession(
     ? undefined
     : (await readJsonlRecordsFrom(archiveFilePath())).find((s) => s.id === sessionId);
 
-  const candidates = [fromDb, fromJsonl, fromArchive].filter(
-    (r): r is HistoryRecord => Boolean(r),
+  const candidates = [fromJsonl, fromDb, fromArchive].filter(
+    (record): record is HistoryRecord => Boolean(record),
   );
-  if (candidates.length === 0) return undefined;
-  return sortHistoryByUpdatedDesc(candidates)[0];
+  const freshest = freshestHistoryRecord(candidates);
+  if (!freshest) return undefined;
+
+  // Heal split-brain stores on selection. This is especially important across
+  // upgrades where optional SQLite availability changes between launches.
+  if (!fromJsonl || compareHistoryFreshness(freshest, fromJsonl) > 0) {
+    await upsertJsonl(freshest);
+  }
+  if (db && (!fromDb || compareHistoryFreshness(freshest, fromDb) > 0)) {
+    upsertSqlite(db, freshest);
+    await enforceSqliteRetention(db);
+    invalidateSessionListCache();
+  }
+  return freshest;
 }
 
 export function getHistoryPath(): string {
@@ -945,11 +1189,7 @@ export function getHistoryPath(): string {
   return jsonlFilePath();
 }
 
-/**
- * Clear active history after archiving a full snapshot. Never unrecoverably
- * destroys chats — a timestamped copy is written under history-backups/ and
- * the previous active file is moved into history-archive.jsonl.
- */
+
 export async function clearAllHistory(): Promise<{
   cleared: boolean;
   detail: string;
@@ -957,10 +1197,6 @@ export async function clearAllHistory(): Promise<{
   let detail = "";
   await ensureHistoryRecovered();
 
-  // Snapshot + move aside. Do NOT write into history-archive.jsonl here —
-  // that file is auto-reimported by recoverOrphanedHistory, which would
-  // immediately undo a clear. Intentional clears go to history-cleared-*.jsonl
-  // (and rolling backups) only.
   try {
     const snapshot = await readJsonlRecordsFrom(jsonlFilePath());
     if (snapshot.length > 0) {

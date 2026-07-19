@@ -52,6 +52,7 @@ export class RendererLifecycle {
   private readonly disposers: Disposer[];
   private started = false;
   private shuttingDown = false;
+  private shutdownPromise: Promise<void> | undefined;
   private destroyed = false;
   private lastSigintAt = 0;
   private readonly listeners: Array<{
@@ -85,10 +86,22 @@ export class RendererLifecycle {
   /**
    * Idempotent teardown: dispose extra resources in reverse order, then destroy
    * the renderer. Safe to call from multiple signals/error paths concurrently.
+   *
+   * Concurrent callers await the SAME in-flight teardown instead of returning
+   * early. This matters at quit: a second exit trigger (App Ctrl+C plus a raw
+   * SIGINT, SIGTERM during shutdown, etc.) must not let `shutdownAndExit` call
+   * `process.exit()` while the first shutdown's disposers — including the final
+   * history flush — are still writing to disk. Returning early here is exactly
+   * how a terminal `/compact` save was being truncated before it hit disk.
    */
   async shutdown(): Promise<void> {
-    if (this.shuttingDown) return;
+    if (this.shutdownPromise) return this.shutdownPromise;
     this.shuttingDown = true;
+    this.shutdownPromise = this.runShutdown();
+    return this.shutdownPromise;
+  }
+
+  private async runShutdown(): Promise<void> {
     this.removeHandlers();
     for (let i = this.disposers.length - 1; i >= 0; i--) {
       const disposer = this.disposers[i];
@@ -105,7 +118,10 @@ export class RendererLifecycle {
     }
   }
 
-  /** Tear down fully, then exit — destroy always precedes exit. */
+  /**
+   * Tear down fully, then exit — destroy always precedes exit, and exit never
+   * runs until the (possibly already in-flight) shutdown has fully completed.
+   */
   async shutdownAndExit(code: number): Promise<void> {
     await this.shutdown();
     this.proc.exit(code);

@@ -153,4 +153,54 @@ describe("history autosave upsert", () => {
     const sessions = await listSessions(10);
     expect(sessions[0]?.name).toBe("Kubernetes basics");
   });
+
+  it("rejects a lower revision that arrives after a compacted snapshot", async () => {
+    const { getSession, upsertSession } = await import("../src/store/history.js");
+    const compactedMemory =
+      "Session memory from compacted earlier turns:\n\npost-resume work complete";
+
+    await upsertSession(
+      "revisioned-session",
+      [
+        { role: "system", content: compactedMemory },
+        { role: "user", content: "latest follow-up" },
+        { role: "assistant", content: "latest answer" },
+      ],
+      "Compacted session",
+      [
+        {
+          kind: "compacted",
+          id: "compact-5",
+          summary: compactedMemory,
+          originalItems: [],
+          done: true,
+        },
+      ],
+      { contextTokens: 12_000, contextLimit: 128_000, exact: false },
+      5,
+      "0000000000000002-writer-new",
+    );
+
+    // This models an older writer completing late. Even a much larger local
+    // sequence must lose to the newer writer generation.
+    await upsertSession(
+      "revisioned-session",
+      [
+        { role: "user", content: "old resumed task" },
+        { role: "assistant", content: "old progress" },
+      ],
+      "Stale session",
+      [{ kind: "user", id: "u-old", text: "old resumed task", done: true }],
+      { contextTokens: 88_000, contextLimit: 128_000, exact: true },
+      999,
+      "0000000000000001-writer-old",
+    );
+
+    const restored = await getSession("revisioned-session");
+    expect(restored?.revision).toBe(5);
+    expect(restored?.name).toBe("Compacted session");
+    expect(restored?.messages[0]?.content).toBe(compactedMemory);
+    expect(restored?.transcript?.[0]?.kind).toBe("compacted");
+    expect(restored?.contextUsage?.contextTokens).toBe(12_000);
+  });
 });

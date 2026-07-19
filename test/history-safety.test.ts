@@ -56,8 +56,10 @@ function sample(
   id: string,
   updatedAt: string,
   name = id,
+  revision?: number,
 ): {
   id: string;
+  revision?: number | undefined;
   name: string;
   createdAt: string;
   updatedAt: string;
@@ -66,6 +68,7 @@ function sample(
 } {
   return {
     id,
+    ...(revision ? { revision } : {}),
     name,
     createdAt: updatedAt,
     updatedAt,
@@ -100,6 +103,45 @@ describe("history retention partitioning", () => {
     expect(kept).toHaveLength(2);
     expect(pruned).toHaveLength(0);
   });
+
+  it("prefers capture revision over a stale source with a newer timestamp", async () => {
+    const { dedupeHistoryById } = await import("../src/store/history.js");
+    const compacted = sample(
+      "same-session",
+      "2026-07-19T10:00:00.000Z",
+      "compacted-new",
+      9,
+    );
+    const stale = sample(
+      "same-session",
+      "2026-07-19T10:05:00.000Z",
+      "stale-finished-late",
+      8,
+    );
+
+    const [selected] = dedupeHistoryById([compacted, stale]);
+    expect(selected?.revision).toBe(9);
+    expect(selected?.name).toBe("compacted-new");
+  });
+
+  it("keeps the first canonical source when equal revisions have conflicting timestamps", async () => {
+    const { dedupeHistoryById } = await import("../src/store/history.js");
+    const canonical = sample(
+      "equal-session",
+      "2026-07-19T10:00:00.000Z",
+      "canonical",
+      12,
+    );
+    const finishedLater = sample(
+      "equal-session",
+      "2026-07-19T10:10:00.000Z",
+      "conflicting-equal-revision",
+      12,
+    );
+
+    const [selected] = dedupeHistoryById([canonical, finishedLater]);
+    expect(selected?.name).toBe("canonical");
+  });
 });
 
 describe("history recovery from orphan temps", () => {
@@ -131,6 +173,45 @@ describe("history recovery from orphan temps", () => {
     expect(ids).toContain("keep");
     expect(ids).toContain("lost");
     expect(existsSync(tmp)).toBe(false); // cleaned after successful merge
+  });
+
+  it("recovers a newer same-session revision from another durable source", async () => {
+    const {
+      getHistoryArchivePath,
+      getJsonlHistoryPath,
+      listSessions,
+      recoverOrphanedHistory,
+    } = await import("../src/store/history.js");
+    writeFileSync(
+      getJsonlHistoryPath(),
+      `${JSON.stringify(
+        sample(
+          "split-session",
+          "2026-07-19T10:05:00.000Z",
+          "stale-jsonl",
+          5,
+        ),
+      )}\n`,
+    );
+    writeFileSync(
+      getHistoryArchivePath(),
+      `${JSON.stringify(
+        sample(
+          "split-session",
+          "2026-07-19T10:00:00.000Z",
+          "newer-revision",
+          6,
+        ),
+      )}\n`,
+    );
+
+    const result = await recoverOrphanedHistory();
+    expect(result.recovered).toBe(1);
+    const selected = (await listSessions(10)).find(
+      (record) => record.id === "split-session",
+    );
+    expect(selected?.revision).toBe(6);
+    expect(selected?.name).toBe("newer-revision");
   });
 });
 

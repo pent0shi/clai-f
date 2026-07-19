@@ -5,6 +5,21 @@ import {
   type RendererHandle,
 } from "../../src/tui-v2/bootstrap/lifecycle.js";
 
+/**
+ * Signal handlers fire shutdown fire-and-forget (`void shutdownAndExit`), so
+ * the test cannot await their promise. Flush microtasks until a condition
+ * holds (bounded) instead of counting a fixed number of ticks — teardown depth
+ * is an implementation detail that must not make these assertions fragile.
+ */
+async function flushUntil(
+  predicate: () => boolean,
+  maxTicks = 50,
+): Promise<void> {
+  for (let i = 0; i < maxTicks && !predicate(); i += 1) {
+    await Promise.resolve();
+  }
+}
+
 class FakeProcess implements ProcessLike {
   readonly handlers = new Map<string, Set<(...a: unknown[]) => void>>();
   readonly exitCalls: number[] = [];
@@ -106,8 +121,7 @@ describe("RendererLifecycle signal handling", () => {
     expect(log).not.toContain("destroy");
 
     proc.emit("SIGINT");
-    await Promise.resolve();
-    await Promise.resolve();
+    await flushUntil(() => proc.exitCalls.length > 0);
     expect(log).toContain("destroy");
     expect(proc.exitCalls).toContain(130);
   });
@@ -135,10 +149,54 @@ describe("RendererLifecycle signal handling", () => {
     await life.start();
     const boom = new Error("boom");
     proc.emit("uncaughtException", boom);
-    await Promise.resolve();
-    await Promise.resolve();
+    await flushUntil(() => proc.exitCalls.length > 0);
     expect(onError).toHaveBeenCalledWith(boom);
     expect(proc.exitCalls).toContain(1);
+  });
+});
+
+describe("RendererLifecycle concurrent quit", () => {
+  it("does not exit until an in-flight shutdown flush completes, even when a second exit races it", async () => {
+    const log: string[] = [];
+    const proc = new FakeProcess();
+    let resolveFlush!: () => void;
+    const flushGate = new Promise<void>((resolve) => {
+      resolveFlush = resolve;
+    });
+    let flushDone = false;
+    const life = new RendererLifecycle({
+      handle: makeHandle(log),
+      process: proc,
+      // Models the awaited history persist in start-tui-v2's disposer.
+      disposers: [
+        async () => {
+          await flushGate;
+          flushDone = true;
+          log.push("flushed");
+        },
+      ],
+    });
+    await life.start();
+
+    // App Ctrl+C path and a racing SIGINT-driven exit both fire.
+    const first = life.shutdownAndExit(0);
+    const second = life.shutdownAndExit(130);
+
+    // Neither may exit while the flush is still pending.
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(proc.exitCalls).toEqual([]);
+    expect(flushDone).toBe(false);
+
+    resolveFlush();
+    await Promise.all([first, second]);
+
+    // Flush completed before any exit; disposer + destroy ran exactly once.
+    expect(flushDone).toBe(true);
+    expect(log.filter((l) => l === "flushed")).toHaveLength(1);
+    expect(log.filter((l) => l === "destroy")).toHaveLength(1);
+    expect(proc.exitCalls.length).toBeGreaterThanOrEqual(1);
+    expect(proc.exitCalls).toContain(0);
   });
 });
 

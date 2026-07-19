@@ -122,6 +122,12 @@ async function compactResearchForImplement(
   if (session.getState().running || session.getState().compacting) return;
 
   const beforeMessages = [...session.messages];
+  const beforeContextUsage = session.getState().contextUsage;
+  const beforeTranscript = services.transcript.getState();
+  const restoreBeforeCompaction = (): void => {
+    services.transcript.hydrate(beforeTranscript);
+    session.restoreMessages(beforeMessages, beforeContextUsage);
+  };
   const beforeTokens = estimateMessagesTokens(beforeMessages);
   if (beforeTokens < PLAN_IMPLEMENT_COMPACT_MIN_TOKENS) return;
   if (beforeMessages.length < 4) return;
@@ -147,8 +153,8 @@ async function compactResearchForImplement(
     });
 
     if (!decision.accept) {
-      session.restoreMessages(beforeMessages);
-      // Overwrite any compacted save from compact() with the original history.
+      restoreBeforeCompaction();
+      // Overwrite any compacted save with one coherent pre-compact snapshot.
       await session.persistNow().catch(() => undefined);
       notifyWarn(
         services,
@@ -168,8 +174,8 @@ async function compactResearchForImplement(
       durationMs: 2200,
     });
   } catch {
-    // compact() leaves history untouched on throw before assign; restore if needed.
-    session.restoreMessages(beforeMessages);
+    // Restore all three persisted facets even if compaction emitted before failing.
+    restoreBeforeCompaction();
     await session.persistNow().catch(() => undefined);
     notifyWarn(
       services,

@@ -6,6 +6,13 @@ import type { TranscriptItem } from "../../tui/state.js";
 export interface SaveSessionOptions {
   /** When set, upsert this session id (continuous autosave) instead of minting a new row. */
   readonly sessionId?: string | undefined;
+  /** Unique writer generation; compared before the per-writer revision. */
+  readonly writerGeneration?: string | undefined;
+  /**
+   * Monotonic snapshot revision within one writer generation. Storage rejects
+   * lower revisions so a slow autosave cannot overwrite a newer save.
+   */
+  readonly revision?: number | undefined;
   /** Optional display name. */
   readonly name?: string | undefined;
   /** Classic-shaped visual transcript for full /history restore. */

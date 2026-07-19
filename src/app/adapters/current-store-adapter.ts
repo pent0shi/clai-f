@@ -19,10 +19,19 @@ export function createCurrentPersistencePort(): PersistencePort {
           options.name,
           transcript,
           contextUsage,
+          options.revision,
+          options.writerGeneration,
         );
         return;
       }
-      await saveSession(list, options?.name, transcript, contextUsage);
+      await saveSession(
+        list,
+        options?.name,
+        transcript,
+        contextUsage,
+        options?.revision,
+        options?.writerGeneration,
+      );
     },
     loadPlan: (sessionId) => loadPlan(sessionId),
     savePlan: (plan) => savePlan(plan),

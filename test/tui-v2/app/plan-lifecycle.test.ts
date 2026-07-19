@@ -4,6 +4,7 @@ import { EventSequencer } from "../../../src/app/events/sequencer.js";
 import type { AgentPort } from "../../../src/app/ports/agent-port.js";
 import type { PersistencePort } from "../../../src/app/ports/persistence-port.js";
 import type { SessionPlan } from "../../../src/store/plan.js";
+import type { ChatMessage } from "../../../src/types.js";
 import { createCompositionRoot } from "../../../src/tui-v2/bootstrap/composition-root.js";
 import { detectCapabilities } from "../../../src/tui-v2/bootstrap/capabilities.js";
 import { createTurnOutcome } from "../../../src/agent/turn-outcome.js";
@@ -18,6 +19,16 @@ import {
   promptPlanApprovalIfNeeded,
 } from "../../../src/tui-v2/app/plan-lifecycle.js";
 import { shouldBlockPlanModeMutate } from "../../../src/agent/plan-decision.js";
+import { hydrateSessionVisual } from "../../../src/tui-v2/state/transcript-hydrate.js";
+
+const completeWithProvider = vi.hoisted(() => vi.fn());
+vi.mock("../../../src/llm/router.js", async (importActual) => {
+  const actual = await importActual<typeof import("../../../src/llm/router.js")>();
+  return {
+    ...actual,
+    completeWithProvider: (...args: unknown[]) => completeWithProvider(...args),
+  };
+});
 
 function plan(overrides: Partial<SessionPlan> = {}): SessionPlan {
   return {
@@ -211,6 +222,81 @@ describe("plan lifecycle (PLAN-004, F-021/023, V2-070)", () => {
     await services.session.submit("hello");
     expect(listener).toHaveBeenCalledOnce();
     expect(listener.mock.calls[0]?.[0]).toMatchObject({ status: "completed" });
+  });
+
+  it("restores messages, transcript, and exact context when compaction is rejected", async () => {
+    completeWithProvider.mockResolvedValueOnce({ text: "tiny" });
+    const sessionSaves: Array<{
+      messages: readonly ChatMessage[];
+      options: Parameters<PersistencePort["saveSession"]>[1];
+    }> = [];
+    const persistence: PersistencePort = {
+      async saveSession(messages, options) {
+        sessionSaves.push({
+          messages: messages.map((message) => ({ ...message })),
+          options: options ? { ...options } : undefined,
+        });
+      },
+      async loadPlan() {
+        return undefined;
+      },
+      async savePlan() {},
+      async deletePlan() {},
+    };
+    const services = createCompositionRoot({
+      agent: fakeAgent([]),
+      persistence,
+      provider: "groq" as never,
+      model: "test-model",
+      capabilities: detectCapabilities({
+        env: {},
+        stdoutIsTTY: true,
+        stdinIsTTY: true,
+        columns: 120,
+        rows: 40,
+      }),
+    });
+    seedDraft(services);
+    const heavy = "research evidence ".repeat(1_200);
+    const messages: ChatMessage[] = [
+      { role: "user", content: heavy },
+      { role: "assistant", content: heavy },
+      { role: "user", content: heavy },
+      { role: "assistant", content: heavy },
+      { role: "user", content: "recent instruction" },
+      { role: "assistant", content: "recent response" },
+    ];
+    services.session.loadHistory(messages, {
+      sessionId: "s1",
+      persistenceRevision: 7,
+      contextUsage: {
+        contextTokens: 88_000,
+        contextLimit: 128_000,
+        exact: true,
+      },
+    });
+    services.transcript.hydrate(
+      hydrateSessionVisual(undefined, messages).state,
+    );
+
+    await implementPlan(services);
+
+    expect(completeWithProvider).toHaveBeenCalled();
+    const restored = sessionSaves.find(
+      (entry) =>
+        entry.messages.length === messages.length &&
+        entry.options?.contextUsage?.contextTokens === 88_000,
+    );
+    expect(restored).toBeDefined();
+    expect(restored?.options?.transcript?.some((item) => item.kind === "compacted")).toBe(
+      false,
+    );
+    expect(
+      [...services.transcript.getState().byId.values()].some(
+        (item) => item.kind === "compacted",
+      ),
+    ).toBe(false);
+    expect(services.session.getState().contextUsage?.contextTokens).toBe(88_000);
   });
 
   it("shouldBlockPlanModeMutate only while unapproved", () => {

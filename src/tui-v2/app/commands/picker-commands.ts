@@ -401,6 +401,7 @@ export async function handleHistory(services: AppServices): Promise<void> {
       services.session.loadHistory(session.messages, {
         sessionId: session.id,
         title: session.name,
+        persistenceRevision: session.revision,
         ...(session.contextUsage
           ? { contextUsage: session.contextUsage }
           : {}),
