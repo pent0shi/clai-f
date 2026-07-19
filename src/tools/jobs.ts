@@ -99,6 +99,25 @@ const TERMINAL_JOB_MAX_AGE_MS = 48 * 60 * 60 * 1000;
 /** Max lines shell.jobs returns to the model (running first, then recent). */
 const LIST_JOBS_MAX_LINES = 40;
 
+/**
+ * Number of trailing bytes in `buf` that form an incomplete multi-byte UTF-8
+ * sequence (a lead byte whose continuation bytes were cut off by the read
+ * boundary). Returns 0 if the buffer already ends on a complete character.
+ */
+function trailingIncompleteBytes(buf: Buffer): number {
+  const len = buf.length;
+  for (let back = 1; back <= 3 && back <= len; back++) {
+    const byte = buf[len - back]!;
+    if ((byte & 0xc0) === 0x80) continue; // continuation byte, keep walking back
+    let expectedLen = 1;
+    if ((byte & 0xe0) === 0xc0) expectedLen = 2;
+    else if ((byte & 0xf0) === 0xe0) expectedLen = 3;
+    else if ((byte & 0xf8) === 0xf0) expectedLen = 4;
+    return expectedLen > back ? back : 0;
+  }
+  return 0;
+}
+
 function processAlive(pid: number | undefined): boolean {
   if (!pid) return false;
   try { process.kill(pid, 0); return true; } catch { return false; }
@@ -747,13 +766,20 @@ export class JobManager {
         parts.push(buffer);
         remaining -= localLength;
       }
-      const nextOffset = start + (length - remaining);
+      let combined = Buffer.concat(parts);
+      // A fixed byte window can land mid-character (e.g. inside the 3-byte
+      // "•" redaction marker). Trim any dangling lead byte(s) off the end so
+      // decoding never mangles a character; the trimmed bytes are re-read
+      // (and land on a boundary) on the caller's next offset-based poll.
+      const trim = start + combined.length < total ? trailingIncompleteBytes(combined) : 0;
+      if (trim > 0) combined = combined.subarray(0, combined.length - trim);
+      const nextOffset = start + (length - remaining) - trim;
       return {
         ok: true,
         output:
           `[${job.id}] ${job.status} exit=${job.exitCode ?? "?"} signal=${job.signal ?? "?"} ` +
           `stream=${stream} offset=${start} nextOffset=${nextOffset} total=${total}:\n` +
-          Buffer.concat(parts).toString("utf8"),
+          combined.toString("utf8"),
         outputPath: path,
         backgroundJob: {
           id: job.id,

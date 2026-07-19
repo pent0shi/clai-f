@@ -56,7 +56,7 @@ jobs:
           echo "CLAI_DATA_DIR=${RUNNER_TEMP}/clai/data" >> "$GITHUB_ENV"
           echo "CLAI_ARTIFACT_DIR=${RUNNER_TEMP}/clai/artifacts" >> "$GITHUB_ENV"
           echo "CLAI_LOG_DIR=${RUNNER_TEMP}/clai/logs" >> "$GITHUB_ENV"
-      - uses: oven-sh/setup-bun@v3
+      - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.3.14
       - uses: actions/setup-node@v6
