@@ -52,7 +52,15 @@ describe("durable background jobs", () => {
     const nextOffset = Number(/nextOffset=(\d+)/.exec(first.output)?.[1]);
     const second = await restarted.tailJob(id!, { stream: "stdout", offset: nextOffset, bytes: 80 });
     expect(first.output).not.toContain(secret);
-    expect(`${first.output}\n${second.output}`).toContain("sk-••••••");
+    // Each response is "<header>:\n<payload>"; a real poller reconstructs the
+    // stream from the payloads alone (offset/nextOffset are contiguous, so no
+    // separator belongs between them — unlike the header line, which isn't
+    // part of the byte stream). Comparing full responses with an inserted
+    // "\n" would inject the *second* header between the two payload halves,
+    // spuriously failing whenever the redaction marker straddles the 80-byte
+    // read boundary (path-length dependent, e.g. on macOS runners).
+    const payloadOf = (output: string): string => output.slice(output.indexOf("\n") + 1);
+    expect(`${payloadOf(first.output)}${payloadOf(second.output)}`).toContain("sk-••••••");
     expect(nextOffset).toBeGreaterThan(0);
 
     const stopped = await restarted.stopJob(id!, { graceMs: 500 });
