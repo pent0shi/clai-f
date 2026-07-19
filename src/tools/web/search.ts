@@ -101,6 +101,11 @@ export async function webSearch(
 
   const trimmedQuery = validated.query;
   const maxResults = validated.maxResults;
+  // One deadline covers provider selection, the primary request, and every
+  // cross-provider fallback. A failed attempt never receives a fresh budget.
+  const timeoutMs = Math.max(1, options.timeoutMs ?? SEARCH_TIMEOUT_MS);
+  const deadline = Date.now() + timeoutMs;
+  const remainingMs = (): number => Math.max(0, deadline - Date.now());
 
   // Resolve the active provider (Requirement 3.5: defaults to
   // DuckDuckGo when no key configured).
@@ -144,22 +149,29 @@ export async function webSearch(
     }
   }
 
-  // Resolve the per-invocation timeout (Requirement 1.8).
-  const timeoutMs = options.timeoutMs ?? SEARCH_TIMEOUT_MS;
-
   // Primary attempt against the active provider. Per Requirement 6.7
   // this is exactly one outbound request with no retry of the *same*
   // provider.
+  const primaryBudgetMs = remainingMs();
+  if (primaryBudgetMs <= 0) {
+    const outcome = buildTimeoutOutcome(provider.id, timeoutMs);
+    void emitAudit(outcome, trimmedQuery.length);
+    return errorResult(outcome);
+  }
   const primaryOutcome = await attemptProvider(
     provider,
     apiKey,
     trimmedQuery,
     maxResults,
-    timeoutMs,
+    primaryBudgetMs,
     options.signal,
   );
   void emitAudit(primaryOutcome, trimmedQuery.length);
   if (primaryOutcome.ok) return successResult(primaryOutcome);
+  // A timeout consumed the shared deadline; never retry another provider.
+  if (primaryOutcome.error?.kind === "timeout" || remainingMs() <= 0) {
+    return errorResult(primaryOutcome);
+  }
 
   // DuckDuckGo is the keyless default and is prone to anti-bot
   // challenges (HTTP 202) and upstream 502/5xx responses on shared or
@@ -177,6 +189,7 @@ export async function webSearch(
     const fallbackNotes: string[] = [];
     let anyKeyConfigured = false;
     for (const candidateId of DDG_FALLBACK_ORDER) {
+      if (remainingMs() <= 0 || options.signal?.aborted) break;
       const candidate = searchProviders[candidateId];
       if (!candidate) continue;
 
@@ -188,12 +201,14 @@ export async function webSearch(
       if (!candidateKey || candidateKey.length === 0) continue;
       anyKeyConfigured = true;
 
+      const fallbackBudgetMs = remainingMs();
+      if (fallbackBudgetMs <= 0 || options.signal?.aborted) break;
       const fbOutcome = await attemptProvider(
         candidate,
         candidateKey,
         trimmedQuery,
         maxResults,
-        timeoutMs,
+        fallbackBudgetMs,
         options.signal,
       );
       void emitAudit(fbOutcome, trimmedQuery.length);
@@ -201,6 +216,7 @@ export async function webSearch(
       fallbackNotes.push(
         `${candidate.displayName}: ${fbOutcome.error?.kind ?? "failed"}`,
       );
+      if (fbOutcome.error?.kind === "timeout" || remainingMs() <= 0) break;
     }
     if (primaryOutcome.error) {
       if (fallbackNotes.length > 0) {

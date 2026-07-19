@@ -215,7 +215,7 @@ describe("coding plan requirement helpers", () => {
     ).toBe(true);
   });
 
-  it("gives long stall budgets to scaffold/install", () => {
+  it("uses the universal default and honors model-selected tool timeouts", () => {
     expect(
       isLongQuietInstallOrScaffoldCommand(
         "npx create-next-app@latest /tmp/x --yes",
@@ -223,46 +223,30 @@ describe("coding plan requirement helpers", () => {
     ).toBe(true);
     expect(isLongQuietInstallOrScaffoldCommand("npm install")).toBe(true);
     expect(isLongQuietInstallOrScaffoldCommand("ls -la")).toBe(false);
-    expect(
-      toolStallBudgetMs({
-        name: "shell.exec",
-        args: { command: "npx create-next-app@latest todo --yes" },
-      }),
-    ).toBeGreaterThanOrEqual(10 * 60_000);
-    expect(
-      toolStallBudgetMs({
-        name: "shell.exec",
-        args: { command: "echo hi" },
-      }),
-    ).toBe(60_000);
-    expect(
-      toolStallBudgetMs({ name: "web.search", args: { query: "x" } }),
-    ).toBe(60_000);
-    expect(
-      toolHardBudgetMs({
-        name: "web.search",
-        args: { query: "x", fetchTop: 2 },
-      }),
-    ).toBe(15_000 + 2 * 30_000 + 15_000);
-    expect(
-      toolHardBudgetMs({ name: "web.fetch", args: { url: "https://x" } }),
-    ).toBe(45_000);
-    expect(
-      toolHardBudgetMs({ name: "shell.exec", args: { command: "echo hi" } }),
-    ).toBe(5 * 60_000);
-    // Multi-path webDiscover needs more than default 5m silence-style budgets.
-    expect(
-      toolStallBudgetMs({
-        name: "pentest.webDiscover",
-        args: { baseUrl: "https://x" },
-      }),
-    ).toBe(90_000);
-    expect(
-      toolHardBudgetMs({
-        name: "pentest.webDiscover",
-        args: { baseUrl: "https://x" },
-      }),
-    ).toBe(8 * 60_000);
+
+    const defaultCalls = [
+      { name: "shell.exec", args: { command: "echo ok" } },
+      { name: "web.search", args: { query: "x" } },
+      { name: "web.fetch", args: { url: "https://x" } },
+    ];
+    for (const call of defaultCalls) {
+      expect(toolStallBudgetMs(call)).toBe(42_500);
+      expect(toolHardBudgetMs(call)).toBe(42_500);
+    }
+
+    const automaticLong = {
+      name: "shell.exec",
+      args: { command: "npm install" },
+    };
+    expect(toolStallBudgetMs(automaticLong)).toBe(15 * 60_000 + 2_500);
+    expect(toolHardBudgetMs(automaticLong)).toBe(15 * 60_000 + 2_500);
+
+    const selected = {
+      name: "shell.exec",
+      args: { command: "npm install", timeoutMs: 12 * 60_000 },
+    };
+    expect(toolStallBudgetMs(selected)).toBe(12 * 60_000 + 2_500);
+    expect(toolHardBudgetMs(selected)).toBe(12 * 60_000 + 2_500);
   });
 
   it("picks install task for npm install, not localStorage", () => {

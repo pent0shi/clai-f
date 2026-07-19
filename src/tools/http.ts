@@ -4,6 +4,11 @@ import { Agent } from "undici";
 import type { ToolResult } from "../types.js";
 import { isBlockedAddress } from "./web/ssrf-guard.js";
 import { toReadableText } from "./web/readable.js";
+import {
+  selectOutput,
+  type OutputSelection,
+  type ResponsePart,
+} from "./output-selection.js";
 
 /** Shared undici agent that skips cert verification (authorized pentest only). */
 let insecureTlsAgent: Agent | undefined;
@@ -103,9 +108,9 @@ const ALLOWED_METHODS = new Set([
 /** Browser-like default UA — less fingerprint noise than clai-http-fetch/*. */
 const DEFAULT_USER_AGENT =
   "Mozilla/5.0 (compatible; clai/1.0; +https://github.com/pentoshi007/clai) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36";
-const DEFAULT_TIMEOUT_MS = 15_000;
-const MIN_TIMEOUT_MS = 3_000;
-const MAX_TIMEOUT_MS = 60_000;
+const DEFAULT_TIMEOUT_MS = 40_000;
+const MIN_TIMEOUT_MS = 1_000;
+const MAX_TIMEOUT_MS = 1_800_000;
 
 interface RedirectHop {
   status: number;
@@ -229,15 +234,18 @@ function isConnectionRefusedError(error: unknown): boolean {
   );
 }
 
-interface FetchOptions {
+interface FetchOptions extends OutputSelection {
   method?: string | undefined;
   body?: string | undefined;
   headers?: Record<string, string> | undefined;
   maxBytes?: number | undefined;
   iOwnThis?: boolean | undefined;
   retries?: number | undefined;
-  /** Request timeout in ms (clamped 3s–60s). Default 15s. */
+  /** Request timeout in ms (clamped 1s–30min). Default 40s. */
   timeoutMs?: number | undefined;
+  /** HTML body formatting; raw preserves the complete captured source. */
+  responseMode?: "readable" | "raw" | undefined;
+  responsePart?: ResponsePart | undefined;
   /**
    * Skip TLS certificate verification (hostname mismatch / self-signed).
    * For authorized pentest against https://IP or lab certs only. Evidence
@@ -347,6 +355,7 @@ export async function httpFetch(
   let lastNetworkError: unknown;
   let usedUrl = url;
   let redirectHops: RedirectHop[] = [];
+  let responseCleanup: (() => void) | undefined;
   const timeoutMs = clampTimeoutMs(options.timeoutMs);
   // Status retries only when caller opts in (default 0). Loopback keeps soft
   // connection-refused retries below regardless of status-retry budget.
@@ -369,6 +378,13 @@ export async function httpFetch(
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), timeoutMs);
         const onParentAbort = () => controller.abort();
+        const cleanupAttempt = (): void => {
+          clearTimeout(timer);
+          if (options.signal) {
+            options.signal.removeEventListener("abort", onParentAbort);
+          }
+        };
+        let retainForBody = false;
         if (options.signal) {
           if (options.signal.aborted) {
             throw options.signal.reason ?? new Error("Aborted");
@@ -412,6 +428,8 @@ export async function httpFetch(
             await sleep(retryDelayMs(localAttempts));
             continue;
           }
+          retainForBody = true;
+          responseCleanup = cleanupAttempt;
           break candidateLoop;
         } catch (error) {
           lastNetworkError = error;
@@ -443,10 +461,7 @@ export async function httpFetch(
           }
           await sleep(retryDelayMs(localAttempts));
         } finally {
-          clearTimeout(timer);
-          if (options.signal) {
-            options.signal.removeEventListener("abort", onParentAbort);
-          }
+          if (!retainForBody) cleanupAttempt();
         }
       }
     }
@@ -474,14 +489,38 @@ export async function httpFetch(
   let collected = "";
   let bytesRead = 0;
   let truncated = false;
-  const reader = response.body?.getReader();
-  if (reader) {
+  let bodyReadError: unknown;
+  try {
+    const reader = response.body?.getReader();
+    if (reader && options.responsePart === "headers") {
+    // Headers-only callers do not need to buffer or decode the body.
     try {
-      while (bytesRead < limit) {
+      await reader.cancel();
+    } catch {
+      // The response metadata is still valid if cancellation races socket close.
+    } finally {
+      try {
+        reader.releaseLock();
+      } catch {
+        // already released
+      }
+    }
+  } else if (reader) {
+    try {
+      for (;;) {
         const { done, value } = await reader.read();
         if (done) break;
         if (!value) continue;
         const remaining = limit - bytesRead;
+        if (remaining <= 0) {
+          truncated = true;
+          try {
+            await reader.cancel();
+          } catch {
+            // ignore — we're abandoning the body deliberately
+          }
+          break;
+        }
         if (value.byteLength > remaining) {
           collected += decoder.decode(value.subarray(0, remaining), { stream: true });
           bytesRead += remaining;
@@ -504,8 +543,27 @@ export async function httpFetch(
         // already released
       }
     }
-  } else {
-    collected = "";
+    } else {
+      collected = "";
+    }
+  } catch (error) {
+    bodyReadError = error;
+  } finally {
+    responseCleanup?.();
+    responseCleanup = undefined;
+  }
+  if (bodyReadError !== undefined) {
+    const timedOut =
+      bodyReadError instanceof Error &&
+      bodyReadError.name === "AbortError" &&
+      !options.signal?.aborted;
+    return {
+      ok: false,
+      output: timedOut
+        ? `Request timed out after ${timeoutMs}ms while reading response body`
+        : `Response body read failed: ${bodyReadError instanceof Error ? bodyReadError.message : String(bodyReadError)}`,
+      exitCode: timedOut ? 124 : options.signal?.aborted ? 130 : 1,
+    };
   }
 
   const contentType = response.headers.get("content-type") ?? "";
@@ -529,13 +587,16 @@ export async function httpFetch(
     redirectHops,
     lastNetworkError,
     insecureTls,
+    responseMode: options.responseMode ?? "readable",
+    responsePart: options.responsePart ?? "full",
   });
+  const output = selectOutput(evidence, options);
 
   return {
     ok: true,
-    output: evidence,
+    output,
     exitCode: 0,
-    truncated,
+    truncated: truncated || output !== evidence,
   };
 }
 
@@ -569,6 +630,8 @@ function formatHttpEvidence(input: {
   redirectHops: RedirectHop[];
   lastNetworkError: unknown;
   insecureTls?: boolean | undefined;
+  responseMode: "readable" | "raw";
+  responsePart: ResponsePart;
 }): string {
   const lines: string[] = [];
   lines.push(
@@ -647,34 +710,18 @@ function formatHttpEvidence(input: {
     } else {
       const ct = input.contentType.toLowerCase();
       const isHtml = ct.includes("html");
-      const isJson =
-        ct.includes("json") ||
-        ct.includes("javascript") ||
-        ct.includes("xml") ||
-        ct.startsWith("text/");
-      // Single representation: readable HTML OR raw text/json — never both.
-      let bodyText = isHtml
-        ? toReadableText(input.body) || input.body
-        : input.body;
-      // Error pages: keep status/headers rich, body shorter.
-      const isError = input.status >= 400;
-      const bodyCap = isError
-        ? 3_000
-        : isHtml
-          ? 6_000
-          : isJson
-            ? 12_000
-            : 8_000;
-      // Body is the only intentional truncate — status/headers/redirects stay full.
-      if (bodyText.length > bodyCap) {
-        bodyText =
-          bodyText.slice(0, bodyCap) +
-          `\n... (body truncated at ${bodyCap.toLocaleString()} chars — headers/status above are complete; re-fetch with higher maxBytes or page if you need more body)`;
+      // Single representation: readable HTML OR raw captured source.
+      const bodyText =
+        isHtml && input.responseMode === "readable"
+          ? toReadableText(input.body) || input.body
+          : input.body;
+      if (input.truncated) {
+        lines.push(
+          `${bodyText || "(empty)"}\n... (wire capture stopped at ${input.limit.toLocaleString()} bytes — raise maxBytes for more body)`,
+        );
+      } else {
+        lines.push(bodyText || "(empty)");
       }
-      if (input.truncated && !bodyText.includes("capture truncated")) {
-        bodyText += `\n... (wire capture stopped at ${input.limit.toLocaleString()} bytes — raise maxBytes for more body)`;
-      }
-      lines.push(bodyText || "(empty)");
     }
   }
 
@@ -689,6 +736,13 @@ function formatHttpEvidence(input: {
     }
   }
 
+  const bodyMarker = lines.indexOf("Body:");
+  if (input.responsePart === "body") {
+    return bodyMarker >= 0 ? lines.slice(bodyMarker + 1).join("\n") : "";
+  }
+  if (input.responsePart === "headers" && bodyMarker >= 0) {
+    return lines.slice(0, Math.max(0, bodyMarker - 1)).join("\n");
+  }
   return lines.join("\n");
 }
 

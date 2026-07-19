@@ -138,6 +138,9 @@ export interface WebSearchOutcome {
  */
 export type ResponseMode = "readable" | "raw";
 
+/** Which portion of the rendered response should be returned. */
+export type ResponsePart = "full" | "headers" | "body";
+
 /** Allowed values for `WebFetchArgs.responseMode`. */
 export const RESPONSE_MODES: readonly ResponseMode[] = [
   "readable",
@@ -159,11 +162,17 @@ export const RESPONSE_MODES: readonly ResponseMode[] = [
 export interface WebFetchArgs {
   url: string;
   maxBytes?: number;
+  /** Wall-clock timeout in milliseconds. Defaults to 40 seconds. */
+  timeoutMs?: number;
   includeHeaders?: boolean;
   includeTls?: boolean;
   includeTiming?: boolean;
   includeRedirectChain?: boolean;
   responseMode?: ResponseMode;
+  responsePart?: ResponsePart;
+  topLines?: number;
+  bottomLines?: number;
+  maxOutputBytes?: number;
   redactSensitive?: boolean;
 }
 
@@ -213,10 +222,12 @@ export const METADATA_BUDGET_BYTES = 65_536;
 export const HTTP_ERROR_BODY_PREVIEW_BYTES = 4096;
 
 /** Total wall-clock timeout in milliseconds for a `web.fetch` invocation. */
-export const FETCH_TIMEOUT_MS = 30_000;
+export const FETCH_TIMEOUT_MS = 40_000;
+export const MIN_FETCH_TIMEOUT_MS = 1_000;
+export const MAX_FETCH_TIMEOUT_MS = 1_800_000;
 
 /** Total wall-clock timeout in milliseconds for a `web.search` invocation. */
-export const SEARCH_TIMEOUT_MS = 15_000;
+export const SEARCH_TIMEOUT_MS = 40_000;
 
 /**
  * Lower-cased map of HTTP response header names to string values.

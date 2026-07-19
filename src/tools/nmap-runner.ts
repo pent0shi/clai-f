@@ -79,7 +79,7 @@ export type NmapScanDepth = "standard" | "deep" | "full";
 export interface NmapTimeoutPolicy {
   readonly depth: NmapScanDepth;
   readonly timeoutMs: number;
-  readonly source: "profile" | "environment";
+  readonly source: "profile" | "environment" | "call";
 }
 
 const NMAP_TIMEOUTS_MS: Readonly<Record<NmapScanDepth, number>> = {
@@ -124,6 +124,7 @@ function inferNmapScanDepth(argv: readonly string[]): NmapScanDepth {
 export async function runNmapScan(
   argv: string[],
   options?: ToolRunOptions,
+  timeoutMsOverride?: number,
 ): Promise<ToolResult> {
   // Known single hosts: skip discovery by default (ICMP/ARP often blocked or
   // needs root; false "0 hosts up" is a common agent failure mode).
@@ -290,7 +291,15 @@ export async function runNmapScan(
     attempts.push({ command: "nmap", argv: scanArgv });
   }
 
-  const timeoutPolicy = resolveNmapTimeoutPolicy(scanArgv);
+  const configuredPolicy = resolveNmapTimeoutPolicy(scanArgv);
+  const timeoutPolicy =
+    typeof timeoutMsOverride === "number" && Number.isFinite(timeoutMsOverride)
+      ? {
+          ...configuredPolicy,
+          timeoutMs: Math.max(1_000, Math.min(30 * 60_000, Math.floor(timeoutMsOverride))),
+          source: "call" as const,
+        }
+      : configuredPolicy;
   options?.onOutput?.(
     `[nmap] ${timeoutPolicy.depth} scan timeout: ${Math.round(timeoutPolicy.timeoutMs / 60_000)}m (${timeoutPolicy.source})\n`,
     "stdout",

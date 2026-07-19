@@ -140,6 +140,17 @@ type DatabaseCtor = new (path: string) => DatabaseLike;
 
 let cachedDb: DatabaseLike | undefined;
 let sqliteUnavailable = false;
+let cachedSessionList:
+  | { historyDir: string; records: HistoryRecord[]; cachedAt: number }
+  | undefined;
+let sessionListGeneration = 0;
+/** Keep repeated /history opens fast while bounding cross-process staleness. */
+const SESSION_LIST_CACHE_TTL_MS = 1_000;
+
+function invalidateSessionListCache(): void {
+  sessionListGeneration += 1;
+  cachedSessionList = undefined;
+}
 
 async function loadDatabase(): Promise<DatabaseLike | undefined> {
   if (cachedDb) return cachedDb;
@@ -252,18 +263,22 @@ async function appendJsonl(record: HistoryRecord): Promise<void> {
  * file and then persist back only its own record, wiping every other session.
  */
 let jsonlWriteChain: Promise<void> = Promise.resolve();
-/** Ensures orphan .tmp / archive recovery runs at most once per process. */
-let recoveryAttempted = false;
+/** Shared one-time orphan/archive recovery; writes await it, UI listings may not. */
+let recoveryPromise: Promise<void> | undefined;
 
 function mutateJsonl(
   update: (records: HistoryRecord[]) => HistoryRecord[],
 ): Promise<void> {
+  invalidateSessionListCache();
   const run = jsonlWriteChain.then(async () => {
     try {
       await ensureHistoryRecovered();
       const current = await readJsonlRecordsFrom(jsonlFilePath());
       const next = update(current);
       await writeJsonlAtomic(next);
+      // A list may have been loaded after the pre-write invalidation but
+      // before the atomic rename completed. Never leave that snapshot cached.
+      invalidateSessionListCache();
     } catch (err: any) {
       handlePermissionError(err);
     }
@@ -483,14 +498,24 @@ export async function recoverOrphanedHistory(): Promise<{
   return { recovered: newCount, sources };
 }
 
-async function ensureHistoryRecovered(): Promise<void> {
-  if (recoveryAttempted) return;
-  recoveryAttempted = true;
-  try {
-    await recoverOrphanedHistory();
-  } catch {
-    // Never block history reads/writes on recovery failure.
+function startHistoryRecovery(): Promise<void> {
+  if (!recoveryPromise) {
+    recoveryPromise = recoverOrphanedHistory()
+      .then(
+        () => undefined,
+        () => undefined,
+      )
+      .finally(() => {
+        // A background recovery may have merged archive/temp records after a
+        // picker list was published; force the next /history to refresh.
+        invalidateSessionListCache();
+      });
   }
+  return recoveryPromise;
+}
+
+async function ensureHistoryRecovered(): Promise<void> {
+  await startHistoryRecovery();
 }
 
 /**
@@ -498,6 +523,7 @@ async function ensureHistoryRecovered(): Promise<void> {
  * atomically. Never hard-deletes pruned chats — they go to history-archive.jsonl.
  */
 async function writeJsonlAtomic(records: HistoryRecord[]): Promise<void> {
+  invalidateSessionListCache();
   await mkdir(historyDirPath(), { recursive: true });
   await fixOwner(historyDirPath());
 
@@ -604,6 +630,7 @@ export async function saveSession(
     return record;
   }
 
+  invalidateSessionListCache();
   const db = await loadDatabase();
   if (db) {
     db.prepare(
@@ -627,6 +654,7 @@ export async function saveSession(
       }),
     );
     await enforceSqliteRetention(db);
+    invalidateSessionListCache();
   } else {
     await appendJsonl(record);
   }
@@ -668,6 +696,7 @@ export async function upsertSession(
 
   if (getConfig().privateMode) return record;
 
+  invalidateSessionListCache();
   const db = await loadDatabase();
   if (db) {
     db.prepare(
@@ -691,6 +720,7 @@ export async function upsertSession(
       }),
     );
     await enforceSqliteRetention(db);
+    invalidateSessionListCache();
   } else {
     await upsertJsonl(record);
   }
@@ -744,6 +774,7 @@ export async function saveToolCall(
     exitCode: result.exitCode,
     output: redactSecrets(result.output),
   };
+  invalidateSessionListCache();
   const db = await loadDatabase();
   if (db) {
     db.prepare(
@@ -796,7 +827,6 @@ function rowToSession(row: unknown): HistoryRecord {
 }
 
 async function listJsonlSessions(limit: number): Promise<HistoryRecord[]> {
-  await ensureHistoryRecovered();
   try {
     const records = sortHistoryByUpdatedDesc(
       dedupeHistoryById(await readJsonlRecordsFrom(jsonlFilePath())),
@@ -821,10 +851,37 @@ function mergeSessionLists(
   return sortHistoryByUpdatedDesc(dedupeHistoryById(lists.flat()));
 }
 
-export async function listSessions(limit = 20): Promise<HistoryRecord[]> {
-  await ensureHistoryRecovered();
-  const fromJsonl = await listJsonlSessions(0); // full set, already sorted
-  const db = await loadDatabase();
+export async function listSessions(
+  limit = 20,
+  options: { recovery?: "blocking" | "background" } = {},
+): Promise<HistoryRecord[]> {
+  if (options.recovery === "background") {
+    void startHistoryRecovery();
+  } else {
+    await ensureHistoryRecovered();
+  }
+
+  const cacheKey = historyDirPath();
+  const now = Date.now();
+  if (
+    cachedSessionList?.historyDir === cacheKey &&
+    now - cachedSessionList.cachedAt <= SESSION_LIST_CACHE_TTL_MS
+  ) {
+    const cached = cachedSessionList.records;
+    return !limit || limit <= 0 ? [...cached] : cached.slice(0, limit);
+  }
+
+  // Do not let a slow pre-write/pre-recovery read overwrite a newer cache.
+  // Every mutation increments this generation before and after persistence.
+  const loadGeneration = sessionListGeneration;
+
+  // JSONL parsing and optional SQLite startup are independent. Running them
+  // concurrently removes dynamic SQLite import latency from /history's
+  // critical path instead of paying both costs serially.
+  const [fromJsonl, db] = await Promise.all([
+    listJsonlSessions(0),
+    loadDatabase(),
+  ]);
   let fromDb: HistoryRecord[] = [];
   if (db) {
     try {
@@ -842,7 +899,14 @@ export async function listSessions(limit = 20): Promise<HistoryRecord[]> {
   // active file by recoverOrphanedHistory() (called on /history open), so
   // they reappear there rather than staying invisible forever.
   const merged = mergeSessionLists(fromJsonl, fromDb);
-  if (!limit || limit <= 0) return merged;
+  if (sessionListGeneration === loadGeneration) {
+    cachedSessionList = {
+      historyDir: cacheKey,
+      records: merged,
+      cachedAt: Date.now(),
+    };
+  }
+  if (!limit || limit <= 0) return [...merged];
   return merged.slice(0, limit);
 }
 
@@ -908,6 +972,7 @@ export async function clearAllHistory(): Promise<{
   }
 
   try {
+    invalidateSessionListCache();
     const db = await loadDatabase();
     if (db) {
       db.exec("DELETE FROM sessions; DELETE FROM tool_calls;");
@@ -941,6 +1006,7 @@ export async function clearAllHistory(): Promise<{
   } catch {
     /* plan store optional */
   }
+  invalidateSessionListCache();
   return { cleared: true, detail: detail.trim() };
 }
 

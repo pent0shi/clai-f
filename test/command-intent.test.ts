@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { looksLongRunning } from "../src/tools/command-intent.js";
+import {
+  looksLikeLongFiniteCommand,
+  looksLongRunning,
+} from "../src/tools/command-intent.js";
 
 describe("command-intent — looksLongRunning", () => {
   it("detects nc listener", () => {
@@ -85,5 +88,15 @@ describe("command-intent — looksLongRunning", () => {
   it("still backgrounds a persistent segment after a finite install", () => {
     expect(looksLongRunning("npm install && npm run dev")).toBe(true);
     expect(looksLongRunning("npm install vite && npx vite")).toBe(true);
+  });
+});
+
+describe("command-intent — durable finite jobs", () => {
+  it("routes potentially long scanners and filesystem find to durable jobs", () => {
+    expect(looksLikeLongFiniteCommand("nmap -sV example.com")).toBe(true);
+    expect(looksLikeLongFiniteCommand("ffuf -u https://x/FUZZ -w words.txt")).toBe(true);
+    expect(looksLikeLongFiniteCommand("sudo find / -name '*.pem'")).toBe(true);
+    expect(looksLikeLongFiniteCommand("npm install")).toBe(false);
+    expect(looksLikeLongFiniteCommand("echo find me")).toBe(false);
   });
 });

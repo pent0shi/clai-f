@@ -11,13 +11,32 @@ function def(
   parameters: ToolDefinition["parameters"],
   flags: Partial<Pick<ToolDefinition, "readOnly" | "mutates" | "askMode">> = {},
 ): ToolDefinition {
+  // Every tool accepts the same outer wall-clock budget. Individual tools may
+  // also consume timeoutMs locally so sockets/processes are torn down cleanly;
+  // the runner remains the final safety net for implementations that do not.
+  const timedParameters: ToolDefinition["parameters"] = {
+    ...parameters,
+    properties: {
+      ...(parameters.properties ?? {}),
+      timeoutMs: {
+        type: "integer",
+        minimum: 1_000,
+        maximum: 1_800_000,
+        description:
+          "Wall-clock timeout in milliseconds (default 40000). Choose a larger value when the operation is expected to take longer.",
+        ...((parameters.properties?.timeoutMs as
+          | Record<string, unknown>
+          | undefined) ?? {}),
+      },
+    },
+  };
   // Primary wire keeps camelCase (fs_writeMany); also register snake alias.
   const wireName = registerWireNamesFor(name);
   return {
     name,
     wireName,
     description,
-    parameters,
+    parameters: timedParameters,
     ...flags,
   };
 }
@@ -251,7 +270,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   ),
   def(
     "shell.exec",
-    "Run a finite shell command and wait for completion. Pass cwd instead of using cd; commands run under a platform command shell, so use portable syntax. Installs/scaffolds/builds belong here with timeoutMs. Use shell.start only for processes intended to keep running.",
+    "Run a finite shell command and wait for completion. Default timeoutMs is 40000; choose a larger timeout for builds/installs/scaffolds. Known long installs get a safe automatic budget when omitted. Potentially long nmap/ffuf/find-style commands are automatically launched as durable background jobs; when a backgroundJob receipt is returned, poll shell.tail using nextOffset and shell.jobs until terminal status instead of launching a duplicate. Pass cwd instead of cd; use shell.start for persistent servers/watchers/listeners.",
     {
       type: "object",
       properties: {
@@ -266,28 +285,47 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   ),
   def(
     "shell.start",
-    "Start a persistent server/watcher/listener in the background and return a job id after OS process launch succeeds. Launch success does not prove application readiness or continued liveness; inspect shell.tail and run a readiness probe. Do not use for finite installs, scaffolds, builds, or tests merely because they may take time.",
+    "Start a persistent server/watcher/listener as a tracked background job. Returns a stable job id and persists registry/status across turns and CLI restarts. Captured output is incrementally available while this CLI process owns the child pipes; after a restart, status is reconciled but detached output pipes cannot be reattached. Launch success does not prove readiness: use shell.tail with offset/nextOffset, shell.jobs, and an application readiness probe. Do not start duplicates; use shell.stop for cleanup. If timeoutMs is supplied it becomes the job execution deadline; finite installs/builds belong in shell.exec with an appropriate timeoutMs.",
     {
       type: "object",
       properties: {
         command: { type: "string" },
         cwd: { type: "string" },
         name: { type: "string" },
+        timeoutMs: {
+          type: "integer",
+          description:
+            "Optional execution deadline for the background job in milliseconds; omitted means no job deadline.",
+        },
       },
       required: ["command"],
       additionalProperties: false,
     },
     { mutates: true },
   ),
-  def("shell.jobs", "List background jobs.", emptyObject, { readOnly: true }),
+  def(
+    "shell.jobs",
+    "List durable background jobs for this session, with running jobs first. Use before starting another long command and before finishing a task with outstanding jobs.",
+    emptyObject,
+    { readOnly: true },
+  ),
   def(
     "shell.tail",
-    "Read recent output from a background job.",
+    "Read status and captured output from a tracked background job. For incremental polling, use stdout (default) or stderr and pass that stream's prior nextOffset as offset; continue until status is exited, failed, killed, or lost. combined is snapshot-only and rejects offset because its concatenated boundary is not a stable cursor.",
     {
       type: "object",
       properties: {
         id: { type: "string" },
         bytes: { type: "integer" },
+        offset: {
+          type: "integer",
+          description: "Byte offset from the prior shell.tail nextOffset (default: recent tail)",
+        },
+        stream: {
+          type: "string",
+          enum: ["stdout", "stderr", "combined"],
+          description: "Captured stream to read (default stdout)",
+        },
       },
       required: ["id"],
       additionalProperties: false,
@@ -296,7 +334,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   ),
   def(
     "shell.stop",
-    "Stop a background job.",
+    "Stop a durable background job by id, verify termination, and persist the terminal status.",
     {
       type: "object",
       properties: { id: { type: "string" } },
@@ -382,7 +420,10 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
           type: "object",
           additionalProperties: { type: "string" },
         },
-        maxBytes: { type: "integer" },
+        maxBytes: {
+          type: "integer",
+          description: "Maximum response-body bytes captured from the wire (separate from maxOutputBytes)",
+        },
         iOwnThis: { type: "boolean" },
         own: { type: "boolean" },
         retries: {
@@ -391,7 +432,35 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         },
         timeoutMs: {
           type: "integer",
-          description: "Request timeout ms (default 15000, clamp 3000-60000)",
+          minimum: 1_000,
+          maximum: 1_800_000,
+          description: "Request timeout in milliseconds (default 40000)",
+        },
+        responseMode: {
+          type: "string",
+          enum: ["readable", "raw"],
+          description:
+            "HTML body formatting: readable text (default) or raw response source. Use raw for client-rendered pages whose readable HTML contains little text.",
+        },
+        responsePart: {
+          type: "string",
+          enum: ["full", "headers", "body"],
+          description: "Return full evidence (default), headers/status only, or body only",
+        },
+        topLines: {
+          type: "integer",
+          minimum: 0,
+          description: "Return only the first N rendered lines (combine with bottomLines for head+tail)",
+        },
+        bottomLines: {
+          type: "integer",
+          minimum: 0,
+          description: "Return only the last N rendered lines (combine with topLines for head+tail)",
+        },
+        maxOutputBytes: {
+          type: "integer",
+          minimum: 0,
+          description: "Strict byte ceiling applied to the final rendered output",
         },
         insecureTls: {
           type: "boolean",
@@ -562,7 +631,10 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
       type: "object",
       properties: {
         url: { type: "string" },
-        maxBytes: { type: "integer" },
+        maxBytes: {
+          type: "integer",
+          description: "Maximum page-body bytes captured from the wire; raise it when metadata reports truncated=true",
+        },
         includeHeaders: { type: "boolean" },
         includeTls: { type: "boolean" },
         includeTiming: { type: "boolean" },
@@ -571,7 +643,28 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
           type: "string",
           enum: ["readable", "raw"],
           description:
-            "Body formatting: readable (default) or raw. Headers/TLS are separate booleans.",
+            "Body formatting: readable (default) or raw response source. Use raw for client-rendered pages whose HTML contains little readable text.",
+        },
+        responsePart: {
+          type: "string",
+          enum: ["full", "headers", "body"],
+          description:
+            "Return the normal full result (default), response headers/metadata only, or body only",
+        },
+        topLines: {
+          type: "integer",
+          minimum: 0,
+          description: "Return only the first N rendered lines (combine with bottomLines for head+tail)",
+        },
+        bottomLines: {
+          type: "integer",
+          minimum: 0,
+          description: "Return only the last N rendered lines (combine with topLines for head+tail)",
+        },
+        maxOutputBytes: {
+          type: "integer",
+          minimum: 0,
+          description: "Strict byte ceiling applied to the final rendered output",
         },
         redactSensitive: { type: "boolean" },
       },

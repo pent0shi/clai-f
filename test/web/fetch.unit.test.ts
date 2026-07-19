@@ -4,7 +4,7 @@
 //   • Requirement 2.3: a successful GET against a stubbed
 //     https://example.com round-trip yields ok=true with the body
 //     visible in the rendered output.
-//   • Requirement 2.10: the 30-second timeout aborts via the
+//   • Requirement 2.10: the 40-second default timeout aborts via the
 //     AbortController and surfaces error.kind="timeout" — exercised
 //     with `vi.useFakeTimers` so the test does not actually sleep.
 //   • Requirement 6.4: a 4xx HTTP error produces error.kind="http-error"
@@ -222,7 +222,7 @@ describe("web.fetch unit tests", () => {
     expect(decision.reason.toLowerCase()).toContain("loopback");
   });
 
-  it("the 30-second wall-clock timer aborts the request via AbortController (Requirement 2.10)", async () => {
+  it("the 40-second wall-clock timer aborts the request via AbortController (Requirement 2.10)", async () => {
     vi.useFakeTimers();
 
     // Build a stub that NEVER emits a response so the only path to
@@ -265,14 +265,14 @@ describe("web.fetch unit tests", () => {
 
     // Run scheduled microtasks so the request is dispatched.
     await vi.runOnlyPendingTimersAsync();
-    // Advance past the 30-second timeout to fire the abort.
-    await vi.advanceTimersByTimeAsync(31_000);
+    // Advance past the 40-second timeout to fire the abort.
+    await vi.advanceTimersByTimeAsync(41_000);
 
     const result = await promise;
 
     expect(result.ok).toBe(false);
     expect(result.error?.kind).toBe("timeout");
-    expect(result.error?.message).toContain("timeout after 30s");
+    expect(result.error?.message).toContain("timeout after 40s");
   });
 
   it("honors caller AbortSignal so turn cancel does not hang", async () => {

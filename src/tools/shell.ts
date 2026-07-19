@@ -54,7 +54,7 @@ export interface SpawnArgvArgs {
 
 const DEFAULT_MAX_MODEL_BYTES = 12_000;
 const DEFAULT_MAX_CAPTURE_BYTES = 500 * 1024 * 1024;
-const DEFAULT_TIMEOUT_MS = 180_000;
+const DEFAULT_TIMEOUT_MS = 40_000;
 
 /** Prefer the platform default shell, but tolerate minimal sandboxes that omit it. */
 export function resolveShell(): string | undefined {

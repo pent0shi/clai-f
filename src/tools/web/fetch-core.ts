@@ -39,9 +39,11 @@ import {
   DEFAULT_RESPONSE_MODE,
   FETCH_TIMEOUT_MS,
   HTTP_ERROR_BODY_PREVIEW_BYTES,
+  MAX_FETCH_TIMEOUT_MS,
   MAX_MAX_BYTES,
   MAX_REDIRECT_HOPS,
   METADATA_BUDGET_BYTES,
+  MIN_FETCH_TIMEOUT_MS,
   MIN_MAX_BYTES,
   RESPONSE_MODES,
   TRUNCATION_MARKER,
@@ -49,6 +51,7 @@ import {
   type HeaderMap,
   type RedirectChain,
   type ResponseMode,
+  type ResponsePart,
   type TimingInfo,
   type TlsInfo,
   type WebFetchArgs,
@@ -184,7 +187,7 @@ export async function webFetchCore(
   const timeoutHandle = setTimeout(() => {
     timedOut = true;
     controller.abort();
-  }, FETCH_TIMEOUT_MS);
+  }, a.timeoutMs);
   // `unref` so the timer never holds the event loop open if the caller
   // forgets to await us. `setTimeout` returns a `Timeout` in Node which
   // exposes `.unref()`; the cast keeps lib.dom.d.ts happy.
@@ -338,11 +341,13 @@ type ValidationResult =
 interface NormalisedArgs {
   url: string;
   maxBytes: number;
+  timeoutMs: number;
   includeHeaders: boolean;
   includeTls: boolean;
   includeTiming: boolean;
   includeRedirectChain: boolean;
   responseMode: ResponseMode;
+  responsePart: ResponsePart;
   redactSensitive: boolean;
 }
 
@@ -397,11 +402,29 @@ function validateArgs(args: WebFetchArgs): ValidationResult {
     maxBytes = args.maxBytes;
   }
 
+  let timeoutMs = FETCH_TIMEOUT_MS;
+  if (args.timeoutMs !== undefined) {
+    if (
+      typeof args.timeoutMs !== "number" ||
+      !Number.isInteger(args.timeoutMs) ||
+      args.timeoutMs < MIN_FETCH_TIMEOUT_MS ||
+      args.timeoutMs > MAX_FETCH_TIMEOUT_MS
+    ) {
+      return validationError(
+        `timeoutMs must be an integer in [${MIN_FETCH_TIMEOUT_MS}, ${MAX_FETCH_TIMEOUT_MS}]`,
+      );
+    }
+    timeoutMs = args.timeoutMs;
+  }
+
   // includeHeaders: optional boolean (Requirement 2.34).
   if (args.includeHeaders !== undefined && typeof args.includeHeaders !== "boolean") {
     return validationError("includeHeaders must be a boolean");
   }
-  const includeHeaders = args.includeHeaders ?? DEFAULT_INCLUDE_HEADERS;
+  const includeHeaders =
+    args.responsePart === "headers"
+      ? true
+      : args.includeHeaders ?? DEFAULT_INCLUDE_HEADERS;
 
   // includeTls: optional boolean. Default is false so general browsing stays
   // lean; callers can opt in when diagnostics matter.
@@ -440,6 +463,20 @@ function validateArgs(args: WebFetchArgs): ValidationResult {
   const responseMode: ResponseMode =
     args.responseMode ?? DEFAULT_RESPONSE_MODE;
 
+  let responsePart: ResponsePart = "full";
+  if (args.responsePart !== undefined) {
+    if (
+      args.responsePart !== "full" &&
+      args.responsePart !== "headers" &&
+      args.responsePart !== "body"
+    ) {
+      return validationError(
+        "responsePart must be one of: full, headers, body",
+      );
+    }
+    responsePart = args.responsePart;
+  }
+
   // redactSensitive: optional boolean (Requirement 2.34).
   if (
     args.redactSensitive !== undefined &&
@@ -454,11 +491,13 @@ function validateArgs(args: WebFetchArgs): ValidationResult {
     value: {
       url: args.url,
       maxBytes,
+      timeoutMs,
       includeHeaders,
       includeTls,
       includeTiming,
       includeRedirectChain,
       responseMode,
+      responsePart,
       redactSensitive,
     },
   };
@@ -919,12 +958,39 @@ async function issueHop(input: IssueHopArgs): Promise<HopOutcome> {
         return;
       }
 
-      // HTTP error (Requirement 6.4). Read up to 4 KiB for the preview
-      // and surface as `http-error`.
+      // HTTP error (Requirement 6.4). Headers-only callers do not need a
+      // body preview; body/full callers receive up to 4 KiB.
       if (status >= 400 && status < 600) {
+        if (ctx.args.responsePart === "headers") {
+          res.destroy();
+          finish({
+            kind: "error",
+            error: {
+              kind: "http-error",
+              message: `${status} ${currentUrl}`,
+              status,
+              url: currentUrl,
+            },
+          });
+          return;
+        }
         readBody(res, HTTP_ERROR_BODY_PREVIEW_BYTES, ctx.controller).then(
           ({ body, truncated, bytesReceived }) => {
-            const preview = renderBodyPreview(body, truncated, bytesReceived);
+            let preview = renderBodyPreview(body, truncated, bytesReceived);
+            if (
+              ctx.args.responseMode === "readable" &&
+              typeof contentType === "string" &&
+              HTML_CONTENT_TYPE_PATTERN.test(contentType)
+            ) {
+              const readable = toReadableText(body.toString("utf8"));
+              if (readable) {
+                preview = renderBodyPreview(
+                  Buffer.from(readable, "utf8"),
+                  truncated,
+                  bytesReceived,
+                );
+              }
+            }
             finish({
               kind: "error",
               error: {
@@ -953,7 +1019,21 @@ async function issueHop(input: IssueHopArgs): Promise<HopOutcome> {
         return;
       }
 
-      // Successful (2xx or non-Location 3xx) terminal hop.
+      // Successful (2xx or non-Location 3xx) terminal hop. Headers-only
+      // requests can stop immediately instead of buffering a body they will
+      // discard in the adapter.
+      if (ctx.args.responsePart === "headers") {
+        res.destroy();
+        finish({
+          kind: "terminal",
+          status,
+          contentType,
+          body: "",
+          bytesReceived: 0,
+          truncated: false,
+        });
+        return;
+      }
       readBody(res, ctx.args.maxBytes, ctx.controller).then(
         ({ body, truncated, bytesReceived }) => {
           const text = classifyAndDecodeBody({
@@ -1310,11 +1390,13 @@ function errorOutcome(input: ErrorOutcomeInput): WebFetchOutcome {
   const args: NormalisedArgs = {
     url: input.requestedUrl,
     maxBytes: DEFAULT_MAX_BYTES,
+    timeoutMs: FETCH_TIMEOUT_MS,
     includeHeaders,
     includeTls,
     includeTiming,
     includeRedirectChain,
     responseMode: input.mode,
+    responsePart: "full",
     redactSensitive,
   };
 
@@ -1466,7 +1548,7 @@ function tryHostname(url: string): string {
 
 /**
  * Build the `timeout` error from the design's error matrix:
- * "web.fetch: timeout after 30s (last url=…)" carrying the elapsed
+ * "web.fetch: timeout after Ns (last url=…)" carrying the elapsed
  * wall-clock for callers that want to log it (Requirement 2.10).
  */
 function timeoutError(
@@ -1477,7 +1559,7 @@ function timeoutError(
   const elapsedMs = Math.max(0, now() - t0);
   return {
     kind: "timeout",
-    message: `web.fetch: timeout after ${Math.round(FETCH_TIMEOUT_MS / 1000)}s (last url=${lastUrl}, elapsed=${elapsedMs}ms)`,
+    message: `web.fetch: timeout after ${Math.round(elapsedMs / 1000)}s (last url=${lastUrl}, elapsed=${elapsedMs}ms)`,
     url: lastUrl,
   };
 }

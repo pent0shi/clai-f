@@ -191,3 +191,72 @@ export function looksLongRunning(command: string): boolean {
     return LONG_RUNNING_PATTERNS.some((pattern) => pattern.test(segment));
   });
 }
+
+/**
+ * Finite commands that commonly exceed an interactive timeout or produce a
+ * large stream. They run as durable jobs: the agent receives a stable id,
+ * session-state reminders keep the job visible, and shell.tail can harvest
+ * output incrementally without re-running the command.
+ */
+const LONG_FINITE_JOB_PATTERNS: readonly RegExp[] = [
+  /^(?:\S*\/)?(?:nmap|masscan)\b/i,
+  /^(?:\S*\/)?(?:ffuf|feroxbuster|gobuster|dirsearch|wfuzz|nikto|nuclei|sqlmap)\b/i,
+  /^(?:\S*\/)?find\s+/i,
+];
+
+const ENV_OPTIONS_WITH_VALUE = new Set(["-u", "--unset", "-C", "--chdir", "-S", "--split-string"]);
+const SUDO_OPTIONS_WITH_VALUE = new Set(["-C", "--close-from", "-D", "--chdir", "-g", "--group", "-h", "--host", "-p", "--prompt", "-R", "--chroot", "-T", "--command-timeout", "-u", "--user"]);
+const TIMEOUT_OPTIONS_WITH_VALUE = new Set(["-k", "--kill-after", "-s", "--signal"]);
+
+function skipWrapperOptions(
+  tokens: string[],
+  index: number,
+  optionsWithValue: ReadonlySet<string>,
+): number {
+  while (index < tokens.length) {
+    const token = tokens[index]!;
+    if (token === "--") return index + 1;
+    if (!token.startsWith("-") || token === "-") break;
+    index += 1;
+    const optionName = token.split("=", 1)[0]!;
+    if (optionsWithValue.has(optionName) && !token.includes("=")) index += 1;
+  }
+  return index;
+}
+
+/** Remove common execution wrappers before classifying the real executable. */
+function unwrapFiniteCommand(segment: string): string {
+  const tokens = segment.trim().split(/\s+/).filter(Boolean);
+  let index = 0;
+  for (let pass = 0; pass < 12 && index < tokens.length; pass += 1) {
+    while (/^[A-Za-z_][\w]*=.*/.test(tokens[index] ?? "")) index += 1;
+    const wrapper = baseCommand(tokens[index]);
+    if (wrapper === "env") {
+      index = skipWrapperOptions(tokens, index + 1, ENV_OPTIONS_WITH_VALUE);
+      continue;
+    }
+    if (wrapper === "sudo") {
+      index = skipWrapperOptions(tokens, index + 1, SUDO_OPTIONS_WITH_VALUE);
+      continue;
+    }
+    if (wrapper === "command" || wrapper === "exec") {
+      index = skipWrapperOptions(tokens, index + 1, new Set());
+      continue;
+    }
+    if (wrapper === "timeout" || wrapper === "gtimeout") {
+      index = skipWrapperOptions(tokens, index + 1, TIMEOUT_OPTIONS_WITH_VALUE);
+      // GNU timeout requires a duration before the command.
+      if (index < tokens.length) index += 1;
+      continue;
+    }
+    break;
+  }
+  return tokens.slice(index).join(" ");
+}
+
+export function looksLikeLongFiniteCommand(command: string): boolean {
+  return commandSegments(command).some((segment) => {
+    const executable = unwrapFiniteCommand(segment);
+    return LONG_FINITE_JOB_PATTERNS.some((pattern) => pattern.test(executable));
+  });
+}

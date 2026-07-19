@@ -27,7 +27,11 @@ import { imageOcr } from "./image.js";
 import { pdfRead } from "./pdf.js";
 import { webFetch } from "./web/fetch.js";
 import { webSearch } from "./web/search.js";
-import { RESPONSE_MODES, type ResponseMode } from "./web/types.js";
+import {
+  RESPONSE_MODES,
+  SEARCH_TIMEOUT_MS,
+  type ResponseMode,
+} from "./web/types.js";
 import { classifyToolCall } from "../safety/classifier.js";
 import { loadScope } from "../store/scope.js";
 import {
@@ -43,7 +47,10 @@ import { pingSweep } from "./net-ping-sweep.js";
 import { toolCheckHandler } from "./capabilities.js";
 import { wordlistFind } from "./wordlists.js";
 import { jobManager } from "./jobs.js";
-import { looksLongRunning } from "./command-intent.js";
+import {
+  looksLikeLongFiniteCommand,
+  looksLongRunning,
+} from "./command-intent.js";
 import { packageBinaryName } from "./package-binary.js";
 import { resolveNmapTimeoutPolicy, runNmapScan } from "./nmap-runner.js";
 import { compareAuthorizationContexts, discoverWebSurface, enumerateApi } from "./pentest-workflows.js";
@@ -195,16 +202,13 @@ function optionalResponseMode(
 export const toolRegistry: Record<string, ToolHandler> = {
   async "shell.exec"(args, options) {
     const command = requireString(args, "command");
-    // Cross-OS non-blocking safety net: servers, watchers, and listeners
-    // (npm run dev, vite, python -m http.server, nc -l, docker compose up,
-    // tail -f, …) would otherwise block the agent's main thread until the
-    // command's timeout — exactly the "I have to Ctrl+C" problem. Route them
-    // to the background job manager (a detached child process on
-    // macOS/Linux, a normal child on Windows) so the agent gets a job id
-    // back immediately and can inspect output with shell.tail / shell.jobs.
-    // The model is still encouraged to use shell.start directly; this just
-    // catches the common mistake of using shell.exec for a server.
-    if (looksLongRunning(command)) {
+    // Persistent processes and potentially expensive finite scanners/searches
+    // run as durable jobs. This avoids false 40s termination while preserving
+    // status/output across turns and process restarts.
+    const requestedTimeoutMs = optionalNumber(args, "timeoutMs");
+    const finiteBackgroundJob =
+      requestedTimeoutMs === undefined && looksLikeLongFiniteCommand(command);
+    if (looksLongRunning(command) || finiteBackgroundJob) {
       const elevated = await prepareElevatedBackgroundCommand(command, {
         signal: options?.signal,
         onOutput: options?.onOutput,
@@ -215,6 +219,9 @@ export const toolRegistry: Record<string, ToolHandler> = {
         elevated?.prepared ? elevated.spec : command,
         {
           cwd: optionalString(args, "cwd"),
+          ...(requestedTimeoutMs !== undefined
+            ? { timeoutMs: requestedTimeoutMs }
+            : {}),
           ...(options?.sessionId
             ? { ownerSessionId: options.sessionId }
             : {}),
@@ -225,20 +232,16 @@ export const toolRegistry: Record<string, ToolHandler> = {
           ...job,
           output:
             `${job.output}\n\n` +
-            "This command keeps running, so it was started in the BACKGROUND (a separate process) " +
-            "instead of blocking. It is NOT finished — use shell.tail {\"id\":\"<id>\"} to read its " +
-            "output, shell.jobs to list jobs, and shell.stop {\"id\":\"<id>\"} to stop it. " +
-            "Do NOT wait on it or claim it exited.",
+            (finiteBackgroundJob
+              ? "This potentially long finite command was started as a durable BACKGROUND job instead of risking a foreground timeout. Poll shell.tail with the returned id until status is exited/failed; use nextOffset for incremental output. Do not launch a duplicate or mark its task complete while it is still running."
+              : "This persistent command was started in the BACKGROUND. It is not proof of readiness — inspect shell.tail, run a readiness probe, use shell.jobs for status, and shell.stop when appropriate."),
         };
       }
       return job;
     }
-    // create-next-app / npm install often exceed the default 3 min shell timeout
-    // when the model omits timeoutMs — bump automatically for known long jobs.
-    const explicitTimeout = optionalNumber(args, "timeoutMs");
     const timeoutMs =
-      explicitTimeout ??
-      (isLongQuietInstallOrScaffoldCommand(command) ? 900_000 : undefined);
+      requestedTimeoutMs ??
+      (isLongQuietInstallOrScaffoldCommand(command) ? 15 * 60_000 : undefined);
 
     // Password tools must never steal the TTY in OpenTUI (freezes Esc/clicks).
     // Prefer secure modal + sudo -S; otherwise refuse interactive elevation.
@@ -364,7 +367,7 @@ export const toolRegistry: Record<string, ToolHandler> = {
     return spawnArgv({
       command: spec.command,
       argv: spec.argv,
-      timeoutMs: 600_000,
+      timeoutMs: optionalNumber(args, "timeoutMs") ?? 600_000,
       signal: options?.signal,
       onOutput: options?.onOutput,
     });
@@ -422,13 +425,16 @@ export const toolRegistry: Record<string, ToolHandler> = {
         name: `nmap-${estimate.profile}-${host.value}`,
         profile: estimate.profile,
         estimatedSeconds: estimate.estimatedSeconds,
+        ...(optionalNumber(args, "timeoutMs") !== undefined
+          ? { timeoutMs: optionalNumber(args, "timeoutMs") as number }
+          : {}),
         ...(options?.sessionId
           ? { ownerSessionId: options.sessionId }
           : {}),
         ...(options?.engagementAuthorization ? { authorization: options.engagementAuthorization } : {}),
       });
     }
-    return runNmapScan(argv, options);
+    return runNmapScan(argv, options, optionalNumber(args, "timeoutMs"));
   },
   async "http.fetch"(args, options) {
     const headers =
@@ -476,6 +482,15 @@ export const toolRegistry: Record<string, ToolHandler> = {
       iOwnThis,
       retries: optionalNumber(args, "retries"),
       timeoutMs: optionalNumber(args, "timeoutMs"),
+      responseMode:
+        optionalString(args, "responseMode") === "raw" ? "raw" : "readable",
+      responsePart: (() => {
+        const part = optionalString(args, "responsePart");
+        return part === "headers" || part === "body" ? part : "full";
+      })(),
+      topLines: optionalNumber(args, "topLines"),
+      bottomLines: optionalNumber(args, "bottomLines"),
+      maxOutputBytes: optionalNumber(args, "maxOutputBytes"),
       insecureTls,
       signal: options?.signal,
       // Never attach engagement hop checks for owned loopback — leftover
@@ -486,12 +501,20 @@ export const toolRegistry: Record<string, ToolHandler> = {
   async "web.search"(args, options) {
     const query = requireString(args, "query");
     const maxResults = optionalNumber(args, "maxResults");
+    const selectedTimeoutMs = optionalNumber(args, "timeoutMs") ?? SEARCH_TIMEOUT_MS;
+    // Search providers, fallback attempts, and optional fetchTop page reads
+    // share one wall-clock deadline rather than each resetting the budget.
+    const deadline = Date.now() + selectedTimeoutMs;
+    const remainingMs = (): number => Math.max(0, deadline - Date.now());
     const result = await webSearch(
       {
         query,
         ...(maxResults !== undefined ? { maxResults } : {}),
       },
-      { ...(options?.signal ? { signal: options.signal } : {}) },
+      {
+        ...(options?.signal ? { signal: options.signal } : {}),
+        timeoutMs: Math.max(1, remainingMs()),
+      },
     );
 
     // "Search and read" — like a human (or Claude) following the most
@@ -505,6 +528,12 @@ export const toolRegistry: Record<string, ToolHandler> = {
 
     const urls = extractResultUrls(result.output).slice(0, want);
     if (urls.length === 0) return result;
+    if (remainingMs() <= 0) {
+      return {
+        ...result,
+        output: `${result.output}\n\n(fetchTop skipped: web.search deadline exhausted)`,
+      };
+    }
 
     // Heartbeats reset the runner's stall watchdog (web.search emits no
     // stdout of its own). Honor turn cancel between pages so Esc/Ctrl+C
@@ -532,8 +561,17 @@ export const toolRegistry: Record<string, ToolHandler> = {
           "stdout",
         );
         try {
+          const pageBudgetMs = remainingMs();
+          if (pageBudgetMs <= 0) {
+            return `── PAGE: ${url} (skipped: web.search deadline exhausted)`;
+          }
           const page = await webFetch(
-            { url, responseMode: "readable", includeHeaders: false },
+            {
+              url,
+              responseMode: "readable",
+              includeHeaders: false,
+              timeoutMs: pageBudgetMs,
+            },
             { ...(options?.signal ? { signal: options.signal } : {}) },
           );
           // Never truncate page bodies for the tool result — the UI pager and
@@ -557,6 +595,8 @@ export const toolRegistry: Record<string, ToolHandler> = {
     const fetchArgs: Parameters<typeof webFetch>[0] = { url };
     const maxBytes = optionalNumber(args, "maxBytes");
     if (maxBytes !== undefined) fetchArgs.maxBytes = maxBytes;
+    const timeoutMs = optionalNumber(args, "timeoutMs");
+    if (timeoutMs !== undefined) fetchArgs.timeoutMs = timeoutMs;
     const includeHeaders = optionalBoolean(args, "includeHeaders");
     fetchArgs.includeHeaders = includeHeaders ?? false;
     const includeTls = optionalBoolean(args, "includeTls");
@@ -567,6 +607,21 @@ export const toolRegistry: Record<string, ToolHandler> = {
     fetchArgs.includeRedirectChain = includeRedirectChain ?? false;
     const responseMode = optionalResponseMode(args, "responseMode");
     if (responseMode !== undefined) fetchArgs.responseMode = responseMode;
+    const responsePart = optionalString(args, "responsePart");
+    if (
+      responsePart === "full" ||
+      responsePart === "headers" ||
+      responsePart === "body"
+    ) {
+      fetchArgs.responsePart = responsePart;
+      if (responsePart === "headers") fetchArgs.includeHeaders = true;
+    }
+    const topLines = optionalNumber(args, "topLines");
+    if (topLines !== undefined) fetchArgs.topLines = topLines;
+    const bottomLines = optionalNumber(args, "bottomLines");
+    if (bottomLines !== undefined) fetchArgs.bottomLines = bottomLines;
+    const maxOutputBytes = optionalNumber(args, "maxOutputBytes");
+    if (maxOutputBytes !== undefined) fetchArgs.maxOutputBytes = maxOutputBytes;
     const redactSensitive = optionalBoolean(args, "redactSensitive");
     if (redactSensitive !== undefined)
       fetchArgs.redactSensitive = redactSensitive;
@@ -706,6 +761,9 @@ export const toolRegistry: Record<string, ToolHandler> = {
                   name: `recon-${estimate.profile}-${host.value}`,
                   profile: estimate.profile,
                   estimatedSeconds: estimate.estimatedSeconds,
+                  ...(optionalNumber(args, "timeoutMs") !== undefined
+                    ? { timeoutMs: optionalNumber(args, "timeoutMs") as number }
+                    : {}),
                   ...(options?.sessionId
                     ? { ownerSessionId: options.sessionId }
                     : {}),
@@ -714,7 +772,15 @@ export const toolRegistry: Record<string, ToolHandler> = {
               : prepared.result;
             return { key: step.key, display, result };
           }
-          return { key: step.key, display, result: await runNmapScan(step.argv, options) };
+          return {
+            key: step.key,
+            display,
+            result: await runNmapScan(
+              step.argv,
+              options,
+              optionalNumber(args, "timeoutMs"),
+            ),
+          };
         }
         if (step.key === "dns") {
           return {
@@ -865,6 +931,9 @@ export const toolRegistry: Record<string, ToolHandler> = {
     return jobManager.startJob(elevated?.prepared ? elevated.spec : command, {
       cwd: optionalString(args, "cwd"),
       name: optionalString(args, "name"),
+      ...(optionalNumber(args, "timeoutMs") !== undefined
+        ? { timeoutMs: optionalNumber(args, "timeoutMs") as number }
+        : {}),
       ...(options?.sessionId
         ? { ownerSessionId: options.sessionId }
         : {}),
@@ -874,10 +943,18 @@ export const toolRegistry: Record<string, ToolHandler> = {
     return jobManager.listJobs(options?.sessionId);
   },
   async "shell.tail"(args) {
-    return jobManager.tailJob(
-      requireString(args, "id"),
-      optionalNumber(args, "bytes"),
-    );
+    const offset = optionalNumber(args, "offset");
+    const bytes = optionalNumber(args, "bytes");
+    const stream = optionalString(args, "stream") as
+      | "stdout"
+      | "stderr"
+      | "combined"
+      | undefined;
+    return jobManager.tailJob(requireString(args, "id"), {
+      ...(offset !== undefined ? { offset } : {}),
+      ...(bytes !== undefined ? { bytes } : {}),
+      ...(stream !== undefined ? { stream } : {}),
+    });
   },
   async "shell.stop"(args) {
     return jobManager.stopJob(requireString(args, "id"));
@@ -1105,8 +1182,8 @@ const BATCH_FORBIDDEN_TOOLS = new Set([
 const BATCH_MAX_CALLS = 20;
 const BATCH_DEFAULT_CONCURRENCY = 3;
 const BATCH_MAX_CONCURRENCY = 6;
-/** Hard ceiling so tool.batch never sits on "running" forever (hang DNS/HTTP). */
-const BATCH_HARD_TIMEOUT_MS = 180_000;
+/** Default batch ceiling; the model may override it with timeoutMs. */
+const BATCH_HARD_TIMEOUT_MS = 40_000;
 /** Progress heartbeats keep the outer tool stall watchdog alive. */
 const BATCH_HEARTBEAT_MS = 5_000;
 
@@ -1323,9 +1400,16 @@ async function runToolBatch(
     if (options.signal.aborted) batchAc.abort();
     else options.signal.addEventListener("abort", onParentAbort, { once: true });
   }
+  const batchTimeoutMs = Math.max(
+    1_000,
+    Math.min(
+      1_800_000,
+      optionalNumber(args, "timeoutMs") ?? BATCH_HARD_TIMEOUT_MS,
+    ),
+  );
   const hardTimer = setTimeout(() => {
     if (!batchAc.signal.aborted) batchAc.abort();
-  }, BATCH_HARD_TIMEOUT_MS);
+  }, batchTimeoutMs);
   (hardTimer as unknown as { unref?: () => void }).unref?.();
 
   let finished = 0;

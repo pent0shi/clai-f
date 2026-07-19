@@ -50,6 +50,8 @@ export interface BackgroundJob {
   kind?: JobKind | undefined;
   name?: string | undefined;
   authorization?: { target: string; expiresAt?: string | undefined } | undefined;
+  /** Optional execution deadline for finite durable jobs. */
+  timeoutAt?: string | undefined;
 }
 
 interface PersistedRegistry { schemaVersion: 1; jobs: BackgroundJob[] }
@@ -70,6 +72,8 @@ export interface StartJobOptions {
   ownerSessionId?: string | undefined;
   profile?: string | undefined;
   estimatedSeconds?: number | undefined;
+  /** Stop this finite job after the selected duration. */
+  timeoutMs?: number | undefined;
   authorization?: { target: string; expiresAt?: string | undefined } | undefined;
 }
 
@@ -203,6 +207,7 @@ export class JobManager {
   private processes = new Map<string, ChildProcess>();
   private writers = new Map<string, { stdout: RotatingRedactedWriter; stderr: RotatingRedactedWriter }>();
   private abortControllers = new Map<string, AbortController>();
+  private deadlineTimers = new Map<string, NodeJS.Timeout>();
   private readonly registryPath: string;
 
   constructor(private readonly jobsDir = getJobsDir()) {
@@ -231,6 +236,45 @@ export class JobManager {
     return job.ownerSessionId === sessionId;
   }
 
+  private clearJobDeadline(id: string): void {
+    const timer = this.deadlineTimers.get(id);
+    if (timer) clearTimeout(timer);
+    this.deadlineTimers.delete(id);
+  }
+
+  /** Reconcile a restored process that no longer has a ChildProcess close event. */
+  private refreshJobLiveness(job: BackgroundJob): void {
+    if (!this.isLive(job) || this.processes.has(job.id)) return;
+    const identity = processIdentity(job.pid);
+    if (
+      processAlive(job.pid) &&
+      identity &&
+      job.processIdentity &&
+      identity === job.processIdentity
+    ) {
+      return;
+    }
+    job.status = "lost";
+    job.endedAt = new Date().toISOString();
+    this.clearJobDeadline(job.id);
+    void this.persist();
+  }
+
+  /** Arm or restore a persisted finite-job deadline. */
+  private scheduleJobDeadline(job: BackgroundJob): void {
+    this.clearJobDeadline(job.id);
+    if (!job.timeoutAt || !this.isLive(job)) return;
+    const timeoutAt = Date.parse(job.timeoutAt);
+    if (!Number.isFinite(timeoutAt)) return;
+    const timer = setTimeout(() => {
+      this.deadlineTimers.delete(job.id);
+      this.refreshJobLiveness(job);
+      if (this.isLive(job)) void this.stopJob(job.id, { graceMs: 1_000 });
+    }, Math.max(0, timeoutAt - Date.now()));
+    timer.unref?.();
+    this.deadlineTimers.set(job.id, timer);
+  }
+
   /**
    * Register an in-flight tool for stall tracking only.
    * Never appears in shell.jobs and never touches the durable registry.
@@ -255,6 +299,7 @@ export class JobManager {
     }
     this.abortControllers.delete(id);
     this.processes.delete(id);
+    if (!this.isLive(job)) this.clearJobDeadline(id);
     // Drop finished tool-track rows immediately — they are not background jobs.
     if (!this.isDurable(job) && !this.isLive(job)) {
       this.jobs.delete(id);
@@ -326,6 +371,13 @@ export class JobManager {
       ownerSessionId: options?.ownerSessionId ?? "unknown",
       kind: "durable",
       ...(options?.name ? { name: options.name } : {}),
+      ...(options?.timeoutMs !== undefined
+        ? {
+            timeoutAt: new Date(
+              Date.now() + Math.max(1_000, Math.floor(options.timeoutMs)),
+            ).toISOString(),
+          }
+        : {}),
       ...(options?.authorization ? { authorization: options.authorization } : {}),
     };
     this.jobs.set(id, job);
@@ -441,10 +493,12 @@ export class JobManager {
         ? setTimeout(() => { void this.stopJob(id, { graceMs: 1_000 }); }, expiresAt - Date.now())
         : undefined;
       expiryTimer?.unref?.();
+      this.scheduleJobDeadline(job);
       child.stdout?.on("data", (chunk: Buffer) => { stdout.append(chunk); job.heartbeatAt = new Date().toISOString(); void this.persist(); });
       child.stderr?.on("data", (chunk: Buffer) => { stderr.append(chunk); job.heartbeatAt = new Date().toISOString(); void this.persist(); });
       child.on("close", (code, signal) => {
         if (expiryTimer) clearTimeout(expiryTimer);
+        this.clearJobDeadline(id);
         job.exitCode = code ?? undefined;
         job.signal = signal ?? undefined;
         job.status = signal ? "killed" : code === 0 ? "exited" : "failed";
@@ -455,6 +509,7 @@ export class JobManager {
       });
       child.on("error", (error: NodeJS.ErrnoException) => {
         if (expiryTimer) clearTimeout(expiryTimer);
+        this.clearJobDeadline(id);
         const code = error.code ?? "UNKNOWN";
         stderr.append(`Background process error [${code}]: ${error.message}\n`);
         job.status = "failed";
@@ -568,6 +623,7 @@ export class JobManager {
    */
   listJobs(sessionId?: string): ToolResult {
     this.pruneTerminalJobs();
+    for (const job of this.jobs.values()) this.refreshJobLiveness(job);
     const durable = [...this.jobs.values()].filter(
       (job) => this.isDurable(job) && this.matchesSession(job, sessionId),
     );
@@ -643,7 +699,9 @@ export class JobManager {
 
   getJob(id: string): BackgroundJob | undefined {
     const resolved = this.resolveJobId(id);
-    return resolved ? this.jobs.get(resolved) : undefined;
+    const job = resolved ? this.jobs.get(resolved) : undefined;
+    if (job) this.refreshJobLiveness(job);
+    return job;
   }
 
   async tailJob(id: string, bytesOrCursor?: number | TailCursor): Promise<ToolResult> {
@@ -653,8 +711,17 @@ export class JobManager {
       const known = [...this.jobs.keys()].join(", ") || "none";
       return { ok: false, output: `Job "${id}" not found. Canonical job IDs: ${known}.`, exitCode: 1 };
     }
+    this.refreshJobLiveness(job);
     const cursor = typeof bytesOrCursor === "number" ? { bytes: bytesOrCursor } : (bytesOrCursor ?? {});
-    const stream = cursor.stream ?? "combined";
+    const stream = cursor.stream ?? "stdout";
+    if (stream === "combined" && cursor.offset !== undefined) {
+      return {
+        ok: false,
+        output:
+          "Incremental offsets are stream-specific. Poll stdout and stderr separately when using offset/nextOffset; combined is snapshot-only.",
+        exitCode: 1,
+      };
+    }
     const paths = stream === "stderr" ? job.artifacts.stderr.chunks : stream === "stdout" ? job.artifacts.stdout.chunks : [...job.artifacts.stdout.chunks, ...job.artifacts.stderr.chunks];
     const readablePaths = paths.length > 0 ? paths : [stream === "stderr" ? job.stderrArtifact : job.stdoutArtifact];
     const path = readablePaths.at(-1)!;
@@ -708,6 +775,7 @@ export class JobManager {
     if (!job || !resolved) return { ok: false, output: `Job "${id}" not found.`, exitCode: 1 };
     id = resolved;
     if (job.status !== "running" && job.status !== "starting") return { ok: false, output: `Job "${id}" is already ${job.status}.`, exitCode: 1 };
+    this.clearJobDeadline(id);
     job.status = "stopping"; await this.persist();
     this.abortControllers.get(id)?.abort();
     const pid = job.pid;
@@ -716,7 +784,7 @@ export class JobManager {
       try { process.platform !== "win32" && job.processGroupId ? process.kill(-job.processGroupId, signal) : process.kill(pid, signal); return true; } catch { return !processAlive(pid); }
     };
     const graceful = options?.signal ?? "SIGTERM";
-    if (!send(graceful) && processAlive(pid)) { job.status = "running"; await this.persist(); return { ok: false, output: `Failed to signal job "${id}".`, exitCode: 1 }; }
+    if (!send(graceful) && processAlive(pid)) { job.status = "running"; if (!job.timeoutAt || Date.parse(job.timeoutAt) > Date.now()) this.scheduleJobDeadline(job); await this.persist(); return { ok: false, output: `Failed to signal job "${id}".`, exitCode: 1 }; }
     const waitForExit = async (ms: number): Promise<boolean> => {
       const deadline = Date.now() + ms;
       while (Date.now() < deadline) { if (!processAlive(pid)) return true; await new Promise((resolve) => setTimeout(resolve, 25)); }
@@ -725,7 +793,7 @@ export class JobManager {
     let stopped = await waitForExit(options?.graceMs ?? 2_000);
     let actualSignal: NodeJS.Signals = graceful;
     if (!stopped && options?.escalate !== false) { actualSignal = "SIGKILL"; send(actualSignal); stopped = await waitForExit(1_000); }
-    if (!stopped) { job.status = "running"; await this.persist(); return { ok: false, output: `Job "${id}" remains alive after ${actualSignal}.`, exitCode: 1 }; }
+    if (!stopped) { job.status = "running"; if (!job.timeoutAt || Date.parse(job.timeoutAt) > Date.now()) this.scheduleJobDeadline(job); await this.persist(); return { ok: false, output: `Job "${id}" remains alive after ${actualSignal}.`, exitCode: 1 }; }
     job.status = "killed"; job.signal = actualSignal; job.endedAt = new Date().toISOString();
     this.abortControllers.delete(id); this.processes.delete(id); this.writers.get(id)?.stdout.close(); this.writers.get(id)?.stderr.close(); this.writers.delete(id);
     await this.persist();
@@ -733,6 +801,7 @@ export class JobManager {
   }
 
   getRunningJobs(sessionId?: string): BackgroundJob[] {
+    for (const job of this.jobs.values()) this.refreshJobLiveness(job);
     return [...this.jobs.values()].filter(
       (job) =>
         this.isDurable(job) &&
@@ -742,6 +811,7 @@ export class JobManager {
   }
 
   getRecentJobs(limit = 50, sessionId?: string): BackgroundJob[] {
+    for (const job of this.jobs.values()) this.refreshJobLiveness(job);
     return [...this.jobs.values()]
       .filter(
         (job) => this.isDurable(job) && this.matchesSession(job, sessionId),
@@ -792,11 +862,15 @@ export class JobManager {
             job.status = "lost";
             job.endedAt = new Date().toISOString();
           } else {
+            // The process identity is still verified. Restore any persisted
+            // deadline after insertion; an already-expired deadline schedules
+            // immediate stopJob(), which verifies termination before marking it.
             job.status = "running";
             job.heartbeatAt = new Date().toISOString();
           }
         }
         this.jobs.set(job.id, job);
+        this.scheduleJobDeadline(job);
       }
       this.pruneTerminalJobs();
       this.persistSync();

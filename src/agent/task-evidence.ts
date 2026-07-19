@@ -699,70 +699,64 @@ export function isLongQuietInstallOrScaffoldCommand(cmd: string): boolean {
   );
 }
 
-/** Stall watchdog budget: scaffold/install can be silent for a long time. */
+/** Default wall-clock budget for every tool unless the model overrides it. */
+export const DEFAULT_TOOL_TIMEOUT_MS = 40_000;
+const MIN_TOOL_TIMEOUT_MS = 1_000;
+const MAX_TOOL_TIMEOUT_MS = 30 * 60_000;
+
+function requestedToolTimeoutMs(call: {
+  name: string;
+  args: Record<string, unknown>;
+}): number {
+  const requested = call.args.timeoutMs;
+  if (typeof requested === "number" && Number.isFinite(requested)) {
+    return Math.max(
+      MIN_TOOL_TIMEOUT_MS,
+      Math.min(MAX_TOOL_TIMEOUT_MS, Math.floor(requested)),
+    );
+  }
+
+  const cmd = typeof call.args.command === "string" ? call.args.command : "";
+  if (
+    call.name === "pkg.install" ||
+    (call.name === "shell.exec" && isLongQuietInstallOrScaffoldCommand(cmd))
+  ) {
+    return 15 * 60_000;
+  }
+  if (call.name === "net.scan" || call.name === "pentest.recon") {
+    return 15 * 60_000;
+  }
+  if (call.name === "pentest.webDiscover") return 8 * 60_000;
+  if (call.name === "pentest.apiEnumerate") return 2 * 60_000;
+  if (call.name === "pentest.authCompare") return 3 * 60_000;
+  return DEFAULT_TOOL_TIMEOUT_MS;
+}
+
+const OUTER_STALL_SETTLE_MARGIN_MS = 2_500;
+
+/**
+ * Silence cancellation leaves a short margin for a tool's own timeout handler
+ * to return its richer result. The hard wall-clock watchdog still enforces the
+ * exact model-selected deadline.
+ */
 export function toolStallBudgetMs(call: {
   name: string;
   args: Record<string, unknown>;
 }): number {
-  const cmd = typeof call.args.command === "string" ? call.args.command : "";
-  if (call.name === "pkg.install") return 10 * 60_000;
-  if (
-    (call.name === "shell.exec" || call.name === "shell.start") &&
-    isLongQuietInstallOrScaffoldCommand(cmd)
-  ) {
-    return 15 * 60_000; // create-next-app + npm install often 2–10+ min with quiet stretches
-  }
-  // Network tools: 60s silence budget (aligned with model stream stall).
-  if (call.name === "web.search" || call.name === "web.fetch" || call.name === "http.fetch") {
-    return 60_000;
-  }
-  // Multi-request workflows emit progress ticks; allow quieter stretches between hops.
-  if (
-    call.name === "pentest.webDiscover" ||
-    call.name === "pentest.apiEnumerate" ||
-    call.name === "pentest.authCompare"
-  ) {
-    return 90_000;
-  }
-  return 60_000;
+  return requestedToolTimeoutMs(call) + OUTER_STALL_SETTLE_MARGIN_MS;
 }
 
 /**
- * Hard wall-clock budget for a tool call. When exceeded the runner aborts
- * and force-settles even if the underlying promise never resolves (hung
- * socket that ignored AbortSignal). Distinct from the stall watchdog
- * (which fires on *silence*); this fires on total elapsed time.
+ * Hard wall-clock watchdog for every tool call. Local implementations enforce
+ * the selected deadline; this outer fallback waits through the same short
+ * settlement margin so their timeout/abort handlers can return a rich result
+ * before the runner force-settles an ignored AbortSignal.
  */
 export function toolHardBudgetMs(call: {
   name: string;
   args: Record<string, unknown>;
 }): number {
-  const cmd = typeof call.args.command === "string" ? call.args.command : "";
-  if (call.name === "pkg.install") return 20 * 60_000;
-  if (
-    (call.name === "shell.exec" || call.name === "shell.start") &&
-    isLongQuietInstallOrScaffoldCommand(cmd)
-  ) {
-    return 20 * 60_000;
-  }
-  if (call.name === "web.search") {
-    // search (15s) + up to 3 fetchTop pages (30s each) + margin
-    const fetchTop =
-      typeof call.args.fetchTop === "number" && Number.isFinite(call.args.fetchTop)
-        ? Math.max(0, Math.min(3, Math.floor(call.args.fetchTop)))
-        : 0;
-    return 15_000 + fetchTop * 30_000 + 15_000;
-  }
-  if (call.name === "web.fetch") return 45_000;
-  if (call.name === "http.fetch") return 90_000;
-  if (call.name === "net.scan" || call.name === "pentest.recon") return 15 * 60_000;
-  // webDiscover: up to 100 paths × ~15s HTTP timeout / concurrency 4 ≈ ~6+ min worst case.
-  if (call.name === "pentest.webDiscover") return 8 * 60_000;
-  if (call.name === "pentest.apiEnumerate") return 2 * 60_000;
-  if (call.name === "pentest.authCompare") return 3 * 60_000;
-  if (call.name === "shell.start") return 120_000; // should background quickly
-  // Default hard cap so a silent hung tool cannot freeze the session forever.
-  return 5 * 60_000;
+  return requestedToolTimeoutMs(call) + OUTER_STALL_SETTLE_MARGIN_MS;
 }
 
 /** Grace period after abort before force-settling a hung tool promise. */

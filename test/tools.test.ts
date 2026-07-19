@@ -193,12 +193,9 @@ describe("tools – http.fetch", () => {
     expect(result.output).toMatch(/x-obscure-debug:\s*keep-me/i);
     expect(result.output).toMatch(/set-cookie:\s*sid=xyz/i);
     expect(result.output).toMatch(/x-request-id:\s*req-1/i);
-    // Body may be truncated; headers section is complete above Body.
-    const bodyIdx = result.output.indexOf("\nBody:\n");
-    expect(bodyIdx).toBeGreaterThan(0);
-    const headersSection = result.output.slice(0, bodyIdx);
-    expect(headersSection).toMatch(/x-obscure-debug:\s*keep-me/i);
-    expect(result.output).toMatch(/body truncated|truncated/i);
+    // No hidden post-capture body cap: the complete captured body is returned.
+    expect(result.output).not.toMatch(/body truncated|wire capture stopped/i);
+    expect(result.output.endsWith(huge)).toBe(true);
   });
 
   it("records redirect chain and hop set-cookie in evidence", async () => {

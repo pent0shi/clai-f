@@ -1071,7 +1071,7 @@ async function handleSlash(
       return true;
     }
     case "/history": {
-      const sessions = await listSessions(50);
+      const sessions = await listSessions(50, { recovery: "background" });
       if (sessions.length === 0) {
         console.log(chalk.dim("  no saved sessions"));
         return true;

@@ -25,12 +25,17 @@
 import type { ToolResult } from "../../types.js";
 import { auditLog } from "../../store/logs.js";
 import type { ToolRunOptions } from "../registry.js";
+import { selectOutput } from "../output-selection.js";
 import {
   webFetchCore,
   type WebFetchCoreOptions,
 } from "./fetch-core.js";
 import { buildFetchAuditPayload } from "./audit.js";
-import type { WebFetchArgs, WebFetchOutcome } from "./types.js";
+import {
+  TRUNCATION_MARKER,
+  type WebFetchArgs,
+  type WebFetchOutcome,
+} from "./types.js";
 
 /**
  * Optional injection point for tests so they can stub the underlying
@@ -66,7 +71,7 @@ export async function webFetch(
   // cascade into a tool failure.
   void emitAudit(outcome);
 
-  return outcome.ok ? renderSuccess(outcome) : renderError(outcome);
+  return outcome.ok ? renderSuccess(outcome, args) : renderError(outcome, args);
 }
 
 async function emitAudit(outcome: WebFetchOutcome): Promise<void> {
@@ -83,42 +88,18 @@ async function emitAudit(outcome: WebFetchOutcome): Promise<void> {
  * metadata JSON block follows; then `---` separates the body so the
  * agent loop can split if needed.
  */
-function renderSuccess(outcome: WebFetchOutcome): ToolResult {
+function renderSuccess(
+  outcome: WebFetchOutcome,
+  args: WebFetchArgs,
+): ToolResult {
   const meta = outcome.metadata;
+  const part = args.responsePart ?? "full";
   const hasDiagnostics = Boolean(
-    meta.headers ||
-      meta.tls ||
-      meta.timing ||
-      meta.redirectChain,
+    meta.headers || meta.tls || meta.timing || meta.redirectChain,
   );
   const summary = `${meta.finalUrl} ${meta.status}${meta.contentType ? ` ${meta.contentType}` : ""}`;
   const second = `mode=${meta.mode}  resolvedIp=${meta.resolvedIp || "?"}  bytes=${meta.bytesReceived}${meta.truncated ? ` (truncated@${meta.truncatedAt ?? meta.bytesReceived})` : ""}`;
 
-  if (!hasDiagnostics && meta.mode === "readable") {
-    const output = [
-      `URL: ${meta.finalUrl}`,
-      `Status: ${meta.status}${meta.contentType ? ` (${meta.contentType})` : ""}`,
-      `Bytes: ${meta.bytesReceived}${meta.truncated ? ` (truncated at ${meta.truncatedAt ?? meta.bytesReceived})` : ""}`,
-      "",
-      "Content:",
-      outcome.body,
-    ].join("\n");
-    return {
-      ok: true,
-      output,
-      exitCode: 0,
-      truncated: meta.truncated || false,
-      stats: {
-        bytesRead: meta.bytesReceived,
-        bytesDropped: 0,
-        linesRead: outcome.body.split("\n").length,
-        elapsedMs: meta.timing?.totalMs ?? 0,
-      },
-    };
-  }
-
-  // Stripped metadata for the JSON block — drop the body-shape fields
-  // so the agent reads them once on the first line.
   const jsonBlock = JSON.stringify(
     {
       requestedUrl: meta.requestedUrl,
@@ -142,15 +123,50 @@ function renderSuccess(outcome: WebFetchOutcome): ToolResult {
     2,
   );
 
-  const output = `${summary}\n${second}\n\n${jsonBlock}\n\n---\n${outcome.body}`;
+  const wireTruncationNotice = `[WIRE TRUNCATED at ${(meta.truncatedAt ?? meta.bytesReceived).toLocaleString()} bytes; raise maxBytes for more body]`;
+  let output: string;
+  if (part === "body") {
+    output = meta.truncated
+      ? `${outcome.body}\n${wireTruncationNotice}`
+      : outcome.body;
+  } else if (part === "headers") {
+    output = `${summary}\n${second}\n\n${jsonBlock}`;
+  } else if (!hasDiagnostics && meta.mode === "readable") {
+    output = [
+      `URL: ${meta.finalUrl}`,
+      `Status: ${meta.status}${meta.contentType ? ` (${meta.contentType})` : ""}`,
+      `Bytes: ${meta.bytesReceived}${meta.truncated ? ` (truncated at ${meta.truncatedAt ?? meta.bytesReceived})` : ""}`,
+      "",
+      "Content:",
+      outcome.body,
+    ].join("\n");
+  } else {
+    output = `${summary}\n${second}\n\n${jsonBlock}\n\n---\n${outcome.body}`;
+  }
+
+  const renderedOutput = output;
+  output = selectOutput(renderedOutput, args);
+  if (
+    part === "body" &&
+    meta.truncated &&
+    !output.includes(wireTruncationNotice)
+  ) {
+    // Head/tail selection can remove a trailing wire notice. Prefix it onto
+    // the first selected line (so the requested line count remains stable),
+    // then re-apply only the strict byte ceiling.
+    output = selectOutput(
+      output ? `${wireTruncationNotice} ${output}` : wireTruncationNotice,
+      { maxOutputBytes: args.maxOutputBytes },
+    );
+  }
   return {
     ok: true,
     output,
     exitCode: 0,
-    truncated: meta.truncated || false,
+    truncated: meta.truncated || output !== renderedOutput,
     stats: {
       bytesRead: meta.bytesReceived,
-      bytesDropped: 0,
+      bytesDropped: Math.max(0, Buffer.byteLength(outcome.body) - Buffer.byteLength(output)),
       linesRead: outcome.body.split("\n").length,
       elapsedMs: meta.timing?.totalMs ?? 0,
     },
@@ -163,7 +179,10 @@ function renderSuccess(outcome: WebFetchOutcome): ToolResult {
  * envelope of the outcome follows so callers can branch on
  * `error.kind` if needed.
  */
-function renderError(outcome: WebFetchOutcome): ToolResult {
+function renderError(
+  outcome: WebFetchOutcome,
+  args: WebFetchArgs,
+): ToolResult {
   const err = outcome.error;
   const head = err?.message ?? "web.fetch failed";
   const body = JSON.stringify(
@@ -173,13 +192,22 @@ function renderError(outcome: WebFetchOutcome): ToolResult {
       finalUrl: outcome.metadata.finalUrl,
       resolvedIp: outcome.metadata.resolvedIp,
       finalHostname: outcome.metadata.finalHostname,
+      headers: outcome.metadata.headers,
     },
     null,
     2,
   );
+  const renderedOutput =
+    args.responsePart === "body"
+      ? err?.bodyPreview ?? ""
+      : `${head}\n\n${body}`;
+  const output = selectOutput(renderedOutput, args);
   return {
     ok: false,
-    output: `${head}\n\n${body}`,
+    output,
+    truncated:
+      output !== renderedOutput ||
+      Boolean(err?.bodyPreview?.includes(TRUNCATION_MARKER)),
     exitCode: 1,
   };
 }

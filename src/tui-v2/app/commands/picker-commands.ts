@@ -32,7 +32,6 @@ import {
 import {
   getSession,
   listSessions,
-  recoverOrphanedHistory,
 } from "../../../store/history.js";
 import { relativeTime, shortCwd } from "../../../tui/text-format.js";
 import { conversationItemCount } from "../../state/transcript-types.js";
@@ -291,20 +290,9 @@ function applyReasoning(services: AppServices, value: string): void {
 }
 
 export async function handleHistory(services: AppServices): Promise<void> {
-  // Recover pruned/orphan sessions from .tmp snapshots + archive before listing.
-  try {
-    const recovered = await recoverOrphanedHistory();
-    if (recovered.recovered > 0) {
-      services.session.notice(
-        "info",
-        `restored ${recovered.recovered} session(s) from backup/archive`,
-      );
-    }
-  } catch {
-    /* best-effort */
-  }
-
-  const sessions = await listSessions(200);
+  // listSessions performs one-time crash/archive recovery internally. Calling
+  // recovery again here rescanned archives and backups on every picker open.
+  const sessions = await listSessions(200, { recovery: "background" });
   const currentMessages = services.session.messages;
   const currentId = services.session.sessionId;
   const currentTitle = services.session.getState().title;
@@ -382,9 +370,10 @@ export async function handleHistory(services: AppServices): Promise<void> {
         services.overlay.close();
         return;
       }
-      // Prefer a fresh load so we get the full transcript payload.
-      const session =
-        (await getSession(value)) ?? sessions.find((s) => s.id === value);
+      // Refresh only the selected record so a session changed by another
+      // process while the picker was open cannot be resumed stale. This work
+      // happens after selection and does not delay opening /history.
+      const session = await getSession(value);
       if (!session) {
         services.session.notice("warn", "session not found");
         services.overlay.close();
