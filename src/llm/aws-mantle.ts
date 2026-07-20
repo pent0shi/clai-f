@@ -46,6 +46,24 @@ function anthropicThinkingBudget(reasoning: ReasoningPreference | undefined): nu
   }
 }
 
+/** See anthropic.ts — Opus 4.7+ / Sonnet 5+ require adaptive thinking. */
+function requiresAdaptiveThinking(model: string): boolean {
+  return /claude-(?:opus|sonnet|haiku)-(?:4-[7-9]|4-\d\d|5(?:-|$))/i.test(model);
+}
+
+function anthropicThinkingField(
+  reasoning: ReasoningPreference | undefined,
+  model: string,
+): Record<string, unknown> | undefined {
+  if (!reasoning?.enabled) return undefined;
+  if (requiresAdaptiveThinking(model)) {
+    return { type: "adaptive", effort: reasoning.effort ?? "medium" };
+  }
+  const budget = anthropicThinkingBudget(reasoning);
+  if (budget === undefined) return undefined;
+  return { type: "enabled", budget_tokens: budget };
+}
+
 function isAnthropicMantleModel(model: string): boolean {
   return /(?:^|[./-])(?:anthropic|claude)(?:[./-]|$)/i.test(model);
 }
@@ -112,6 +130,7 @@ export const mantleProvider: LlmProvider = {
       (message) => message.role === "system",
     )?.content;
     const messages = toAnthropicToolMessages(request.messages);
+    const thinking = anthropicThinkingField(request.thinking, model);
     const response = await fetch(`${baseUrl}/messages`, {
       method: "POST",
       signal: request.signal ?? null,
@@ -126,19 +145,13 @@ export const mantleProvider: LlmProvider = {
         system,
         messages,
         max_tokens: request.maxTokens ?? 1_024,
-        temperature: request.temperature ?? 0.2,
+        // See anthropic.ts: temperature must stay default when thinking is on.
+        ...(thinking ? {} : { temperature: request.temperature ?? 0.2 }),
         ...anthropicToolBodyFields({
           tools: request.tools,
           toolChoice: request.toolChoice,
         }),
-        ...(anthropicThinkingBudget(request.thinking) !== undefined
-          ? {
-              thinking: {
-                type: "enabled",
-                budget_tokens: anthropicThinkingBudget(request.thinking),
-              },
-            }
-          : {}),
+        ...(thinking ? { thinking } : {}),
       }),
     });
     const data = await readJson<{
@@ -205,6 +218,7 @@ export const mantleProvider: LlmProvider = {
       (message) => message.role === "system",
     )?.content;
     const messages = toAnthropicToolMessages(request.messages);
+    const thinking = anthropicThinkingField(request.thinking, model);
     const response = await fetch(`${baseUrl}/messages`, {
       method: "POST",
       signal: request.signal ?? null,
@@ -219,20 +233,13 @@ export const mantleProvider: LlmProvider = {
         system,
         messages,
         max_tokens: request.maxTokens ?? 1_024,
-        temperature: request.temperature ?? 0.2,
+        ...(thinking ? {} : { temperature: request.temperature ?? 0.2 }),
         ...anthropicToolBodyFields({
           tools: request.tools,
           toolChoice: request.toolChoice,
         }),
         stream: true,
-        ...(anthropicThinkingBudget(request.thinking) !== undefined
-          ? {
-              thinking: {
-                type: "enabled",
-                budget_tokens: anthropicThinkingBudget(request.thinking),
-              },
-            }
-          : {}),
+        ...(thinking ? { thinking } : {}),
       }),
     });
     if (!response.ok) {

@@ -557,7 +557,22 @@ export function buildReasoningPayload(
   }
 }
 
-function buildChatBody(options: {
+/**
+ * OpenAI's own reasoning model families (gpt-5.x, o1, o3, o4) reject the
+ * legacy Chat Completions sampling knobs: `max_tokens` must be
+ * `max_completion_tokens`, and `temperature`/`top_p` must be omitted or left
+ * at their default (non-default values return HTTP 400 "Unsupported
+ * parameter"). Matched by model name (not provider) since OpenAI-compatible
+ * gateways that pass these model IDs through to the real OpenAI API hit the
+ * same restriction.
+ * https://help.openai.com/en/articles/5072518 (Chat Completions section).
+ */
+export function isOpenAiReasoningModel(model: string): boolean {
+  const m = model.toLowerCase();
+  return /(?:^|\/)gpt-5(?:\.|-|$)/.test(m) || /(?:^|\/)o[134](?:\.|-|$)/.test(m);
+}
+
+export function buildChatBody(options: {
   model: string;
   messages: ChatMessage[];
   maxTokens?: number | undefined;
@@ -582,12 +597,20 @@ function buildChatBody(options: {
   const isMinimaxM3 = /minimax-m3/i.test(options.model);
   const defaultMaxTokens = isMinimaxM3 ? 8_192 : reasoningOn ? 8_192 : 4_096;
   const defaultTemperature = isMinimaxM3 ? 1.0 : 0.2;
+  const reasoningModel = isOpenAiReasoningModel(options.model);
   const body: Record<string, unknown> = {
     model: options.model,
     messages: toOpenAiMessages(options.messages, options.supportsVision),
-    max_tokens: options.maxTokens ?? defaultMaxTokens,
-    temperature: options.temperature ?? defaultTemperature,
     stream: options.stream,
+    ...(reasoningModel
+      ? { max_completion_tokens: options.maxTokens ?? defaultMaxTokens }
+      : { max_tokens: options.maxTokens ?? defaultMaxTokens }),
+    // gpt-5.x / o1 / o3 / o4 only accept the default temperature (1) and
+    // reject any explicit value — omit the field entirely rather than send
+    // our 0.2 default and get a 400.
+    ...(reasoningModel
+      ? {}
+      : { temperature: options.temperature ?? defaultTemperature }),
     ...reasoning,
     ...openAiToolBodyFields({
       tools: options.tools,

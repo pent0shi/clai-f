@@ -10,20 +10,94 @@ import {
 // Side-effect: register wire name map before fromWireName use.
 import "../../tools/definitions.js";
 
+/**
+ * Gemini's function-calling `Schema` type only understands a specific subset
+ * of JSON Schema (see https://ai.google.dev/api/caching#Schema): type,
+ * format, title, description, nullable, enum, maxItems, minItems, properties,
+ * required, minProperties, maxProperties, minLength, maxLength, pattern,
+ * example, anyOf, propertyOrdering, default, items, minimum, maximum.
+ *
+ * Anything else — most commonly `additionalProperties` (rejected at ANY
+ * nesting depth, not just the top level) and `oneOf` (Gemini only supports
+ * `anyOf`) — makes the whole request fail with HTTP 400
+ * ("Unknown name ... Cannot find field"). This walks the schema recursively
+ * so nested array/object parameters (fs.writeMany, tool.batch, plan.create, …)
+ * never leak unsupported keywords into the wire payload.
+ */
+const GEMINI_SCHEMA_KEYS = new Set([
+  "type",
+  "format",
+  "title",
+  "description",
+  "nullable",
+  "enum",
+  "maxItems",
+  "minItems",
+  "properties",
+  "required",
+  "minProperties",
+  "maxProperties",
+  "minLength",
+  "maxLength",
+  "pattern",
+  "example",
+  "anyOf",
+  "propertyOrdering",
+  "default",
+  "items",
+  "minimum",
+  "maximum",
+]);
+
+function sanitizeGeminiSchema(schema: unknown): unknown {
+  if (Array.isArray(schema)) {
+    return schema.map((entry) => sanitizeGeminiSchema(entry));
+  }
+  if (!schema || typeof schema !== "object") return schema;
+  const input = schema as Record<string, unknown>;
+  const out: Record<string, unknown> = {};
+  // Gemini only supports `anyOf`, not `oneOf`/`allOf` — fold oneOf into anyOf
+  // (loses the "exactly one" constraint, but the model still gets valid
+  // alternatives instead of a hard-rejected request).
+  const anyOfSource = input.anyOf ?? input.oneOf;
+  for (const [key, value] of Object.entries(input)) {
+    if (key === "oneOf") continue;
+    if (!GEMINI_SCHEMA_KEYS.has(key)) continue;
+    if (key === "properties" && value && typeof value === "object") {
+      const props: Record<string, unknown> = {};
+      for (const [propName, propSchema] of Object.entries(
+        value as Record<string, unknown>,
+      )) {
+        props[propName] = sanitizeGeminiSchema(propSchema);
+      }
+      out.properties = props;
+      continue;
+    }
+    if ((key === "items" || key === "anyOf") && value !== undefined) {
+      out[key] = sanitizeGeminiSchema(value);
+      continue;
+    }
+    out[key] = value;
+  }
+  if (!("anyOf" in out) && anyOfSource !== undefined) {
+    out.anyOf = sanitizeGeminiSchema(anyOfSource);
+  }
+  return out;
+}
+
 export function toGeminiFunctionDeclarations(defs: ToolDefinition[]): Array<{
   name: string;
   description: string;
   parameters: Record<string, unknown>;
 }> {
   return defs.map((d) => {
-    // Gemini is picky about some JSON Schema keywords; strip additionalProperties.
-    const parameters = {
+    const parameters = sanitizeGeminiSchema({
       type: "object",
       properties: d.parameters.properties,
       ...(d.parameters.required?.length
         ? { required: d.parameters.required }
         : {}),
-    };
+    }) as Record<string, unknown>;
     return {
       name: d.wireName,
       description: d.description,
@@ -56,7 +130,7 @@ export function geminiToolBodyFields(options: {
 }
 
 type GeminiPart =
-  | { text: string; thought?: boolean }
+  | { text: string; thought?: boolean; thoughtSignature?: string }
   | { inlineData: { mimeType: string; data: string } }
   | {
       functionCall: {
@@ -64,6 +138,7 @@ type GeminiPart =
         args?: Record<string, unknown>;
         id?: string;
       };
+      thoughtSignature?: string;
     }
   | {
       functionResponse: {
@@ -118,6 +193,12 @@ export function toGeminiToolContents(
             args: tc.args ?? {},
             ...(tc.id ? { id: tc.id } : {}),
           },
+          // Gemini 3 requires the exact thoughtSignature it returned on this
+          // functionCall part to be echoed back, or the request 400s. See
+          // https://ai.google.dev/gemini-api/docs/generate-content/thought-signatures
+          ...(tc.thoughtSignature
+            ? { thoughtSignature: tc.thoughtSignature }
+            : {}),
         });
       }
       contents.push({ role: "model", parts });
@@ -156,6 +237,7 @@ export function parseGeminiFunctionCalls(
     | Array<{
         text?: string;
         thought?: boolean;
+        thoughtSignature?: string;
         functionCall?: {
           name?: string;
           args?: Record<string, unknown>;
@@ -179,6 +261,11 @@ export function parseGeminiFunctionCalls(
         id: part.functionCall.id ?? syntheticToolCallId(toolCalls.length),
         name: fromWireName(wire) ?? wire,
         args,
+        // Gemini 3 attaches this only to the first functionCall part in a
+        // step — capture it wherever it lands so it can be echoed back.
+        ...(part.thoughtSignature
+          ? { thoughtSignature: part.thoughtSignature }
+          : {}),
       });
     }
     // Skip thought text from user-visible content.

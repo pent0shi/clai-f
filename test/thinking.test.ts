@@ -49,4 +49,34 @@ describe('thinking helpers', () => {
     expect(result.visible).toBe('shown');
     expect(getLastThinking()).toBe('hidden');
   });
+
+  it('recognizes the <thinking> delimiters used by Kimi-compatible routes', () => {
+    expect(stripThinking('<thinking>check the config</thinking>Done.')).toEqual({
+      visible: 'Done.',
+      hasThinking: true,
+      thinkContent: 'check the config',
+    });
+  });
+
+  it('streams Kimi-compatible <thinking> tags split across chunks in place', () => {
+    const visible: string[] = [];
+    const reasoning: string[] = [];
+    const parser = createThinkingStreamParser(
+      (text) => visible.push(text),
+      (text) => reasoning.push(text),
+    );
+
+    parser.push('<think');
+    parser.push('ing>check');
+    parser.push(' the config</think');
+    parser.push('ing>Done.');
+    const result = parser.finish();
+
+    expect(reasoning.join('')).toBe('check the config');
+    expect(visible.join('')).toBe('Done.');
+    expect(result).toMatchObject({
+      visible: 'Done.',
+      thinkContent: 'check the config',
+    });
+  });
 });

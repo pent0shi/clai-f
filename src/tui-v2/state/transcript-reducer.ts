@@ -2,8 +2,8 @@
  * Pure transcript reducer (V2-050). Folds one `AnyAppEvent` into normalized
  * transcript state. Streaming deltas keep one open pending item per kind;
  * `assistant-message` / `thinking-block` finalize it. A real `tool-call`
- * discards any unfinalized assistant stream (raw tool-fence text) so display
- * order is thinking → Response prose → tool cards.
+ * discards any unfinalized assistant stream (raw tool-fence text). Event
+ * order is preserved exactly as the model and tool runner emitted it.
  */
 
 import type { AnyAppEvent } from "../../app/events/app-event.js";
@@ -113,9 +113,15 @@ function appendDelta(
     content: text,
     streaming: true,
   };
-  // Streaming thinking stays in append order (after prior responses). Reordering
-  // is only for late one-shot thinking-block finalizes (see finalizeMessage).
-  return { ...appendItem(state, item), [pendingKey]: id } as TranscriptState;
+  // Some models (e.g. Kimi K2-thinking) send reasoning_content tokens
+  // *after* content tokens.  When a pending assistant row already exists,
+  // slot the new thinking block before it so the transcript reads
+  // thinking → response, matching the user's expectation.
+  let next: TranscriptState = { ...appendItem(state, item), [pendingKey]: id } as TranscriptState;
+  if (state.pendingAssistantId) {
+    next = moveItemBefore(next, id, state.pendingAssistantId);
+  }
+  return next;
 }
 
 function finalizeMessage(
@@ -127,22 +133,12 @@ function finalizeMessage(
   const pendingKey = kind === "assistant" ? "pendingAssistantId" : "pendingThinkingId";
   const pendingId = state[pendingKey];
   let next = state;
-  /** Thinking that was already open via thinking-delta (vs one-shot block). */
-  let hadStreamingThinking = false;
-  let thinkingId: string | undefined;
-  let assistantId: string | undefined;
   if (pendingId) {
     next = updateItem(next, pendingId, (item) =>
       kind === "assistant"
         ? { ...(item as AssistantItem), text, streaming: false }
         : { ...(item as ThinkingItem), content: text, streaming: false },
     );
-    if (kind === "thinking") {
-      thinkingId = pendingId;
-      hadStreamingThinking = true;
-    } else {
-      assistantId = pendingId;
-    }
   } else {
     const id = `${kind}-${event.id}`;
     const base = {
@@ -156,22 +152,13 @@ function finalizeMessage(
         ? { ...base, kind: "assistant", text, streaming: false }
         : { ...base, kind: "thinking", content: text, streaming: false };
     next = appendItem(next, item);
-    if (kind === "thinking") thinkingId = id;
-    else assistantId = id;
+    // Thinking must precede its associated response even when created
+    // after assistant deltas have already started streaming.
+    if (kind === "thinking" && next.pendingAssistantId) {
+      next = moveItemBefore(next, id, next.pendingAssistantId);
+    }
   }
-  next = { ...next, [pendingKey]: undefined };
-  // Repair answer-then-think order without stacking every think before A1.
-  if (thinkingId) {
-    next = repairThinkingBeforePrecedingAssistant(
-      next,
-      thinkingId,
-      event.turnId,
-      /* allowMovePastFinalizedAssistant */ !hadStreamingThinking,
-    );
-  } else if (assistantId) {
-    next = repairTrailingThinkingForAssistant(next, assistantId, event.turnId);
-  }
-  return next;
+  return { ...next, [pendingKey]: undefined };
 }
 
 function pushNotice(
@@ -206,77 +193,6 @@ function closePending(state: TranscriptState): TranscriptState {
       streaming: false,
     }));
     next = { ...next, pendingThinkingId: undefined };
-  }
-  return next;
-}
-
-function sameTurn(
-  item: TranscriptItem,
-  turnId: TranscriptItem["turnId"],
-): boolean {
-  if (turnId !== undefined) return item.turnId === turnId;
-  return item.turnId === undefined;
-}
-
-/**
- * If thinking sits after a same-turn assistant with no tool cards between them,
- * optionally move it before that assistant.
- *
- * - One-shot late thinking-block (allowMovePastFinalizedAssistant): always
- *   pull above the preceding response (classic stripThinking-after-prose).
- * - Streamed thinking: only pull above an assistant that is **still streaming**
- *   (answer-then-think in the same step). Streamed think after a *finished*
- *   response is the next step (A1 → T2 → A2) and must stay put.
- * - Tool between assistant and thinking: never cross (A1 → tools → T2).
- */
-function repairThinkingBeforePrecedingAssistant(
-  state: TranscriptState,
-  thinkingId: string,
-  turnId: TranscriptItem["turnId"],
-  allowMovePastFinalizedAssistant: boolean,
-): TranscriptState {
-  const thinkingIdx = state.order.indexOf(thinkingId);
-  if (thinkingIdx < 0) return state;
-  for (let i = thinkingIdx - 1; i >= 0; i -= 1) {
-    const id = state.order[i]!;
-    const item = state.byId.get(id);
-    if (!item || !sameTurn(item, turnId)) continue;
-    if (item.kind === "tool") return state;
-    if (item.kind === "assistant") {
-      const assistant = item as AssistantItem;
-      if (assistant.streaming || allowMovePastFinalizedAssistant) {
-        return moveItemBefore(state, thinkingId, id);
-      }
-      return state;
-    }
-  }
-  return state;
-}
-
-/**
- * When an assistant finalizes, pull same-turn thinking that is still after it
- * with no tools between (covers races where thinking-block lands after
- * assistant-message). Only moves thinking that is still streaming or was
- * already finalized for this step — never pulls step-2 thinking across tools.
- */
-function repairTrailingThinkingForAssistant(
-  state: TranscriptState,
-  assistantId: string,
-  turnId: TranscriptItem["turnId"],
-): TranscriptState {
-  const assistantIdx = state.order.indexOf(assistantId);
-  if (assistantIdx < 0) return state;
-  let next = state;
-  const toMove: string[] = [];
-  for (let i = assistantIdx + 1; i < next.order.length; i += 1) {
-    const id = next.order[i]!;
-    const item = next.byId.get(id);
-    if (!item || !sameTurn(item, turnId)) continue;
-    if (item.kind === "tool" || item.kind === "assistant") break;
-    if (item.kind === "thinking") toMove.push(id);
-  }
-  for (const thinkingId of toMove) {
-    next = moveItemBefore(next, thinkingId, assistantId);
   }
   return next;
 }

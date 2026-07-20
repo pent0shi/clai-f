@@ -36,10 +36,11 @@ function truncate(text: string, max: number): string {
  */
 export function sanitizeTitle(raw: string): string | undefined {
   let title = raw;
-  // Drop any reasoning the model leaked inline (<think>…</think>), including an
-  // unclosed block — reasoning models sometimes emit these before the answer.
-  title = title.replace(/<think>[\s\S]*?<\/think>/gi, "");
-  title = title.replace(/<think>[\s\S]*$/i, "");
+  // Drop any reasoning the model leaked inline (<think>…</think> or Kimi's
+  // <thinking>…</thinking>), including an unclosed block — reasoning models
+  // sometimes emit these before the answer.
+  title = title.replace(/<think(?:ing)?\b[^>]*>[\s\S]*?<\/think(?:ing)?>/gi, "");
+  title = title.replace(/<think(?:ing)?\b[^>]*>[\s\S]*$/i, "");
   title = title.trim();
   if (!title) return undefined;
   // Keep only the first non-empty line — some models add an explanation below.

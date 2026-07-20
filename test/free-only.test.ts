@@ -136,7 +136,9 @@ describe("provider fallback rate limits", () => {
         () => undefined,
         (message) => statuses.push(message),
       ),
-    ).rejects.toThrow(/Provider\s+Error[\s\S]*groq\s+Model is rate limited/);
+    ).rejects.toThrow(
+      /No provider could stream the request\. — groq: Model is rate limited[\s\S]*Exact provider error: Provider request failed with HTTP 429 \(retry after 35s\)/,
+    );
 
     expect(nvidiaCalled).toBe(false);
     expect(statuses.join("")).toMatch(/staying on selected provider/);
@@ -172,7 +174,7 @@ describe("provider fallback rate limits", () => {
         () => undefined,
       ),
     ).rejects.toThrow(
-      /Provider\s+Error[\s\S]*groq\s+.*(401|Authentication|authorization)/i,
+      /No provider could stream the request\. — groq:.*(401|Authentication|authorization)/i,
     );
 
     expect(nvidiaCalled).toBe(false);

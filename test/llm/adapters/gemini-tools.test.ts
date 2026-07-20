@@ -67,4 +67,63 @@ describe("gemini tools adapter", () => {
     expect(contents[1]!.role).toBe("user");
     expect(contents[1]!.parts).toHaveLength(2);
   });
+
+  /**
+   * Gemini 3 requires the exact thoughtSignature it attaches to a
+   * functionCall part to be echoed back verbatim on the next turn, or the
+   * request fails with HTTP 400 ("missing a thought_signature"). Capture on
+   * parse, replay on the next history round-trip.
+   */
+  it("captures thoughtSignature from a functionCall part", () => {
+    const parsed = parseGeminiFunctionCalls([
+      {
+        functionCall: { name: "fs_list", args: {} },
+        thoughtSignature: "sig-abc123",
+      },
+    ]);
+    expect(parsed.toolCalls[0]!.thoughtSignature).toBe("sig-abc123");
+  });
+
+  it("does not set thoughtSignature when the part has none (parallel calls)", () => {
+    const parsed = parseGeminiFunctionCalls([
+      { functionCall: { name: "fs_list", args: {} } },
+    ]);
+    expect(parsed.toolCalls[0]!.thoughtSignature).toBeUndefined();
+  });
+
+  it("echoes thoughtSignature back on the functionCall part in history", () => {
+    const contents = toGeminiToolContents([
+      {
+        role: "assistant",
+        content: "",
+        toolCalls: [
+          {
+            id: "1",
+            name: "fs.list",
+            args: {},
+            thoughtSignature: "sig-abc123",
+          },
+        ],
+      },
+    ]);
+    const modelParts = contents[0]!.parts as Array<{
+      functionCall?: unknown;
+      thoughtSignature?: string;
+    }>;
+    expect(modelParts[0]!.thoughtSignature).toBe("sig-abc123");
+  });
+
+  it("omits thoughtSignature field entirely when absent", () => {
+    const contents = toGeminiToolContents([
+      {
+        role: "assistant",
+        content: "",
+        toolCalls: [{ id: "1", name: "fs.list", args: {} }],
+      },
+    ]);
+    const modelParts = contents[0]!.parts as Array<{
+      thoughtSignature?: string;
+    }>;
+    expect("thoughtSignature" in modelParts[0]!).toBe(false);
+  });
 });

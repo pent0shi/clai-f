@@ -175,6 +175,7 @@ export const geminiProvider: LlmProvider = {
           parts?: Array<{
             text?: string;
             thought?: boolean;
+            thoughtSignature?: string;
             functionCall?: {
               name?: string;
               args?: Record<string, unknown>;
@@ -241,6 +242,7 @@ export const geminiProvider: LlmProvider = {
     const collectedParts: Array<{
       text?: string;
       thought?: boolean;
+      thoughtSignature?: string;
       functionCall?: {
         name?: string;
         args?: Record<string, unknown>;
@@ -279,6 +281,7 @@ export const geminiProvider: LlmProvider = {
               parts?: Array<{
                 text?: string;
                 thought?: boolean;
+                thoughtSignature?: string;
                 functionCall?: {
                   name?: string;
                   args?: Record<string, unknown>;

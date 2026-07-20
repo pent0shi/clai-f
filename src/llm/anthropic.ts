@@ -37,28 +37,52 @@ function anthropicThinkingBudget(
   }
 }
 
-function buildAnthropicBody(request: CompletionRequest, stream: boolean): string {
+/**
+ * Claude Opus 4.7+ and later generations (Sonnet 5, Opus 4.8, …) removed
+ * manual extended thinking (`thinking: {type:"enabled", budget_tokens}`) —
+ * it now returns HTTP 400. Those models require adaptive thinking
+ * (`thinking: {type:"adaptive"}` + `effort`) instead. Earlier models
+ * (3-7, 4, 4-5, 4-6) still use the legacy budget_tokens form.
+ * https://docs.anthropic.com/en/docs/about-claude/models/extended-thinking-models
+ */
+function requiresAdaptiveThinking(model: string): boolean {
+  return /claude-(?:opus|sonnet|haiku)-(?:4-[7-9]|4-\d\d|5(?:-|$))/i.test(model);
+}
+
+function anthropicThinkingField(
+  reasoning: ReasoningPreference | undefined,
+  model: string,
+): Record<string, unknown> | undefined {
+  if (!reasoning?.enabled) return undefined;
+  if (requiresAdaptiveThinking(model)) {
+    return { type: "adaptive", effort: reasoning.effort ?? "medium" };
+  }
+  const budget = anthropicThinkingBudget(reasoning);
+  if (budget === undefined) return undefined;
+  return { type: "enabled", budget_tokens: budget };
+}
+
+export function buildAnthropicBody(request: CompletionRequest, stream: boolean): string {
   const model = request.model ?? defaultModels.anthropic;
   const system = request.messages.find(
     (message) => message.role === "system",
   )?.content;
   const messages = toAnthropicToolMessages(request.messages);
-  const thinkingBudget = anthropicThinkingBudget(request.thinking);
+  const thinking = anthropicThinkingField(request.thinking, model);
   return JSON.stringify({
     model,
     system,
     messages,
     max_tokens: request.maxTokens ?? 1_024,
-    temperature: request.temperature ?? 0.2,
+    // Anthropic requires temperature to stay at its default (1) whenever
+    // thinking is enabled — sending our 0.2 default returns HTTP 400
+    // ("temperature may only be set to 1 when thinking is enabled").
+    // Omit the field in that case rather than pin it to 1 explicitly, since
+    // some non-thinking-capable models on the same body path (e.g. Haiku
+    // 3.5) still support a real temperature.
+    ...(thinking ? {} : { temperature: request.temperature ?? 0.2 }),
     ...(stream ? { stream: true } : {}),
-    ...(thinkingBudget !== undefined
-      ? {
-          thinking: {
-            type: "enabled",
-            budget_tokens: thinkingBudget,
-          },
-        }
-      : {}),
+    ...(thinking ? { thinking } : {}),
     ...anthropicToolBodyFields({
       tools: request.tools,
       toolChoice: request.toolChoice,

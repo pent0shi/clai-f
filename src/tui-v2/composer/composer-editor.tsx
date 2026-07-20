@@ -14,7 +14,6 @@ import {
 } from "@opentui/core";
 import { useKeyboard, usePaste } from "@opentui/react";
 import { shouldStoreInPromptHistory } from "../../tui/input-history.js";
-import { safeCwd } from "../../os/cwd.js";
 import { getConfig } from "../../store/config.js";
 import type { AppServices } from "../bootstrap/composition-root.js";
 import type { Theme } from "../rendering/theme.js";
@@ -27,9 +26,14 @@ import {
 import {
   isLargePaste,
   PasteRegistry,
+  samePastePlaceholderEntries,
   type PastePlaceholderEntry,
 } from "./paste-placeholder.js";
-import { resolveCompletionMenu, type CompletionMenu } from "./completion.js";
+import {
+  resolveCompletionMenu,
+  sameCompletionMenu,
+  type CompletionMenu,
+} from "./completion.js";
 import { buildComposerTextareaOverrides } from "./textarea-keybindings.js";
 import { composerActionPort } from "./composer-action-port.js";
 import { notify } from "../notify.js";
@@ -277,8 +281,12 @@ export function ComposerEditor(props: ComposerEditorProps): ReactNode {
     }
     // Prompt "❯ " (2) + horizontal padding (2) leave this for wrapped text.
     const wrapWidth = Math.max(10, props.width - 4);
-    setContentRows(countComposerVisualLines(editor.plainText, wrapWidth));
-    setPasteChips(pasteRegistry.current.activeIn(editor.plainText));
+    const nextRows = countComposerVisualLines(editor.plainText, wrapWidth);
+    setContentRows((current) => (current === nextRows ? current : nextRows));
+    const nextChips = pasteRegistry.current.activeIn(editor.plainText);
+    setPasteChips((current) =>
+      samePastePlaceholderEntries(current, nextChips) ? current : nextChips,
+    );
   }
 
   function refreshMenu(): void {
@@ -288,7 +296,6 @@ export function ComposerEditor(props: ComposerEditorProps): ReactNode {
       services.commands,
       editor.plainText,
       editor.cursorOffset,
-      safeCwd(),
     );
     setAcceptedSlash((accepted) => {
       if (!accepted || next.kind !== "slash") return undefined;
@@ -300,6 +307,14 @@ export function ComposerEditor(props: ComposerEditorProps): ReactNode {
       return kept;
     });
     setMenu((prev) => {
+      // Cursor moves and native textarea notifications often arrive without
+      // changing completion content. Reusing the prior object prevents a full
+      // command-menu/transcript render for those no-op input events.
+      if (sameCompletionMenu(prev, next)) {
+        menuRef.current = prev;
+        menuKindRef.current = prev.kind;
+        return prev;
+      }
       // Keep selection stable when the filtered list only shrinks/grows.
       if (prev.kind === next.kind && next.kind !== "none" && prev.kind !== "none") {
         const sel = selectedRef.current;

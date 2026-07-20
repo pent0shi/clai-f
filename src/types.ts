@@ -40,6 +40,15 @@ export interface NativeToolCall {
   args: Record<string, unknown>;
   /** Original JSON arguments string when the provider sent one. */
   rawArguments?: string | undefined;
+  /**
+   * Gemini 3 "thought signature" — an opaque, encrypted token the model
+   * attaches to a functionCall part so it can resume its reasoning state
+   * when the tool result comes back. Must be echoed back verbatim on the
+   * matching functionCall part in the next turn, or Gemini 3 returns a hard
+   * HTTP 400. Unused by other providers.
+   * https://ai.google.dev/gemini-api/docs/generate-content/thought-signatures
+   */
+  thoughtSignature?: string | undefined;
 }
 
 /** Partial native tool call while the provider stream is still open (P2-3). */

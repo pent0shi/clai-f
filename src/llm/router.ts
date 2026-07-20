@@ -147,30 +147,52 @@ function failureReason(error: unknown): string {
  */
 export function formatProviderFailureForUser(error: unknown): string {
   if (error instanceof ProviderError) {
+    // Keep the provider's own message in the transcript. The classification
+    // below is useful guidance, but hiding an upstream 429/body detail makes
+    // it needlessly hard to tell OpenAI and Gemini failures apart.
+    const exactError = error.message.replace(/\s+/g, " ").trim();
+    const withExactError = (guidance: string): string =>
+      exactError ? `${guidance}\nExact provider error: ${exactError}` : guidance;
     const status = error.status ?? 0;
     if (status === 429) {
-      return "Model is rate limited (429). Try another provider/model or switch to a paid plan.";
+      return withExactError(
+        "Model is rate limited (429). Try another provider/model or switch to a paid plan.",
+      );
     }
     if (status === 401 || status === 403) {
-      return `Authentication/authorization failed (${status}). Check the API key with \`clai providers\` or set the provider env var.`;
+      return withExactError(
+        `Authentication/authorization failed (${status}). Check the API key with \`clai providers\` or set the provider env var.`,
+      );
     }
     if (status === 402) {
-      return "Insufficient credits / payment required (402). Try another API key for this provider, top up the account, or switch provider.";
+      return withExactError(
+        "Insufficient credits / payment required (402). Try another API key for this provider, top up the account, or switch provider.",
+      );
     }
     if (status === 404) {
-      return "Model or endpoint not found (404). Run `/model list` or pick another model.";
+      return withExactError(
+        "Model or endpoint not found (404). Run `/model list` or pick another model.",
+      );
     }
     if (status === 413) {
-      return "Request exceeded the provider input limit (413). Wait for auto-compact, run `/compact`, or continue with a smaller turn.";
+      return withExactError(
+        "Request exceeded the provider input limit (413). Wait for auto-compact, run `/compact`, or continue with a smaller turn.",
+      );
     }
     if (status === 422) {
-      return "Provider rejected the request body (422). Model name or parameters may be incompatible — try another model.";
+      return withExactError(
+        "Provider rejected the request body (422). Model name or parameters may be incompatible — try another model.",
+      );
     }
     if (status === 503 || status === 502 || status === 504) {
-      return `Upstream provider unavailable (${status}). Retry shortly or switch provider/model; free-tier models are often capacity-constrained.`;
+      return withExactError(
+        `Upstream provider unavailable (${status}). Retry shortly or switch provider/model; free-tier models are often capacity-constrained.`,
+      );
     }
     if (status >= 500 && status < 600) {
-      return `Upstream provider error (${status}). Retry or switch with \`/provider\` / \`/model\`.`;
+      return withExactError(
+        `Upstream provider error (${status}). Retry or switch with \`/provider\` / \`/model\`.`,
+      );
     }
   }
   const message = (error instanceof Error ? error.message : String(error))
@@ -213,10 +235,12 @@ function escapeTableCell(value: string): string {
 
 function formatFailures(failures: ProviderFailure[]): string {
   if (failures.length === 0) return "";
-  const rows = failures.map((failure) =>
-    `${failure.provider.padEnd(12)} ${escapeTableCell(failure.message)}`,
-  );
-  return `\n\nProvider      Error\n------------  -----\n${rows.join("\n")}`;
+  // Keep the first visible error self-contained. Some terminal renderers
+  // truncate multiline notices, which previously left users with only
+  // “No provider could stream the request.” and hid the useful provider body.
+  return ` — ${failures
+    .map((failure) => `${failure.provider}: ${escapeTableCell(failure.message)}`)
+    .join("; ")}`;
 }
 
 /**

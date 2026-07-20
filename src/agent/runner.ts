@@ -3237,20 +3237,20 @@ export async function runAgentTurn(
                 }
               }
 
-              if (!sawReasoning && /<think/i.test(token)) {
+              if (!sawReasoning && /<think(?:ing)?\b/i.test(token)) {
                 sawReasoning = true;
                 inThinking = true;
                 spinner.setLabel("thinking");
                 if (!writesDirectly) emit({ type: "status", text: "thinking" });
               }
-              if (/<\/think>/i.test(token)) {
+              if (/<\/think(?:ing)?>/i.test(token)) {
                 inThinking = false;
                 spinner.setLabel("generating response (0 tokens)");
                 generatedTokens = 0;
               }
 
               if (inThinking) {
-                const cleaned = token.replace(/<\/?think[^>]*>/gi, "");
+                const cleaned = token.replace(/<\/?think(?:ing)?[^>]*>/gi, "");
                 if (cleaned) {
                   spinner.pushPreview(cleaned);
                   const approx = cleaned.split(/\s+/).filter(Boolean).length;
@@ -3316,7 +3316,16 @@ export async function runAgentTurn(
         assistantText = assistantTextResult;
 
 
-        if (assistantText.hasThinking) {
+        // Only emit a thinking-block event when the classic renderer is
+        // active (writesDirectly / no deltaParser).  In TUI v2 the
+        // deltaParser already streamed thinking-delta events that created
+        // the thinking item in the correct transcript position; emitting
+        // a redundant thinking-block after tool-call events have cleared
+        // pendingThinkingId causes the reducer to append a *duplicate*
+        // thinking item at the end of the transcript — the root cause of
+        // the "ghost thinking blocks below the response" bug seen with
+        // models that use reasoning_content (e.g. Kimi K2-thinking).
+        if (assistantText.hasThinking && !deltaParser) {
           writeThinkingBlock(assistantText.thinkContent);
         }
 

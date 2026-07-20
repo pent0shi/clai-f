@@ -66,6 +66,27 @@ export type CompletionMenu =
   | { readonly kind: "mention"; readonly start: number; readonly items: readonly FileSuggestion[] }
   | { readonly kind: "none" };
 
+/** True when a native cursor/input event would render the identical menu. */
+export function sameCompletionMenu(a: CompletionMenu, b: CompletionMenu): boolean {
+  if (a.kind !== b.kind) return false;
+  if (a.kind === "none" || b.kind === "none") return true;
+  if (a.start !== b.start) return false;
+  if (a.kind === "slash" && b.kind === "slash") {
+    return (
+      a.end === b.end &&
+      a.items.length === b.items.length &&
+      a.items.every((item, index) => item.name === b.items[index]?.name)
+    );
+  }
+  if (a.kind === "mention" && b.kind === "mention") {
+    return (
+      a.items.length === b.items.length &&
+      a.items.every((item, index) => item.value === b.items[index]?.value)
+    );
+  }
+  return false;
+}
+
 /** Slash takes priority since a mention cannot start a line with "/". */
 export function resolveCompletionMenu(
   registry: CommandRegistry,

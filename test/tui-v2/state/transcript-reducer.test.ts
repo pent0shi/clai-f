@@ -180,9 +180,7 @@ describe("transcript reducer (V2-050)", () => {
     expect((items[0] as AssistantItem).text).toBe("Checking your interfaces.");
   });
 
-  it("moves late thinking above the assistant response of the same turn", () => {
-    // Repro: assistant prose streams first, then a thinking-block is finalized
-    // from stripThinking on the complete message (appended after Response).
+  it("keeps late thinking after the assistant response that preceded it", () => {
     const seq = buildSequencer();
     const turnId = asTurnId("turn-1");
     let state = EMPTY_TRANSCRIPT_STATE;
@@ -219,15 +217,12 @@ describe("transcript reducer (V2-050)", () => {
       ),
     );
     const kinds = transcriptItems(state).map((i) => i.kind);
-    expect(kinds).toEqual(["thinking", "assistant", "tool"]);
-    expect((transcriptItems(state)[0] as ThinkingItem).content).toMatch(/http\.fetch/);
-    expect((transcriptItems(state)[1] as AssistantItem).text).toMatch(/recon/);
+    expect(kinds).toEqual(["assistant", "thinking", "tool"]);
+    expect((transcriptItems(state)[0] as AssistantItem).text).toMatch(/recon/);
+    expect((transcriptItems(state)[1] as ThinkingItem).content).toMatch(/http\.fetch/);
   });
 
-  it("interleaves thinking with each response in multi-step turns (no pile-up)", () => {
-    // Repro: nudge/multi-step turn emits think+respond repeatedly. Moving every
-    // late thinking-block before the *first* assistant stacked all ▸ thinking
-    // rows above every ◆ Response.
+  it("preserves each response and late thinking block in multi-step turns", () => {
     const seq = buildSequencer();
     const turnId = asTurnId("turn-1");
     let state = EMPTY_TRANSCRIPT_STATE;
@@ -309,18 +304,16 @@ describe("transcript reducer (V2-050)", () => {
     // Notices between steps are toast-only and do not appear as chat rows.
     expect(summary).toEqual([
       "U",
-      "T:think-1 greeting",
       "A:Hey! I'm cla",
-      "T:think-2 clarify",
+      "T:think-1 greeting",
       "A:I didn't pro",
-      "T:think-3 refuse",
+      "T:think-2 clarify",
       "A:Give me a re",
+      "T:think-3 refuse",
     ]);
   });
 
-  it("reorders streamed answer-then-think so thinking sits above the response", () => {
-    // Live bug: model streams final summary first, then reasoning — thinking
-    // row was left below the deliverable because streaming finalizes skipped reorder.
+  it("reorders late thinking-delta before the pending assistant row", () => {
     const seq = buildSequencer();
     const turnId = asTurnId("turn-1");
     let state = EMPTY_TRANSCRIPT_STATE;
@@ -336,6 +329,11 @@ describe("transcript reducer (V2-050)", () => {
         turnId,
       ),
     );
+    // Thinking is moved before the assistant even though its delta arrived later.
+    expect(transcriptItems(state).map((item) => item.kind)).toEqual([
+      "thinking",
+      "assistant",
+    ]);
     state = applyAppEvent(
       state,
       seq.build(
@@ -360,8 +358,8 @@ describe("transcript reducer (V2-050)", () => {
     );
     const items = transcriptItems(state);
     expect(items.map((i) => i.kind)).toEqual(["thinking", "assistant"]);
-    expect((items[0] as ThinkingItem).content).toMatch(/final summary/);
     expect((items[1] as AssistantItem).text).toMatch(/Risk: LOW/);
+    expect((items[0] as ThinkingItem).content).toMatch(/final summary/);
     expect((items[0] as ThinkingItem).streaming).toBe(false);
   });
 
@@ -560,6 +558,36 @@ describe("transcript reducer (V2-050)", () => {
     state = applyAppEvent(state, seq.build("turn-aborted", {}, undefined));
     expect(state.runningStatus).toBeUndefined();
     expect(transcriptItems(state).at(-1)).toMatchObject({ kind: "notice", level: "warn" });
+  });
+
+  it("keeps model prose, tools, and post-tool analysis in emitted order", () => {
+    const seq = buildSequencer();
+    const turnId = asTurnId("turn-1");
+    let state = EMPTY_TRANSCRIPT_STATE;
+    state = applyAppEvent(state, seq.build("thinking-delta", { text: "checking" }, turnId));
+    state = applyAppEvent(state, seq.build("assistant-delta", { text: "I'll inspect the config." }, turnId));
+    state = applyAppEvent(
+      state,
+      seq.build("assistant-message", { messageId: seq.ids.message(), text: "I'll inspect the config." }, turnId),
+    );
+    state = applyAppEvent(
+      state,
+      seq.build("tool-call", { toolCallId: asToolCallId("tool-1"), name: "fs.read", argsDisplay: "config.json" }, turnId),
+    );
+    state = applyAppEvent(
+      state,
+      seq.build("tool-result", { toolCallId: asToolCallId("tool-1"), ok: true, summary: "read" }, turnId),
+    );
+    state = applyAppEvent(state, seq.build("thinking-delta", { text: "interpreting" }, turnId));
+    state = applyAppEvent(state, seq.build("assistant-delta", { text: "The setting is enabled." }, turnId));
+
+    expect(transcriptItems(state).map((item) => item.kind)).toEqual([
+      "thinking",
+      "assistant",
+      "tool",
+      "thinking",
+      "assistant",
+    ]);
   });
 
   it("ignores plan-updated/confirm-requested but still advances lastSequence", () => {

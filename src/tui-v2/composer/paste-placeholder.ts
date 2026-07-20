@@ -56,6 +56,13 @@ export interface PastePlaceholderEntry {
   readonly label: string;
 }
 
+export function samePastePlaceholderEntries(
+  a: readonly PastePlaceholderEntry[],
+  b: readonly PastePlaceholderEntry[],
+): boolean {
+  return a.length === b.length && a.every((item, index) => item.id === b[index]?.id);
+}
+
 /**
  * Holds full pasted text keyed by an incrementing id and renders the token
  * shown in the composer buffer in its place.

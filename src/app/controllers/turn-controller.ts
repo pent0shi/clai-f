@@ -39,36 +39,20 @@ export interface TurnControllerDeps {
 }
 
 /**
- * Coalesces assistant deltas while forwarding thinking deltas immediately.
+ * Forwards visible response deltas immediately so the transcript genuinely
+ * streams. The transcript reducer already combines adjacent deltas into one
+ * row; buffering them here made providers such as Gemini appear blank until
+ * the request had finished.
  */
 class DeltaCoalescer {
-  private assistant = "";
-
   constructor(private readonly sink: (event: AgentEvent) => void) {}
 
   push(event: AgentEvent): void {
-    if (event.type === "assistant-delta") {
-      this.assistant += event.text;
-      return;
-    }
-    if (event.type === "thinking-delta") {
-      if (this.assistant) this.flushAssistant();
-      this.sink(event);
-      return;
-    }
-    this.flush();
     this.sink(event);
   }
 
   flush(): void {
-    this.flushAssistant();
-  }
-
-  private flushAssistant(): void {
-    if (!this.assistant) return;
-    const text = this.assistant;
-    this.assistant = "";
-    this.sink({ type: "assistant-delta", text });
+    // Kept as the turn boundary API; all events are dispatched eagerly.
   }
 }
 

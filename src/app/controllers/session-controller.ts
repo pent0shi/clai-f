@@ -747,9 +747,10 @@ export class SessionController implements Disposable {
         this.scheduleAutosave();
       },
     });
-  
     this.notifyState();
     const result = await pending;
+    // Clear the footer spinner before persistence can delay the UI.
+    this.notifyState();
     // Persist on every terminal outcome — aborted turns used to skip save,
     // so /history only showed "Aborted." while plans still had real work.
     if (
@@ -765,7 +766,6 @@ export class SessionController implements Disposable {
       void this.maybeRefreshTitle();
     }
     for (const listener of this.turnEndListeners) listener(result);
-    this.notifyState();
     return result;
   }
 

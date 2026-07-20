@@ -18,13 +18,13 @@ function trimBlocks(blocks: string[]): string {
 }
 
 function findOpenTag(text: string): { index: number; length: number } | undefined {
-  const match = /<think\b[^>]*>/i.exec(text);
+  const match = /<think(?:ing)?\b[^>]*>/i.exec(text);
   if (!match) return undefined;
   return { index: match.index, length: match[0].length };
 }
 
 function findCloseTag(text: string): { index: number; length: number } | undefined {
-  const match = /<\/think>/i.exec(text);
+  const match = /<\/think(?:ing)?>/i.exec(text);
   if (!match) return undefined;
   return { index: match.index, length: match[0].length };
 }
@@ -32,15 +32,15 @@ function findCloseTag(text: string): { index: number; length: number } | undefin
 export function stripThinking(text: string): ThinkingResult {
   const thinkBlocks: string[] = [];
   let visible = text
-    .replace(/<think\b[^>]*>([\s\S]*?)(?:<\/think>|$)/gi, (_match, content: string) => {
+    .replace(/<think(?:ing)?\b[^>]*>([\s\S]*?)(?:<\/think(?:ing)?>|$)/gi, (_match, content: string) => {
       thinkBlocks.push(content);
       return "";
     });
 
   // Strip stray close and open tags
   visible = visible
-    .replace(/<\/think>/gi, "")
-    .replace(/<think\b[^>]*>/gi, "")
+    .replace(/<\/think(?:ing)?>/gi, "")
+    .replace(/<think(?:ing)?\b[^>]*>/gi, "")
     .trim();
 
   const thinkContent = trimBlocks(thinkBlocks);
@@ -223,7 +223,7 @@ export function createThinkingStreamParser(
         const partialClose = pending.toLowerCase().lastIndexOf("</think");
         const safeLength = partialClose >= 0
           ? partialClose
-          : Math.max(0, pending.length - "</think>".length + 1);
+          : Math.max(0, pending.length - "</thinking>".length + 1);
         if (safeLength === 0) break;
         emitThinking(pending.slice(0, safeLength));
         pending = pending.slice(safeLength);
@@ -255,7 +255,9 @@ export function createThinkingStreamParser(
 
       // Hold back partial open tags
       const partialOpen = pending.toLowerCase().lastIndexOf("<think");
-      const safeLength = partialOpen >= 0 ? partialOpen : Math.max(0, pending.length - "<think".length + 1);
+      const safeLength = partialOpen >= 0
+        ? partialOpen
+        : Math.max(0, pending.length - "<thinking".length + 1);
       if (safeLength === 0) break;
       emitVisible(pending.slice(0, safeLength));
       pending = pending.slice(safeLength);

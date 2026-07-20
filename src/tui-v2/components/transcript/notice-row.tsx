@@ -21,7 +21,9 @@ function badge(level: NoticeLevel): { label: string; fg: string; bg: string } {
 
 function bodyColor(level: NoticeLevel, theme: Theme): string {
   if (level === "warn") return theme.activity;
-  if (level === "error") return theme.mode;
+  // Error notices are part of the transcript, not just a badge: make the
+  // full provider message visibly red so it cannot be mistaken for a status.
+  if (level === "error") return theme.diffDel;
   return theme.cyan;
 }
 

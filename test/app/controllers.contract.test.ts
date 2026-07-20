@@ -115,19 +115,20 @@ function buildSession(prefix = "") {
 }
 
 describe("V2-025 controllers run a complete scripted turn (Phase 2 gate)", () => {
-  it("emits ordered AppEvents, coalesces deltas, references tool output, updates plan + history", async () => {
+  it("emits ordered AppEvents, streams deltas, references tool output, updates plan + history", async () => {
     const { events, persistence, plans, session } = buildSession();
     const result = await session.submit("go");
 
     expect(result.status).toBe("completed");
     if (result.status === "completed") expect(result.finalAnswer).toBe("Done");
 
-    // Delta coalescing: two assistant deltas become one, flushed before the
-    // structural tool-call. Thinking delta flushed before assistant delta.
+    // Visible chunks are dispatched as they arrive; the transcript reducer
+    // renders them in a single streaming response row.
     expect(events.map((e) => e.type)).toEqual([
       "turn-started",
       "status",
       "thinking-delta",
+      "assistant-delta",
       "assistant-delta",
       "tool-call",
       "tool-output",
@@ -136,12 +137,15 @@ describe("V2-025 controllers run a complete scripted turn (Phase 2 gate)", () =>
       "assistant-message",
       "turn-ended",
     ]);
-    const assistantDelta = events.find((e) => e.type === "assistant-delta");
-    expect(assistantDelta?.payload).toEqual({ text: "Hello" });
+    const assistantDeltas = events.filter((e) => e.type === "assistant-delta");
+    expect(assistantDeltas.map((event) => event.payload)).toEqual([
+      { text: "Hel" },
+      { text: "lo" },
+    ]);
 
     // Monotonic, gap-free sequence; every event carries the turn id.
     expect(events.map((e) => e.sequence)).toEqual([
-      1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
+      1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11,
     ]);
     expect(events.every((e) => e.turnId === "turn-1")).toBe(true);
 

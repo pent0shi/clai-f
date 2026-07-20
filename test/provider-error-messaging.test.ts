@@ -43,4 +43,12 @@ describe("provider failure messaging", () => {
     );
     expect(msg).toMatch(/unavailable|capacity|free-tier/i);
   });
+
+  it("preserves the exact provider error alongside rate-limit guidance", () => {
+    const msg = formatProviderFailureForUser(
+      new ProviderError("Gemini quota exceeded; retry in 31 seconds", 429),
+    );
+    expect(msg).toContain("Model is rate limited (429)");
+    expect(msg).toContain("Exact provider error: Gemini quota exceeded; retry in 31 seconds");
+  });
 });
