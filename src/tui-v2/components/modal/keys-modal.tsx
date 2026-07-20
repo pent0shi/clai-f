@@ -5,6 +5,10 @@
  * Existing keys show as masked placeholders — typing replaces that slot.
  * Empty save on an existing row keeps the stored secret. Mirrors ScopeModal
  * layout (docked above composer).
+ *
+ * Each existing key row has a ★ / ☆ toggle to mark it as the active (sticky)
+ * key used as the rotation start.  New (unsaved) rows cannot be activated
+ * until they are saved.
  */
 
 import { useEffect, useRef, useState, type ReactNode } from "react";
@@ -24,6 +28,7 @@ export interface KeysModalProps {
 }
 
 const ACCENT = "#e0b000";
+const ACTIVE_FG = "#f5c542";
 
 interface KeyRow {
   readonly id: number;
@@ -55,6 +60,13 @@ function rowsFromRequest(request: KeysEditorRequest): KeyRow[] {
 export function KeysModal(props: KeysModalProps): ReactNode {
   const { services, theme, request, docked } = props;
   const [rows, setRows] = useState<KeyRow[]>(() => rowsFromRequest(request));
+  // Track which key row is marked as active (sticky rotation start).
+  // Defaults to the stored activeIndex; clamped to existing-key rows only.
+  const existingCount = request.initialKeys.length;
+  const [activeKeyIdx, setActiveKeyIdx] = useState(() => {
+    const stored = request.activeIndex ?? 0;
+    return existingCount > 0 ? Math.min(stored, existingCount - 1) : 0;
+  });
   // With N stored keys we render N rows + one trailing empty — focus that empty
   // row so the user can paste a new key without editing an existing slot first.
   // With no keys, a single empty row is focused at index 0.
@@ -137,12 +149,21 @@ export function KeysModal(props: KeysModalProps): ReactNode {
       };
       setRows([only]);
       setFocusIdx(0);
+      setActiveKeyIdx(0);
       queueMicrotask(() => applyTextToInputs([only]));
       return;
     }
     const removed = synced[index];
     if (removed) inputRefs.current.delete(removed.id);
     const next = synced.filter((_, i) => i !== index);
+    // Adjust active index if the removed row was before or at the active row.
+    if (removed?.slotId) {
+      if (index < activeKeyIdx) {
+        setActiveKeyIdx((prev) => Math.max(0, prev - 1));
+      } else if (index === activeKeyIdx) {
+        setActiveKeyIdx(0);
+      }
+    }
     setRows(next);
     setFocusIdx(Math.max(0, Math.min(index, next.length - 1)));
     queueMicrotask(() => applyTextToInputs(next));
@@ -160,7 +181,7 @@ export function KeysModal(props: KeysModalProps): ReactNode {
         out.push({ value });
       }
     }
-    services.overlay.answerKeys({ action: "save", rows: out });
+    services.overlay.answerKeys({ action: "save", rows: out, activeIndex: activeKeyIdx });
   }
 
   function resetAll(): void {
@@ -193,8 +214,8 @@ export function KeysModal(props: KeysModalProps): ReactNode {
     }
   });
 
-  const existingCount = request.initialKeys.length;
   const typedCount = rows.filter((r) => r.text.trim().length > 0).length;
+  const showActiveToggle = existingCount > 1;
 
   return (
     <box
@@ -230,52 +251,69 @@ export function KeysModal(props: KeysModalProps): ReactNode {
       <text
         content={
           existingCount > 0
-            ? `${existingCount} stored · type to replace a slot · + adds another (max ${MAX_PROVIDER_KEYS})`
+            ? `${existingCount} stored · type to replace a slot · + adds another (max ${MAX_PROVIDER_KEYS})${showActiveToggle ? " · ★ = active key" : ""}`
             : `No keys yet · paste one or more keys (max ${MAX_PROVIDER_KEYS})`
         }
         style={{ fg: theme.muted, attributes: TextAttributes.DIM }}
       />
 
-      {rows.map((row, index) => (
-        <box
-          key={row.id}
-          style={{ flexDirection: "row", width: "100%", alignItems: "center" }}
-        >
-          <text
-            content={`${index + 1}. `}
-            style={{ fg: theme.muted, width: 4, flexShrink: 0 }}
-          />
-          <input
-            ref={(el: InputRenderable | null) => {
-              inputRefs.current.set(row.id, el);
-            }}
-            focused={focusIdx === index}
-            placeholder={row.placeholder}
-            onContentChange={() => {
-              const el = inputRefs.current.get(row.id);
-              updateRowText(row.id, el?.plainText ?? "");
-              setFocusIdx(index);
-            }}
-            backgroundColor={theme.background}
-            textColor={theme.foreground}
-            focusedBackgroundColor={theme.background}
-            focusedTextColor={theme.foreground}
-            cursorColor={ACCENT}
-            style={{ flexGrow: 1, minWidth: 20 }}
-          />
-          <text content=" " />
-          <text
-            content=" ✕ "
-            style={{
-              fg: theme.white,
-              bg: theme.failedBg,
-              attributes: TextAttributes.BOLD,
-              flexShrink: 0,
-            }}
-            onMouseDown={() => removeRow(index)}
-          />
-        </box>
-      ))}
+      {rows.map((row, index) => {
+        const isExisting = Boolean(row.slotId);
+        const isActive = isExisting && index === activeKeyIdx;
+        return (
+          <box
+            key={row.id}
+            style={{ flexDirection: "row", width: "100%", alignItems: "center" }}
+          >
+            <text
+              content={`${index + 1}. `}
+              style={{ fg: theme.muted, width: 4, flexShrink: 0 }}
+            />
+            {showActiveToggle ? (
+              <text
+                content={isExisting ? (isActive ? " ★ " : " ☆ ") : "   "}
+                style={{
+                  fg: isActive ? ACTIVE_FG : theme.muted,
+                  attributes: isActive ? TextAttributes.BOLD : TextAttributes.DIM,
+                  flexShrink: 0,
+                }}
+                onMouseDown={() => {
+                  if (isExisting) setActiveKeyIdx(index);
+                }}
+              />
+            ) : null}
+            <input
+              ref={(el: InputRenderable | null) => {
+                inputRefs.current.set(row.id, el);
+              }}
+              focused={focusIdx === index}
+              placeholder={row.placeholder}
+              onContentChange={() => {
+                const el = inputRefs.current.get(row.id);
+                updateRowText(row.id, el?.plainText ?? "");
+                setFocusIdx(index);
+              }}
+              backgroundColor={theme.background}
+              textColor={theme.foreground}
+              focusedBackgroundColor={theme.background}
+              focusedTextColor={theme.foreground}
+              cursorColor={ACCENT}
+              style={{ flexGrow: 1, minWidth: 20 }}
+            />
+            <text content=" " />
+            <text
+              content=" ✕ "
+              style={{
+                fg: theme.white,
+                bg: theme.failedBg,
+                attributes: TextAttributes.BOLD,
+                flexShrink: 0,
+              }}
+              onMouseDown={() => removeRow(index)}
+            />
+          </box>
+        );
+      })}
 
       <box style={{ flexDirection: "row", width: "100%" }}>
         <text
@@ -316,7 +354,7 @@ export function KeysModal(props: KeysModalProps): ReactNode {
       </box>
 
       <text
-        content={`enter:save  ·  ^a / +:add  ·  ✕:remove  ·  ^r:reset all  ·  esc:cancel${typedCount ? `  ·  ${typedCount} new/edited` : ""}`}
+        content={`enter:save  ·  ^a / +:add  ·  ✕:remove${showActiveToggle ? "  ·  ★:set active" : ""}  ·  ^r:reset all  ·  esc:cancel${typedCount ? `  ·  ${typedCount} new/edited` : ""}`}
         style={{ fg: theme.muted, attributes: TextAttributes.DIM }}
       />
     </box>

@@ -264,6 +264,7 @@ async function openLlmKeysEditor(
   const answer = await services.overlay.openKeysEditor({
     provider: id,
     initialKeys: stored.map((key) => ({ id: key.id, masked: key.masked })),
+    activeIndex: multi.source !== "env" ? multi.activeIndex : undefined,
   });
   if (!answer) {
     notice(services, "info", "cancelled");
@@ -295,8 +296,8 @@ async function openLlmKeysEditor(
     return;
   }
 
-  let activeIndex = 0;
-  if (multi.source !== "env" && multi.keys.length > 0) {
+  let activeIndex = answer.activeIndex ?? 0;
+  if (answer.activeIndex === undefined && multi.source !== "env" && multi.keys.length > 0) {
     const previous = multi.keys[multi.activeIndex]?.value;
     if (previous) {
       const found = resolved.indexOf(previous);
@@ -305,7 +306,9 @@ async function openLlmKeysEditor(
   }
 
   await setProviderKeys(id, resolved, activeIndex);
-  const label = resolved.length === 1 ? maskSecret(resolved[0]!) : `${resolved.length} keys`;
+  const label = resolved.length === 1
+    ? maskSecret(resolved[0]!)
+    : `${resolved.length} keys · active: #${activeIndex + 1}`;
   notice(services, "info", `saved ${id} · ${label}`);
 }
 
@@ -326,6 +329,7 @@ async function openSearchKeysEditor(
   const answer = await services.overlay.openKeysEditor({
     provider: id,
     initialKeys: stored.map((key) => ({ id: key.id, masked: key.masked })),
+    activeIndex: multi.source !== "env" ? multi.activeIndex : undefined,
   });
   if (!answer) {
     notice(services, "info", "cancelled");
@@ -348,8 +352,8 @@ async function openSearchKeysEditor(
     return;
   }
 
-  let activeIndex = 0;
-  if (multi.source !== "env" && multi.keys.length > 0) {
+  let activeIndex = answer.activeIndex ?? 0;
+  if (answer.activeIndex === undefined && multi.source !== "env" && multi.keys.length > 0) {
     const previous = multi.keys[multi.activeIndex]?.value;
     if (previous) {
       const found = resolved.indexOf(previous);
@@ -358,7 +362,9 @@ async function openSearchKeysEditor(
   }
 
   await setSearchProviderKeys(id, resolved, activeIndex);
-  const label = resolved.length === 1 ? maskSecret(resolved[0]!) : `${resolved.length} keys`;
+  const label = resolved.length === 1
+    ? maskSecret(resolved[0]!)
+    : `${resolved.length} keys · active: #${activeIndex + 1}`;
   notice(services, "info", `saved ${id} · ${label}`);
 }
 

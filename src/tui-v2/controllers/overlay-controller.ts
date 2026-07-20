@@ -60,6 +60,8 @@ export interface KeysEditorSlotView {
 export interface KeysEditorRequest {
   readonly provider: string;
   readonly initialKeys: readonly KeysEditorSlotView[];
+  /** Index of the currently-active (sticky) key for rotation. */
+  readonly activeIndex?: number | undefined;
 }
 
 /**
@@ -67,7 +69,7 @@ export interface KeysEditorRequest {
  * is a new/replacement plaintext key. Reset clears all keys for the provider.
  */
 export type KeysEditorAnswer =
-  | { readonly action: "save"; readonly rows: readonly { slotId?: string; value: string }[] }
+  | { readonly action: "save"; readonly rows: readonly { slotId?: string; value: string }[]; readonly activeIndex?: number | undefined }
   | { readonly action: "reset" };
 
 export interface PromptActionsRequest {
