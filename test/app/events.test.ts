@@ -198,12 +198,12 @@ describe("V2-021 AgentEventAdapter", () => {
     expect(out.map((event) => event.type)).toEqual(["plan-updated"]);
   });
 
-  it("shows failed task commands with their buffered output", () => {
+  it("shows failed plan.create with its buffered output", () => {
     const out = collectFrom([
-      { type: "tool-call", id: "task-1", name: "task.update", argsDisplay: "t1 done" },
-      { type: "tool-start", id: "task-1" },
-      { type: "tool-output", id: "task-1", chunk: "missing evidence" },
-      { type: "tool-result", id: "task-1", ok: false, summary: "cannot mark done", exitCode: 1 },
+      { type: "tool-call", id: "plan-1", name: "plan.create", argsDisplay: "blog app" },
+      { type: "tool-start", id: "plan-1" },
+      { type: "tool-output", id: "plan-1", chunk: "validation error" },
+      { type: "tool-result", id: "plan-1", ok: false, summary: "invalid plan", exitCode: 1 },
     ]);
 
     expect(out.map((event) => event.type)).toEqual([
@@ -211,7 +211,24 @@ describe("V2-021 AgentEventAdapter", () => {
       "tool-output",
       "tool-result",
     ]);
-    expect(out[0]?.type === "tool-call" && out[0].payload.name).toBe("task.update");
+    expect(out[0]?.type === "tool-call" && out[0].payload.name).toBe("plan.create");
+  });
+
+  it("hides task.update entirely even when it fails or is blocked", () => {
+    const failed = collectFrom([
+      { type: "tool-call", id: "task-1", name: "task.update", argsDisplay: "t1 done" },
+      { type: "tool-start", id: "task-1" },
+      { type: "tool-output", id: "task-1", chunk: "missing evidence" },
+      { type: "tool-result", id: "task-1", ok: false, summary: "cannot mark done", exitCode: 1 },
+    ]);
+    expect(failed).toEqual([]);
+
+    const blocked = collectFrom([
+      { type: "tool-call", id: "task-2", name: "task.update", argsDisplay: "t2 done" },
+      { type: "tool-start", id: "task-2" },
+      { type: "tool-blocked", id: "task-2", name: "task.update", reason: "policy denied" },
+    ]);
+    expect(blocked).toEqual([]);
   });
 
   it("shows blocked plan commands instead of silently dropping them", () => {

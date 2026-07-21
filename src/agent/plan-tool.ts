@@ -17,6 +17,7 @@ import { renderPlanChecklist } from "../ui/plan-pane.js";
 import type { LoopGuard } from "./loop-guard.js";
 import type { SessionPolicy } from "./session-policy.js";
 import { isLumpedSingleTask } from "./tool-call-parser.js";
+import { buildDependencyReminder, dependencySignature, dependencyToast } from "./task-sync.js";
 import type { ToolCall } from "../types.js";
 import { getActiveProjectRoot } from "./project-root.js";
 import { detectPackageManager } from "./workspace-orient.js";
@@ -411,6 +412,10 @@ export interface PlanToolResult {
   display: string;
   /** What to feed back to the model as the tool result. */
   modelNote: string;
+  /** Soft reminder (held, not applied) — skip loop-guard accounting. */
+  reminder?: boolean | undefined;
+  /** Short identifiable toast to surface when this result is a reminder. */
+  toast?: string | undefined;
 }
 
 /** Build the system-context block describing the session's active plan. */
@@ -448,7 +453,14 @@ export function planContextMessage(plan: SessionPlan, approved: boolean): string
   }
   if (approved) {
     const inProgress = plan.tasks.find((t) => t.state === "in_progress");
+    const failed = plan.tasks.find((t) => t.state === "failed");
     const firstPending = readyPlanTasks(plan)[0];
+    const hasOpenWork = plan.tasks.some(
+      (t) =>
+        t.state === "in_progress" ||
+        t.state === "pending" ||
+        t.state === "failed",
+    );
     lines.push(
       "The user APPROVED this plan. Execute it NOW. Tasks are checkpoints — you still own the whole goal.",
     );
@@ -458,10 +470,29 @@ export function planContextMessage(plan: SessionPlan, approved: boolean): string
           "Retry what was in progress; do NOT restart completed work from scratch. " +
           "Do NOT re-do tasks already marked done.",
       );
+    } else if (failed) {
+      lines.push(
+        `RETRY FAILED TASK ${failed.id} (${failed.title}) — reopen it (task.update in_progress), ` +
+          "fix the root cause, then re-verify before marking done. Do NOT re-do tasks already marked done.",
+      );
     } else if (firstPending) {
       lines.push(
         `START WITH TASK ${firstPending.id} (${firstPending.title}). ` +
           "Do NOT re-do tasks already marked done.",
+      );
+    }
+    if (hasOpenWork) {
+      lines.push(
+        "FIRST THIS TURN — reconcile with this task list before doing anything else. It persists across abort and " +
+          "compaction, is re-injected here every turn, and is the CURRENT source of truth for what is done vs pending. " +
+          "It OVERRIDES any 'current state', 'remaining work', 'ready to…', or completion wording in the compacted memory " +
+          "summary; when the summary and these task states disagree, trust these task states.",
+      );
+      lines.push(
+        "Let the task states drive your next action and next reads: open the in_progress or failed task, read only its " +
+          "own artifacts plus the specific earlier-task outputs you need to confirm what is already done, then continue " +
+          "strictly task-by-task from there. Do NOT re-scan the whole project or read unrelated files to rediscover " +
+          "status, and do NOT write a final or completion summary while any task is still pending or in_progress.",
       );
     }
     lines.push(
@@ -500,6 +531,9 @@ export async function handlePlanTool(
   const autoApprove = Boolean(ctx.autoApprove);
   void ctx.loopGuard;
   void ctx.step;
+  // Defensive init for the sync-guard holders (legacy/hand-built policies).
+  if (!session.pendingDependency) session.pendingDependency = { value: undefined };
+  if (!session.pendingTaskBatch) session.pendingTaskBatch = { value: undefined };
   if (call.name === "plan.create") {
     const goal = normalizePlanGoal(call.args);
     const detail = normalizePlanDetail(call.args);
@@ -940,11 +974,39 @@ export async function handlePlanTool(
           .flatMap((task) => task.resourceLocks ?? []),
       );
       const conflictingLocks = (target?.resourceLocks ?? []).filter((lock) => heldLocks.has(lock));
+      // Opening a task before its dependencies land is a soft, model-driven
+      // decision: remind once, then apply if the model re-issues to confirm.
       if (
-        (!ready && !retryingFailedTask) ||
-        incompleteDependencies.length > 0 ||
-        conflictingLocks.length > 0
+        target &&
+        incompleteDependencies.length > 0 &&
+        !retryingFailedTask &&
+        conflictingLocks.length === 0
       ) {
+        const sig = dependencySignature(taskId, stateRaw, incompleteDependencies);
+        if (session.pendingDependency.value === sig) {
+          session.pendingDependency.value = undefined;
+        } else {
+          session.pendingDependency.value = sig;
+          return {
+            handled: true,
+            ok: false,
+            reminder: true,
+            display: chalk.yellow(
+              `  ⚠ [${taskId}] opened before its dependencies — confirm or finish them first\n`,
+            ),
+            modelNote: buildDependencyReminder({
+              taskId,
+              title: target.title,
+              targetState: stateRaw,
+              blockers: incompleteDependencies.map((id) => ({
+                id,
+                title: plan.tasks.find((t) => t.id === id)?.title ?? "",
+              })),
+            }),
+            toast: dependencyToast(taskId),
+          };
+        }
+      } else if ((!ready && !retryingFailedTask) || conflictingLocks.length > 0) {
         const nextReady = readyPlanTasks(plan)[0];
         return {
           handled: true,
@@ -958,6 +1020,9 @@ export async function handlePlanTool(
               ? `Open the next ready task first: ${nextReady.id} ("${nextReady.title}").`
               : ""),
         };
+      } else {
+        // Ready to open — drop any stale dependency-override confirmation.
+        session.pendingDependency.value = undefined;
       }
     }
     // A retry is a new execution attempt. Previous receipts proved only the

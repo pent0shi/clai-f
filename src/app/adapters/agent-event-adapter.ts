@@ -9,7 +9,7 @@ import {
 } from "../events/app-event.js";
 import type { OutputSpool } from "../events/event-buffer.js";
 import type { EventSequencer } from "../events/sequencer.js";
-import { isQuietMetaTool } from "./quiet-meta-tools.js";
+import { isQuietMetaTool, shouldHideQuietMetaToolInChat } from "./quiet-meta-tools.js";
 
 const STEP_STATUS = /^step (\d+)$/;
 
@@ -124,7 +124,11 @@ export class AgentEventAdapter {
         const toolCallId = this.toolCallId(event.id);
         const buffered = this.bufferedMetaTools.get(toolCallId);
         if (buffered) {
-          if (event.ok) {
+          // Drop entirely when the card is chat-hidden for this outcome
+          // (task.update always; plan.create only on success). Otherwise flush
+          // the buffered call so its failure card and result render together.
+          const status = event.ok ? "ok" : "failed";
+          if (event.ok || shouldHideQuietMetaToolInChat(buffered.name, status)) {
             this.bufferedMetaTools.delete(toolCallId);
             return;
           }
@@ -143,7 +147,13 @@ export class AgentEventAdapter {
       case "tool-blocked": {
         const toolCallId = this.toolCallId(event.id);
         const buffered = this.bufferedMetaTools.get(toolCallId);
-        if (buffered) this.flushBufferedMetaTool(toolCallId, buffered);
+        if (buffered) {
+          if (shouldHideQuietMetaToolInChat(buffered.name, "blocked")) {
+            this.bufferedMetaTools.delete(toolCallId);
+            return;
+          }
+          this.flushBufferedMetaTool(toolCallId, buffered);
+        }
         this.push("tool-blocked", {
           toolCallId,
           name: event.name,

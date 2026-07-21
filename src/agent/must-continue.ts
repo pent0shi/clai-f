@@ -136,7 +136,7 @@ export function recoveryForNarration(
       ...base,
       notice: "plan was written as text, not created",
       message: nativeTools
-        ? 'You wrote the plan as prose but did NOT call plan.create. Call plan.create now with goal, detail, tasks, and kind="coding" or "pentest".'
+        ? 'You wrote the plan as prose but did NOT call plan.create. Call plan.create now with goal, detail, tasks, and a specific kind you choose to fit the work (e.g. build, frontend, feature, bugfix, pentest, recon — not "general").'
         : "You wrote the plan as prose but did NOT call plan.create. Emit one plan.create tool block now.",
     };
   }

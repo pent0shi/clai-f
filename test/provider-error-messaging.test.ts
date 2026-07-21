@@ -7,7 +7,7 @@ import { ProviderError } from "../src/llm/http.js";
 // public error surface that users see after failures.
 
 // Prefer testing the exported helper if we add one; for now export a test seam.
-import { formatProviderFailureForUser } from "../src/llm/router.js";
+import { formatProviderFailureForUser, isEmptyCompletionError } from "../src/llm/router.js";
 
 describe("provider failure messaging", () => {
   it("maps auth errors to actionable key guidance", () => {
@@ -50,5 +50,31 @@ describe("provider failure messaging", () => {
     );
     expect(msg).toContain("Model is rate limited (429)");
     expect(msg).toContain("Exact provider error: Gemini quota exceeded; retry in 31 seconds");
+  });
+});
+
+describe("isEmptyCompletionError", () => {
+  it("detects a provider that completed without a visible answer", () => {
+    expect(
+      isEmptyCompletionError(
+        new ProviderError("bynara completed without a visible answer."),
+      ),
+    ).toBe(true);
+  });
+
+  it("detects the router-wrapped empty completion failure", () => {
+    expect(
+      isEmptyCompletionError(
+        new Error(
+          "No provider could stream the request. — bynara: bynara completed without a visible answer.",
+        ),
+      ),
+    ).toBe(true);
+  });
+
+  it("does not treat auth, rate-limit, or generic failures as empty completions", () => {
+    expect(isEmptyCompletionError(new ProviderError("unauthorized", 401))).toBe(false);
+    expect(isEmptyCompletionError(new ProviderError("too large", 413))).toBe(false);
+    expect(isEmptyCompletionError(new Error("socket connection was closed"))).toBe(false);
   });
 });

@@ -193,6 +193,49 @@ describe("SessionController parity helpers (V2-080)", () => {
     expect(events.some((e) => e.type === "compacted")).toBe(true);
   });
 
+  it("persists after compaction even when the kept tail has no user message (trailing compacted card survives reload)", async () => {
+    const saved: Array<
+      readonly { role: string; content: string }[]
+    > = [];
+    const persistence: PersistencePort = {
+      async saveSession(messages) {
+        saved.push(messages.map((m) => ({ role: m.role, content: m.content })));
+      },
+      async loadPlan() {
+        return undefined;
+      },
+      async savePlan() {},
+      async deletePlan() {},
+    };
+    const session = new SessionController({
+      agent: fakeAgent(),
+      persistence,
+      emit: () => {},
+      sessionId: "sess-tail-no-user",
+    });
+    // Older turns get summarized; the kept tail is assistant-only (no user),
+    // which previously tripped the persistNow user-message guard.
+    session.loadHistory(
+      [
+        { role: "user", content: "build the app " + "x".repeat(400) },
+        { role: "assistant", content: "starting the build " + "x".repeat(400) },
+        { role: "assistant", content: "recent assistant one" },
+        { role: "assistant", content: "recent assistant two" },
+      ],
+      { sessionId: "sess-tail-no-user" },
+    );
+
+    const result = await session.compact(undefined, 2);
+
+    expect(result.summarized).toBe(true);
+    expect(session.messages.some(isCompactionMemoryMessage)).toBe(true);
+    expect(session.messages.some((m) => m.role === "user")).toBe(false);
+    expect(saved.length).toBeGreaterThan(0);
+    expect(
+      saved.at(-1)?.some((m) => m.content.includes("Session memory from compacted")),
+    ).toBe(true);
+  });
+
   it("emits the PLAN MODE HANDOFF memory instead of a generic compacted label", async () => {
     completeWithProvider.mockResolvedValueOnce({
       text: "## Research evidence\nVerified React project state\n## Current state\nReady to implement",

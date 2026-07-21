@@ -50,6 +50,7 @@ const ACTION_LABELS: Partial<Record<ActionId, string>> = {
   "app.help": "Open command help",
   "app.toggle-plan": "Toggle plan / tasks pane",
   "app.jobs": "Open background jobs",
+  "app.cycle-mode": "Cycle mode (ask → agent → plan)",
   "focus.next-region": "Cycle focus (composer → chat → plan)",
   "focus.composer": "Focus composer",
   "focus.transcript": "Focus transcript",

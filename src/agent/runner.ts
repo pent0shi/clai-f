@@ -11,7 +11,7 @@ import type {
   ToolDefinition,
   ToolResult,
 } from "../types.js";
-import { streamWithProvider, completeWithProvider } from "../llm/router.js";
+import { streamWithProvider, completeWithProvider, isEmptyCompletionError } from "../llm/router.js";
 import { resolveToolDialect } from "../llm/capabilities.js";
 import {
   syntheticToolCallId,
@@ -184,6 +184,16 @@ import {
   handlePlanTool,
   resolvePlanTaskId,
 } from "./plan-tool.js";
+import {
+  readTaskUpdateArgs,
+  distinctAdvancingTaskIds,
+  isSimultaneousTaskAdvance,
+  batchUpdateSignature,
+  buildMultiUpdateReminder,
+  multiUpdateToast,
+  type TaskUpdateIntent,
+  type BatchTaskDescriptor,
+} from "./task-sync.js";
 import {
   absorbLooseWorkIntoLedger,
   applyDestinationCwd,
@@ -637,6 +647,10 @@ export async function runAgentTurn(
     };
     let lastAnswer = "";
     const session: SessionPolicy = options.session ?? createSessionPolicy();
+    // Defensive init: external/legacy callers may build a policy without the
+    // newer sync-guard holders. Never dereference an undefined holder.
+    if (!session.pendingTaskBatch) session.pendingTaskBatch = { value: undefined };
+    if (!session.pendingDependency) session.pendingDependency = { value: undefined };
     // One-shot CLI / tests that never entered TUI/REPL still need an isolated
     // scratch+output workspace. No-op when a session already bound one.
     if (!getActiveSessionWorkspace()) {
@@ -1236,6 +1250,9 @@ export async function runAgentTurn(
 
     let pendingCalls: ToolCall[] = [];
     let narrowNmapDispatchCount = 0;
+    // Multi-task sync guard state (recomputed per model message before execution).
+    let batchRemindCalls = new Set<ToolCall>();
+    let batchReminderNote = "";
 
     const deferredPostToolMessages: ChatMessage[] = [];
     /**
@@ -1398,6 +1415,26 @@ export async function runAgentTurn(
         }
       }
 
+      // Held batch task update: one reminder for the whole simultaneous set,
+      // no execution, until the model re-issues the identical batch to confirm.
+      if (call.name === "task.update" && batchRemindCalls.has(rawCall)) {
+        if (!alreadyPrintedIds.has(toolEventId)) {
+          const toolCallLine =
+            chalk.cyan(`  ▶ ${call.name}`) +
+            chalk.gray(` ${formatToolArgs(call)}`);
+          writeToolCall(
+            toolEventId,
+            call,
+            styleToolChatter(call, toolCallLine) + "\n",
+          );
+          alreadyPrintedIds.add(toolEventId);
+        }
+        const result = { ok: false, output: batchReminderNote, exitCode: 1 };
+        emitToolResult(toolEventId, result, batchReminderNote);
+        writeToolOutput(toolEventId, "held\n", chalk.yellow("  ⚠") + "\n");
+        return { ok: false, call, result, contextOutput: batchReminderNote };
+      }
+
       const retryReasonRaw = call.args._retryReason;
       const retryReason =
         retryReasonRaw && typeof retryReasonRaw === "object"
@@ -1520,7 +1557,9 @@ export async function runAgentTurn(
           autoApprove: !isPlanMode,
         });
         if (planResult.handled) {
-          loopGuard.recordAttempt(step, call.name, call.args, planResult.ok, 0);
+          if (!planResult.reminder) {
+            loopGuard.recordAttempt(step, call.name, call.args, planResult.ok, 0);
+          }
 
           if (planResult.ok && call.name === "task.update") {
             const stateRaw =
@@ -1593,6 +1632,14 @@ export async function runAgentTurn(
               styleToolChatter(call, toolCallLine) + "\n",
             );
             alreadyPrintedIds.add(toolEventId);
+          }
+
+          if (planResult.reminder && planResult.toast) {
+            writeNotice(
+              "warn",
+              planResult.toast,
+              chalk.yellow(`  ⚠ ${planResult.toast}\n`),
+            );
           }
 
           if (planResult.plan) {
@@ -2819,7 +2866,7 @@ export async function runAgentTurn(
       force = false,
     ): Promise<void> {
       const beforeTokens = estimateNextRequestTokens(messages);
-      // E1: soft early compact (default 70k) while hard ceiling remains 100k.
+      // E1: auto-compact trigger (default 100k, matches hard ceiling).
       const compactTrigger = autoCompactTriggerTokens();
       if (!force && beforeTokens < compactTrigger) return;
       if (messages.length <= AUTO_COMPACT_KEEP_RECENT + 2) return;
@@ -3287,6 +3334,34 @@ export async function runAgentTurn(
             })) {
               if (notice.includes("Large context")) continue; // already shown above
               writeNotice("warn", notice, chalk.yellow(`  ⚠ ${notice}\n`));
+            }
+            // A fully empty model completion (no text, no tool calls) must not
+            // kill the turn. It shows up most after auto-compaction, when the
+            // tail ends on re-injected system context and the model has nothing
+            // to answer. Append a trailing user nudge (so the turn no longer
+            // ends on system messages) and retry, bounded like the
+            // successful-but-empty path below.
+            if (
+              !options.signal?.aborted &&
+              isEmptyCompletionError(streamError) &&
+              emptyVisibleRetries < 3
+            ) {
+              emptyVisibleRetries += 1;
+              writeNotice(
+                "warn",
+                "model streamed an empty response — nudging it to continue",
+                chalk.yellow(
+                  "  ⚠ model streamed an empty response — nudging it to continue\n",
+                ),
+              );
+              messages.push(
+                recoveryUserMessage(
+                  "Your previous response was empty. Continue the task now: emit your next tool call, " +
+                    "or give your final answer if every required step is already complete and verified. " +
+                    "Do not reply with an empty message.",
+                ),
+              );
+              continue;
             }
             throw streamError;
           }
@@ -4575,6 +4650,57 @@ export async function runAgentTurn(
           // or a confirm was declined; the model must see every tool result.
           if (res.lastAnswer === "Aborted.") aborted = true;
         };
+
+        // Multi-task sync guard: when one model message advances more than one
+        // distinct task at once, hold the whole set behind a single reminder.
+        // The model confirms by re-issuing the identical batch; a single-task
+        // (or non-advancing) message clears any pending confirmation.
+        batchRemindCalls = new Set<ToolCall>();
+        batchReminderNote = "";
+        {
+          const livePlanForBatch = await loadPlan(session.sessionId).catch(
+            () => undefined,
+          );
+          const intents: TaskUpdateIntent[] = [];
+          for (const b of toRun) {
+            const parsed = readTaskUpdateArgs(b.call);
+            if (!parsed) continue;
+            const resolvedId = livePlanForBatch
+              ? resolvePlanTaskId(livePlanForBatch, parsed.taskId) ?? parsed.taskId
+              : parsed.taskId;
+            intents.push({ call: b.call, taskId: resolvedId, state: parsed.state });
+          }
+          if (isSimultaneousTaskAdvance(intents)) {
+            const signature = batchUpdateSignature(intents);
+            if (session.pendingTaskBatch.value === signature) {
+              session.pendingTaskBatch.value = undefined;
+              writeNotice(
+                "info",
+                "confirmed batch task update — applying",
+                chalk.dim("  ℹ confirmed batch task update — applying\n"),
+              );
+            } else {
+              session.pendingTaskBatch.value = signature;
+              const descriptors: BatchTaskDescriptor[] = intents.map((intent) => ({
+                taskId: intent.taskId,
+                title:
+                  livePlanForBatch?.tasks.find((t) => t.id === intent.taskId)
+                    ?.title ?? "",
+                targetState: intent.state,
+              }));
+              batchReminderNote = buildMultiUpdateReminder(descriptors);
+              for (const intent of intents) batchRemindCalls.add(intent.call);
+              const advancing = distinctAdvancingTaskIds(intents).length;
+              writeNotice(
+                "warn",
+                multiUpdateToast(advancing),
+                chalk.yellow(`  ⚠ ${multiUpdateToast(advancing)}\n`),
+              );
+            }
+          } else {
+            session.pendingTaskBatch.value = undefined;
+          }
+        }
 
         const groups = groupToolCallsForExecution(
           allCalls,

@@ -43,6 +43,7 @@ export interface StatusLineProps {
   readonly onJumpBottom?: (() => void) | undefined;
   readonly onClearDraft?: (() => void) | undefined;
   readonly onOpenShortcuts?: (() => void) | undefined;
+  readonly onCycleMode?: (() => void) | undefined;
 }
 
 const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"] as const;
@@ -314,6 +315,7 @@ export function StatusLine(props: StatusLineProps): ReactNode {
     onJumpBottom,
     onClearDraft,
     onOpenShortcuts,
+    onCycleMode,
   } = props;
   const state = useSessionState(session);
   const [frame, setFrame] = useState(0);
@@ -510,6 +512,20 @@ export function StatusLine(props: StatusLineProps): ReactNode {
         }}
       >
         <ModeBadge mode={mode} theme={theme} short={shortMode} />
+
+        {/* Shift+Tab mode cycle hint (click to cycle ask → agent → plan) */}
+        {density !== "xs" ? (
+          <>
+            <text selectable={false} content=" " />
+            <ClickableHint
+              short="⇧⇥"
+              expand="cycle mode"
+              active={false}
+              theme={theme}
+              onClick={onCycleMode}
+            />
+          </>
+        ) : null}
 
         {/* sm+: minimal command hint */}
         {density === "md" || density === "lg" ? (

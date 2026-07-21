@@ -57,6 +57,9 @@ export const defaultKeymap: readonly KeyBinding[] = [
   binding("ctrl+j", "app.jobs", "global"),
   binding("ctrl+t", "transcript.toggle-thinking", "global"),
   binding("ctrl+o", "transcript.toggle-output", "global"),
+  // Shift+Tab cycles ask → agent → plan from any base region (bare Tab is
+  // reserved for the composer completion menu / focus, so it stays free).
+  binding("shift+tab", "app.cycle-mode", "global"),
   // Absolute bottom of chat from anywhere (including composer).
   // Ctrl+U is NOT global: macOS Cmd+Backspace often arrives as Ctrl+U, and
   // OpenTUI's textarea uses ctrl+u for delete-to-line-start. Jump-to-top is

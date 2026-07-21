@@ -7,10 +7,13 @@ export const COMPACTION_SYSTEM_PROMPT = `You are a session-memory compressor for
 
 Write a dense, accurate CONTINUATION MEMORY for another assistant that will resume this work with no other history.
 
+You are SUMMARIZING a past session, NOT continuing it. Do not answer the user, do not perform the next task, and do not role-play the agent. Never emit tool calls or invent tool results, file-write receipts (bytes/lines/sha256), exit codes, or "TOOL:" / "[tools: …]" transcript lines — describe what already happened in your own words.
+
 Rules:
 - Fidelity over style. Never invent tool results, file contents, findings, URLs, ports, or completions.
 - Prefer concrete artifacts: absolute paths, commands (short form), exit outcomes, HTTP status, plan task ids/states, job ids, open ports, confirmed vs unconfirmed findings.
 - LENGTH: aim for ~800–1500 tokens of dense bullets — complete short memory beats a long dump that cuts mid-sentence. No full tool transcripts or HTML bodies.
+- NO DUPLICATION: state each fact exactly once, in its best section. This memory is prepended to a live context that ALSO re-injects fresh ACTIVE PLAN, SESSION STATE, and ENGAGEMENT SCOPE — do not restate the full plan or every task, and do not reproduce long user prompts verbatim; capture goals/deltas concisely.
 - Omit secrets, API keys, passwords, tokens, and full credential material. Say "[redacted]" if present.
 - Omit progress bars, repeated failures, and decorative chatter.
 - Do not wrap the whole answer in markdown code fences.
@@ -89,6 +92,7 @@ export function buildCompactionUserPrompt(parts: CompactionPromptParts): string 
     sections.push(
       "Create a complete but compact continuation memory of the session below.",
       "Treat resumed history and newer turns as one continuous conversation.",
+      "Open with a single ORIENTATION line — current objective plus status (done / in progress / blocked) — so the resuming agent reorients in one read. Keep it to one line; the details belong in the sections below, not restated here.",
       "",
       "Organize under these exact section headings (skip a section only if empty):",
       "## User goals",
@@ -102,6 +106,12 @@ export function buildCompactionUserPrompt(parts: CompactionPromptParts): string 
       "Preserve: user intentions, decisions, constraints, paths, stack/package manager,",
       "commands and key results, plan task states, errors and failed approaches,",
       "servers/jobs still running, and exactly what remains.",
+      "",
+      "AVOID BLOAT — this memory is prepended to a context that re-injects fresh ACTIVE PLAN, SESSION STATE, and ENGAGEMENT SCOPE after compaction:",
+      "- DEDUPLICATE: state each fact once in its best section. Never repeat the same path, command, decision, or finding across multiple sections.",
+      "- Do NOT restate the full plan or list every task under Remaining work — the live ACTIVE PLAN is re-injected separately. Record only deltas: the next task, blockers, dependency/order caveats, and states not obvious from the plan.",
+      "- Do NOT reproduce long user prompts verbatim. Capture the goal and hard constraints concisely under User goals.",
+      "- Omit routine fs.list / fs.read / tool.check receipts and transient logs whose result is already captured. Prefer dense bullets over prose.",
       "",
       "PHASE AWARENESS under Decisions and constraints:",
       "- If earlier turns were plan-mode research, do not elevate gather-only / await-accept / no-implement rules as permanent forever-constraints for agent execution.",
@@ -138,4 +148,32 @@ export function trimTranscriptForCompaction(
     "\n\n[... middle of session omitted for length ...]\n\n" +
     transcript.slice(-tail)
   );
+}
+
+
+/**
+ * Detects a "summary" that is really the model continuing the task or replaying
+ * the raw transcript instead of compressing it. Weak models sometimes echo tool
+ * receipts (bytes/lines/sha256), "TOOL:" lines, or "[tools: …]" markers, or
+ * narrate the next step with fabricated tool calls. A faithful memory never
+ * contains these artifacts, so their presence means the summary is unusable and
+ * compaction should fail loudly rather than persist garbage.
+ */
+export function looksLikeTranscriptReplay(summary: string): boolean {
+  const hardMarkers = [
+    /sha256_12\s*=/i,
+    /Do NOT re-read this file/i,
+    /\(\s*exit\s*=\s*-?\d+\s*,\s*ok\s*=\s*(?:true|false)\s*\)/i,
+    /<tool_call>|<arg_key>|<arg_value>|<\/tool_call>/i,
+    /\bbytes\s*=\s*\d+\s+lines\s*=\s*\d+/i,
+  ];
+  if (hardMarkers.some((re) => re.test(summary))) return true;
+
+  const softMarkers = [
+    /^\s*TOOL:\s*Tool\b/im,
+    /\[tools:\s/i,
+    /\bLet me continue\b/i,
+    /\bTask t\d+:/,
+  ];
+  return softMarkers.filter((re) => re.test(summary)).length >= 2;
 }

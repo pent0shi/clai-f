@@ -12,7 +12,8 @@ import {
 import { anthropicProvider } from "./anthropic.js";
 import { geminiProvider } from "./gemini.js";
 import { groqProvider } from "./groq.js";
-import { ProviderError } from "./http.js";
+import { ProviderError, isReasoningUnsupportedError } from "./http.js";
+import { markReasoningUnsupported } from "./capabilities.js";
 import {
   attemptsPerKey,
   buildKeyAttemptPlan,
@@ -256,6 +257,18 @@ function shouldStopProviderFallback(error: unknown): boolean {
   return /no completion text|response was empty|empty response|returned no text/i.test(message);
 }
 
+/**
+ * True when a stream/complete failure was a fully empty model completion — no
+ * visible text and no tool calls. Safe to retry with a nudge (common right
+ * after auto-compaction when the tail ends on re-injected system context).
+ */
+export function isEmptyCompletionError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /completed without a visible answer|no visible answer|returned no content|no completion text|response was empty|empty response|returned no text/i.test(
+    message,
+  );
+}
+
 export const providers: Record<ProviderId, LlmProvider> = {
   groq: groqProvider,
   gemini: geminiProvider,
@@ -354,8 +367,8 @@ async function tryCompleteOnce(
   const activeRequest = { ...request, provider: providerId, model };
   try {
     return await provider.complete(activeRequest, auth);
-  } catch (toolError) {
-    if (activeRequest.tools?.length && isToolsUnsupportedError(toolError)) {
+  } catch (error) {
+    if (activeRequest.tools?.length && isToolsUnsupportedError(error)) {
       markTextOnlyModel(providerId, model);
       const textRequest = {
         ...activeRequest,
@@ -365,7 +378,13 @@ async function tryCompleteOnce(
       };
       return await provider.complete(textRequest, auth);
     }
-    throw toolError;
+    // Model rejected a reasoning/thinking knob — mark it and retry once
+    // without reasoning so an unsupported option never fails the request.
+    if (isReasoningUnsupportedError(error)) {
+      markReasoningUnsupported(model);
+      return await provider.complete(activeRequest, auth);
+    }
+    throw error;
   }
 }
 
@@ -386,8 +405,8 @@ async function tryStreamOnce(
     const result = await provider.complete(activeRequest, auth);
     onToken(result.text);
     return result;
-  } catch (toolError) {
-    if (activeRequest.tools?.length && isToolsUnsupportedError(toolError)) {
+  } catch (error) {
+    if (activeRequest.tools?.length && isToolsUnsupportedError(error)) {
       markTextOnlyModel(providerId, model);
       onStatus?.(
         `ℹ ${providerId}/${model} does not support native tools — falling back to text protocol`,
@@ -405,7 +424,23 @@ async function tryStreamOnce(
       onToken(result.text);
       return result;
     }
-    throw toolError;
+    // Model rejected a reasoning/thinking knob (e.g. chat_template_kwargs on a
+    // NIM chat template that does not accept it). Mark it so buildChatBody stops
+    // sending reasoning, then retry once without it. A parameter rejection is a
+    // request-time 4xx, so no tokens have streamed yet — the retry is clean.
+    if (isReasoningUnsupportedError(error)) {
+      markReasoningUnsupported(model);
+      onStatus?.(
+        `ℹ ${providerId}/${model} rejected reasoning options — retrying without them`,
+      );
+      if (provider.stream) {
+        return await provider.stream(activeRequest, auth, onToken);
+      }
+      const result = await provider.complete(activeRequest, auth);
+      onToken(result.text);
+      return result;
+    }
+    throw error;
   }
 }
 

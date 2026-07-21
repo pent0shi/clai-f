@@ -7,6 +7,10 @@ export interface SessionPolicy {
   sessionId: string;
   /** When true, the agent must follow its approved plan (set by /implement). */
   planApproved: { value: boolean };
+  /** Signature of a multi-task update awaiting the model's re-issue to confirm. */
+  pendingTaskBatch: { value: string | undefined };
+  /** Signature of an early task-open (unmet dependencies) awaiting confirmation. */
+  pendingDependency: { value: string | undefined };
 }
 
 export function createSessionPolicy(sessionId?: string): SessionPolicy {
@@ -17,6 +21,8 @@ export function createSessionPolicy(sessionId?: string): SessionPolicy {
       sessionId ??
       `sess-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
     planApproved: { value: false },
+    pendingTaskBatch: { value: undefined },
+    pendingDependency: { value: undefined },
   };
 }
 

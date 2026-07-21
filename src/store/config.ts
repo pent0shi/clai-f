@@ -117,7 +117,7 @@ const defaults: ClaiConfig = {
   permissions: "default",
   toolCalling: "auto",
   softEarlyCompact: true,
-  softCompactTokenBudget: 70_000,
+  softCompactTokenBudget: 100_000,
   fsPassthroughCapChars: 64_000,
   adaptiveMaxTokens: true,
   freeTierContextGuard: true,

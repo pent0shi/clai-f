@@ -875,9 +875,13 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
             ],
           },
         },
-        kind: { type: "string" },
+        kind: {
+          type: "string",
+          description:
+            "REQUIRED category for this plan — you decide it from the actual work, never leave it generic and never default to \"general\". Use one concise lowercase word (rarely two) naming the primary activity. Pick the most specific fitting label; invent a better one when none below fits. Building/coding: build, frontend, ui, webapp, api, backend, feature, refactor, bugfix, fix, debugging, testing, perf, devops, infra, deployment, migration, docs, config. Data/research: data, research, analysis. Security: security, pentest, reconnaissance, recon, osint, exploit, audit, hardening, forensics. Choose \"general\" ONLY when the work truly spans many categories with no dominant one.",
+        },
       },
-      required: ["goal", "tasks"],
+      required: ["goal", "tasks", "kind"],
       additionalProperties: true,
     },
     { mutates: true },

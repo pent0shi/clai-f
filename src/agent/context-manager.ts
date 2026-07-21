@@ -7,6 +7,7 @@ import {
 } from "./tool-history.js";
 import {
   buildCompactionUserPrompt,
+  looksLikeTranscriptReplay,
   trimTranscriptForCompaction,
 } from "./compaction-summary.js";
 import {
@@ -260,7 +261,22 @@ export async function compactMessagesWithSummary(
     };
   }
 
+  const isDurableSystem = (content: string): boolean =>
+    content.startsWith("ACTIVE PLAN") ||
+    content.startsWith("SESSION STATE") ||
+    content.startsWith("ENGAGEMENT SCOPE") ||
+    content.startsWith("TASK ANALYSIS") ||
+    content.includes("\nACTIVE PLAN") ||
+    content.includes("SESSION STATE / WORKING MEMORY");
+
+  // Stale ACTIVE PLAN / SESSION STATE / SCOPE snapshots are re-injected fresh
+  // after compaction and their current form is captured in durableState below.
+  // Feeding old copies into the summarizer only bloats input and invites the
+  // model to restate the plan — drop them from the transcript.
   const messageTranscript = older
+    .filter(
+      (message) => !(message.role === "system" && isDurableSystem(message.content)),
+    )
     .map((message) => {
       let content = redactSecrets(message.content);
       if (message.role === "assistant") {
@@ -279,13 +295,6 @@ export async function compactMessagesWithSummary(
   const visual = sessionTranscript?.trim()
     ? redactSecrets(sessionTranscript.trim())
     : "";
-  const isDurableSystem = (content: string): boolean =>
-    content.startsWith("ACTIVE PLAN") ||
-    content.startsWith("SESSION STATE") ||
-    content.startsWith("ENGAGEMENT SCOPE") ||
-    content.startsWith("TASK ANALYSIS") ||
-    content.includes("\nACTIVE PLAN") ||
-    content.includes("SESSION STATE / WORKING MEMORY");
 
   const durableBits = messages
     .filter((m) => m.role === "system" && isDurableSystem(m.content))
@@ -321,6 +330,11 @@ export async function compactMessagesWithSummary(
   const summary = stripThinking(rawSummary).visible.trim();
   if (!summary) {
     throw new Error("compaction failed: model returned an empty summary");
+  }
+  if (looksLikeTranscriptReplay(summary)) {
+    throw new Error(
+      "compaction failed: model replayed the transcript instead of summarizing — retry /compact or switch model",
+    );
   }
 
   const head = preserveSystemHead ? [messages[0]!] : [];

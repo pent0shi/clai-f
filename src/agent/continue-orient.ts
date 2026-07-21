@@ -214,14 +214,24 @@ export function buildContinueOrientation(input: ContinueOrientInput): string {
     }
   }
 
-  lines.push(
-    "Suggested order (adapt to evidence):",
-    "1) shell.jobs — see what is still running or just finished.",
-    "2) shell.tail on relevant job ids (or read saved artifacts) — harvest results before new work.",
-    "3) Resume the in_progress / failed task with real tools; only then task.update done with proof.",
-    "4) Start the next pending task only after the current one is honestly complete.",
-    "Avoid busy-wait loops (sleep/poll with no progress). Prefer background long jobs + other useful work, then tail.",
-  );
+  const orderSteps: string[] = ["Suggested order (adapt to evidence):"];
+  if (plan) {
+    orderSteps.push(
+      "1) Re-read the ACTIVE PLAN task states above first — they are the current source of truth for what is done vs pending; reconcile against them, not against the memory summary's prose.",
+      "2) Open the in_progress / failed task and read only its own artifacts plus the earlier-task outputs you need to confirm what is already done — before scanning unrelated files.",
+      "3) If long jobs were running, shell.jobs then shell.tail the relevant ids (or read saved artifacts) to harvest results before redoing that work.",
+      "4) Resume the task with real tools; mark it done only with fresh proof, then open the next pending task.",
+      "Do not skip ahead, do not finalize while tasks remain, and avoid busy-wait loops (sleep/poll with no progress).",
+    );
+  } else {
+    orderSteps.push(
+      "1) shell.jobs — see what is still running or just finished.",
+      "2) shell.tail on relevant job ids (or read saved artifacts) — harvest results before new work.",
+      "3) Resume the interrupted work with real tools; confirm each outcome from actual results, not assumptions.",
+      "Avoid busy-wait loops (sleep/poll with no progress). Prefer background long jobs + other useful work, then tail.",
+    );
+  }
+  lines.push(...orderSteps);
 
   return lines.join("\n");
 }

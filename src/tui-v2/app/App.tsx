@@ -43,6 +43,8 @@ import { composerActionPort } from "../composer/composer-action-port.js";
 import { formatShortcutsReference } from "../actions/format-shortcuts.js";
 import { formatCommandHelpMarkdown } from "../rendering/format-help.js";
 import { notify, notifyWarn } from "../notify.js";
+import { setDefaultMode } from "../../store/config.js";
+import { modeSwitchSummary, nextMode } from "./mode-cycle.js";
 
 const CTRL_C_QUIT_WINDOW_MS = 1500;
 
@@ -251,6 +253,11 @@ export function App(): ReactNode {
         services.overlay.openJobs();
         notify(services, "Jobs panel", { key: "jobs", durationMs: 1200 });
         break;
+      case "app.cycle-mode": {
+        key.preventDefault();
+        cycleMode();
+        break;
+      }
       case "app.help":
         key.preventDefault();
         services.overlay.openPager(
@@ -409,6 +416,18 @@ export function App(): ReactNode {
       key: "thinking",
       durationMs: 1500,
     });
+  }
+
+  function cycleMode(): void {
+    const current = services.session.getState().mode;
+    const target = nextMode(current);
+    services.session.setMode(target);
+    setDefaultMode(target);
+    notify(
+      services,
+      `Mode · ${target.toUpperCase()} — ${modeSwitchSummary(target)} · ⇧⇥`,
+      { key: "mode", level: "success", durationMs: 1800 },
+    );
   }
 
   function toggleOutput(): void {
@@ -590,6 +609,7 @@ export function App(): ReactNode {
           onJumpBottom={jumpChatBottom}
           onClearDraft={clearDraft}
           onOpenShortcuts={openShortcutsPager}
+          onCycleMode={cycleMode}
         />
       </box>
 

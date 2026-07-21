@@ -488,7 +488,8 @@ export class SessionController implements Disposable {
   async persistNow(name?: string): Promise<void> {
     if (this.deps.noHistory || getConfig().privateMode) return;
     if (this.history.length === 0) return;
-    if (!this.history.some((message) => message.role === "user")) return;
+    // Compaction folds user turns into a memory message; persist those too, or the trailing "compacted" card is lost on reload.
+    if (!this.history.some((m) => m.role === "user" || isCompactionMemoryMessage(m))) return;
     if (name) this.sessionTitle = name;
 
     const contextUsage = persistedContextUsage(this.resolveContextUsage());
@@ -500,7 +501,6 @@ export class SessionController implements Disposable {
     });
   }
 
-  
   async maybeRefreshTitle(): Promise<void> {
     if (this.deps.noHistory || getConfig().privateMode) return;
     if (this.titleInFlight) return;
@@ -775,7 +775,7 @@ export class SessionController implements Disposable {
    */
   private scheduleAutosave(): void {
     if (this.deps.noHistory || getConfig().privateMode) return;
-    if (!this.history.some((m) => m.role === "user")) return;
+    if (!this.history.some((m) => m.role === "user" || isCompactionMemoryMessage(m))) return;
     const now = Date.now();
     if (now - this.lastAutosaveAt < SessionController.AUTOSAVE_MIN_MS) return;
     if (this.autosaveInFlight) return;

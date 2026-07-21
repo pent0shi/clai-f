@@ -89,7 +89,7 @@ export function ComposerInputBox(props: {
         placeholder={
           running
             ? "type to queue a message…"
-            : `ask anything · @ file or folder · Shift+Enter newline`
+            : `ask anything · @ file or folder · Shift+Enter newline · ⇧⇥ mode`
         }
         placeholderColor={theme.muted}
         textColor={theme.foreground}

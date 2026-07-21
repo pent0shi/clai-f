@@ -25,11 +25,18 @@ afterEach(() => {
 });
 
 describe("reliability policy (E1–E6)", () => {
-  it("E1: soft early compact defaults below hard ceiling", () => {
+  it("E1: soft early compact trigger defaults to the hard ceiling (100k)", () => {
     const p = getReliabilityPolicy();
     expect(p.softEarlyCompact).toBe(true);
     expect(p.softCompactTokenBudget).toBe(DEFAULT_SOFT_COMPACT_TOKEN_BUDGET);
     expect(autoCompactTriggerTokens(p)).toBe(DEFAULT_SOFT_COMPACT_TOKEN_BUDGET);
+    expect(autoCompactTriggerTokens(p)).toBe(HARD_COMPACT_TOKEN_BUDGET);
+  });
+
+  it("E1: soft compact trigger can be lowered via env", () => {
+    process.env.CLAI_SOFT_COMPACT_TOKENS = "60000";
+    const p = getReliabilityPolicy();
+    expect(autoCompactTriggerTokens(p)).toBe(60_000);
     expect(autoCompactTriggerTokens(p)).toBeLessThan(HARD_COMPACT_TOKEN_BUDGET);
   });
 

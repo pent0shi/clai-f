@@ -18,8 +18,8 @@ export async function summarizeForSessionCompact(
   const maxTokens = 2_048;
   const systemContent =
     opts.purpose === "plan-implement"
-      ? "Write concise, non-redundant research memory for an agent executing an approved plan. Do not add framing: the PLAN MODE HANDOFF wrapper and active plan are injected separately. For coding target 600–1000 tokens; preserve only verified state, reusable research/artifacts, decisions, blockers, and risks. Security handoffs may be longer to preserve findings and coverage. Never invent or cut a fact mid-token."
-      : "You compress conversation history into accurate continuation memory.";
+      ? "Write concise, non-redundant research memory for an agent executing an approved plan. Do not add framing: the PLAN MODE HANDOFF wrapper and active plan are injected separately. For coding target 600–1000 tokens; preserve only verified state, reusable research/artifacts, decisions, blockers, and risks. Security handoffs may be longer to preserve findings and coverage. Never invent or cut a fact mid-token. You are summarizing, not continuing: never emit tool calls or fabricate tool results, file receipts, or transcript lines."
+      : "You compress conversation history into accurate continuation memory. You are SUMMARIZING the past session, not continuing it: do not answer the user, do not perform the next task, and never emit tool calls or fabricate tool results, file-write receipts (bytes/lines/sha256), exit codes, or 'TOOL:'/'[tools: …]' transcript lines. Describe what already happened in your own words.";
 
   const completeSummary = async (p: string): Promise<string> => {
     const response = await completeWithProvider({

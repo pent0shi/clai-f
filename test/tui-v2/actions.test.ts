@@ -124,6 +124,16 @@ describe("ActionRouter", () => {
     const router = new ActionRouter();
     expect(router.resolve("ctrl+z", "composer")).toBeUndefined();
   });
+
+  it("resolves Shift+Tab to mode cycling from base regions", () => {
+    const router = new ActionRouter();
+    expect(router.resolve("shift+tab", "global")).toBe("app.cycle-mode");
+    // Composer is non-trapping, so the global mode-cycle chord still resolves.
+    expect(router.resolve("shift+tab", "composer")).toBe("app.cycle-mode");
+    expect(router.resolve("shift+tab", "transcript")).toBe("app.cycle-mode");
+    // Bare Tab stays the focus/completion chord (never mode cycling).
+    expect(router.resolve("shift+tab", "global")).not.toBe("focus.next-region");
+  });
 });
 
 describe("FocusController", () => {

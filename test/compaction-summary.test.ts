@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildCompactionUserPrompt,
   COMPACTION_SYSTEM_PROMPT,
+  looksLikeTranscriptReplay,
   trimTranscriptForCompaction,
 } from "../src/agent/compaction-summary.js";
 import {
@@ -15,6 +16,12 @@ describe("compaction-summary prompts", () => {
   it("system prompt demands fidelity and sections", () => {
     expect(COMPACTION_SYSTEM_PROMPT).toMatch(/Never invent/i);
     expect(COMPACTION_SYSTEM_PROMPT).toMatch(/secrets/i);
+  });
+
+  it("system prompt forbids continuing/replaying instead of summarizing", () => {
+    expect(COMPACTION_SYSTEM_PROMPT).toMatch(/SUMMARIZING/);
+    expect(COMPACTION_SYSTEM_PROMPT).toMatch(/not continuing it|NOT continuing/i);
+    expect(COMPACTION_SYSTEM_PROMPT).toMatch(/sha256|file-write receipts/i);
   });
 
   it("user prompt includes required headings and durable state", () => {
@@ -69,6 +76,41 @@ describe("compaction-summary prompts", () => {
   });
 });
 
+describe("looksLikeTranscriptReplay", () => {
+  it("flags fabricated fs.write receipts and tool transcript lines", () => {
+    expect(
+      looksLikeTranscriptReplay(
+        "Created app/page.tsx\n  bytes=1909 lines=63 sha256_12=71aebb363f49\n  Do NOT re-read this file",
+      ),
+    ).toBe(true);
+    expect(
+      looksLikeTranscriptReplay("TOOL: Tool fs.read result (exit=0, ok=true):\n{...}"),
+    ).toBe(true);
+    expect(
+      looksLikeTranscriptReplay(
+        "Now I need to update package.json. Let me continue:\nTask t3: Update scripts\n[tools: fs.read]",
+      ),
+    ).toBe(true);
+    expect(
+      looksLikeTranscriptReplay(
+        "<tool_call>fs.read<arg_key>path<arg_value>/app/package.json</arg_value>",
+      ),
+    ).toBe(true);
+  });
+
+  it("does not flag a faithful structured summary", () => {
+    const good = [
+      "## User goals",
+      "Convert the Vite todo app to Next.js preserving all features.",
+      "## Work completed",
+      "Installed Next.js 16, removed Vite, created app/layout.tsx and app/page.tsx.",
+      "## Remaining work",
+      "Update package.json scripts, then run the dev server.",
+    ].join("\n");
+    expect(looksLikeTranscriptReplay(good)).toBe(false);
+  });
+});
+
 describe("LLM compaction integration shape", () => {
   it("feeds structured prompt and stores model memory", async () => {
     const msgs: ChatMessage[] = Array.from({ length: 12 }, (_, index) => ({
@@ -99,6 +141,21 @@ describe("LLM compaction integration shape", () => {
     expect(result.messages.some((m) => m.content.includes("Build todo app"))).toBe(
       true,
     );
+  });
+
+  it("fails compaction when the model replays the transcript instead of summarizing", async () => {
+    const msgs: ChatMessage[] = Array.from({ length: 12 }, (_, index) => ({
+      role: index % 2 === 0 ? ("user" as const) : ("assistant" as const),
+      content: `message-${index}-` + "content-to-exceed-limits-".repeat(20),
+    }));
+    await expect(
+      compactMessagesWithSummary(
+        msgs,
+        async () =>
+          "Let me continue.\nTask t3: Update scripts\n[tools: fs.write]\nTOOL: Tool fs.write result (exit=0, ok=true):\nWrote package.json bytes=610 lines=26 sha256_12=8f7c3b8e1d2a",
+        { keepRecent: 4 },
+      ),
+    ).rejects.toThrow(/replayed the transcript/i);
   });
 
   it("plan-implement purpose uses handoff memory prefix", async () => {

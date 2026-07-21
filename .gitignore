@@ -17,6 +17,7 @@ improvements-native-tools/
 AGENT_STATUS.md
 AGENT_STATUS1.md
 vulnerability-assessment-report.md
+pentest-report-*.md
 docs/v2/
 .vscode/
 debug-test.ts

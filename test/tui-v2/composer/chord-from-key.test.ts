@@ -43,4 +43,9 @@ describe("chordFromKeyEvent", () => {
       chordFromKeyEvent({ name: "a", ctrl: true, meta: true, shift: true }),
     ).toBe("ctrl+alt+shift+a");
   });
+
+  it("maps Shift+Tab to shift+tab whether reported as tab+shift or backtab", () => {
+    expect(chordFromKeyEvent({ name: "tab", shift: true })).toBe("shift+tab");
+    expect(chordFromKeyEvent({ name: "backtab" })).toBe("shift+tab");
+  });
 });

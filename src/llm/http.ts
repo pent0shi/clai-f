@@ -7,7 +7,7 @@ import type {
   ToolChoice,
   ToolDefinition,
 } from "../types.js";
-import { modelSupportsVision } from "./capabilities.js";
+import { modelSupportsVision, isReasoningUnsupported } from "./capabilities.js";
 import {
   accumulateOpenAiToolCallDelta,
   finalizeOpenAiToolCalls,
@@ -558,7 +558,41 @@ export function buildReasoningPayload(
 }
 
 /**
- * OpenAI's own reasoning model families (gpt-5.x, o1, o3, o4) reject the
+ * Detects provider errors that mean the model rejected one of our
+ * reasoning/thinking knobs (chat_template_kwargs, enable_thinking,
+ * clear_thinking, reasoning_effort, reasoning_budget, thinking). NVIDIA NIM and
+ * other OpenAI-compatible gateways return a 400/422 for chat templates that do
+ * not accept these fields. When this matches, the router strips the reasoning
+ * payload and retries so an unsupported option never fails the whole request.
+ */
+export function isReasoningUnsupportedError(error: unknown): boolean {
+  const status =
+    error && typeof error === "object" && "status" in error
+      ? Number((error as { status?: number }).status)
+      : undefined;
+  const body =
+    error && typeof error === "object" && "body" in error
+      ? String((error as { body?: string }).body ?? "")
+      : "";
+  const message = error instanceof Error ? error.message : String(error);
+  const hay = `${message}\n${body}`.toLowerCase();
+
+  const mentionsReasoningKnob =
+    /chat_template_kwargs|enable_thinking|clear_thinking|reasoning_effort|reasoning_budget|reasoning_content|\bthinking\b/.test(
+      hay,
+    );
+  if (!mentionsReasoningKnob) return false;
+
+  // A 4xx that names a reasoning field is a parameter rejection — strip it.
+  if (status === 400 || status === 422) return true;
+
+  // Any status: explicit "not supported / unknown / invalid parameter" wording.
+  return /not support|unsupported|unknown|unrecognized|not a valid|not allowed|unexpected keyword|does not accept|extra fields not permitted|additional propert|invalid[_ ]?(?:request[_ ]?)?(?:argument|parameter|field)/.test(
+    hay,
+  );
+}
+
+/**
  * legacy Chat Completions sampling knobs: `max_tokens` must be
  * `max_completion_tokens`, and `temperature`/`top_p` must be omitted or left
  * at their default (non-default values return HTTP 400 "Unsupported
@@ -585,11 +619,16 @@ export function buildChatBody(options: {
   toolChoice?: ToolChoice | undefined;
   parallelToolCalls?: boolean | undefined;
 }): string {
-  const reasoning = buildReasoningPayload(
-    options.reasoning,
-    options.reasoningStyle ?? "none",
-    options.model,
-  );
+  // Skip reasoning knobs entirely for models observed to reject them this
+  // session (see isReasoningUnsupportedError). This is how thinking degrades
+  // gracefully: the request still runs, just without the unsupported option.
+  const reasoning = isReasoningUnsupported(options.model)
+    ? {}
+    : buildReasoningPayload(
+        options.reasoning,
+        options.reasoningStyle ?? "none",
+        options.model,
+      );
   
   const reasoningOn = Boolean(options.reasoning?.enabled);
   // Kimchi exposes this model as `minimax-m3`; NVIDIA uses the longer

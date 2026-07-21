@@ -33,7 +33,7 @@ vi.mock("../src/tools/definitions.js", async (importActual) => {
   const schemaHeavyTool: ToolDefinition = {
     name: "fs.read",
     wireName: "fs_read",
-    description: `Schema-heavy tool fixture: ${"x".repeat(220_000)}`,
+    description: `Schema-heavy tool fixture: ${"x".repeat(400_000)}`,
     parameters: {
       type: "object",
       properties: { path: { type: "string" } },
