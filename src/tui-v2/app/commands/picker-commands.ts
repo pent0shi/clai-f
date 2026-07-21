@@ -9,15 +9,24 @@ import { modelSupportsThinking } from "../../../llm/capabilities.js";
 import { assertProvider } from "../../../llm/provider.js";
 import { assertSearchProvider } from "../../../tools/web/providers/provider.js";
 import { searchProviders } from "../../../tools/web/providers/provider.js";
-import { searchProviderIds, type SearchProviderId } from "../../../tools/web/types.js";
+import {
+  asExaSearchType,
+  exaSearchTypeDescriptions,
+  exaSearchTypes,
+  searchProviderIds,
+  type ExaSearchType,
+  type SearchProviderId,
+} from "../../../tools/web/types.js";
 import { providerIds, type ProviderId, type ReasoningEffort } from "../../../types.js";
 import { getKnownModels } from "../../../repl/slash-commands.js";
 import { clearActiveProjectRoot } from "../../../agent/project-root.js";
 import {
   getConfig,
+  getExaSearchType,
   getProviderModel,
   setActiveSearchProvider,
   setDefaultProvider,
+  setExaSearchType,
   setProviderModel,
   setThinking,
   updateConfig,
@@ -205,23 +214,41 @@ async function activateProvider(services: AppServices, next: ProviderId): Promis
 }
 
 export function handleSearch(services: AppServices, invocation: CommandInvocation): void {
-  if (invocation.args) {
+  const args = invocation.args.trim();
+  if (args) {
+    const parts = args.split(/\s+/);
+    const providerArg = parts[0]!;
+    // `/search exa <type>` sets Exa's retrieval strategy directly.
+    if (providerArg.toLowerCase() === "exa" && parts.length > 1) {
+      const type = asExaSearchType(parts.slice(1).join(" "));
+      if (!type) {
+        services.session.notice(
+          "warn",
+          `unknown exa search type: ${parts.slice(1).join(" ")} · options: ${exaSearchTypes.join(", ")}`,
+        );
+        return;
+      }
+      void activateExaWithType(services, type);
+      return;
+    }
     try {
-      void activateSearchProvider(services, assertSearchProvider(invocation.args.trim()));
+      void activateSearchProvider(services, assertSearchProvider(providerArg));
     } catch {
-      services.session.notice("warn", `unknown search provider: ${invocation.args.trim()}`);
+      services.session.notice("warn", `unknown search provider: ${providerArg}`);
     }
     return;
   }
   const active = getConfig().activeSearchProvider;
+  const exaType = getExaSearchType();
   const options: PickerOption[] = searchProviderIds.map((id) => {
     const adapter = searchProviders[id];
+    const keyNote = adapter?.needsApiKey
+      ? `${adapter.displayName} · API key required`
+      : `${adapter?.displayName ?? id} · keyless`;
     return {
       value: id,
       label: id === active ? `${id} · active` : id,
-      description: adapter?.needsApiKey
-        ? `${adapter.displayName} · API key required`
-        : `${adapter?.displayName ?? id} · keyless`,
+      description: id === "exa" ? `${keyNote} · type: ${exaType}` : keyNote,
     };
   });
   services.overlay.openPicker({ title: "Search providers", options }, (value) => {
@@ -246,6 +273,46 @@ async function activateSearchProvider(services: AppServices, next: SearchProvide
   setActiveSearchProvider(next);
   services.overlay.close();
   services.session.notice("info", `search provider → ${next}`);
+  // Exa is the only provider with a tunable retrieval strategy — offer the
+  // type picker right after activation so users land on the right latency
+  // and depth without a second command.
+  if (next === "exa") openExaSearchTypePicker(services);
+}
+
+/** Open the picker that customises Exa's retrieval strategy (`type`). */
+function openExaSearchTypePicker(services: AppServices): void {
+  const current = getExaSearchType();
+  const options: PickerOption[] = exaSearchTypes.map((type) => ({
+    value: type,
+    label: type === current ? `${type} · active` : type,
+    description: exaSearchTypeDescriptions[type],
+    active: type === current,
+  }));
+  services.overlay.openPicker({ title: "Exa search type", options }, (value) => {
+    const type = asExaSearchType(value);
+    if (type) applyExaSearchType(services, type);
+    services.overlay.close();
+  });
+}
+
+/**
+ * Persist the chosen Exa search type. When Exa is not already the active
+ * search provider, selecting a type also activates Exa so the setting takes
+ * effect on the next search.
+ */
+async function activateExaWithType(
+  services: AppServices,
+  type: ExaSearchType,
+): Promise<void> {
+  if (getConfig().activeSearchProvider !== "exa") {
+    await activateSearchProvider(services, "exa");
+  }
+  applyExaSearchType(services, type);
+}
+
+function applyExaSearchType(services: AppServices, type: ExaSearchType): void {
+  setExaSearchType(type);
+  services.session.notice("info", `exa search type → ${type}`);
 }
 
 export function handleReasoning(services: AppServices, invocation: CommandInvocation): void {

@@ -75,7 +75,8 @@ export async function setProviderKey(
   if (
     providerValue === "brave" ||
     providerValue === "tavily" ||
-    providerValue === "duckduckgo"
+    providerValue === "duckduckgo" ||
+    providerValue === "exa"
   ) {
     const { setSearchProviderKey } = await import("./search-providers.js");
     const opts: { fromEnv?: string; stdin?: boolean } = {};
@@ -162,7 +163,8 @@ export async function unsetProviderKey(providerValue: string): Promise<void> {
   if (
     providerValue === "brave" ||
     providerValue === "tavily" ||
-    providerValue === "duckduckgo"
+    providerValue === "duckduckgo" ||
+    providerValue === "exa"
   ) {
     const { unsetSearchProviderKey } = await import("./search-providers.js");
     await unsetSearchProviderKey(providerValue);

@@ -1,7 +1,8 @@
 import Conf from "conf";
 import { dirname } from "node:path";
 import type { Mode, ProviderId, ReasoningPreference } from "../types.js";
-import type { SearchProviderId } from "../tools/web/types.js";
+import type { ExaSearchType, SearchProviderId } from "../tools/web/types.js";
+import { DEFAULT_EXA_SEARCH_TYPE } from "../tools/web/types.js";
 import { defaultModels, sanitizeProviderModel } from "../llm/provider.js";
 import { safeCwd } from "../os/cwd.js";
 import { fixOwnerSync, handlePermissionError } from "../os/permissions.js";
@@ -36,6 +37,8 @@ export interface ClaiConfig {
   sandboxReads: boolean;
   /** Active search provider used by the web.search tool. */
   activeSearchProvider: SearchProviderId;
+  /** Exa retrieval strategy (`type`) applied when Exa is the active provider. */
+  exaSearchType: ExaSearchType;
   /** When true, bypass the OS keychain and always use plaintext file storage. */
   disableKeychain: boolean;
   /** Permissions mode for auto-confirming tool calls ("default" or "allow-all"). */
@@ -113,6 +116,7 @@ const defaults: ClaiConfig = {
   historyRetentionLimit: 0,
   sandboxReads: false,
   activeSearchProvider: "duckduckgo",
+  exaSearchType: DEFAULT_EXA_SEARCH_TYPE,
   disableKeychain: false,
   permissions: "default",
   toolCalling: "auto",
@@ -217,4 +221,12 @@ export function getActiveSearchProvider(): SearchProviderId {
 
 export function setActiveSearchProvider(id: SearchProviderId): ClaiConfig {
   return updateConfig({ activeSearchProvider: id });
+}
+
+export function getExaSearchType(): ExaSearchType {
+  return getConfig().exaSearchType ?? DEFAULT_EXA_SEARCH_TYPE;
+}
+
+export function setExaSearchType(type: ExaSearchType): ClaiConfig {
+  return updateConfig({ exaSearchType: type });
 }

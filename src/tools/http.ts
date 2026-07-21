@@ -1,8 +1,11 @@
 import net from "node:net";
+import { createHash } from "node:crypto";
 import { lookup } from "node:dns/promises";
+import type { LookupAddress, LookupOptions } from "node:dns";
 import { Agent } from "undici";
 import type { ToolResult } from "../types.js";
 import { isBlockedAddress } from "./web/ssrf-guard.js";
+import { decodeTextBody } from "./web/decode.js";
 import { toReadableText } from "./web/readable.js";
 import {
   selectOutput,
@@ -21,6 +24,83 @@ function getInsecureTlsAgent(): Agent {
     });
   }
   return insecureTlsAgent;
+}
+
+type PinnedLookupCallback = (
+  error: NodeJS.ErrnoException | null,
+  address: string | LookupAddress[],
+  family?: number,
+) => void;
+
+/**
+ * Pin Fetch to addresses that already passed policy. If policy pre-resolution
+ * was unavailable (for example, an injected test transport), the dispatcher's
+ * own lookup performs the SSRF classification immediately before connect so
+ * there is still no unchecked second DNS resolution.
+ */
+function createPinnedAgent(
+  addresses: readonly string[],
+  insecureTls: boolean,
+  allowBlockedAddresses: boolean,
+): Agent {
+  const preResolved = toLookupAddresses(addresses);
+  return new Agent({
+    connect: {
+      rejectUnauthorized: !insecureTls,
+      lookup: (
+        hostname: string,
+        options: LookupOptions,
+        callback: PinnedLookupCallback,
+      ): void => {
+        const send = (resolved: LookupAddress[]): void => {
+          if (resolved.length === 0) {
+            callback(new Error(`DNS resolution returned no addresses for ${hostname}`), "");
+            return;
+          }
+          if (
+            !allowBlockedAddresses &&
+            (isBlockedAddress(hostname) ||
+              resolved.some((entry) => isBlockedAddress(entry.address)))
+          ) {
+            callback(
+              new Error(`Refusing private/loopback/metadata DNS result for ${hostname}`),
+              "",
+            );
+            return;
+          }
+          if (options && typeof options === "object" && options.all === true) {
+            callback(null, resolved);
+            return;
+          }
+          const selected = resolved[0]!;
+          callback(null, selected.address, selected.family);
+        };
+
+        if (preResolved.length > 0) {
+          send(preResolved);
+          return;
+        }
+        void lookup(hostname, { all: true }).then(
+          (results) => send(toLookupAddresses(results.map((entry) => entry.address))),
+          (error: unknown) =>
+            callback(
+              error instanceof Error ? error : new Error(String(error)),
+              "",
+            ),
+        );
+      },
+    },
+  });
+}
+
+function toLookupAddresses(addresses: readonly string[]): LookupAddress[] {
+  return addresses
+    .map((address) => ({ address, family: net.isIP(address) }))
+    .filter((entry): entry is LookupAddress => entry.family === 4 || entry.family === 6);
+}
+
+async function closeAgents(agents: readonly Agent[]): Promise<void> {
+  await Promise.allSettled(agents.map(async (agent) => agent.close()));
 }
 
 /** Flatten error + nested cause(s) for TLS code matching. */
@@ -87,8 +167,10 @@ function formatTlsNetworkError(error: unknown, url: string): string {
   );
 }
 
-/** Capture budget for body bytes (artifact + evidence build). Model context is capped later. */
+/** Capture budget for decoded response-body bytes (artifact + evidence build). */
 const DEFAULT_MAX_BYTES = 128 * 1024;
+/** Hard memory ceiling for one response capture; raise maxBytes up to this cap. */
+const MAX_CAPTURE_BYTES = 16 * 1024 * 1024;
 /**
  * Default retries for remote evidence: 0 so intentional 5xx/probe responses are
  * not silently rewritten. Callers may pass retries; owned loopback still soft-
@@ -114,9 +196,12 @@ const MAX_TIMEOUT_MS = 1_800_000;
 
 interface RedirectHop {
   status: number;
+  statusText: string;
+  method: string;
   url: string;
   location: string;
-  setCookies: string[];
+  /** Runtime-normalized response headers; repeated Set-Cookie stays separate. */
+  headers: Array<readonly [string, string]>;
 }
 
 /**
@@ -243,9 +328,14 @@ interface FetchOptions extends OutputSelection {
   retries?: number | undefined;
   /** Request timeout in ms (clamped 1s–30min). Default 40s. */
   timeoutMs?: number | undefined;
-  /** HTML body formatting; raw preserves the complete captured source. */
+  /** HTML body formatting; raw is the forensic default. */
   responseMode?: "readable" | "raw" | undefined;
   responsePart?: ResponsePart | undefined;
+  /**
+   * Forward credentials across an origin-changing redirect. Disabled by
+   * default so an in-scope endpoint cannot leak supplied auth to another host.
+   */
+  forwardSensitiveHeaders?: boolean | undefined;
   /**
    * Skip TLS certificate verification (hostname mismatch / self-signed).
    * For authorized pentest against https://IP or lab certs only. Evidence
@@ -265,6 +355,7 @@ export async function httpFetch(
   url: string,
   options: FetchOptions = {},
 ): Promise<ToolResult> {
+  const startedAt = Date.now();
   let target: URL;
   try {
     target = new URL(url);
@@ -291,6 +382,7 @@ export async function httpFetch(
 
   const startHost = target.hostname.replace(/^\[|\]$/g, "");
   const ownedLoopback = Boolean(options.iOwnThis && isLoopbackHost(startHost));
+  const authorizedAddresses = new Map<string, string[]>();
 
   // SSRF and engagement-policy checks run for the initial destination and
   // every redirect hop. Owned loopback (local app verify) skips engagement
@@ -298,6 +390,7 @@ export async function httpFetch(
   const authorizeDestination = async (destination: URL): Promise<string | undefined> => {
     const hostname = destination.hostname.replace(/^\[|\]$/g, "");
     const resolvedAddresses = await resolveHosts(hostname);
+    authorizedAddresses.set(hostname.toLowerCase(), resolvedAddresses);
     const blocked = isBlockedAddress(hostname) || resolvedAddresses.some(isBlockedAddress);
     const destLoopback = isLoopbackHost(hostname);
     if (blocked && !options.iOwnThis) {
@@ -339,10 +432,9 @@ export async function httpFetch(
   if (options.body !== undefined && method !== "GET" && method !== "HEAD") {
     init.body = options.body;
   }
-  // Node undici: skip cert checks for authorized IP/lab HTTPS probes.
-  if (insecureTls && target.protocol === "https:") {
-    init.dispatcher = getInsecureTlsAgent();
-  }
+  // The insecure dispatcher is selected per hop below because redirects may
+  // change scheme. A single shared dispatcher keeps authorized lab probes
+  // cheap without weakening unrelated requests.
 
   // Local dev: try localhost / 127.0.0.1 / ::1 until one accepts (Vite dual-stack).
   const urlCandidates =
@@ -351,9 +443,12 @@ export async function httpFetch(
       : [url];
 
   let response: Response | undefined;
+  const pinnedAgents: Agent[] = [];
   let attempts = 0;
   let lastNetworkError: unknown;
+  // The active URL may advance through redirects within this attempt.
   let usedUrl = url;
+  let finalMethod = method;
   let redirectHops: RedirectHop[] = [];
   let responseCleanup: (() => void) | undefined;
   const timeoutMs = clampTimeoutMs(options.timeoutMs);
@@ -393,29 +488,87 @@ export async function httpFetch(
         }
         try {
           let requestUrl = candidateUrl;
+          let requestMethod = method;
+          let requestBody = init.body;
+          let requestHeaders = new Headers(headers);
           let redirects = 0;
           redirectHops = [];
           for (;;) {
-            response = await fetch(requestUrl, {
+            const hopInit: RequestInit & { dispatcher?: Agent } = {
               ...init,
+              method: requestMethod,
+              headers: requestHeaders,
               signal: controller.signal,
-            });
+            };
+            if (requestBody === undefined || requestBody === null) {
+              delete hopInit.body;
+            } else {
+              hopInit.body = requestBody;
+            }
+            const hopUrl = new URL(requestUrl);
+            const hopHost = hopUrl.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+            const pinned = authorizedAddresses.get(hopHost) ?? [];
+            if (!isLoopbackHost(hopHost)) {
+              const dispatcher = createPinnedAgent(
+                pinned,
+                insecureTls && hopUrl.protocol === "https:",
+                options.iOwnThis === true,
+              );
+              pinnedAgents.push(dispatcher);
+              hopInit.dispatcher = dispatcher;
+            } else if (insecureTls && hopUrl.protocol === "https:") {
+              // Owned loopback keeps the shared dispatcher so localhost can
+              // retain its IPv4/IPv6 fallback behavior.
+              hopInit.dispatcher = getInsecureTlsAgent();
+            } else {
+              delete hopInit.dispatcher;
+            }
+
+            usedUrl = requestUrl;
+            response = await fetch(requestUrl, hopInit);
+            finalMethod = requestMethod;
             const location = response.headers.get("location");
             if (!(response.status >= 300 && response.status < 400 && location)) break;
             if (redirects >= 10) throw new Error("Too many redirects (maximum 10)");
-            const setCookies =
-              typeof response.headers.getSetCookie === "function"
-                ? response.headers.getSetCookie()
-                : multiHeader(response.headers, "set-cookie");
             redirectHops.push({
               status: response.status,
+              statusText: response.statusText,
+              method: requestMethod,
               url: requestUrl,
               location,
-              setCookies,
+              headers: snapshotHeaders(response.headers),
             });
             const next = new URL(location, requestUrl);
             const denial = await authorizeDestination(next);
             if (denial) throw new Error(denial);
+
+            if (
+              !options.forwardSensitiveHeaders &&
+              new URL(requestUrl).origin !== next.origin
+            ) {
+              requestHeaders = new Headers(requestHeaders);
+              requestHeaders.delete("authorization");
+              requestHeaders.delete("proxy-authorization");
+              requestHeaders.delete("cookie");
+            }
+
+            // Match widely deployed user-agent redirect semantics while
+            // preserving methods for 307/308. This avoids replaying a POST
+            // body onto a 303 destination and records the actual method used.
+            if (
+              requestMethod !== "HEAD" &&
+              (response.status === 303 ||
+                ((response.status === 301 || response.status === 302) &&
+                  requestMethod === "POST"))
+            ) {
+              requestMethod = "GET";
+              requestBody = undefined;
+              requestHeaders = new Headers(requestHeaders);
+              requestHeaders.delete("content-length");
+              requestHeaders.delete("content-type");
+              requestHeaders.delete("transfer-encoding");
+            }
+
             await drainResponse(response);
             requestUrl = next.toString();
             redirects += 1;
@@ -466,6 +619,7 @@ export async function httpFetch(
       }
     }
   } catch (error) {
+    await closeAgents(pinnedAgents);
     const tried =
       urlCandidates.length > 1
         ? ` (tried ${urlCandidates.join(" → ")})`
@@ -478,73 +632,71 @@ export async function httpFetch(
     };
   }
   if (!response) {
+    await closeAgents(pinnedAgents);
     return {
       ok: false,
       output: "Network error: no response was received",
       exitCode: 1,
     };
   }
-  const limit = options.maxBytes ?? DEFAULT_MAX_BYTES;
-  const decoder = new TextDecoder("utf-8", { fatal: false });
-  let collected = "";
+  const limit = clampCaptureBytes(options.maxBytes);
+  const chunks: Buffer[] = [];
   let bytesRead = 0;
   let truncated = false;
   let bodyReadError: unknown;
   try {
     const reader = response.body?.getReader();
     if (reader && options.responsePart === "headers") {
-    // Headers-only callers do not need to buffer or decode the body.
-    try {
-      await reader.cancel();
-    } catch {
-      // The response metadata is still valid if cancellation races socket close.
-    } finally {
+      // Headers-only callers do not need to buffer or decode the body.
       try {
-        reader.releaseLock();
+        await reader.cancel();
       } catch {
-        // already released
-      }
-    }
-  } else if (reader) {
-    try {
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        if (!value) continue;
-        const remaining = limit - bytesRead;
-        if (remaining <= 0) {
-          truncated = true;
-          try {
-            await reader.cancel();
-          } catch {
-            // ignore — we're abandoning the body deliberately
-          }
-          break;
+        // The response metadata is still valid if cancellation races socket close.
+      } finally {
+        try {
+          reader.releaseLock();
+        } catch {
+          // already released
         }
-        if (value.byteLength > remaining) {
-          collected += decoder.decode(value.subarray(0, remaining), { stream: true });
-          bytesRead += remaining;
-          truncated = true;
-          try {
-            await reader.cancel();
-          } catch {
-            // ignore — we're abandoning the body deliberately
-          }
-          break;
-        }
-        collected += decoder.decode(value, { stream: true });
-        bytesRead += value.byteLength;
       }
-      collected += decoder.decode();
-    } finally {
+    } else if (reader) {
       try {
-        reader.releaseLock();
-      } catch {
-        // already released
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (!value) continue;
+          const remaining = limit - bytesRead;
+          if (remaining <= 0) {
+            truncated = true;
+            try {
+              await reader.cancel();
+            } catch {
+              // ignore — we're abandoning the body deliberately
+            }
+            break;
+          }
+          const captured = value.byteLength > remaining
+            ? value.subarray(0, remaining)
+            : value;
+          chunks.push(Buffer.from(captured));
+          bytesRead += captured.byteLength;
+          if (value.byteLength > remaining) {
+            truncated = true;
+            try {
+              await reader.cancel();
+            } catch {
+              // ignore — we're abandoning the body deliberately
+            }
+            break;
+          }
+        }
+      } finally {
+        try {
+          reader.releaseLock();
+        } catch {
+          // already released
+        }
       }
-    }
-    } else {
-      collected = "";
     }
   } catch (error) {
     bodyReadError = error;
@@ -557,6 +709,7 @@ export async function httpFetch(
       bodyReadError instanceof Error &&
       bodyReadError.name === "AbortError" &&
       !options.signal?.aborted;
+    await closeAgents(pinnedAgents);
     return {
       ok: false,
       output: timedOut
@@ -566,11 +719,16 @@ export async function httpFetch(
     };
   }
 
+  const capturedBody = Buffer.concat(chunks, bytesRead);
   const contentType = response.headers.get("content-type") ?? "";
-  const isBinary = isBinaryContentType(contentType) || isBinaryContent(collected);
+  const decoded = decodeTextBody(capturedBody, contentType);
+  const isBinary =
+    isBinaryContentType(contentType) ||
+    (!isTextualContentType(contentType) && isBinaryContent(capturedBody));
   const finalUrl = response.url || usedUrl;
   const evidence = formatHttpEvidence({
-    method,
+    requestedMethod: method,
+    finalMethod,
     requestedUrl: url,
     usedUrl,
     finalUrl,
@@ -578,25 +736,37 @@ export async function httpFetch(
     statusText: response.statusText,
     attempts,
     bytesRead,
+    bodySha256: createHash("sha256").update(capturedBody).digest("hex"),
+    bodyCharset: decoded.charset,
+    charsetSource: decoded.charsetSource,
+    unsupportedCharset: decoded.unsupportedCharset,
     truncated,
     limit,
     contentType,
     headers: response.headers,
-    body: collected,
+    body: decoded.text,
     isBinary,
     redirectHops,
     lastNetworkError,
     insecureTls,
-    responseMode: options.responseMode ?? "readable",
+    forwardSensitiveHeaders: options.forwardSensitiveHeaders === true,
+    responseMode: options.responseMode ?? "raw",
     responsePart: options.responsePart ?? "full",
   });
   const output = selectOutput(evidence, options);
+  await closeAgents(pinnedAgents);
 
   return {
     ok: true,
     output,
     exitCode: 0,
     truncated: truncated || output !== evidence,
+    stats: {
+      bytesRead,
+      bytesDropped: 0,
+      linesRead: decoded.text.split("\n").length,
+      elapsedMs: Date.now() - startedAt,
+    },
   };
 }
 
@@ -608,12 +778,31 @@ function multiHeader(headers: Headers, name: string): string[] {
   return out;
 }
 
+/**
+ * Snapshot every response header exposed by the Fetch runtime. Header names
+ * and most repeat values are normalized by Fetch; Set-Cookie is recovered as
+ * separate lines when Node/undici exposes getSetCookie().
+ */
+function snapshotHeaders(headers: Headers): Array<readonly [string, string]> {
+  const out: Array<readonly [string, string]> = [];
+  headers.forEach((value, key) => {
+    if (key.toLowerCase() !== "set-cookie") out.push([key, value]);
+  });
+  const setCookies =
+    typeof headers.getSetCookie === "function"
+      ? headers.getSetCookie()
+      : multiHeader(headers, "set-cookie");
+  for (const value of setCookies) out.push(["set-cookie", value]);
+  return out;
+}
+
 /** Headers always kept in evidence (security / fingerprint / cookies). */
 const PRIORITY_HEADER_RE =
   /^(set-cookie|server|x-powered-by|x-aspnet|x-generator|x-frame-options|x-content-type-options|x-xss-protection|content-security-policy|content-type|location|www-authenticate|access-control-|strict-transport|referrer-policy|permissions-policy|cross-origin-|cache-control|via|cf-ray|x-request-id|x-amz-|x-served|link|allow|retry-after)$/i;
 
 function formatHttpEvidence(input: {
-  method: string;
+  requestedMethod: string;
+  finalMethod: string;
   requestedUrl: string;
   usedUrl: string;
   finalUrl: string;
@@ -621,6 +810,10 @@ function formatHttpEvidence(input: {
   statusText: string;
   attempts: number;
   bytesRead: number;
+  bodySha256: string;
+  bodyCharset: string;
+  charsetSource: string;
+  unsupportedCharset?: string | undefined;
   truncated: boolean;
   limit: number;
   contentType: string;
@@ -630,12 +823,13 @@ function formatHttpEvidence(input: {
   redirectHops: RedirectHop[];
   lastNetworkError: unknown;
   insecureTls?: boolean | undefined;
+  forwardSensitiveHeaders: boolean;
   responseMode: "readable" | "raw";
   responsePart: ResponsePart;
 }): string {
   const lines: string[] = [];
   lines.push(
-    `${input.status} ${input.statusText} ${input.method} ${input.finalUrl}`,
+    `${input.status} ${input.statusText} ${input.finalMethod} ${input.finalUrl}`,
   );
   if (input.insecureTls) {
     lines.push(
@@ -646,30 +840,66 @@ function formatHttpEvidence(input: {
   if (input.redirectHops.length > 0) {
     const chain = [
       ...input.redirectHops.map(
-        (h) => `${h.status} ${h.url} → ${h.location}`,
+        (h) => `${h.status} ${h.method} ${h.url} → ${h.location}`,
       ),
-      `${input.status} ${input.finalUrl}`,
+      `${input.status} ${input.finalMethod} ${input.finalUrl}`,
     ];
     lines.push(`redirects: ${chain.join(" → ")}`);
-    for (const hop of input.redirectHops) {
-      if (hop.setCookies.length) {
-        lines.push(
-          `  hop ${hop.status} set-cookie: ${hop.setCookies.join("; ")}`,
-        );
+    const crossedOrigin = input.redirectHops.some((hop) => {
+      try {
+        return new URL(hop.url).origin !== new URL(hop.location, hop.url).origin;
+      } catch {
+        return false;
       }
+    });
+    if (crossedOrigin) {
+      lines.push(
+        input.forwardSensitiveHeaders
+          ? "redirect credentials: explicitly forwarded across origin change"
+          : "redirect credentials: Authorization, Proxy-Authorization, and Cookie stripped across origin change",
+      );
+    }
+    lines.push("");
+    lines.push("Redirect responses (headers runtime-normalized):");
+    for (const hop of input.redirectHops) {
+      lines.push(
+        `  ${hop.status} ${hop.statusText} ${hop.method} ${hop.url}`,
+        `  location: ${hop.location}`,
+      );
+      for (const [key, value] of hop.headers) {
+        lines.push(`  ${key}: ${value}`);
+      }
+      lines.push("");
     }
   }
 
-  const metaBits = [
-    `attempts=${input.attempts}`,
-    `bytes=${input.bytesRead}`,
-  ];
-  if (input.truncated) metaBits.push(`truncated@${input.limit}`);
+  const metaBits = [`attempts=${input.attempts}`];
+  if (input.responsePart === "headers") {
+    metaBits.push("bodyCapture=skipped(responsePart=headers)");
+  } else {
+    metaBits.push(
+      `bodyBytes=${input.bytesRead}`,
+      `bodySha256=${input.bodySha256}`,
+      `charset=${input.bodyCharset}(${input.charsetSource})`,
+    );
+    if (input.unsupportedCharset) {
+      metaBits.push(`unsupportedCharset=${input.unsupportedCharset}`);
+    }
+    if (input.truncated) metaBits.push(`truncated@${input.limit}`);
+  }
   if (input.usedUrl !== input.requestedUrl) metaBits.push(`via=${input.usedUrl}`);
-  if (input.requestedUrl !== input.finalUrl && input.redirectHops.length === 0) {
-    metaBits.push(`requested=${input.requestedUrl}`);
+  if (
+    input.requestedMethod !== input.finalMethod ||
+    (input.requestedUrl !== input.finalUrl && input.redirectHops.length === 0)
+  ) {
+    metaBits.push(`requested=${input.requestedMethod} ${input.requestedUrl}`);
   }
   lines.push(metaBits.join(" "));
+  if (input.responsePart !== "headers") {
+    lines.push(
+      "capture: response-body bytes after Fetch transfer/content decoding; SHA-256 covers exactly the captured bytes",
+    );
+  }
 
   if (input.finalUrl.startsWith("https:") && !input.insecureTls) {
     lines.push(
@@ -677,20 +907,18 @@ function formatHttpEvidence(input: {
     );
   }
 
-  // ALL response headers, always — cheap vs body and critical for pentest.
-  // Security/fingerprint headers first for scannability; remainder sorted after.
-  const allHeaders: Array<[string, string]> = [];
-  input.headers.forEach((v, k) => allHeaders.push([k, v]));
-  allHeaders.sort(([a], [b]) => a.localeCompare(b));
+  // Fetch normalizes names and most repeated values. Preserve every exposed
+  // field, with individual Set-Cookie lines, and be explicit about the limit.
+  const allHeaders = snapshotHeaders(input.headers);
   const priority: string[] = [];
   const rest: string[] = [];
-  for (const [k, v] of allHeaders) {
-    const line = `${k}: ${v}`;
-    if (PRIORITY_HEADER_RE.test(k)) priority.push(line);
+  for (const [key, value] of allHeaders) {
+    const line = `${key}: ${value}`;
+    if (PRIORITY_HEADER_RE.test(key)) priority.push(line);
     else rest.push(line);
   }
   lines.push("");
-  lines.push("Headers:");
+  lines.push("Final response headers (runtime-normalized; Set-Cookie preserved separately):");
   for (const line of priority) lines.push(line);
   for (const line of rest) lines.push(line);
 
@@ -700,24 +928,24 @@ function formatHttpEvidence(input: {
     lines.push(`Tech hints: ${tech}`);
   }
 
-  if (input.method !== "HEAD") {
+  if (input.finalMethod !== "HEAD") {
     lines.push("");
     lines.push("Body:");
     if (input.isBinary) {
       lines.push(
-        `[Binary content (${input.contentType || "unknown content type"}) — raw body suppressed]`,
+        `[Binary content (${input.contentType || "unknown content type"}) — textual rendering suppressed; use bodySha256 and headers as evidence]`,
       );
     } else {
-      const ct = input.contentType.toLowerCase();
-      const isHtml = ct.includes("html");
-      // Single representation: readable HTML OR raw captured source.
+      const isHtml = input.contentType.toLowerCase().includes("html");
+      // Raw is the forensic default and preserves source comments, tags,
+      // attributes, values, whitespace, and malformed markup after decoding.
       const bodyText =
         isHtml && input.responseMode === "readable"
-          ? toReadableText(input.body) || input.body
+          ? toReadableText(input.body, input.finalUrl) || input.body
           : input.body;
       if (input.truncated) {
         lines.push(
-          `${bodyText || "(empty)"}\n... (wire capture stopped at ${input.limit.toLocaleString()} bytes — raise maxBytes for more body)`,
+          `${bodyText || "(empty)"}\n... (capture stopped at ${input.limit.toLocaleString()} decoded response-body bytes — raise maxBytes for more body)`,
         );
       } else {
         lines.push(bodyText || "(empty)");
@@ -785,6 +1013,11 @@ function deriveTechHints(
   return bits.join("; ");
 }
 
+function clampCaptureBytes(value: number | undefined): number {
+  if (value === undefined || !Number.isFinite(value)) return DEFAULT_MAX_BYTES;
+  return Math.max(0, Math.min(MAX_CAPTURE_BYTES, Math.floor(value)));
+}
+
 function clampRetries(value: number): number {
   if (!Number.isFinite(value)) return DEFAULT_RETRIES;
   return Math.max(0, Math.min(5, Math.floor(value)));
@@ -800,9 +1033,9 @@ function sleep(ms: number): Promise<void> {
 
 async function drainResponse(response: Response): Promise<void> {
   try {
-    await response.arrayBuffer();
+    await response.body?.cancel();
   } catch {
-    // Best effort only; retrying is more important than draining.
+    // Best effort only; redirect/retry can proceed after a socket-close race.
   }
 }
 
@@ -823,18 +1056,30 @@ function isBinaryContentType(contentType: string): boolean {
   return false;
 }
 
-function isBinaryContent(text: string): boolean {
-  const sample = text.slice(0, 2048);
-  if (sample.includes("\u0000")) return true;
+function isTextualContentType(contentType: string): boolean {
+  const ct = contentType.toLowerCase().split(";", 1)[0]?.trim() ?? "";
+  return (
+    ct.startsWith("text/") ||
+    ct === "image/svg+xml" ||
+    ct === "application/json" ||
+    ct.endsWith("+json") ||
+    ct === "application/xml" ||
+    ct.endsWith("+xml") ||
+    ct === "application/javascript" ||
+    ct === "application/x-javascript" ||
+    ct === "application/x-www-form-urlencoded"
+  );
+}
+
+function isBinaryContent(body: Buffer): boolean {
+  const sample = body.subarray(0, 2_048);
   let nonPrintableCount = 0;
-  for (let i = 0; i < sample.length; i++) {
-    const code = sample.charCodeAt(i);
-    // Control chars other than tab (9), lf (10), cr (13)
-    if (code < 32 && code !== 9 && code !== 10 && code !== 13) {
-      nonPrintableCount++;
-      if (nonPrintableCount > 5) {
-        return true;
-      }
+  for (const byte of sample) {
+    if (byte === 0) return true;
+    // Control bytes other than tab (9), lf (10), cr (13).
+    if (byte < 32 && byte !== 9 && byte !== 10 && byte !== 13) {
+      nonPrintableCount += 1;
+      if (nonPrintableCount > 5) return true;
     }
   }
   return false;

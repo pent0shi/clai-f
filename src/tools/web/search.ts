@@ -10,7 +10,8 @@
  * returns anti-bot challenges (HTTP 202) or upstream 502/5xx responses on
  * shared or rate-limited networks. When the active provider is DuckDuckGo
  * and it fails, the handler transparently falls back to a keyed provider
- * — Tavily first, then Brave — whenever a key is configured for it. Each
+ * — Exa first, then Tavily, then Brave — whenever a key is configured for
+ * it. Each
  * fallback is a single attempt against a *different* provider, so the
  * per-provider single-attempt contract (Requirement 6.7) is preserved.
  *
@@ -30,10 +31,11 @@ import {
 } from "./providers/provider.js";
 // Importing the provider modules below ensures their side-effect
 // registration into `searchProviders` runs before the handler is
-// invoked. (DDG → keyless default; Brave / Tavily → optional.)
+// invoked. (DDG → keyless default; Exa / Brave / Tavily → optional.)
 import "./providers/duckduckgo.js";
 import "./providers/brave.js";
 import "./providers/tavily.js";
+import "./providers/exa.js";
 import {
   DEFAULT_MAX_RESULTS,
   MAX_MAX_RESULTS,
@@ -198,7 +200,7 @@ export async function webSearch(
       if (fallbackNotes.length > 0) {
         primaryOutcome.error.message += ` Fallback also failed (${fallbackNotes.join("; ")}).`;
       } else if (!anyKeyConfigured) {
-        primaryOutcome.error.message += ` No keyed fallback provider is configured; set one so web.search can recover automatically, e.g. \`clai search-provider tavily\` then \`clai set tavily <KEY>\` (Brave also supported).`;
+        primaryOutcome.error.message += ` No keyed fallback provider is configured; set one so web.search can recover automatically, e.g. \`clai search-provider exa\` then \`clai set exa <KEY>\` (Tavily and Brave also supported).`;
       }
     }
   }
@@ -211,7 +213,7 @@ export async function webSearch(
 // ---------------------------------------------------------------------------
 
 /** Ordered fallback after a keyless DuckDuckGo failure. */
-const DDG_FALLBACK_ORDER: readonly SearchProviderId[] = ["tavily", "brave"];
+const DDG_FALLBACK_ORDER: readonly SearchProviderId[] = ["exa", "tavily", "brave"];
 const MAX_SEARCH_RETRIES = 6;
 const MAX_SEARCH_RETRY_WAIT_MS = 120_000;
 

@@ -5,7 +5,11 @@ import {
   visionCapabilitySource,
 } from "../llm/capabilities.js";
 import { safeCwd } from "../os/cwd.js";
-import { expandMentions, loadImageAttachments, type Attachment } from "../ui/mentions.js";
+import {
+  expandMentions,
+  loadImagePaths,
+  type Attachment,
+} from "../ui/mentions.js";
 
 export interface ResolvedTurnInput {
   readonly prompt: string;
@@ -46,7 +50,13 @@ export function resolveTurnInput(input: {
       expansion = expandMentions(input.prompt, baseDir, true);
     }
   }
-  const images = vision ? loadImageAttachments(input.prompt, baseDir) : [];
+  const images = vision
+    ? loadImagePaths(
+        expansion.attachments
+          .filter((attachment) => attachment.kind === "image")
+          .map((attachment) => attachment.path),
+      )
+    : [];
   const prompt = expansion.contextBlock
     ? `${expansion.text}\n\n${expansion.contextBlock}`
     : expansion.text;

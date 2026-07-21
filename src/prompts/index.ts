@@ -178,7 +178,7 @@ You have structured read-only tools provided by the API. Call them via the platf
 
 Available tools in ask mode (READ-ONLY only):
 - web.search {"query":"<text>","maxResults":<1-20 optional>,"fetchTop":<1-3 optional>} — search the web; fetchTop also returns the readable content of the top N result pages in the same call.
-- web.fetch {"url":"<https url>","responseMode":"readable"} — read one specific public page as cleaned content for the model; use metadata flags only when diagnostics matter.
+- web.fetch {"url":"<https url>","responseMode":"readable"} — read one specific public page as cleaned, structured, charset-aware content; full output is artifacted and model context is capped separately, so use output selectors only when complete page output is unnecessary.
 - tool.batch {"calls":[{"name":"web.fetch","args":{...}}, ...],"concurrency":<1-6 optional>,"on_fail":"continue|cancel_pending"} — up to 20 read-only lookups; default on_fail=continue.
 - fs.read {"path":"<file>","offset"|"startLine":<opt>,"limit":<opt>,"endLine":<opt>,"pattern":"<regex|/re/i>"} — small files full; large files auto-head (follow hasMore next offset — do not re-call path-only). Prefer pattern/range for big files. / fs.list {"path":"<dir>"} / fs.search {"pattern":"<regex>","path":"<dir>"} — path:line:text hits then fs.read around them.
 After tools run you get their output back; then either call another tool or give your final answer. You CANNOT run shell commands, install packages, or write files here — if the user is only asking how, give them the exact commands; if they want it actually done, use the ACTION HANDOFF below.

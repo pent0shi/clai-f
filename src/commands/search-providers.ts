@@ -22,6 +22,7 @@ import type { SearchProviderId } from "../tools/web/types.js";
 import "../tools/web/providers/duckduckgo.js";
 import "../tools/web/providers/brave.js";
 import "../tools/web/providers/tavily.js";
+import "../tools/web/providers/exa.js";
 
 /** Read a secret from stdin without echoing. */
 async function readStdin(): Promise<string> {
@@ -45,7 +46,8 @@ export function isSearchProviderId(value: string): boolean {
   return (
     normalized === "brave" ||
     normalized === "tavily" ||
-    normalized === "duckduckgo"
+    normalized === "duckduckgo" ||
+    normalized === "exa"
   );
 }
 
@@ -124,7 +126,7 @@ export async function printSearchProviderKeys(): Promise<void> {
   console.log(chalk.dim("  PROVIDER      SOURCE    KEYS"));
 
   const active = getActiveSearchProvider();
-  const ids: SearchProviderId[] = ["duckduckgo", "brave", "tavily"];
+  const ids: SearchProviderId[] = ["duckduckgo", "brave", "tavily", "exa"];
   for (const id of ids) {
     const adapter = searchProviders[id];
     const isActive = id === active;

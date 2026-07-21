@@ -1,12 +1,15 @@
+import { execFileSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import {
   copyFileSync,
   existsSync,
   mkdirSync,
   readdirSync,
   readFileSync,
+  rmSync,
   statSync,
 } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, platform } from "node:os";
 import {
   basename,
   dirname,
@@ -16,6 +19,12 @@ import {
   resolve,
   relative,
 } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import {
+  detectModelImageMediaType,
+  isModelImageMediaType,
+  MAX_IMAGE_BYTES,
+} from "../attachments/image-content.js";
 import { safeCwd } from "../os/cwd.js";
 import type { ChatImage } from "../types.js";
 import { scratchDirFor } from "../prompts/index.js";
@@ -199,14 +208,6 @@ export interface MentionExpansion {
   contextBlock: string;
 }
 
-/** Max raw bytes of an image we will base64-inline for a vision model.
- *  Providers cap the *base64* payload (Anthropic rejects >5 MB base64, the
- *  tightest limit across providers). Base64 inflates bytes by ~33%, so we
- *  cap raw bytes at ~3.75 MB to stay safely under 5 MB encoded. Larger
- *  images get a "too large" note so the agent can downscale them with a
- *  tool (e.g. sips/magick) instead of triggering a 400 from the API. */
-const MAX_IMAGE_BYTES = 3_750_000;
-
 const IMAGE_MEDIA_TYPES: Record<string, string> = {
   ".png": "image/png",
   ".jpg": "image/jpeg",
@@ -231,25 +232,41 @@ function expandHome(p: string): string {
   return p;
 }
 
-/**
- * Strip shell-style quoting/escaping a terminal adds when you drag-drop a
- * file: surrounding single/double quotes, and backslash-escaped spaces and
- * special chars (common on macOS/Linux). Returns the cleaned path.
- */
 export function normalizeDroppedPath(token: string): string {
-  let t = token.trim();
-  if (t.length === 0) return t;
-  // Surrounding quotes
+  let normalized = token.trim();
+  if (normalized.length === 0) return normalized;
   if (
-    (t.startsWith("'") && t.endsWith("'") && t.length >= 2) ||
-    (t.startsWith('"') && t.endsWith('"') && t.length >= 2)
+    (normalized.startsWith("'") &&
+      normalized.endsWith("'") &&
+      normalized.length >= 2) ||
+    (normalized.startsWith('"') &&
+      normalized.endsWith('"') &&
+      normalized.length >= 2)
   ) {
-    t = t.slice(1, -1);
-  } else {
-    // Unescape "\ " and similar backslash escapes that drag-drop inserts.
-    t = t.replace(/\\(.)/g, "$1");
+    normalized = normalized.slice(1, -1);
   }
-  return t;
+  if (/^file:\/\//i.test(normalized)) {
+    try {
+      return fileURLToPath(normalized);
+    } catch {
+      return normalized;
+    }
+  }
+  const windowsPath =
+    /^[A-Za-z]:[\\/]/.test(normalized) || /^\\\\/.test(normalized);
+  if (!windowsPath) normalized = normalized.replace(/\\(.)/g, "$1");
+  return normalized;
+}
+
+export function formatAttachmentReference(
+  path: string,
+  baseDir: string = safeCwd(),
+): string {
+  const normalized = expandHome(normalizeDroppedPath(path));
+  const absolute = isAbsolute(normalized)
+    ? normalized
+    : resolve(baseDir, normalized);
+  return pathToFileURL(absolute).href;
 }
 
 /**
@@ -450,31 +467,24 @@ export function listDirectoryAttachment(
  */
 export function extractMentionTokens(line: string): string[] {
   const tokens: string[] = [];
-
-  // 1. @-mentions: @ at start or after whitespace, run until whitespace.
   const mentionRe = /(^|\s)@(\S+)/g;
-  let m: RegExpExecArray | null;
-  while ((m = mentionRe.exec(line)) !== null) {
-    tokens.push(`@${m[2]}`);
+  let match: RegExpExecArray | null;
+  while ((match = mentionRe.exec(line)) !== null) {
+    tokens.push(`@${match[2]}`);
   }
 
-  // 2. Quoted paths (drag-drop on many terminals wraps in single quotes).
   const quotedRe = /'([^']+)'|"([^"]+)"/g;
-  while ((m = quotedRe.exec(line)) !== null) {
-    const inner = m[1] ?? m[2] ?? "";
-    if (inner.includes("/") || isAbsolute(inner)) tokens.push(`'${inner}'`);
+  while ((match = quotedRe.exec(line)) !== null) {
+    const inner = match[1] ?? match[2] ?? "";
+    if (inner) tokens.push(match[0]);
   }
 
-  // 3. Bare path-like tokens (absolute, ~/, ./, or escaped-space paths).
-  //    Conservative: only when they look like a path AND exist as a file.
-  const bareRe = /(?:^|\s)((?:~\/|\.\/|\/)(?:\\ |[^\s])+)/g;
-  while ((m = bareRe.exec(line)) !== null) {
-    const raw = m[1] ?? "";
-    if (raw.startsWith("@")) continue;
-    tokens.push(raw);
+  const bareRe = /(?:^|\s)((?:file:\/\/|~[\\/]|\.{1,2}[\\/]|\/|[A-Za-z]:[\\/]|\\\\)(?:\\ |[^\s])+)/gi;
+  while ((match = bareRe.exec(line)) !== null) {
+    const raw = match[1] ?? "";
+    if (raw && !raw.startsWith("@")) tokens.push(raw);
   }
 
-  // De-dupe while preserving order.
   return [...new Set(tokens)];
 }
 
@@ -544,8 +554,7 @@ export function extractExistingPathsFs(
 ): string[] {
   const found: string[] = [];
   const seen = new Set<string>();
-  // Candidate path starts: "/", "~/", "./", "../" at start or after space.
-  const startRe = /(?:^|\s)((?:~|\.{1,2})?\/)/g;
+  const startRe = /(?:^|\s|["'])((?:file:\/\/|(?:~|\.{1,2})?[\\/]|[A-Za-z]:[\\/]|\\\\))/gi;
   let m: RegExpExecArray | null;
   while ((m = startRe.exec(line)) !== null) {
     const startIdx = m.index + m[0].length - (m[1]?.length ?? 0);
@@ -576,14 +585,12 @@ export function extractExistingPathsFs(
 }
 
 function tokenToPath(token: string, baseDir: string): string {
-  let t = token;
-  if (t.startsWith("@")) t = t.slice(1);
-  t = normalizeDroppedPath(t);
-  // Trailing slash is fine for directories in the prompt (`@src/`) but
-  // path.resolve/stat work cleaner without it.
-  t = t.replace(/\/+$/, "") || t;
-  t = expandHome(t);
-  return isAbsolute(t) ? t : resolve(baseDir, t);
+  let path = token;
+  if (path.startsWith("@")) path = path.slice(1);
+  path = normalizeDroppedPath(path);
+  path = path.replace(/[\\/]+$/, "") || path;
+  path = expandHome(path);
+  return isAbsolute(path) ? path : resolve(baseDir, path);
 }
 
 /**
@@ -652,6 +659,8 @@ export function expandMentions(
       }
     } else if (kind === "image") {
       const stablePath = stabilizeImagePaths([absPath], baseDir)[0] ?? absPath;
+      const mediaType = imageMediaType(stablePath);
+      const sendable = Boolean(mediaType && isModelImageMediaType(mediaType));
       let oversized = false;
       try {
         oversized = statSync(stablePath).size > MAX_IMAGE_BYTES;
@@ -659,7 +668,7 @@ export function expandMentions(
         try {
           oversized = statSync(absPath).size > MAX_IMAGE_BYTES;
         } catch {
-          /* ignore */
+          oversized = false;
         }
       }
       attachments.push({
@@ -668,9 +677,11 @@ export function expandMentions(
         kind: "image",
         note: oversized
           ? `image is larger than ${Math.round(MAX_IMAGE_BYTES / 1_000_000)}MB and was NOT attached — downscale it first (macOS: sips -Z 1600 "<img>" --out /tmp/small.png; or use magick/ffmpeg), then reference the smaller copy`
-          : visionCapable
-            ? "image file — attached as multimodal input; inspect it directly for text, colors, layout, spacing, and visual style. Stable path used if original may vanish. Prefer vision over OCR unless the user asks for OCR."
-            : "image file — the current model can't view images; switch to a vision model for colors/layout/style, or extract text with OCR if only text is needed (OCR grounding may still be attached)",
+          : !sendable
+            ? "image format could not be converted to PNG/JPEG/GIF/WebP and was NOT attached"
+            : visionCapable
+              ? "image file — attached as multimodal input; inspect it directly for text, colors, layout, spacing, and visual style. Stable path used if original may vanish. Prefer vision over OCR unless the user asks for OCR."
+              : "image file — the current model can't view images; switch to a vision model for colors/layout/style, or extract text with OCR if only text is needed (OCR grounding may still be attached)",
       });
     } else if (kind === "document") {
       const isPdf = extname(absPath).toLowerCase() === ".pdf";
@@ -744,79 +755,104 @@ export function imageAttachmentPaths(
   return stabilizeImagePaths(paths, baseDir);
 }
 
-/**
- * Copy image paths into a stable scratch folder so vision/OCR still work if
- * the original vanishes (macOS TemporaryItems, Desktop screenshots with
- * spaces, drag-drop temps). Always stabilizes readable images.
- */
+function convertImageToPng(source: string, destination: string): boolean {
+  const attempts: Array<[string, string[]]> = [];
+  if (platform() === "darwin") {
+    attempts.push([
+      "sips",
+      ["-s", "format", "png", source, "--out", destination],
+    ]);
+  }
+  attempts.push(["magick", [source, destination]]);
+  if (platform() !== "win32") attempts.push(["convert", [source, destination]]);
+  for (const [command, args] of attempts) {
+    try {
+      execFileSync(command, args, {
+        stdio: "ignore",
+        timeout: 15_000,
+      });
+      if (existsSync(destination) && statSync(destination).size > 0) return true;
+    } catch {
+      rmSync(destination, { force: true });
+    }
+  }
+  return false;
+}
+
 export function stabilizeImagePaths(
   paths: string[],
   baseDir: string = safeCwd(),
 ): string[] {
-  const out: string[] = [];
-  const attachDir = join(scratchDirFor(baseDir), "attachments");
-  for (const p of paths) {
-    if (!existsSync(p)) {
-      out.push(p);
+  const output: string[] = [];
+  const attachmentDir = join(scratchDirFor(baseDir), "attachments");
+  for (const source of paths) {
+    if (!existsSync(source)) {
+      output.push(source);
+      continue;
+    }
+    if (resolve(dirname(source)) === resolve(attachmentDir)) {
+      output.push(source);
       continue;
     }
     try {
-      mkdirSync(attachDir, { recursive: true });
-      const safeName = basename(p)
-        .replace(/[^\w.\-]+/g, "_")
+      mkdirSync(attachmentDir, { recursive: true });
+      const extension = extname(source).toLowerCase();
+      const stem = basename(source, extension)
+        .replace(/[^\w.-]+/g, "_")
         .replace(/_+/g, "_")
-        .slice(0, 120) || "image";
-      const dest = join(attachDir, `${Date.now()}-${safeName}`);
-      copyFileSync(p, dest);
-      out.push(dest);
+        .slice(0, 100) || "image";
+      const id = `${Date.now()}-${randomUUID().slice(0, 8)}`;
+      const mediaType = imageMediaType(source);
+      if (!mediaType || !isModelImageMediaType(mediaType)) {
+        const converted = join(attachmentDir, `${id}-${stem}.png`);
+        if (convertImageToPng(source, converted)) {
+          output.push(converted);
+          continue;
+        }
+      }
+      const destination = join(
+        attachmentDir,
+        `${id}-${stem}${extension || ".img"}`,
+      );
+      copyFileSync(source, destination);
+      output.push(destination);
     } catch {
-      out.push(p);
+      output.push(source);
     }
   }
-  return out;
+  return output;
 }
 
-/**
- * Read the image attachments referenced in a prompt into base64 ChatImage
- * objects, ready to attach to a multimodal user message. Only called when
- * the active model supports vision. Skips images that are missing or larger
- * than MAX_IMAGE_BYTES (those still appear as text notes via expandMentions).
- */
+export function loadImagePaths(paths: readonly string[]): ChatImage[] {
+  const images: ChatImage[] = [];
+  const seen = new Set<string>();
+  for (const path of paths) {
+    if (seen.has(path)) continue;
+    seen.add(path);
+    if (classifyPath(path) !== "image") continue;
+    try {
+      const stat = statSync(path);
+      if (stat.size > MAX_IMAGE_BYTES) continue;
+      const buffer = readFileSync(path);
+      const mediaType = detectModelImageMediaType(buffer);
+      if (!mediaType) continue;
+      images.push({
+        mediaType,
+        dataBase64: buffer.toString("base64"),
+        path,
+      });
+    } catch {
+      continue;
+    }
+  }
+  return images;
+}
+
 export function loadImageAttachments(
   line: string,
   baseDir: string = safeCwd(),
 ): ChatImage[] {
-  const images: ChatImage[] = [];
-  const seen = new Set<string>();
-  const candidates = stabilizeImagePaths(
-    [
-      ...extractMentionTokens(line).map((t) => tokenToPath(t, baseDir)),
-      ...extractExistingPathsFs(line, baseDir),
-    ].filter((p) => {
-      if (seen.has(p)) return false;
-      seen.add(p);
-      return true;
-    }),
-    baseDir,
-  );
-  for (const absPath of candidates) {
-    if (classifyPath(absPath) !== "image") continue;
-    const mediaType = imageMediaType(absPath);
-    if (!mediaType) continue;
-    try {
-      const stat = statSync(absPath);
-      if (stat.size > MAX_IMAGE_BYTES) continue;
-      const buf = readFileSync(absPath);
-      images.push({
-        mediaType,
-        dataBase64: buf.toString("base64"),
-        path: absPath,
-      });
-    } catch {
-      // unreadable — skip; the text note from expandMentions still applies
-    }
-  }
-  return images;
+  return loadImagePaths(imageAttachmentPaths(line, baseDir));
 }
 
 function displayPath(absPath: string, baseDir: string): string {

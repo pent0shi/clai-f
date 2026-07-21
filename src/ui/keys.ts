@@ -41,6 +41,13 @@ export function isCtrlP(key: Keypress): boolean {
   );
 }
 
+export function isCtrlV(key: Keypress): boolean {
+  return (
+    (Boolean(key.ctrl) && key.name?.toLowerCase() === "v") ||
+    key.sequence === "\x16"
+  );
+}
+
 export function isEscape(key: Keypress): boolean {
   return key.name === "escape" || key.sequence === "\x1b";
 }

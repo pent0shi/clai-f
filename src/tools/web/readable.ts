@@ -30,10 +30,18 @@ const STRIPPED_SELECTORS = [
   "script",
   "style",
   "noscript",
+  "template",
+  "svg",
+  "canvas",
+].join(", ");
+
+/** Obvious page chrome; scoped so article/main headers and asides survive. */
+const CHROME_SELECTORS = [
   "nav",
-  "header",
-  "footer",
-  "aside",
+  "[role='navigation']",
+  "body > header",
+  "body > footer",
+  "body > aside",
 ].join(", ");
 
 /**
@@ -41,13 +49,13 @@ const STRIPPED_SELECTORS = [
  *
  * The conversion:
  * 1. Parses `html` with cheerio (no DOM/browser dependency).
- * 2. Removes `<script>`, `<style>`, `<noscript>`, `<nav>`, `<header>`,
- *    `<footer>`, and `<aside>` subtrees outright.
+ * 2. Removes executable/non-text subtrees and obvious page-level chrome while
+ *    preserving headers, footers, and asides nested inside the chosen article
+ *    or main content.
  * 3. Removes every HTML comment node anywhere in the tree.
  * 4. Extracts the remaining text via `$.root().text()`.
- * 5. Collapses every run of ASCII/Unicode whitespace (including newlines,
- *    tabs, NBSPs) into a single space and trims the result so the agent
- *    receives compact prose.
+ * 5. Collapses runs of page-text whitespace while preserving line breaks and
+ *    indentation inside `<pre>` blocks.
  * 6. Appends a deduplicated "Links" section so the agent can find the
  *    correct URL for any link on the page without guessing.
  *
@@ -62,7 +70,8 @@ export function toReadableText(html: string, baseUrl?: string): string {
   const $ = cheerio.load(html);
 
   $(STRIPPED_SELECTORS).remove();
-  $("[aria-hidden='true'], [hidden], template, svg, canvas").remove();
+  $(CHROME_SELECTORS).remove();
+  $("[aria-hidden='true'], [hidden]").remove();
 
   $('*')
     .contents()
@@ -221,8 +230,8 @@ function renderNode($: cheerio.CheerioAPI, node: AnyNode, baseUrl?: string): str
   if (tag === "br") return [""];
 
   if (tag === "pre") {
-    const text = wrapped.text().replace(/\n{3,}/g, "\n\n").trim();
-    return text ? ["```", text, "```"] : [];
+    const text = wrapped.text().replace(/\r\n?/g, "\n").replace(/\n{4,}/g, "\n\n\n").trim();
+    return text ? ["```", ...text.split("\n"), "```"] : [];
   }
 
   if (tag === "code") {
@@ -325,7 +334,20 @@ function renderForm(
 
 function normalizeReadableLines(lines: string[]): string {
   const out: string[] = [];
+  let inCodeBlock = false;
   for (const line of lines) {
+    if (line === "```") {
+      if (out[out.length - 1] === "" && !inCodeBlock) out.pop();
+      out.push(line);
+      inCodeBlock = !inCodeBlock;
+      continue;
+    }
+    if (inCodeBlock) {
+      // Preserve indentation and line structure inside <pre>; only remove CR
+      // and trailing horizontal whitespace that add no source information.
+      out.push(line.replace(/\r/g, "").replace(/[ \t]+$/g, ""));
+      continue;
+    }
     const text = collapseWhitespace(line);
     if (!text) {
       if (out.length > 0 && out[out.length - 1] !== "") out.push("");
@@ -333,7 +355,7 @@ function normalizeReadableLines(lines: string[]): string {
     }
     if (out[out.length - 1] !== text) out.push(text);
   }
-  return out.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+  return out.join("\n").trim();
 }
 
 // ---------------------------------------------------------------------------

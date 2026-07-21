@@ -154,6 +154,7 @@ const searchProviderEnvVars: Record<SearchProviderId, string | undefined> = {
   brave: 'BRAVE_SEARCH_API_KEY',
   tavily: 'TAVILY_API_KEY',
   duckduckgo: undefined,
+  exa: 'EXA_API_KEY',
 };
 
 export function searchProviderEnvVar(id: SearchProviderId): string | undefined {

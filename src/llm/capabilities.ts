@@ -169,6 +169,11 @@ const visionCapabilityCache = new Map<
 const capabilityKey = (provider: ProviderId, model: string): string =>
   `${provider}:${model.trim().toLowerCase()}`;
 
+function configuredVisionModel(provider: ProviderId): string | undefined {
+  const envKey = `CLAI_VISION_MODEL_${provider.toUpperCase().replace(/-/g, "_")}`;
+  return process.env[envKey]?.trim() || undefined;
+}
+
 /** Provider discovery/user overrides can refresh capability knowledge at runtime. */
 export function registerModelVisionCapability(input: {
   provider: ProviderId;
@@ -192,7 +197,12 @@ export function visionCapabilitySource(
   provider: ProviderId,
   model: string,
 ): "provider" | "user" | "fallback-table" {
-  return visionCapabilityCache.get(capabilityKey(provider, model))?.source ?? "fallback-table";
+  const cached = visionCapabilityCache.get(capabilityKey(provider, model));
+  if (cached) return cached.source;
+  const configured = configuredVisionModel(provider);
+  return configured?.toLowerCase() === model.trim().toLowerCase()
+    ? "user"
+    : "fallback-table";
 }
 
 /**
@@ -206,8 +216,13 @@ export function modelSupportsVision(
 ): boolean {
   const cached = visionCapabilityCache.get(capabilityKey(provider, model));
   if (cached) return cached.vision;
+  const configured = configuredVisionModel(provider);
+  if (configured?.toLowerCase() === model.trim().toLowerCase()) return true;
   const patterns = visionPatterns[provider] ?? [];
-  return patterns.some((pattern) => pattern.test(model));
+  const normalizedModel = model.trim().replace(/\s+/g, "-");
+  return patterns.some(
+    (pattern) => pattern.test(model) || pattern.test(normalizedModel),
+  );
 }
 
 
@@ -232,8 +247,7 @@ export function preferredVisionModel(
   currentModel: string,
 ): string | undefined {
   if (modelSupportsVision(provider, currentModel)) return currentModel;
-  const envKey = `CLAI_VISION_MODEL_${provider.toUpperCase().replace(/-/g, "_")}`;
-  const override = process.env[envKey]?.trim();
+  const override = configuredVisionModel(provider);
   if (override && modelSupportsVision(provider, override)) return override;
   const discovered = [...visionCapabilityCache.entries()]
     .filter(([key, value]) => key.startsWith(`${provider}:`) && value.vision)

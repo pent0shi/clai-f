@@ -22,6 +22,7 @@ import type { Socket } from "node:net";
 import type { TLSSocket } from "node:tls";
 
 import { Capture, type CapturedFields } from "./capture.js";
+import { decodeTextBody } from "./decode.js";
 import { enforce as enforceBudget } from "./budget.js";
 import { toReadableText } from "./readable.js";
 import { applyToCookies, applyToHeaders } from "./redact.js";
@@ -976,18 +977,27 @@ async function issueHop(input: IssueHopArgs): Promise<HopOutcome> {
         }
         readBody(res, HTTP_ERROR_BODY_PREVIEW_BYTES, ctx.controller).then(
           ({ body, truncated, bytesReceived }) => {
-            let preview = renderBodyPreview(body, truncated, bytesReceived);
+            let preview = renderBodyPreview(
+              body,
+              truncated,
+              bytesReceived,
+              contentType,
+            );
             if (
               ctx.args.responseMode === "readable" &&
               typeof contentType === "string" &&
               HTML_CONTENT_TYPE_PATTERN.test(contentType)
             ) {
-              const readable = toReadableText(body.toString("utf8"));
+              const readable = toReadableText(
+                decodeTextBody(body, contentType).text,
+                currentUrl,
+              );
               if (readable) {
                 preview = renderBodyPreview(
                   Buffer.from(readable, "utf8"),
                   truncated,
                   bytesReceived,
+                  "text/plain; charset=utf-8",
                 );
               }
             }
@@ -1241,8 +1251,9 @@ function readBody(
  * {@link WebFetchOutcome.body}.
  *
  * Decision matrix:
- *   - `mode = "raw"`            → UTF-8 (replace) up to `maxBytes`
- *                                  (Requirement 2.29).
+ *   - `mode = "raw"`            → decode using the declared Content-Type
+ *                                  charset (or HTML meta / UTF-8 fallback),
+ *                                  up to `maxBytes`.
  *   - `mode = "readable"` AND
  *     content-type is HTML/XHTML → run {@link toReadableText} so chrome
  *                                  and non-rendering content are
@@ -1262,7 +1273,7 @@ function classifyAndDecodeBody(input: {
   maxBytes: number;
   baseUrl?: string;
 }): string {
-  const decoded = decodeUtf8WithReplacement(input.body);
+  const decoded = decodeTextBody(input.body, input.contentType).text;
 
   if (input.mode === "raw") return decoded;
 
@@ -1277,27 +1288,19 @@ function classifyAndDecodeBody(input: {
 }
 
 /**
- * UTF-8 decoder with replacement for invalid byte sequences. Node's
- * built-in `TextDecoder` is the most reliable way to do this without
- * pulling in `iconv-lite`.
- */
-function decodeUtf8WithReplacement(buf: Buffer): string {
-  return new TextDecoder("utf-8", { fatal: false }).decode(buf);
-}
-
-/**
  * Render the body preview included in `http-error` outcomes
- * (Requirement 6.4). The preview is decoded as UTF-8 with replacement
- * and capped at {@link HTTP_ERROR_BODY_PREVIEW_BYTES}; when the
- * underlying body was truncated we append the standard truncation
- * marker so the agent can tell it did not see the full response.
+ * (Requirement 6.4). The preview honors the response charset and is capped at
+ * {@link HTTP_ERROR_BODY_PREVIEW_BYTES}; when the underlying body was
+ * truncated we append the standard truncation marker so the agent can tell it
+ * did not see the full response.
  */
 function renderBodyPreview(
   body: Buffer,
   truncated: boolean,
   _bytesReceived: number,
+  contentType?: string,
 ): string {
-  const text = decodeUtf8WithReplacement(body);
+  const text = decodeTextBody(body, contentType).text;
   if (!truncated) return text;
   return `${text}${TRUNCATION_MARKER}`;
 }

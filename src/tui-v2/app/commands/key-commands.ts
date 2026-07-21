@@ -27,7 +27,7 @@ import type { CommandInvocation } from "../../../app/commands/command.js";
 import type { AppServices } from "../../bootstrap/composition-root.js";
 import type { PickerOption } from "../../rendering/picker-filter.js";
 
-const SEARCH_IDS = new Set(["brave", "tavily", "duckduckgo"]);
+const SEARCH_IDS = new Set(["brave", "tavily", "duckduckgo", "exa"]);
 
 function notice(services: AppServices, level: "info" | "warn", text: string): void {
   services.session.notice(level, text);

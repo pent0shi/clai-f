@@ -1,3 +1,4 @@
+import { readFileSync, statSync } from "node:fs";
 import {
   appendFile,
   copyFile,
@@ -15,10 +16,15 @@ import {
 import { join } from "node:path";
 import {
   isInternalChatMessage,
+  type ChatImage,
   type ChatMessage,
   type ToolCall,
   type ToolResult,
 } from "../types.js";
+import {
+  detectModelImageMediaType,
+  MAX_IMAGE_BYTES,
+} from "../attachments/image-content.js";
 import type { TranscriptItem } from "../tui/state.js";
 import { redactSecrets } from "../llm/provider.js";
 import { getConfig } from "./config.js";
@@ -225,11 +231,44 @@ function newId(): string {
 
 function scrubMessages(messages: ChatMessage[]): ChatMessage[] {
   return messages.map((message) => {
+    const { images, ...rest } = message;
+    const persistedImages = images?.flatMap((image): ChatImage[] =>
+      image.path
+        ? [{ mediaType: image.mediaType, dataBase64: "", path: image.path }]
+        : [],
+    );
+    return {
+      ...rest,
+      content: redactSecrets(message.content),
+      ...(persistedImages?.length ? { images: persistedImages } : {}),
+    };
+  });
+}
+
+function hydrateMessageImages(messages: ChatMessage[]): ChatMessage[] {
+  return messages.map((message) => {
+    if (!message.images?.length) return message;
+    const images = message.images.flatMap((image): ChatImage[] => {
+      if (image.dataBase64) return [image];
+      if (!image.path) return [];
+      try {
+        if (statSync(image.path).size > MAX_IMAGE_BYTES) return [];
+        const bytes = readFileSync(image.path);
+        const mediaType = detectModelImageMediaType(bytes);
+        if (!mediaType) return [];
+        return [
+          {
+            mediaType,
+            dataBase64: bytes.toString("base64"),
+            path: image.path,
+          },
+        ];
+      } catch {
+        return [];
+      }
+    });
     const { images: _images, ...rest } = message;
-    // Drop image bytes from persisted history — base64 blobs would bloat the
-    // store and they're not useful to replay. The text content (which
-    // includes a note that an image was attached) is kept and redacted.
-    return { ...rest, content: redactSecrets(message.content) };
+    return images.length > 0 ? { ...rest, images } : rest;
   });
 }
 
@@ -1180,7 +1219,7 @@ export async function getSession(
     await enforceSqliteRetention(db);
     invalidateSessionListCache();
   }
-  return freshest;
+  return { ...freshest, messages: hydrateMessageImages(freshest.messages) };
 }
 
 export function getHistoryPath(): string {

@@ -90,12 +90,7 @@ import {
   estimateMessagesTokens,
 } from "./agent/context-manager.js";
 import { isCtrlC, isCtrlO, isCtrlP, isCtrlT, isEscape } from "./ui/keys.js";
-import {
-  expandMentions,
-  loadImageAttachments,
-  imageAttachmentPaths,
-  stabilizeImagePaths,
-} from "./ui/mentions.js";
+import { imageAttachmentPaths } from "./ui/mentions.js";
 import { imageOcr } from "./tools/image.js";
 import {
   handleDraftPlanDecision,

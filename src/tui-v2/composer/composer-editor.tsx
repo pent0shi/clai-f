@@ -14,6 +14,7 @@ import {
 } from "@opentui/core";
 import { useKeyboard, usePaste } from "@opentui/react";
 import { shouldStoreInPromptHistory } from "../../tui/input-history.js";
+import { formatAttachmentReference } from "../../ui/mentions.js";
 import { getConfig } from "../../store/config.js";
 import type { AppServices } from "../bootstrap/composition-root.js";
 import type { Theme } from "../rendering/theme.js";
@@ -36,6 +37,7 @@ import {
 } from "./completion.js";
 import { buildComposerTextareaOverrides } from "./textarea-keybindings.js";
 import { composerActionPort } from "./composer-action-port.js";
+import { createComposerImagePaste } from "./composer-image-paste.js";
 import { notify } from "../notify.js";
 import { CompletionMenuView } from "../components/completion/completion-menu.js";
 import { ComposerInputBox } from "../components/composer/composer-input-box.js";
@@ -86,6 +88,10 @@ export function ComposerEditor(props: ComposerEditorProps): ReactNode {
   const editorRef = useRef<TextareaRenderable>(null);
   const promptHistory = useRef(new PromptHistory());
   const pasteRegistry = useRef(new PasteRegistry());
+  const imagePaste = createComposerImagePaste(services, editorRef, () => {
+    syncContentRows();
+    refreshMenu();
+  });
   /** Trackpad-as-arrows: count rapid ↑/↓ so we scroll chat instead of history. */
   const arrowBurst = useRef({ count: 0, lastAt: 0 });
   const [menu, setMenu] = useState<CompletionMenu>({ kind: "none" });
@@ -189,6 +195,8 @@ export function ComposerEditor(props: ComposerEditorProps): ReactNode {
     // by App (`app.interrupt`: abort then double-press exit) so we must not
     // swallow it here — otherwise the quit arm never arms and exit needs
     // three presses.
+    if (imagePaste.handleChord(chord, overlay.kind, key)) return;
+
     if (
       overlay.kind === "none" &&
       menuKindRef.current === "none" &&
@@ -253,6 +261,7 @@ export function ComposerEditor(props: ComposerEditorProps): ReactNode {
   usePaste((event) => {
     if (!shouldOwnKeyboard) return;
     const text = stripAnsiSequences(decodePasteBytes(event.bytes));
+    if (imagePaste.handlePaste(text, event)) return;
     if (!isLargePaste(text)) return;
     event.preventDefault();
     const entry = pasteRegistry.current.register(text);
@@ -349,14 +358,6 @@ export function ComposerEditor(props: ComposerEditorProps): ReactNode {
     });
   }
 
-  /**
-   * Accept the highlighted completion.
-   * - slash: insert `/name `
-   * - mention file: insert `@path ` and close
-   * - mention dir + drill: insert `@path/` and keep browsing children (Tab)
-   * - mention dir + attach: insert `@path ` and close (Enter) so the whole
-   *   folder is attached on submit
-   */
   function acceptSuggestion(opts?: {
     readonly index?: number;
     readonly drillDir?: boolean;
@@ -414,7 +415,7 @@ export function ComposerEditor(props: ComposerEditorProps): ReactNode {
           }
         }
       } else {
-        replacement = `@${item.value} `;
+        replacement = `${formatAttachmentReference(item.value)} `;
         keepMentionOpen = false;
       }
     }

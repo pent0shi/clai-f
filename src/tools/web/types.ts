@@ -16,14 +16,67 @@
  * The set is intentionally independent of the LLM `ProviderId` union so the
  * two keyspaces stay decoupled.
  */
-export type SearchProviderId = "brave" | "tavily" | "duckduckgo";
+export type SearchProviderId = "brave" | "tavily" | "duckduckgo" | "exa";
 
 /** Convenience tuple form of the {@link SearchProviderId} union. */
 export const searchProviderIds: readonly SearchProviderId[] = [
   "brave",
   "tavily",
   "duckduckgo",
+  "exa",
 ] as const;
+
+/**
+ * Exa `/search` retrieval strategy, ordered by increasing latency and depth.
+ *
+ * `instant`/`fast`/`auto` are single-shot retrieval tiers; `deep-lite`,
+ * `deep`, and `deep-reasoning` are the deep-search variants that run multiple
+ * query passes and rank the combined results. The value is provider-scoped
+ * configuration (see `ClaiConfig.exaSearchType`) and is forwarded verbatim as
+ * the `type` field on the Exa request.
+ */
+export type ExaSearchType =
+  | "instant"
+  | "fast"
+  | "auto"
+  | "deep-lite"
+  | "deep"
+  | "deep-reasoning";
+
+/** Convenience tuple form of {@link ExaSearchType}, low-to-high latency. */
+export const exaSearchTypes: readonly ExaSearchType[] = [
+  "instant",
+  "fast",
+  "auto",
+  "deep-lite",
+  "deep",
+  "deep-reasoning",
+] as const;
+
+/**
+ * Default Exa search type. `deep-lite` trades a few seconds of latency for
+ * markedly better relevance than the single-shot tiers, which suits the
+ * research and CVE-lookup workflows Exa is selected for.
+ */
+export const DEFAULT_EXA_SEARCH_TYPE: ExaSearchType = "deep-lite";
+
+/** Short human descriptions for each {@link ExaSearchType}, shown in pickers. */
+export const exaSearchTypeDescriptions: Record<ExaSearchType, string> = {
+  instant: "~250 ms · quick lookups, autocomplete",
+  fast: "~450 ms · low latency, good relevance",
+  auto: "~1 s · balanced relevance and speed",
+  "deep-lite": "~4 s · cheaper deep synthesis (default)",
+  deep: "4-15 s · thorough research and enrichment",
+  "deep-reasoning": "12-40 s · hardest multi-step synthesis",
+};
+
+/** Narrow an arbitrary string to an {@link ExaSearchType}, or `undefined`. */
+export function asExaSearchType(value: string): ExaSearchType | undefined {
+  const normalized = value.trim().toLowerCase();
+  return (exaSearchTypes as readonly string[]).includes(normalized)
+    ? (normalized as ExaSearchType)
+    : undefined;
+}
 
 /**
  * Arguments accepted by the `web.search` tool.
@@ -133,7 +186,8 @@ export interface WebSearchOutcome {
  *
  * - `readable`: HTML/XHTML stripped to text; non-HTML text passed through
  *   (Requirements 2.4, 2.5, 2.28).
- * - `raw`: response bytes decoded as UTF-8 with replacement, truncated to
+ * - `raw`: response bytes decoded using the declared Content-Type charset,
+ *   an HTML meta charset fallback, or UTF-8 with replacement; truncated to
  *   `maxBytes` (Requirement 2.29).
  */
 export type ResponseMode = "readable" | "raw";

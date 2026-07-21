@@ -409,7 +409,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   ),
   def(
     "http.fetch",
-    "Raw HTTP evidence for pentest/protocol/private targets: status, redirect chain, headers/cookies, body. Default no status-retries (pass retries to retry 5xx). For https://IP or self-signed lab certs use insecureTls=true (records that verification was off). TLS fingerprint: web.fetch includeTls. Not for casual public-page reading (prefer web.fetch).",
+    "Raw-by-default HTTP evidence for pentest/protocol/private targets: status, full redirect response headers, final headers/cookies, decoded source body, and captured-body SHA-256. Full output is artifacted while model context is capped separately. Cross-origin redirects strip credentials unless explicitly overridden. Default no status-retries (pass retries to retry 5xx). For https://IP or self-signed lab certs use insecureTls=true (records that verification was off). TLS fingerprint: web.fetch includeTls. Not for casual public-page reading (prefer web.fetch).",
     {
       type: "object",
       properties: {
@@ -422,7 +422,9 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         },
         maxBytes: {
           type: "integer",
-          description: "Maximum response-body bytes captured from the wire (separate from maxOutputBytes)",
+          minimum: 0,
+          maximum: 16_777_216,
+          description: "Maximum decoded response-body bytes captured (default 131072, hard cap 16777216; separate from maxOutputBytes)",
         },
         iOwnThis: { type: "boolean" },
         own: { type: "boolean" },
@@ -438,9 +440,9 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         },
         responseMode: {
           type: "string",
-          enum: ["readable", "raw"],
+          enum: ["raw", "readable"],
           description:
-            "HTML body formatting: readable text (default) or raw response source. Use raw for client-rendered pages whose readable HTML contains little text.",
+            "HTML body formatting: raw response source (default; preserves comments/tags/attributes) or readable text. Prefer web.fetch instead when only page prose is needed.",
         },
         responsePart: {
           type: "string",
@@ -450,17 +452,22 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         topLines: {
           type: "integer",
           minimum: 0,
-          description: "Return only the first N rendered lines (combine with bottomLines for head+tail)",
+          description: "Return only the first N rendered lines. Omit to retain complete evidence in the saved artifact.",
         },
         bottomLines: {
           type: "integer",
           minimum: 0,
-          description: "Return only the last N rendered lines (combine with topLines for head+tail)",
+          description: "Return only the last N rendered lines. Omit to retain complete evidence in the saved artifact.",
         },
         maxOutputBytes: {
           type: "integer",
           minimum: 0,
-          description: "Strict byte ceiling applied to the final rendered output",
+          description: "Strict final-output ceiling. Omit to retain complete evidence; model context is capped separately.",
+        },
+        forwardSensitiveHeaders: {
+          type: "boolean",
+          description:
+            "Forward Authorization, Proxy-Authorization, and Cookie across an origin-changing redirect (default false; use only when explicitly intended).",
         },
         insecureTls: {
           type: "boolean",

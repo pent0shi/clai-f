@@ -235,7 +235,7 @@ describe("web.search DuckDuckGo -> keyed-provider fallback", () => {
     expect(result.output).toContain('"provider": "duckduckgo"');
     // The DDG failure message steers the user to configure a keyed
     // fallback provider.
-    expect(result.output).toContain("clai search-provider tavily");
+    expect(result.output).toContain("clai search-provider exa");
   });
 
   it("does not fall back when DuckDuckGo succeeds", async () => {

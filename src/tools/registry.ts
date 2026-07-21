@@ -483,7 +483,7 @@ export const toolRegistry: Record<string, ToolHandler> = {
       retries: optionalNumber(args, "retries"),
       timeoutMs: optionalNumber(args, "timeoutMs"),
       responseMode:
-        optionalString(args, "responseMode") === "raw" ? "raw" : "readable",
+        optionalString(args, "responseMode") === "readable" ? "readable" : "raw",
       responsePart: (() => {
         const part = optionalString(args, "responsePart");
         return part === "headers" || part === "body" ? part : "full";
@@ -491,6 +491,8 @@ export const toolRegistry: Record<string, ToolHandler> = {
       topLines: optionalNumber(args, "topLines"),
       bottomLines: optionalNumber(args, "bottomLines"),
       maxOutputBytes: optionalNumber(args, "maxOutputBytes"),
+      forwardSensitiveHeaders:
+        optionalBoolean(args, "forwardSensitiveHeaders") ?? false,
       insecureTls,
       signal: options?.signal,
       // Never attach engagement hop checks for owned loopback — leftover

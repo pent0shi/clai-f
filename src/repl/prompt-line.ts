@@ -5,8 +5,17 @@ import chalk from "chalk";
 import { PROMPT } from "../ui/banner.js";
 import { stripAnsi } from "../ui/ansi-box.js";
 import { isPagerActive } from "../ui/output-pane.js";
-import { isCtrlC, isCtrlO, isCtrlP, isCtrlT, isEscape } from "../ui/keys.js";
 import {
+  isCtrlC,
+  isCtrlO,
+  isCtrlP,
+  isCtrlT,
+  isCtrlV,
+  isEscape,
+} from "../ui/keys.js";
+import { captureClipboardImage } from "../attachments/clipboard-image.js";
+import {
+  formatAttachmentReference,
   getMentionQuery,
   findFileSuggestions,
   type FileSuggestion,
@@ -218,6 +227,8 @@ export async function readPromptLine(options: {
     
     let pasting = false;
     let pasteBuffer = "";
+    let imagePasteInFlight = false;
+    let closed = false;
 
     // Track which row (relative to prompt start) the cursor is on.
     // Needed to move back up to prompt start when text wraps across rows.
@@ -258,16 +269,15 @@ export async function readPromptLine(options: {
     const applyMention = (suggestion: FileSuggestion, start: number): void => {
       const before = line.slice(0, start);
       const after = line.slice(cursor);
-      let insert = `@${suggestion.value}`;
+      let insert = suggestion.isDir
+        ? `@${suggestion.value}`
+        : formatAttachmentReference(suggestion.value);
       let newCursor = before.length + insert.length;
       if (!suggestion.isDir) {
-        // Completed a file — add a trailing space and close the menu so the
-        // user can keep typing their request.
         insert += " ";
         newCursor = before.length + insert.length;
         mentionDismissed = true;
       } else {
-        // Completed a directory — keep the menu open so the user drills in.
         mentionDismissed = false;
       }
       line = before + insert + after;
@@ -345,7 +355,36 @@ export async function readPromptLine(options: {
       refresh();
     };
 
+    const showImagePasteError = (message: string): void => {
+      if (promptCursorRow > 0) moveCursor(output, 0, -promptCursorRow);
+      cursorTo(output, 0);
+      output.write("\x1b[J");
+      output.write(`${chalk.yellow(`  ${message}`)}\n`);
+      promptCursorRow = 0;
+      refresh();
+    };
+
+    const pasteClipboardImage = (): void => {
+      if (imagePasteInFlight || closed) return;
+      imagePasteInFlight = true;
+      setImmediate(() => {
+        const result = captureClipboardImage();
+        imagePasteInFlight = false;
+        if (closed) return;
+        if (!result.ok) {
+          showImagePasteError(result.reason);
+          return;
+        }
+        const needsLeadingSpace =
+          cursor > 0 && !/\s/.test(line[cursor - 1] ?? "");
+        insertText(
+          `${needsLeadingSpace ? " " : ""}${formatAttachmentReference(result.path)} `,
+        );
+      });
+    };
+
     const cleanup = (restoreInput = false): void => {
+      closed = true;
       input.off("keypress", handleKeypress);
       // Leave bracketed-paste mode so the terminal isn't left in a special
       // state during tool execution or after exit.
@@ -411,6 +450,10 @@ export async function readPromptLine(options: {
         } else if (isPrintableSequence(sequence)) {
           pasteBuffer += sequence;
         }
+        return;
+      }
+      if (isCtrlV(key)) {
+        pasteClipboardImage();
         return;
       }
 

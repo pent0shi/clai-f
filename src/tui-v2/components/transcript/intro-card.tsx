@@ -37,9 +37,16 @@ export function IntroCard(props: IntroCardProps): ReactNode {
   const width = widthProp ?? Math.max(56, termWidth - 4);
 
   const session = services.session.getState();
-  const permissions = getConfig().permissions ?? "default";
+  const cfg = getConfig();
+  const permissions = cfg.permissions ?? "default";
   const version = getCurrentVersion();
   const workdir = displayWorkdir(safeCwd());
+
+  // Fall back to the configured defaults (never the literal "default") so the
+  // card always shows the real provider and its exact model, matching the
+  // composer meta line, even before the session selection is populated.
+  const provider = session.provider ?? cfg.defaultProvider;
+  const model = session.model ?? cfg.defaultModel;
 
   const lines = useMemo(
     () =>
@@ -47,8 +54,8 @@ export function IntroCard(props: IntroCardProps): ReactNode {
         width,
         version,
         mode: session.mode,
-        provider: session.provider ?? "default",
-        model: session.model ?? "",
+        provider,
+        model,
         permissions,
         workdir,
       }).map((line) => ansiToStyledText(line.length === 0 ? " " : line)),
@@ -56,8 +63,8 @@ export function IntroCard(props: IntroCardProps): ReactNode {
       width,
       version,
       session.mode,
-      session.provider,
-      session.model,
+      provider,
+      model,
       permissions,
       workdir,
     ],
