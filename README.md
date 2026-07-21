@@ -1,48 +1,31 @@
 # clai
 
-> **Offensive-security agent in your terminal** — recon, enumerate, exploit, and report with an approve-before-run plan workflow. Also a strong coding/sysadmin agent for shell and files. Free to build, free to run.
+> A fast, terminal-native AI agent that runs real tools — built to run on **free API tiers**, stay alive across rate limits with **multi-key + multi-provider switching**, and do serious work: **building, debugging, and scope-based pentesting / bug bounty**.
 
-clai is an AI **agent CLI** built for people who break (and fix) systems: authorized pentests, red-team style workflows, CTFs, report verification, and day-to-day security engineering. It runs real tools (`nmap`, `ffuf`, `sqlmap`, `http` evidence capture, …), keeps a **durable engagement plan**, and never pretends a finding is real without tool output to back it up. Providers that support it use **native function/tool calling** (config `toolCalling: auto|native|text`); text-fence tools remain as fallback.
+`clai` is an agentic CLI. It doesn't just describe what to do — it edits files, runs shell commands, scans hosts, fetches HTTP evidence, keeps a durable task plan, and verifies its own work before claiming success. It runs entirely in your terminal with a full-screen console UI (and a classic line REPL fallback).
 
-It also builds software and runs shell/file workflows when that is the job — same agent, same safety gate, same UI.
+Two things make it practical for everyday use:
 
----
-
-## Why clai for pentesting?
-
-| Pain | What clai does |
-|------|----------------|
-| Chatbots that only *describe* scans | **Runs** recon, fuzzers, and PoCs via shell + dedicated tools |
-| Long engagements lose the thread | **Session plan** + task checklist survives compaction and reloads from history |
-| Spray-and-pray tooling | **Stack fingerprint first**, then stack-matched wordlists and vectors |
-| Noisy full dumps fill context | **High-signal tool use**, artifacts for long output, expandable cards |
-| Unscoped scanning | **Authorize once**, optional **engagement scope**, confirm on mutating work |
-| “AI said vulnerable” without evidence | Findings require **command + real output**; report-style structure encouraged |
-
-### Engagement shape (built into the agent)
-
-```
-recon / discovery  →  fingerprint stack  →  plan.create (kind=pentest)
-        ↑                      │
-        │              /implement  (approve)
-        │                      ↓
-        └──── enumerate → exploit → post-ex → report
-              (revise plan as surface grows; keep completed tasks)
-```
-
-1. **Recon first** (whois, DNS, `net.context`, `net.scan`, `http.fetch`, `pentest.recon`, …) — read-only discovery does **not** need a plan yet.  
-2. **Analyze evidence**, then **`plan.create`** with `kind=pentest` from real ports/services/endpoints/weaknesses — then **stop**.  
-3. You **`/implement`**, refine in chat, or **`/discard`**.  
-4. Execute task-by-task with **`task.update`**; expand the plan when new surface appears without wiping done work.
-
-Non-destructive by default: prove issues with the least invasive evidence (reflected values, auth bypass PoCs, `whoami` after a shell). Destructive impact only when you explicitly ask.
+- **It's cheap-to-free to run.** Point it at Groq, Google Gemini, NVIDIA NIM, OpenRouter, Bynara, Kimchi, or a local Ollama — all have free access — and clai stacks them. Add several keys per provider; when one hits a rate limit, it rotates to the next automatically.
+- **It's honest.** Findings need real tool output. Builds get typechecked/run before "done." Compaction and history keep long sessions coherent instead of hallucinating progress.
 
 ---
 
-## Installation
+## Highlights
+
+- **Free-tier first.** 12 providers wired in, 6 cloud free tiers + local Ollama. Default provider is NVIDIA NIM (`openai/gpt-oss-20b`) so a fresh install can run at no cost.
+- **Multi-key smart switching.** Up to 10 keys per provider with a *sticky* active key and circular rotation on rate-limit / auth / quota / transient / 5xx / empty-response errors. Optional cross-provider fallback and a free-only filter.
+- **Scope-based pentesting.** Opt-in engagement scope with authorized/excluded targets, allowed phases, rate and concurrency ceilings, redirect and DNS-rebinding escape detection, and out-of-scope flagging — designed for authorized pentests and bug-bounty programs.
+- **Real building & debugging.** Scaffolds apps, edits code surgically, installs packages, runs builds/tests, starts dev servers as background jobs, and probes them before reporting success.
+- **Durable plans.** `plan.create` / `task.update` drive a live checklist that survives context compaction and reloads with `/history` — the agent works task-by-task and won't fake completion.
+- **Native + text tool calling.** Uses provider-native function calling where available, with a text-fence fallback (`toolCalling: auto|native|text`).
+- **Safety gate you control.** Every action is classified safe / confirm / block; deletes always confirm with a preview; destructive patterns are blocked.
+
+---
+
+## Install
 
 ### macOS
-
 ```sh
 brew tap pentoshi007/clai && brew install clai
 # or
@@ -50,248 +33,280 @@ curl -fsSL https://raw.githubusercontent.com/pentoshi007/clai/main/install/insta
 ```
 
 ### Linux
-
 ```sh
 curl -fsSL https://raw.githubusercontent.com/pentoshi007/clai/main/install/install.sh | sh
 ```
 
 ### Windows
-
 ```powershell
 irm https://raw.githubusercontent.com/pentoshi007/clai/main/install/install.ps1 | iex
-# or: scoop bucket add clai https://github.com/pentoshi007/clai && scoop install clai
+# or
+scoop bucket add clai https://github.com/pentoshi007/clai && scoop install clai
 ```
 
 ### npm / from source
-
 ```sh
 npm i -g @pentoshi/clai
-
 # or
 git clone https://github.com/pentoshi007/clai.git
 cd clai && npm install && npm run build && npm start
 ```
 
-Type `clai` in any terminal to start.
+Node.js ≥ 20. Type `clai` in any terminal to start.
 
 ---
 
-## Quick start (security)
+## Quick start
+
+Get a free key from any supported provider, add it, and go:
 
 ```sh
-# Full-screen agent UI
+# Add a free key (Groq shown; NVIDIA/Gemini/OpenRouter/Bynara/Kimchi work the same)
+clai set groq gsk_your_key_here
+
+# Launch the full-screen agent console
 clai
 
-# Authorize offensive tools for this machine (once)
-clai authorize-pentest AGREE
-
-# Optional: remember engagement boundaries
-clai scope add --targets lab.example.com,10.10.0.0/24
-
-# One-shot agent against an in-scope target
-clai --mode agent "recon lab.example.com — open ports, stack, and interesting endpoints"
-
-# Ask mode: methodology / commands only, no execution
-clai --mode ask "how would you enum an internal AD lab from a foothold?"
+# Or one-shot from the shell
+clai "explain what this repo does and find the entrypoint"
+clai --mode agent "add a /health endpoint to the Express app and run the tests"
 ```
 
-Inside a session:
-
-```text
-> recon app.lab.local and map the attack surface
-  … agent runs whois/dns/nmap/http evidence …
-  … plan.create (pentest checklist) …
-> /implement
-  … tasks execute with live plan pane (Ctrl+H) …
-> verify the IDOR on /api/v1/orders/{id} with a low-impact PoC
-```
-
----
-
-## Security & pentest capabilities
-
-### Tools that matter for engagements
-
-| Area | What you get |
-|------|----------------|
-| **Network** | `net.scan` (nmap wrapper, SYN with privilege / TCP fallback), `net.context`, `net.pingSweep`, `pentest.recon` (whois + dig + top ports) |
-| **HTTP evidence** | `http.fetch` — status, headers, cookies, TLS, body for **raw protocol / pentest** work (not casual page reading) |
-| **Web reading / OSINT** | `web.search`, `web.fetch` (readable pages), plus shell for specialized CLIs |
-| **Batch recon** | `tool.batch` — up to 20 lookups in one call; optional `on_fail` fail-fast or selective cancel when dependents need a prerequisite |
-| **Discovery** | `tool.check`, `pkg.install`, `wordlist.find` — install only what is missing; locate wordlists per OS (no Kali-only path guesses) |
-| **DNS / ownership** | `dns.lookup`, `whois.lookup` for narrow questions |
-| **Shell** | Full toolbox: `nmap`, `ffuf`, `gobuster`, `feroxbuster`, `sqlmap`, `hydra`, `nikto`, `masscan`, `nuclei`, `tshark`, … via `shell.exec` |
-| **Jobs** | Long scanners/listeners as background jobs (`shell.start` / `/jobs` / `Ctrl+J`) |
-| **Reporting** | Markdown tables, artifact paths for long scans, structured finding style (title, severity, evidence, repro, impact, remediations) |
-
-### Methodology the agent is steered toward
-
-- **Recon → fingerprint → enumerate → exploit → post-ex → report**  
-- **Tech stack from real headers/body** before directory fuzz or exploit choice (Next.js ≠ PHP wordlists)  
-- **Fuzz, don’t guess** — one bounded content-discovery pass with filters, not dozens of blind `http.fetch` paths  
-- **Enumerate before exploit**; match vectors to the stack  
-- **Verify from tool output** — no fabricated banners or fake CVE hits  
-- **Scope discipline** — flag out-of-scope hosts; keep authorized targets as the boundary  
-
-### Authorization & safety gate
-
-clai assumes **you** own authorization. The product still gates risk:
+Prefer fully local and offline? Point at Ollama:
 
 ```sh
-clai authorize-pentest AGREE          # session-level ack before scan/attack tools
-clai scope add --targets a.com,10.0.0.0/24
-# in UI: /scope add a.com · /scope show · /scope clear
+clai set ollama --url http://localhost:11434
+clai use ollama
 ```
 
-| Risk | Behavior |
-|------|----------|
-| **safe** | Auto-run read-only recon patterns, `http.fetch` GET evidence, many enum CLIs |
-| **confirm** | Mutating shell, writes, installs, aggressive scans |
-| **block** | Destructive patterns (`rm -rf /`, fork bombs, classic exfil signatures, …) |
-
-Default posture is **non-destructive proof**. Escalate impact only when you ask for it.
-
-### Plan pane for engagements
-
-- Live checklist while you work (`Ctrl+H`)  
-- Full plan + notes pager (`Ctrl+P` / `/plan`)  
-- Approve with `/implement`, revise in chat, cancel with `/discard`  
-- Plans **survive context compaction** and **reload with `/history`**  
-- Agent mode: working checklist + evidence-before-done; plan mode: roadmap you approve before execution  
-
 ---
 
-## Terminal UI (operator console)
+## Run it on free tiers (and keep it running)
 
-Full-screen OpenTUI console by default: streaming chat, nested tool cards (including `tool.batch` sub-sections), file diffs, plan pane, pickers, history, secure key prompts. Falls back to a classic line REPL if the terminal cannot host the UI.
+This is the core of clai's design: assemble capacity from free tiers, then survive rate limits automatically.
 
-| Action | How |
-|--------|-----|
-| Send | `Enter` |
-| Newline | `Shift+Enter` |
-| Abort turn | `Esc` / `Ctrl+C` (cancels in-flight tools cleanly) |
-| Expand thinking | `Ctrl+T` (clickable on status strip) |
-| Expand tool / compacted output | `Ctrl+O` |
-| Plan pane | `Ctrl+H` |
-| Full plan document | `Ctrl+P` |
-| Background jobs | `Ctrl+J` |
-| Commands / files | `/` · `@` |
-| Exit | `Ctrl+C` twice |
+### Supported providers
 
-Tool cards show **command/input** clearly and keep long scan tails in **OUTPUT** (expand or open pager). File writes show a **diff preview**. Deletes always ask for confirmation (`y`/`n`); press **`v`** to preview the path before confirming. Compaction cards preserve engagement memory without dropping the plan.
+| Provider | Default model | Tier | Env var |
+|----------|---------------|------|---------|
+| NVIDIA NIM | `openai/gpt-oss-20b` | Free | `NVIDIA_API_KEY` |
+| Groq | `llama-3.3-70b-versatile` | Free | `GROQ_API_KEY` |
+| Google Gemini | `gemini-3.5-flash` | Free | `GEMINI_API_KEY` |
+| OpenRouter | `meta-llama/llama-3.3-70b-instruct:free` | Free | `OPENROUTER_API_KEY` |
+| Bynara | `mimo-v2.5-free` | Free | `BYNARA_API_KEY` |
+| Kimchi | `kimi-k2.6` | Free | `CASTAI_API_KEY` |
+| Ollama | `llama3.1:8b` | Local / free | `OLLAMA_HOST` |
+| OpenAI | `gpt-5.4-mini` | Paid | `OPENAI_API_KEY` |
+| Anthropic | `claude-3-5-haiku-latest` | Paid | `ANTHROPIC_API_KEY` |
+| AgentRouter | `claude-opus-4-6` | Paid | `AGENTROUTER_API_KEY` |
+| AWS Mantle | `anthropic.claude-haiku-4-5` | Paid | `ANTHROPIC_API_KEY` |
+| Qwen Cloud | `qwen3.7-plus` | Paid (DashScope) | `DASHSCOPE_API_KEY` |
 
-**`/history`** restores full sessions — prompts, tool results, findings context, and the matching plan when present (including after abort / autosave).
+Several "paid" providers also expose limited free allowances — the tier label reflects what the default keys usually buy you. Flip `freeOnly` off to include paid providers in fallback.
 
----
-
-## Modes
-
-| Mode | Security use |
-|------|----------------|
-| **`/agent`** | Run recon, build a pentest plan, execute after `/implement`, verify findings with tools |
-| **`/ask`** | Methodology, commands, and writeups **without** executing tools |
-
-Switch anytime: `/agent`, `/ask`, or `clai --mode agent|ask "…"`.
-
-Coding and general sysadmin work use the same agent (scaffold, debug, packages) with the same plan gate for multi-step jobs.
-
----
-
-## Features (summary)
-
-- **Pentest-first agent loop** — recon-before-plan, stack-aware enum, evidence-backed findings  
-- **Durable plans** — `plan.create` / `task.update`, side pane, approve/refine/discard; agent vs plan task workflows  
-- **Parallel multi-tool turns** — independent reads run together; failures do **not** cancel siblings by default  
-- **`tool.batch` fail policy** — opt-in `on_fail=cancel_pending` or selective `cancel_on_fail` / rules when later work depends on earlier success  
-- **Native + text tool calling** — `toolCalling: auto|native|text`  
-- **11+ LLM providers** with streaming (free tiers + local Ollama)  
-- **Safety gate** + pentest authorization + optional engagement scope (deletes always confirm with preview)  
-- **OS-aware** installs and wordlist discovery (macOS / Linux / Windows)  
-- **Context compaction** (auto + `/compact`) that keeps the plan alive  
-- **Session history** with full transcript + plan restore  
-- **Background jobs** for long scanners and listeners  
-- **Web OSINT** — `web.search` / `web.fetch` alongside raw `http.fetch`  
-- **Stall / cancel robustness** — tool heartbeats, hard deadlines, clean Esc abort with results recorded  
-
----
-
-## Provider setup
-
-| Provider | Default model | Free tier | Key prefix |
-|----------|---------------|-----------|------------|
-| Groq | `llama-3.3-70b-versatile` | ✓ | `gsk_` |
-| Gemini | `gemini-2.0-flash` | ✓ | `AIza` / `AQ.` |
-| OpenRouter | `meta-llama/llama-3.3-70b-instruct:free` | ✓ | `sk-or-` |
-| OpenAI | `gpt-4o-mini` | — | `sk-` |
-| Anthropic | `claude-3-5-haiku-latest` | — | `sk-ant-` |
-| NVIDIA NIM | `openai/gpt-oss-20b` | ✓ | `nvapi-` |
-| AgentRouter | `gpt-5` | — | `sk-` |
-| Kimchi | `kimi-k2.6` | ✓ | (any) |
-| AWS Mantle | `anthropic.claude-haiku-4-5` | — | `sk-ant-` |
-| Ollama | `llama3.1:8b` | ✓ local | URL |
-| Bynara | `mimo-v2.5-free` | ✓ | `sk_nry_` |
+### Manage keys
 
 ```sh
-clai set groq gsk_...              # store / append an API key (multi-key supported)
-clai set groq gsk_another_...      # add a second key for the same provider
+clai set groq gsk_first_key            # store a key (appends if one exists)
+clai set groq gsk_second_key           # add another key for the same provider
 clai set gemini --from-env GEMINI_API_KEY
 echo "gsk_..." | clai set groq --stdin
 clai set ollama --url http://localhost:11434
-clai keys                          # lists each key (masked) + sticky active ★
-clai use groq
-clai provider                      # picker shows selected model per provider
-clai unset groq                    # removes ALL keys for that provider
+clai keys                              # list providers + masked keys, active key marked ★
+clai use groq                          # set active provider
+clai provider                          # interactive provider/model picker
+clai unset groq                        # remove ALL keys for a provider
 ```
 
-In the TUI, **`/set`** opens a multi-row key editor (like `/scope`): add with `+`, remove rows, **Save**, or **Reset all**. **`/unset`** clears every key for the chosen provider. When several keys are stored, clai **rotates** on rate limits / auth / transient errors (one retry per key, then the next key in a circle) and shows a non-stacking toast (`using groq · …ab12` / `switching …`).
+In the console, **`/set`** opens a multi-row key editor: add rows with `+`, remove rows, **Save**, or **Reset all**. **`/keys`** lists them masked; **`/unset`** clears a provider.
 
-Env overrides: `GROQ_API_KEY`, `GEMINI_API_KEY`, `OPENROUTER_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `NVIDIA_API_KEY`, `OLLAMA_HOST`, …
+### Smart switching (how it stays up)
 
----
+- **Multi-key rotation** — up to **10 keys per provider**. The last key that worked is *sticky*; on failure clai rotates circularly to the next key.
+- **What triggers a switch** — HTTP 429 (rate limit), 401/403 (auth), 402 / quota / billing text, transient network errors, 500–504, and empty completions. Auth and quota errors switch **immediately** (no backoff wait); rate limits back off briefly first.
+- **Cross-provider fallback** *(opt-in)* — `/fallback on` lets clai try other configured providers after the active one is exhausted (only when running a provider's default model).
+- **Free-only mode** *(opt-in)* — `/freeonly on` excludes paid-cloud providers from the fallback chain, so you never accidentally spend.
+- **Quiet status** — a single non-stacking status line shows what happened, e.g. `switching groq key [2/4] …ab12 (rate limited)`. Keys are always masked to the last 4 chars.
 
-## Commands operators use most
-
-| Command | For security work |
-|---------|-------------------|
-| `/agent` | Offensive / execution mode |
-| `/ask` | Research & methodology only |
-| `/implement` · `/discard` · `/plan` | Plan lifecycle |
-| `/scope` | Engagement targets |
-| `/output` · `Ctrl+O` | Full tool / scan tails |
-| `/jobs` · `Ctrl+J` | Long-running tools |
-| `/compact` · `/context` | Keep long engagements inside the window |
-| `/history` | Resume yesterday’s engagement |
-| `/allow` | Session tool allow-list |
-| `/cwd` | Switch lab / loot directory |
-| `/model` · `/provider` | Capacity for the job |
-| `/update` · `/help` · `/exit` | Housekeeping |
-
-CLI mirrors: `clai authorize-pentest`, `clai scope add`, `clai doctor` (missing tools + install hints), `clai update`.
+```sh
+/freeonly on      # stay on free tiers only
+/fallback on      # allow other providers when the current one is exhausted
+```
 
 ---
 
-## Built-in tools (agent)
+## What clai is good at
 
-| Tool | Role in engagements |
-|------|---------------------|
-| `shell.exec` / `shell.start` · `shell.jobs` / `tail` / `stop` | nmap, ffuf, sqlmap, hydra, custom PoCs, listeners, background jobs |
-| `net.scan` · `net.context` · `net.pingSweep` · `pentest.recon` | Host/port/service discovery |
-| `http.fetch` | Raw HTTP/TLS evidence |
-| `web.search` · `web.fetch` | OSINT / docs (readable), not raw exploit traffic |
-| `dns.lookup` · `whois.lookup` | Narrow DNS / ownership |
-| `tool.batch` | Fan-out up to 20 tools; `concurrency` 1–6; `on_fail` continue (default) / cancel_pending / rules; per-call `cancel_on_fail` |
-| `tool.check` · `pkg.install` · `wordlist.find` | Tooling readiness |
-| `fs.read` · `fs.list` · `fs.search` · `fs.write` · `fs.writeMany` · `fs.edit` · `fs.replaceLines` · `fs.append` · `fs.delete` | Files (sandboxed roots; delete always confirms + optional preview) |
-| `plan.create` · `task.update` | Engagement checklist / working tasks |
-| `sysinfo` · `image.ocr` · `pdf.read` | Host context, report/screenshot OCR |
-| `agent.handoff` | Ask mode → offer agent mode when the user wants action, not explanation |
+### Building & debugging
 
-### `tool.batch` fail policy (opt-in)
+The same agent that runs recon also ships code. It explores before it writes, matches your existing stack from lockfiles, edits surgically, and proves the result:
 
-Default is **continue** — one failed lookup never kills the rest (best for recon).
+- Scaffolds and extends apps; replaces starter boilerplate with real features (a scaffold alone is treated as incomplete).
+- Surgical file tools: `fs.edit`, `fs.replaceLines`, `fs.append`, plus multi-file writes.
+- Runs the checks that apply — typecheck, build, unit/integration tests — and fixes failures before claiming success.
+- Starts dev servers as background jobs, tails until ready, probes `localhost`, and reports the URL / port / job id with the server left running.
+- Debugging loop: reproduce → read the actual error → fix root cause → re-verify (never "diagnosed but not fixed").
+
+```sh
+clai --mode agent "convert this Vite React app to Next.js App Router, keep all features, run the build"
+clai --mode agent "this test is flaky — find the race and fix it"
+```
+
+### Scope-based pentesting & bug bounty
+
+clai is built to run real, authorized security work — not to narrate it. It follows a recon-first methodology and keeps you inside the boundaries you set.
+
+```
+recon / discovery  →  fingerprint stack  →  plan.create (kind=pentest)
+        ↑                      │
+        │              /implement (approve)
+        │                      ↓
+        └──── enumerate → exploit → post-ex → report
+              (revise the plan as surface grows; keep completed tasks)
+```
+
+1. **Authorize once**, then optionally **define scope** — authorized targets, exclusions, allowed phases, rate/concurrency ceilings, and an expiry.
+2. **Recon first** (read-only discovery needs no plan): whois, DNS, `net.scan`, `net.context`, `http.fetch`, `pentest.recon`, and shell tools like `nmap`, `ffuf`, `nuclei`, `sqlmap`.
+3. **Analyze real evidence**, then `plan.create` with `kind=pentest` from actual ports/services/endpoints — then stop for your approval.
+4. `/implement` and execute task-by-task; expand the plan as new attack surface appears without wiping completed work.
+5. **Report** with structure — title, severity, evidence, reproduction, impact, remediation — and honest residual/untested notes.
+
+**Scope enforcement is real, not cosmetic.** When scope is active, clai checks each target against your authorized/excluded lists, enforces token-bucket rate limits and a concurrency ceiling, detects **redirects that leave scope** and **DNS-rebinding escapes**, and flags out-of-scope hosts instead of touching them. Loopback GET/HEAD stays allowed for local dev verification. Scope is opt-in: with no scope defined, scoping is simply off.
+
+```sh
+clai authorize-pentest AGREE
+clai scope new --targets lab.example.com,10.10.0.0/24 --exclude prod.example.com \
+  --phases recon,enumeration --max-rate 5 --max-concurrency 2
+# in the console: /scope show · /scope add <targets> · /scope clear
+```
+
+Dedicated recon tools: `pentest.recon` (bundled whois/dns/nmap), `pentest.webDiscover` (scoped path discovery), `pentest.apiEnumerate` (OpenAPI/Swagger), `pentest.authCompare` (auth-context diffing), `pentest.scanStatus` (durable scan checkpoints).
+
+### General security & sysadmin workflows
+
+Log triage, config hardening, packaging, network questions, OCR of a screenshot or PDF report, quick OSINT — all handled by the same agent under the same safety gate.
+
+---
+
+## Modes & reasoning
+
+Three modes, switchable anytime with a slash command, `Shift+Tab`, or `clai --mode`:
+
+| Mode | Use |
+|------|-----|
+| **ask** | Answers, methodology, and read-only tools — no mutations, no attacks. |
+| **agent** | Executes: edits, installs, scans, verifies, works the plan. |
+| **plan** | Research and design a durable plan; approve with `/implement` before execution. |
+
+**Reasoning / thinking** is controlled with `/variants` (alias `/reasoning`), accepting `on`, `off`, `none`, `minimal`, `low`, `medium`, `high`, or `xhigh`. clai only sends reasoning options to models that support them — and if a model rejects them at runtime, it marks that model, retries once without them, and tells you (`… rejected reasoning options — retrying without them`) so a session never hangs on an unsupported knob.
+
+---
+
+## Safety gate
+
+You own authorization; clai still gates risk on every action:
+
+| Level | Behavior |
+|-------|----------|
+| **safe** | Auto-runs read-only work: `fs.read/list/search`, `sysinfo`, `dns.lookup`, `whois.lookup`, `http.fetch` GET, `web.search`/`web.fetch`, recon scanners. |
+| **confirm** | Asks first for mutations: file writes/edits, installs, moves, aggressive/mutating shell. |
+| **block** | Refuses destructive patterns (`rm -rf /`, fork bombs, classic exfil signatures) and SSRF-prone fetches. |
+
+`fs.delete` always confirms (with an optional `v` preview) even under allow-all. `tool.batch` inherits the highest risk level of its children. Use `/permissions` to choose the default confirmation level and `/allow` / `/disallow` for a per-session tool allow-list.
+
+---
+
+## Terminal UI
+
+A full-screen console by default: streaming chat, nested tool cards (including `tool.batch` sub-calls), file diffs, a live plan pane, pickers, history, and secure masked key prompts. It falls back to a classic REPL when the terminal can't host the UI.
+
+| Action | Key |
+|--------|-----|
+| Send / newline | `Enter` / `Shift+Enter` |
+| Abort turn (keeps results) | `Esc` |
+| Interrupt / quit | `Ctrl+C` (twice to quit) |
+| Cycle mode (ask→agent→plan) | `Shift+Tab` |
+| Plan pane / plan detail | `Ctrl+H` / `Ctrl+P` |
+| Background jobs | `Ctrl+J` |
+| Expand thinking / tool output | `Ctrl+T` / `Ctrl+O` |
+| Search transcript | `Ctrl+R` |
+| Copy selection | `Ctrl+Shift+C` |
+| Commands / file mentions | `/` · `@` |
+| Help / shortcuts | `Ctrl+G` |
+
+Tool cards show the command/input clearly and keep long scan tails in an expandable OUTPUT pager (search, copy, export). File writes show a diff preview. Compaction cards preserve session memory without dropping the plan, and `/history` restores full sessions — prompts, tool results, and the matching plan — even after an abort or autosave.
+
+---
+
+## Slash commands
+
+| Command | Does |
+|---------|------|
+| `/ask` · `/agent` · `/plan` | Switch mode (plan = design-then-approve) |
+| `/implement` · `/discard` | Approve+execute or drop the current plan |
+| `/model [name\|#]` · `/provider [name]` · `/use <provider>` | Pick model / switch provider |
+| `/set [provider]` · `/unset [provider]` · `/keys` · `/info [provider]` | Manage API keys and view provider info |
+| `/variants [level]` · `/reasoning [level]` | Thinking / reasoning effort |
+| `/freeonly [on\|off]` · `/fallback [on\|off]` | Free-only filter · cross-provider fallback |
+| `/search [provider]` · `/search-provider` | Choose web-search backend |
+| `/scope [show\|add\|new\|clear]` | Engagement scope |
+| `/output [last\|id\|list]` | Open full tool output (also `Ctrl+O`) |
+| `/jobs` | Background jobs (also `Ctrl+J`) |
+| `/compact` · `/context` | Compact history now · show context size |
+| `/history` · `/save <name>` · `/new` · `/clear` · `/reset` | Session lifecycle |
+| `/allow <tool>` · `/disallow <tool>` · `/permissions` | Tool permissions |
+| `/cwd <path>` | Change working directory |
+| `/think` · `/thinking` | Show thinking from the last response |
+| `/privacy [...]` | Private mode · clear history/logs/artifacts |
+| `/update` · `/help` · `/shortcuts` · `/clean` · `/exit` | Housekeeping |
+
+---
+
+## CLI commands
+
+```sh
+clai [prompt...]                       # interactive console, or one-shot with a prompt
+  --mode <ask|agent|plan>  --provider <p>  --model <m>
+  -y/--yes  --no-history  --classic  --ui <legacy|tui|v2>
+
+clai set <provider> [key]              # --from-env <VAR> | --stdin | --url <url> | --skip-ping
+clai unset <provider>                  # remove all keys for a provider
+clai keys                              # list providers with masked keys
+clai use <provider>                    # set active provider
+clai provider [provider]               # switch provider or open picker
+clai model <model>                     # set model for the active provider
+clai mode <ask|agent|plan>             # set default mode
+clai search-provider <brave|tavily|duckduckgo>
+clai config [key] [value]              # print / get / set config
+clai doctor                            # check installed tools + provider config
+clai history [--show <id>]             # list sessions / print one
+clai update                            # check for updates
+clai authorize-pentest AGREE           # enable scan/attack tools (one-time ack)
+clai scope <show|new|add|clear>        # engagement scope (new: --targets --exclude --phases
+                                       #   --name --note --expires --max-rate --max-concurrency)
+clai privacy <status|on|off|retention|clear-history|clear-logs|clear-artifacts|clear-all>
+```
+
+---
+
+## Built-in tools
+
+| Group | Tools |
+|-------|-------|
+| **Files** | `fs.read` · `fs.list` · `fs.search` · `fs.write` · `fs.writeMany` · `fs.edit` · `fs.replaceLines` · `fs.append` · `fs.delete` |
+| **Shell & jobs** | `shell.exec` · `shell.start` · `shell.jobs` · `shell.tail` · `shell.stop` · `pkg.install` |
+| **Network** | `net.scan` (nmap) · `net.context` · `net.pingSweep` · `dns.lookup` · `whois.lookup` |
+| **HTTP / web** | `http.fetch` (raw evidence) · `web.search` · `web.fetch` (readable) |
+| **Pentest** | `pentest.recon` · `pentest.webDiscover` · `pentest.apiEnumerate` · `pentest.authCompare` · `pentest.scanStatus` |
+| **Orchestration** | `tool.batch` (up to 20 calls, `on_fail` policies) · `tool.check` · `wordlist.find` |
+| **Plan** | `plan.create` · `task.update` · `agent.handoff` |
+| **Context** | `sysinfo` · `image.ocr` · `pdf.read` |
+
+### tool.batch fail policy
+
+Default is **continue** — one failed lookup never kills the rest (ideal for recon). Opt into fail-fast or selective cancellation when later work depends on earlier success:
 
 ```json
-// Fail-fast: stop remaining calls after the first failure
 {"name":"tool.batch","args":{
   "on_fail":"cancel_pending",
   "calls":[
@@ -299,21 +314,19 @@ Default is **continue** — one failed lookup never kills the rest (best for rec
     {"name":"http.fetch","args":{"url":"https://lab.example/"}}
   ]
 }}
-
-// Selective: if scan fails, cancel only fuzz (dns still runs)
-{"name":"tool.batch","args":{
-  "calls":[
-    {"id":"dns","name":"dns.lookup","args":{"target":"lab.example"}},
-    {"id":"scan","name":"net.scan","args":{"target":"lab.example"},
-     "cancel_on_fail":["fuzz"]},
-    {"id":"fuzz","name":"shell.exec","args":{"command":"ffuf …"}}
-  ]
-}}
 ```
 
-Top-level multi-tool messages (several separate tool blocks) never cancel siblings; use `tool.batch` when you need a fail policy.
+Top-level messages with several separate tool blocks never cancel siblings — use `tool.batch` when you need a fail policy.
 
-### Search providers (OSINT)
+---
+
+## Web search / OSINT
+
+| Provider | Key | Env var |
+|----------|-----|---------|
+| DuckDuckGo | none (default) | — |
+| Brave | required | `BRAVE_SEARCH_API_KEY` |
+| Tavily | required | `TAVILY_API_KEY` |
 
 ```sh
 clai set brave bsx-...
@@ -321,34 +334,27 @@ clai set tavily tvly-...
 clai search-provider tavily
 ```
 
-DuckDuckGo is default and keyless. Env: `BRAVE_SEARCH_API_KEY`, `TAVILY_API_KEY`.
-
----
-
-## Updates & doctor
-
-```sh
-clai update
-clai doctor    # OS, keys, and which security tools are installed
-```
+Search-provider keys are multi-key and rotate just like model providers.
 
 ---
 
 ## Per-project context
 
-`.clai/context.md` in a repo injects durable notes (e.g. lab topology, in-scope hosts, stack assumptions) every turn.
+Drop a `.clai/context.md` in a repo and its contents are injected every turn — lab topology, in-scope hosts, stack assumptions, coding conventions, or anything the agent should always know for that project.
 
 ---
 
-## Configuration
+## Configuration & privacy
 
 ```sh
-clai config
-clai mode agent
-clai model <name>
+clai config                # view config
+clai mode agent            # default mode
+clai model <name>          # default model for the active provider
+/privacy on                # private mode: don't persist this session
+/privacy clear-all         # wipe history, logs, and artifacts
 ```
 
-Config lives under the OS user config dir (e.g. `~/.config/clai/`).
+Config lives under your OS user config dir (e.g. `~/.config/clai/`). Keys are stored locally and shown only masked.
 
 ---
 
@@ -356,27 +362,23 @@ Config lives under the OS user config dir (e.g. `~/.config/clai/`).
 
 ```sh
 npm install
-npm run dev
+npm run dev          # run from source
 npm run typecheck
 npm run build
-npm test
-npm run compile    # native binaries (Bun)
+npm test             # full vitest suite
+npm run compile      # native binaries (Bun)
 ```
-
-Node.js ≥ 20.
 
 ---
 
 ## Releasing
 
-Tag-driven CI (`.github/workflows/release.yml`): tests → multi-platform binaries → GitHub Release → npm `@pentoshi/clai` → Homebrew tap.
+Tag-driven CI (`.github/workflows/release.yml`): validate (typecheck + tests + prompt-budget + release checks) → multi-platform binaries → GitHub Release → npm `@pentoshi/clai` → Homebrew tap.
 
 ```sh
-# Single source of truth: package.json "version" only.
+# package.json "version" is the single source of truth.
 npm version 3.8.0 --no-git-tag-version
-# sync-version refreshes version.generated.ts + install manifests + lock root
-# (also runs automatically on build / pretest / compile)
-npm run sync-version
+npm run sync-version    # refreshes version.generated.ts + install manifests + lockfile
 git commit -am "v3.8.0" && git push origin main
 git tag -a v3.8.0 -m "clai v3.8.0" && git push origin v3.8.0
 ```
@@ -385,22 +387,20 @@ Secrets: `NPM_TOKEN`, `TAP_GITHUB_TOKEN`. Optional: `NPM_PROVENANCE=true`.
 
 ---
 
-## Architecture (overview)
+## Architecture
 
 ```
 clai/
 ├─ src/
-│  ├─ index.ts              # CLI entry
-│  ├─ modes/                # ask · agent
-│  ├─ agent/                # loop, plans, compaction, tool parsing
-│  ├─ llm/                  # providers + streaming + native tools
-│  ├─ tools/                # shell, net, http, web, fs, batch, pentest, …
-│  ├─ safety/               # classifier + patterns
-│  ├─ store/                # config, history, keys, plans, scope, logs
-│  ├─ tui-v2/               # full-screen OpenTUI (primary)
-│  ├─ app/                  # session, commands, events
-│  └─ prompts/              # agent methodology (incl. pentest; embedded for bun)
-├─ bin/clai.mjs
+│  ├─ index.ts          # CLI entry + subcommands
+│  ├─ agent/            # loop, plans, compaction, resume orientation, tool parsing
+│  ├─ llm/              # 12 providers, streaming, native tools, key rotation + fallback
+│  ├─ tools/            # fs, shell, net, http, web, pentest, batch, plan
+│  ├─ safety/           # risk classifier + engagement (scope) policy
+│  ├─ store/            # config, history, keys, plans, scope
+│  ├─ tui-v2/           # full-screen OpenTUI console (primary)
+│  ├─ app/              # session controllers, commands, events
+│  └─ prompts/          # agent methodology (embedded for the compiled binary)
 ├─ install/ · manifests/
 └─ package.json
 ```
@@ -409,8 +409,6 @@ clai/
 
 ## License
 
-MIT
+MIT.
 
----
-
-**Use only on systems you are authorized to test.** clai is an operator tool: authorization, scope, and impact are yours; the agent executes with the gates and confirmations you configure.
+**Use only on systems you are authorized to test.** clai is an operator's tool: authorization, scope, and impact are yours. The agent executes with the gates and confirmations you configure — nothing more.
