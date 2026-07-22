@@ -403,6 +403,7 @@ export type ReasoningStyle =
   | "nvidia"
   | "groq"
   | "openrouter"
+  | "agentrouter"
   | "none";
 
 
@@ -460,6 +461,45 @@ export function buildReasoningPayload(
       if (!enabled) return {};
       const clamped = clampEffort(effort);
       return { reasoning_effort: clamped, reasoning: { effort: clamped } };
+    }
+    case "agentrouter": {
+      // AgentRouter proxies three families, each with a *different* reasoning
+      // contract (verified live against agentrouter.org/v1, 2026-07). We send
+      // only the standard top-level knob each one honours — no redundant
+      // `reasoning` object (none of the routed models read it).
+      const m = (model ?? "").toLowerCase();
+      const clamped = clampEffort(effort);
+      // OpenAI gpt-5.x / o-series: top-level `reasoning_effort`, and it uniquely
+      // supports "minimal". These models can't be fully disabled, so "off"
+      // degrades to the cheapest "minimal" rather than the medium default.
+      if (/(?:^|\/)gpt-5|(?:^|\/)o[134](?:\b|-)/.test(m)) {
+        if (!enabled) return { reasoning_effort: "minimal" };
+        const gptEffort =
+          effort === "none"
+            ? "minimal"
+            : effort === "xhigh"
+              ? "high"
+              : effort; // minimal | low | medium | high
+        return { reasoning_effort: gptEffort };
+      }
+      // Zhipu GLM thinks by DEFAULT; `reasoning_effort` only modulates depth and
+      // cannot turn it off. The one knob that actually disables it on this
+      // gateway is `thinking.type=disabled` — so "off" must send that.
+      if (/glm/.test(m)) {
+        if (!enabled) return { thinking: { type: "disabled" } };
+        return { reasoning_effort: clamped };
+      }
+      // Anthropic Claude: `reasoning_effort` enables extended thinking (the
+      // gateway maps it to a thinking budget). Thinking is OFF by default, so
+      // "off" simply omits the knob. `buildChatBody` floors max_tokens above the
+      // budget so enabling it never trips the gateway's budget precondition.
+      if (/claude/.test(m)) {
+        if (!enabled) return {};
+        return { reasoning_effort: clamped };
+      }
+      // Unknown model routed by AgentRouter → plain OpenAI-compatible behavior.
+      if (!enabled) return {};
+      return { reasoning_effort: clamped };
     }
     case "openrouter":
       if (!enabled) return {};
@@ -637,13 +677,27 @@ export function buildChatBody(options: {
   const defaultMaxTokens = isMinimaxM3 ? 8_192 : reasoningOn ? 8_192 : 4_096;
   const defaultTemperature = isMinimaxM3 ? 1.0 : 0.2;
   const reasoningModel = isOpenAiReasoningModel(options.model);
+  // Claude extended thinking via AgentRouter maps reasoning_effort to an
+  // Anthropic `thinking.budget_tokens`, and the gateway (Bedrock) rejects the
+  // request with HTTP 400 unless `max_tokens > budget_tokens`. Some upstream
+  // nodes enforce this intermittently, so whenever Claude reasoning is enabled
+  // we guarantee a ceiling that clears the largest effort budget (32000 was
+  // verified live to succeed while staying within Opus's output cap). This is a
+  // ceiling, not a forced length — Claude still stops at its natural stop.
+  const claudeThinking =
+    reasoningOn &&
+    options.reasoningStyle === "agentrouter" &&
+    /claude/i.test(options.model);
+  const effectiveMaxTokens = claudeThinking
+    ? Math.max(options.maxTokens ?? defaultMaxTokens, 32_000)
+    : (options.maxTokens ?? defaultMaxTokens);
   const body: Record<string, unknown> = {
     model: options.model,
     messages: toOpenAiMessages(options.messages, options.supportsVision),
     stream: options.stream,
     ...(reasoningModel
-      ? { max_completion_tokens: options.maxTokens ?? defaultMaxTokens }
-      : { max_tokens: options.maxTokens ?? defaultMaxTokens }),
+      ? { max_completion_tokens: effectiveMaxTokens }
+      : { max_tokens: effectiveMaxTokens }),
     // gpt-5.x / o1 / o3 / o4 only accept the default temperature (1) and
     // reject any explicit value — omit the field entirely rather than send
     // our 0.2 default and get a 400.

@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { agentrouterProvider } from "../src/llm/agentrouter.js";
+import {
+  agentrouterProvider,
+  AUTHORIZED_USER_AGENTS,
+} from "../src/llm/agentrouter.js";
 
 describe("AgentRouter model discovery", () => {
   afterEach(() => {
@@ -29,7 +32,7 @@ describe("AgentRouter model discovery", () => {
     const options = fetchCallArgs[1] as RequestInit;
     expect(options.headers).toMatchObject({
       "authorization": "Bearer sk-testkey",
-      "User-Agent": "@openai/codex",
+      "User-Agent": AUTHORIZED_USER_AGENTS[0],
     });
   });
 
@@ -55,6 +58,57 @@ describe("AgentRouter model discovery", () => {
     vi.spyOn(Date, "now").mockReturnValue(time + 10000);
     const result = await agentrouterProvider.listModels!({ apiKey: "sk-testkey" });
     expect(result).toEqual(["claude-haiku-4-5-20251001"]);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("rotates to the next authorized client identity on an unauthorized_client 401", async () => {
+    const seenUas: string[] = [];
+    const fetchMock = vi.fn(async (_url: unknown, init: RequestInit) => {
+      const ua = (init.headers as Record<string, string>)["User-Agent"];
+      seenUas.push(ua);
+      // First identity is rejected by the client gate; the next one works.
+      if (ua === AUTHORIZED_USER_AGENTS[0]) {
+        return new Response(
+          JSON.stringify({
+            error: { message: "unauthorized client detected, contact support" },
+            message: "UNAUTHENTICATED",
+            success: false,
+            type: "unauthorized_client_error",
+          }),
+          { status: 401, headers: { "content-type": "application/json" } },
+        );
+      }
+      return new Response(
+        JSON.stringify({ data: [{ id: "glm-5.2" }, { id: "gpt-5.5" }] }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    // Well past the cache TTL so this forces a real fetch.
+    vi.spyOn(Date, "now").mockReturnValue(baseTime + 100 * 60 * 60 * 1000);
+
+    const result = await agentrouterProvider.listModels!({ apiKey: "sk-testkey" });
+    expect(result).toEqual(["glm-5.2", "gpt-5.5"]);
+    expect(seenUas[0]).toBe(AUTHORIZED_USER_AGENTS[0]);
+    expect(seenUas[1]).toBe(AUTHORIZED_USER_AGENTS[1]);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not rotate on a generic invalid-key 401 (fails fast)", async () => {
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({ error: { message: "invalid api key" } }),
+          { status: 401, headers: { "content-type": "application/json" } },
+        ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    vi.spyOn(Date, "now").mockReturnValue(baseTime + 200 * 60 * 60 * 1000);
+
+    await expect(
+      agentrouterProvider.listModels!({ apiKey: "sk-badkey" }),
+    ).rejects.toThrow();
+    // A bad key must not fan out across every identity.
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });
