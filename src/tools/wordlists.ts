@@ -1,18 +1,51 @@
 /**
  * Locate wordlist files for fuzzing tools. Searches known paths first, then
- * broadens to locate DB, full filesystem, and sudo-elevated search so
+ * broadens to locate DB, full filesystem, and cached-credential sudo search so
  * wordlists are found regardless of install location or OS.
+ *
+ * All external searches run through async execFile (never execFileSync) so a
+ * slow `find /` can never block the render loop, and sudo is only ever invoked
+ * with `-n` (cached credentials) — it must NEVER inherit the TTY to prompt for
+ * a password, which corrupts the OpenTUI screen and steals the keyboard.
  */
-import { execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { existsSync } from "node:fs";
 import { homedir, platform } from "node:os";
 import { join } from "node:path";
 import type { ToolResult } from "../types.js";
 
+const execFileAsync = promisify(execFile);
+
 const IS_WIN = platform() === "win32";
 const IS_MAC = platform() === "darwin";
 function getHome(): string {
   return process.env.HOME || process.env.USERPROFILE || homedir();
+}
+
+/**
+ * Run a capture command without inheriting any std stream. Returns stdout on
+ * success; on non-zero exit (e.g. `find` hitting permission-denied dirs) we
+ * still recover whatever stdout was produced. Never throws.
+ */
+async function runCapture(
+  command: string,
+  argv: string[],
+  timeoutMs: number,
+): Promise<string> {
+  try {
+    const { stdout } = await execFileAsync(command, argv, {
+      timeout: timeoutMs,
+      encoding: "utf8",
+      maxBuffer: 8 * 1024 * 1024,
+      killSignal: "SIGKILL",
+      windowsHide: true,
+    });
+    return stdout ?? "";
+  } catch (error) {
+    const stdout = (error as { stdout?: string } | undefined)?.stdout;
+    return typeof stdout === "string" ? stdout : "";
+  }
 }
 
 // --- Known roots per OS ---
@@ -97,109 +130,88 @@ function buildFindNameExpr(filenames: string[]): string[] {
   return filenames.flatMap((f, i) => (i === 0 ? ["-name", f] : ["-o", "-name", f]));
 }
 
-// Quiet directory search: capped depth, timeout, stderr suppressed.
-function searchRoot(root: string, filenames: string[], maxDepth: number): string[] {
+// Quiet directory search: capped depth, timeout, stderr never inherited.
+async function searchRoot(root: string, filenames: string[], maxDepth: number): Promise<string[]> {
   if (!existsSync(root)) return [];
-  try {
-    if (IS_WIN) {
-      const namePattern = filenames.map((f) => `'${f.replace(/'/g, "''")}'`).join(",");
-      const script =
-        `Get-ChildItem -Path '${root.replace(/'/g, "''")}' -Recurse -File ` +
-        `-Depth ${maxDepth} -ErrorAction SilentlyContinue ` +
-        `| Where-Object { @(${namePattern}) -contains $_.Name } ` +
-        `| Select-Object -First 20 -ExpandProperty FullName`;
-      const out = execFileSync("powershell.exe", ["-NoProfile", "-Command", script], {
-        timeout: 8_000, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"],
-      });
-      return parseLines(out);
-    }
-    const nameExpr = buildFindNameExpr(filenames);
-    const out = execFileSync(
-      "find", [root, "-maxdepth", String(maxDepth), "-type", "f", "(", ...nameExpr, ")"],
-      { timeout: 8_000, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+  if (IS_WIN) {
+    const namePattern = filenames.map((f) => `'${f.replace(/'/g, "''")}'`).join(",");
+    const script =
+      `Get-ChildItem -Path '${root.replace(/'/g, "''")}' -Recurse -File ` +
+      `-Depth ${maxDepth} -ErrorAction SilentlyContinue ` +
+      `| Where-Object { @(${namePattern}) -contains $_.Name } ` +
+      `| Select-Object -First 20 -ExpandProperty FullName`;
+    return parseLines(
+      await runCapture("powershell.exe", ["-NoProfile", "-Command", script], 8_000),
     );
-    return parseLines(out);
-  } catch {
-    return [];
   }
+  const nameExpr = buildFindNameExpr(filenames);
+  return parseLines(
+    await runCapture(
+      "find",
+      [root, "-maxdepth", String(maxDepth), "-type", "f", "(", ...nameExpr, ")"],
+      8_000,
+    ),
+  );
 }
 
 // Query the locate/mlocate DB — fast, no root needed. POSIX only.
-function searchLocate(filenames: string[]): string[] {
+async function searchLocate(filenames: string[]): Promise<string[]> {
   if (IS_WIN) return [];
   const hits: string[] = [];
   for (const f of filenames) {
-    try {
-      const out = execFileSync("locate", ["-i", "-l", "20", f], {
-        timeout: 5_000, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"],
-      });
-      hits.push(...parseLines(out));
-    } catch {
-      // locate not installed or DB not built — skip silently.
-    }
+    hits.push(...parseLines(await runCapture("locate", ["-i", "-l", "20", f], 5_000)));
     if (hits.length > 0) break;
   }
   return hits;
 }
 
 // Full filesystem search. POSIX: find /, Windows: all drive letters.
-function searchFullFilesystem(filenames: string[]): string[] {
-  try {
-    if (IS_WIN) {
-      const namePattern = filenames.map((f) => `'${f.replace(/'/g, "''")}'`).join(",");
-      // Discover available drive letters
-      const drivesRaw = execFileSync(
-        "powershell.exe",
-        ["-NoProfile", "-Command", "(Get-PSDrive -PSProvider FileSystem).Root -join ','"],
-        { timeout: 3_000, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
-      );
-      const drives = parseLines(drivesRaw.replace(/,/g, "\n"));
-      if (drives.length === 0) return [];
-      const paths = drives.map((d) => `'${d.replace(/'/g, "''")}'`).join(",");
-      const script =
-        `Get-ChildItem -Path ${paths} -Recurse -File ` +
-        `-Depth 6 -ErrorAction SilentlyContinue ` +
-        `| Where-Object { @(${namePattern}) -contains $_.Name } ` +
-        `| Select-Object -First 20 -ExpandProperty FullName`;
-      const out = execFileSync("powershell.exe", ["-NoProfile", "-Command", script], {
-        timeout: 15_000, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"],
-      });
-      return parseLines(out);
-    }
-    const nameExpr = buildFindNameExpr(filenames);
-    const out = execFileSync(
-      "find", ["/", "-maxdepth", "8", "-type", "f", "(", ...nameExpr, ")"],
-      { timeout: 15_000, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+async function searchFullFilesystem(filenames: string[]): Promise<string[]> {
+  if (IS_WIN) {
+    const namePattern = filenames.map((f) => `'${f.replace(/'/g, "''")}'`).join(",");
+    const drives = parseLines(
+      (
+        await runCapture(
+          "powershell.exe",
+          ["-NoProfile", "-Command", "(Get-PSDrive -PSProvider FileSystem).Root -join ','"],
+          3_000,
+        )
+      ).replace(/,/g, "\n"),
     );
-    return parseLines(out);
-  } catch {
-    return [];
+    if (drives.length === 0) return [];
+    const paths = drives.map((d) => `'${d.replace(/'/g, "''")}'`).join(",");
+    const script =
+      `Get-ChildItem -Path ${paths} -Recurse -File ` +
+      `-Depth 6 -ErrorAction SilentlyContinue ` +
+      `| Where-Object { @(${namePattern}) -contains $_.Name } ` +
+      `| Select-Object -First 20 -ExpandProperty FullName`;
+    return parseLines(
+      await runCapture("powershell.exe", ["-NoProfile", "-Command", script], 15_000),
+    );
   }
+  const nameExpr = buildFindNameExpr(filenames);
+  return parseLines(
+    await runCapture(
+      "find",
+      ["/", "-maxdepth", "8", "-type", "f", "(", ...nameExpr, ")"],
+      15_000,
+    ),
+  );
 }
 
-// Sudo-elevated find /. Tries non-interactive first (cached creds), then
-// interactive (prompts for password via terminal). POSIX only.
-function searchSudo(filenames: string[]): string[] {
+/**
+ * Cached-credential sudo search only. We try `sudo -n find /` which succeeds
+ * silently when a sudo timestamp is already valid and fails instantly (no
+ * prompt) otherwise. We deliberately do NOT fall back to an interactive
+ * `sudo find`: inheriting the TTY makes sudo print "Password:" straight to the
+ * terminal, corrupting the TUI, freezing the keyboard, and never routing
+ * through clai's secure modal. POSIX only.
+ */
+async function searchSudo(filenames: string[]): Promise<string[]> {
   if (IS_WIN) return [];
   const nameExpr = buildFindNameExpr(filenames);
   const findArgs = ["/", "-maxdepth", "8", "-type", "f", "(", ...nameExpr, ")"];
-  // Try non-interactive sudo first (succeeds if creds are cached).
-  try {
-    const out = execFileSync("sudo", ["-n", "find", ...findArgs], {
-      timeout: 15_000, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"],
-    });
-    const hits = parseLines(out);
-    if (hits.length > 0) return hits;
-  } catch { /* creds not cached — fall through to interactive */ }
-  // Interactive sudo: inherit stdin so the terminal can prompt for password.
-  try {
-    const out = execFileSync("sudo", ["find", ...findArgs], {
-      timeout: 30_000, encoding: "utf8", stdio: ["inherit", "pipe", "ignore"],
-    });
-    return parseLines(out);
-  } catch {
-    return [];
-  }
+  return parseLines(await runCapture("sudo", ["-n", "find", ...findArgs], 15_000));
 }
 
 
@@ -226,7 +238,7 @@ export async function wordlistFind(args: WordlistFindArgs): Promise<ToolResult> 
 
   // Pass 1: well-known install locations (shallow, fast).
   for (const root of roots) {
-    const hits = searchRoot(root, filenames, 6);
+    const hits = await searchRoot(root, filenames, 6);
     if (hits.length > 0) return found(hits, "Found in a known wordlist location");
   }
 
@@ -253,20 +265,20 @@ export async function wordlistFind(args: WordlistFindArgs): Promise<ToolResult> 
   ].filter((r) => !roots.includes(r));
 
   for (const root of broaderRoots) {
-    const hits = searchRoot(root, filenames, 4);
+    const hits = await searchRoot(root, filenames, 4);
     if (hits.length > 0) return found(hits, "Found in user directory");
   }
 
   // Pass 3: locate database (fast indexed search, POSIX only).
-  const locateHits = searchLocate(filenames);
+  const locateHits = await searchLocate(filenames);
   if (locateHits.length > 0) return found(locateHits, "Found via locate database");
 
   // Pass 4: full filesystem search (find / or all Windows drives).
-  const fsHits = searchFullFilesystem(filenames);
+  const fsHits = await searchFullFilesystem(filenames);
   if (fsHits.length > 0) return found(fsHits, "Found via full filesystem search");
 
-  // Pass 5: sudo-elevated search (POSIX only, non-interactive).
-  const sudoHits = searchSudo(filenames);
+  // Pass 5: cached-credential sudo search (POSIX only, never prompts).
+  const sudoHits = await searchSudo(filenames);
   if (sudoHits.length > 0) return found(sudoHits, "Found via elevated filesystem search");
 
   return {
@@ -274,7 +286,7 @@ export async function wordlistFind(args: WordlistFindArgs): Promise<ToolResult> 
     output:
       `No wordlist matching "${query}" found after searching the entire filesystem.\n` +
       `Install one: pkg.install seclists (Linux/macOS) or clone https://github.com/danielmiessler/SecLists.\n` +
-      `If running without root, try: sudo clai`,
+      `If credentials are not cached, an elevated search was skipped (clai never opens a raw sudo prompt).`,
     exitCode: 1,
   };
 }

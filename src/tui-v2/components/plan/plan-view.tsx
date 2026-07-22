@@ -375,12 +375,16 @@ function TaskRow(props: {
       : index % 2 === 0
         ? theme.rowB
         : theme.statusBackground;
-  const title = cleanTaskTitle(task);
+  const title = `${task.parentTaskId ? "↳ " : ""}${cleanTaskTitle(task)}`;
   // Budget leaves room for rail (1) + padding + glyph.
   const titleBudget = Math.max(8, width - 5);
   const titleLines = wrapPlanText(title, titleBudget);
-  const noteLines = task.note?.trim()
-    ? wrapPlanText(task.note.trim(), Math.max(8, width - 6))
+  const jobLabel = task.jobId
+    ? `job=${task.jobId}${task.processId ? ` pid=${task.processId}` : ""}`
+    : undefined;
+  const noteText = [jobLabel, task.note?.trim()].filter(Boolean).join(" · ");
+  const noteLines = noteText
+    ? wrapPlanText(noteText, Math.max(8, width - 6))
     : [];
 
   const firstTitle = titleLines[0] ?? "";

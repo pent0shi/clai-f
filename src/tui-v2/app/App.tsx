@@ -24,6 +24,7 @@ import { TranscriptView } from "../components/transcript/transcript-view.js";
 import { PlanView } from "../components/plan/plan-view.js";
 import { OverlayHost } from "../components/overlay/overlay-host.js";
 import { QueuePanel } from "../components/queue/queue-panel.js";
+import { ResponderPanel } from "../components/jobs/jobs-panel.js";
 import { chordFromKeyEvent } from "../actions/chord-from-key.js";
 import { usePlan } from "../state/use-plan.js";
 import { useOverlayState } from "../state/use-overlay.js";
@@ -47,6 +48,10 @@ import { setDefaultMode } from "../../store/config.js";
 import { modeSwitchSummary, nextMode } from "./mode-cycle.js";
 
 const CTRL_C_QUIT_WINDOW_MS = 1500;
+const ESC_CANCEL_WINDOW_MS = 1500;
+/** Collapse App's global handler and the composer handler firing for one
+ *  physical Esc into a single logical press. Well under a human double-tap. */
+const ESC_SAME_PRESS_MS = 80;
 
 /** Floating plan panel width — kept in sync with the overlay box style. */
 function planOverlayWidth(termWidth: number): number {
@@ -64,6 +69,8 @@ export function App(): ReactNode {
   const overlay = useOverlayState(services.overlay);
   const transcript = useTranscriptState(services.transcript);
   const lastCtrlC = useRef(0);
+  const lastEscape = useRef(0);
+  const lastEscapeHandledAt = useRef(0);
   const seenPlanKey = useRef<string | undefined>(undefined);
   /** Seed the composer when the user clicks Edit on a queued prompt. */
   const [composerSeed, setComposerSeed] = useState<
@@ -146,6 +153,7 @@ export function App(): ReactNode {
     if (key.eventType === "release") return;
 
     const chord = chordFromKeyEvent(key);
+    if (chord === "escape" && key.eventType === "repeat") return;
 
     // Password / confirm overlays used to swallow ALL global keys (early return
     // when overlay !== none). Then Ctrl+C only aborted via SIGINT and left the
@@ -177,17 +185,33 @@ export function App(): ReactNode {
           );
           return;
         }
-        // Esc: dismiss prompt + abort turn; never quit.
-        if (services.session.getState().running) {
-          services.session.abort();
-        }
+        // Esc: first press dismisses/arms; second press cancels the live
+        // turn, queued prompts, and every session-owned Responder job.
+        handleEscapeCancellation(dismissed);
         return;
       }
       // Typing / y-n / etc. handled by the modal's own useKeyboard.
       return;
     }
 
-    if (overlay.kind !== "none") return;
+    if (overlay.kind !== "none") {
+      if (chord === "escape") {
+        key.preventDefault();
+        services.overlay.close();
+        handleEscapeCancellation(true);
+      }
+      return;
+    }
+
+    // Esc from the transcript region binds to selection.clear, which shadowed
+    // the global app.cancel — so double-Esc could never cancel a turn/queue/
+    // Responder jobs unless the composer had focus. Clear an active selection
+    // first; otherwise run the same double-Esc cancel every other region gets.
+    if (chord === "escape" && focusContext === "transcript" && !services.selection.hasSelection()) {
+      key.preventDefault();
+      handleEscapeCancellation(false);
+      return;
+    }
 
     // Tab belongs to the completion menu while the composer is active. The
     // previous global focus binding consumed it first, which made `/mod` + Tab
@@ -197,13 +221,8 @@ export function App(): ReactNode {
     if (!action) return;
     switch (action) {
       case "app.cancel":
-        // Esc: abort a live turn only. Never exit — multi-Esc used to quit
-        // because it shared the double-press path with Ctrl+C.
         key.preventDefault();
-        services.overlay.cancelBlockingPrompt();
-        if (services.session.getState().running) {
-          services.session.abort();
-        }
+        handleEscapeCancellation(services.overlay.cancelBlockingPrompt());
         break;
       case "app.interrupt": {
         // Ctrl+C: first press aborts if running (and arms quit); second press
@@ -372,6 +391,65 @@ export function App(): ReactNode {
   // Clicking the transcript leaves focus there so ↑/↓ scroll the chat instead
   // of walking prompt history in the textarea.
   const composerFocused = overlay.kind === "none" && focusContext === "composer";
+
+  function handleEscapeCancellation(dismissed: boolean): void {
+    const now = Date.now();
+    // One physical Esc can reach both this global handler and the composer's
+    // handler; collapse those into a single logical press.
+    if (
+      lastEscapeHandledAt.current > 0 &&
+      now - lastEscapeHandledAt.current < ESC_SAME_PRESS_MS
+    ) {
+      return;
+    }
+    lastEscapeHandledAt.current = now;
+    const doublePress =
+      lastEscape.current > 0 &&
+      now - lastEscape.current < ESC_CANCEL_WINDOW_MS;
+    const sessionState = services.session.getState();
+    const sessionId = services.session.sessionId;
+    const hasResponderWork =
+      services.ports.jobs.running(sessionId).length > 0 ||
+      services.ports.jobs.pendingNotifications(sessionId).length > 0;
+    const hasCancelableWork =
+      sessionState.running || sessionState.queued.length > 0 || hasResponderWork;
+
+    if (doublePress && hasCancelableWork) {
+      lastEscape.current = 0;
+      services.overlay.cancelBlockingPrompt();
+      void services.session.cancelAll().then((result) => {
+        const text = result.ok
+          ? "Cancelled turn, queue, and Responder jobs"
+          : "Cancellation completed with job stop failures — open Jobs for details";
+        if (result.ok) {
+          notify(services, text, {
+            key: "escape-cancel-all",
+            durationMs: 2400,
+          });
+        } else {
+          notifyWarn(services, text, {
+            key: "escape-cancel-all",
+            durationMs: 3200,
+          });
+        }
+      });
+      return;
+    }
+
+    lastEscape.current = now;
+    if (hasCancelableWork) {
+      notifyWarn(
+        services,
+        `${dismissed ? "Prompt dismissed · " : ""}Esc again to cancel turn + queue + Responder jobs`,
+        { key: "escape-cancel-all", durationMs: ESC_CANCEL_WINDOW_MS },
+      );
+    } else if (dismissed) {
+      notify(services, "Closed · Esc", {
+        key: "escape-dismiss",
+        durationMs: 1000,
+      });
+    }
+  }
 
   /**
    * Wheel outside focused regions that own their own scroll (plan pane)
@@ -580,6 +658,18 @@ export function App(): ReactNode {
           docked
         />
 
+        <ResponderPanel
+          services={services}
+          theme={theme}
+          width={contentInnerWidth}
+          blockingOverlay={
+            overlay.kind === "secret" ||
+            overlay.kind === "confirm" ||
+            overlay.kind === "scope-editor" ||
+            overlay.kind === "keys-editor"
+          }
+        />
+
         {/* Completion menu + input live here; menu grows upward into flex space. */}
         <ComposerEditor
           services={services}
@@ -589,6 +679,7 @@ export function App(): ReactNode {
           focused={composerFocused}
           maxSuggestions={completionRows}
           running={session.running}
+          onEscapeCancel={() => handleEscapeCancellation(false)}
           seedDraft={composerSeed}
         />
 

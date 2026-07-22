@@ -22,6 +22,10 @@ import { sanitizeAssistantText } from "../ui/ansi-box.js";
 import { randomUUID } from "node:crypto";
 import { jobManager, type BackgroundJob } from "../tools/jobs.js";
 import {
+  responderContextMessage,
+  upsertResponderContextMessage,
+} from "./responder-context.js";
+import {
   agentModeDirective,
   planModeDirective,
   renderAgentSystemPrompt,
@@ -41,6 +45,30 @@ import {
   scopeHint,
   scopeTargetForToolCall,
 } from "../safety/classifier.js";
+
+/**
+ * Scope/engagement classification runs on every tool call and parses
+ * model-supplied arguments (URLs, hosts, commands). A malformed argument must
+ * never throw out of classification and abort the whole turn — degrade to
+ * "no target / no action" so the normal permission path still applies.
+ */
+function safeScopeTargetForToolCall(call: ToolCall): string | undefined {
+  try {
+    return scopeTargetForToolCall(call);
+  } catch {
+    return undefined;
+  }
+}
+
+function safeEngagementActionForToolCall(
+  call: ToolCall,
+): ReturnType<typeof engagementActionForToolCall> {
+  try {
+    return engagementActionForToolCall(call);
+  } catch {
+    return undefined;
+  }
+}
 import {
   availableToolNames,
   normalizeToolCall,
@@ -113,6 +141,7 @@ import {
   loadPlan,
   savePlan,
   markTask,
+  appendPlanTask,
   readyPlanTasks,
   isPlanTerminal,
   isPlanSuccessful,
@@ -974,6 +1003,26 @@ export async function runAgentTurn(
       userMessage,
     ];
     liveMessages = messages;
+    const responderWakeTurn = prompt.startsWith("Responder completion ready (");
+    const refreshResponderInbox = (): void => {
+      const pending = responderWakeTurn
+        ? jobManager
+            .getPendingNotifications(session.sessionId)
+            .filter(
+              (notification) =>
+                notification.responder && Boolean(notification.deliveredAt),
+            )
+        : [];
+      upsertResponderContextMessage(
+        messages,
+        responderContextMessage({
+          running: jobManager
+            .getRunningJobs(session.sessionId)
+            .filter((job) => job.responder),
+          pending,
+        }),
+      );
+    };
     /** Assigned after session flags exist — see below. */
     let refreshSessionState: (
       plan?: SessionPlan | null | undefined,
@@ -1134,7 +1183,9 @@ export async function runAgentTurn(
 
     const reconcileOpenTaskBeforeFinalizing = async (): Promise<SessionPlan | undefined> => {
       const plan = await loadPlan(session.sessionId).catch(() => undefined);
-      const open = plan?.tasks.find((task) => task.state === "in_progress");
+      const open = plan?.tasks.find(
+        (task) => task.state === "in_progress" && !task.responderOwned,
+      );
       if (!plan || !open) return plan;
       const gate = completionGateForTask(plan, open.id);
       if (!gate.ok) return plan;
@@ -1207,9 +1258,11 @@ export async function runAgentTurn(
       const pm =
         p?.meta?.packageManager ??
         (root ? detectPackageManager(root) : undefined);
-      const open = p?.tasks.find((t) => t.state === "in_progress");
+      const open = p?.tasks.find(
+        (task) => task.state === "in_progress" && !task.responderOwned,
+      );
       const pending = p?.tasks
-        .filter((t) => t.state === "pending")
+        .filter((task) => task.state === "pending" && !task.responderOwned)
         .map((t) => `[${t.id}] ${t.title}`);
       const done = p?.tasks
         .filter((t) => t.state === "done" || t.state === "skipped")
@@ -1466,7 +1519,11 @@ export async function runAgentTurn(
         };
       }
 
-      if (call.name === "plan.create" || call.name === "task.update") {
+      if (
+        call.name === "plan.create" ||
+        call.name === "task.add" ||
+        call.name === "task.update"
+      ) {
         // Evidence gate: refuse done until at least one successful work tool
         // ran under this task (model must see results and be satisfied).
         if (call.name === "task.update") {
@@ -1757,10 +1814,12 @@ export async function runAgentTurn(
         );
         if (livePlanForGate) {
           const unfinished = livePlanForGate.tasks.some(
-            (t) => t.state === "pending" || t.state === "in_progress",
+            (task) =>
+              !task.responderOwned &&
+              (task.state === "pending" || task.state === "in_progress"),
           );
           const inProgress = livePlanForGate.tasks.find(
-            (t) => t.state === "in_progress",
+            (task) => task.state === "in_progress" && !task.responderOwned,
           );
           if (unfinished && !inProgress) {
             // tool.check / fs.list preflight: allow without auto-opening a task
@@ -1893,10 +1952,10 @@ export async function runAgentTurn(
         alreadyPrintedIds.add(toolEventId);
       }
 
-      const scopeTarget = scopeTargetForToolCall(call);
+      const scopeTarget = safeScopeTargetForToolCall(call);
       const engagementAction =
         pentestSession || isPentestToolCall(call) || Boolean(scope)
-          ? engagementActionForToolCall(call)
+          ? safeEngagementActionForToolCall(call)
           : undefined;
       const engagementDecision = engagementAction
         ? evaluateEngagementAction(scope, engagementAction)
@@ -2075,7 +2134,7 @@ export async function runAgentTurn(
         () => undefined,
       );
       dispatchedTaskId = planAtDispatch?.tasks.find(
-        (task) => task.state === "in_progress",
+        (task) => task.state === "in_progress" && !task.responderOwned,
       )?.id;
       if (!dispatchedTaskId && planAtDispatch?.kind === "pentest") {
         const candidate = pickPendingTaskForToolCall(
@@ -2214,6 +2273,12 @@ export async function runAgentTurn(
           confirmed: true,
           userPrompt: prompt,
           sessionId: session.sessionId,
+          ...(dispatchedTaskId ? { taskId: dispatchedTaskId } : {}),
+          wakeOnCompletion: true,
+          monitor: {
+            toolName: call.name,
+            toolEventId,
+          },
           ...(engagementAction && scope
             ? {
               engagementAuthorization: {
@@ -2477,6 +2542,120 @@ export async function runAgentTurn(
             `project root → ${fromScaffold}`,
             chalk.dim(`  ℹ project root set to ${fromScaffold}\n`),
           );
+        }
+      }
+
+      if (result.backgroundJob) {
+        const durableJob = jobManager.getJob(result.backgroundJob.id);
+        // Responder linkage is opt-in: only jobs launched with responder:true
+        // become fire-and-forget plan subtasks that auto-wake on completion.
+        // Plain background jobs stay pollable (shell.jobs/shell.tail) as before.
+        if (durableJob?.responder) {
+        const livePlan = await loadPlan(session.sessionId).catch(
+          () => undefined,
+        );
+        let linkedTaskId = dispatchedTaskId;
+        let linkedParentTaskId: string | undefined;
+        let responderTaskId: string | undefined;
+        if (durableJob && livePlan) {
+          const existing = livePlan.tasks.find(
+            (task) => task.jobId === durableJob.id,
+          );
+          const parentTaskId = dispatchedTaskId && livePlan.tasks.some(
+            (task) => task.id === dispatchedTaskId,
+          )
+            ? dispatchedTaskId
+            : undefined;
+          const terminalState =
+            durableJob.status === "exited"
+              ? "done"
+              : durableJob.status === "failed" ||
+                  durableJob.status === "killed" ||
+                  durableJob.status === "lost"
+                ? "failed"
+                : "in_progress";
+          const note =
+            `job=${durableJob.id} pid=${durableJob.pid ?? "?"} status=${durableJob.status} ` +
+            `artifact=${durableJob.stdoutArtifact}`;
+          const responderTask = existing ?? appendPlanTask(livePlan, {
+            title: `Responder · ${durableJob.name ?? durableJob.commandDisplay.slice(0, 96)}`,
+            state: terminalState,
+            note,
+            dependencies: [],
+            resourceLocks: [],
+            parentTaskId,
+            jobId: durableJob.id,
+            processId: durableJob.pid,
+            responderOwned: true,
+          });
+          responderTask.state = terminalState;
+          responderTask.note = note;
+          responderTask.jobId = durableJob.id;
+          responderTask.processId = durableJob.pid;
+          responderTask.responderOwned = true;
+          if (parentTaskId) responderTask.parentTaskId = parentTaskId;
+          if (isPlanTerminal(livePlan)) {
+            livePlan.status = isPlanSuccessful(livePlan)
+              ? "completed"
+              : "abandoned";
+          } else if (livePlan.status !== "draft") {
+            livePlan.status = "in_progress";
+          }
+          let responderPlanSaved = false;
+          try {
+            await savePlan(livePlan);
+            responderPlanSaved = true;
+          } catch {
+            writeNotice(
+              "warn",
+              `Responder job ${durableJob.id} started, but its plan subtask could not be persisted`,
+              chalk.yellow(
+                `  ⚠ job ${durableJob.id} is running, but task linkage persistence failed\n`,
+              ),
+            );
+          }
+          if (responderPlanSaved) {
+            linkedTaskId = responderTask.id;
+            linkedParentTaskId = parentTaskId;
+            responderTaskId = responderTask.id;
+            pendingSessionStatePlan = livePlan;
+            writePlanUpdate(livePlan, renderPlanForTerminal(livePlan) + "\n");
+          }
+        }
+        if (durableJob) {
+          const linkedJob = jobManager.linkJob(durableJob.id, {
+            ...(linkedTaskId ? { taskId: linkedTaskId } : {}),
+            ...(linkedParentTaskId
+              ? { parentTaskId: linkedParentTaskId }
+              : {}),
+            wakeOnCompletion: true,
+            responder: true,
+            monitor: {
+              ...(durableJob.monitor ?? {}),
+              toolName: call.name,
+              toolEventId,
+            },
+          });
+          if (!linkedJob) {
+            writeNotice(
+              "warn",
+              `Responder job ${durableJob.id} started, but durable task linkage will be retried on completion`,
+              chalk.yellow(
+                `  ⚠ job ${durableJob.id} is running, but durable task linkage needs recovery\n`,
+              ),
+            );
+          } else if (responderTaskId) {
+            result = {
+              ...result,
+              output:
+                `${result.output}\nResponder linked job ${durableJob.id} to subtask [${responderTaskId}]` +
+                `${linkedParentTaskId ? ` under [${linkedParentTaskId}]` : ""}. ` +
+                "This child subtask advances on its own from the real process result — do not mark, poll, or wait on it. " +
+                "Mark your current launch step done and move to the next task now; do NOT shell.tail/shell.jobs/sleep to watch it. " +
+                "The Responder delivers the completion into your context automatically when it is ready.",
+            };
+          }
+        }
         }
       }
 
@@ -2866,7 +3045,7 @@ export async function runAgentTurn(
       force = false,
     ): Promise<void> {
       const beforeTokens = estimateNextRequestTokens(messages);
-      // E1: auto-compact trigger (default 100k, matches hard ceiling).
+      // E1: auto-compact trigger (default 72k soft; hard ceiling 100k).
       const compactTrigger = autoCompactTriggerTokens();
       if (!force && beforeTokens < compactTrigger) return;
       if (messages.length <= AUTO_COMPACT_KEEP_RECENT + 2) return;
@@ -3055,6 +3234,11 @@ export async function runAgentTurn(
       } else {
 
         await maybeAutoCompact("auto-token-budget");
+        // Safe boundary: no assistant tool-call group is open here. Refresh the
+        // durable Responder inbox immediately before every provider request so
+        // completions arriving mid-turn are visible without corrupting native
+        // tool protocol or forcing a separate busy-wait loop.
+        refreshResponderInbox();
 
         const streamLabel =
           step === 0 ? "waiting for model" : `step ${step + 1}`;
@@ -4147,7 +4331,9 @@ export async function runAgentTurn(
               () => undefined,
             );
             const unfinished = livePlan?.tasks.filter(
-              (t) => t.state === "pending" || t.state === "in_progress",
+              (task) =>
+                !task.responderOwned &&
+                (task.state === "pending" || task.state === "in_progress"),
             );
             if (livePlan && unfinished && unfinished.length > 0) {
               const next = unfinished[0]!;

@@ -1,8 +1,21 @@
-import type { BackgroundJob } from "../../tools/jobs.js";
+import type {
+  BackgroundJob,
+  JobLinkMetadata,
+  JobManagerListener,
+  ResponderNotification,
+  StartJobOptions,
+} from "../../tools/jobs.js";
 import type { ToolResult } from "../../types.js";
 
-export type { BackgroundJob };
-
+export type {
+  BackgroundJob,
+  JobLinkMetadata,
+  JobManagerChange,
+  JobManagerListener,
+  JobMonitorMetadata,
+  ResponderNotification,
+  StartJobOptions,
+} from "../../tools/jobs.js";
 
 export interface JobsPort {
   list(sessionId?: string): ToolResult;
@@ -11,12 +24,12 @@ export interface JobsPort {
   get(id: string): BackgroundJob | undefined;
   tail(id: string, bytes?: number): Promise<ToolResult>;
   stop(id: string): Promise<ToolResult>;
-  start(
-    command: string,
-    options?: {
-      cwd?: string | undefined;
-      name?: string | undefined;
-      ownerSessionId?: string | undefined;
-    },
-  ): Promise<ToolResult>;
+  start(command: string, options?: StartJobOptions): Promise<ToolResult>;
+  pendingNotifications(sessionId?: string): ResponderNotification[];
+  markDelivered(notificationId: string): boolean;
+  markAnalyzed(notificationId: string): boolean;
+  acknowledge(notificationId: string): boolean;
+  subscribe(listener: JobManagerListener): () => void;
+  linkJob(jobId: string, metadata: JobLinkMetadata): BackgroundJob | undefined;
+  cancelAll(sessionId: string): Promise<ToolResult>;
 }

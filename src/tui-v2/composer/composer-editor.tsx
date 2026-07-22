@@ -75,6 +75,12 @@ export interface ComposerEditorProps {
   /** Visual region focus from the shell (Tab cycle). */
   readonly focused: boolean;
   /**
+   * Esc while a turn runs: arm/cancel via the shared double-Esc handler
+   * (shows "Esc again to cancel", second press cancels turn + queue + jobs).
+   * Owned by App so the double-press window is shared with the global handler.
+   */
+  readonly onEscapeCancel?: (() => void) | undefined;
+  /**
    * When set (e.g. Edit on a queued prompt), replace the input with this
    * draft. `token` must change each time so the same text can be re-applied.
    */
@@ -191,22 +197,9 @@ export function ComposerEditor(props: ComposerEditorProps): ReactNode {
     if (key.eventType === "release") return;
     const chord = chordFromKeyEvent(key);
 
-    // Esc aborts a live turn from any region (menu closed). Ctrl+C is owned
-    // by App (`app.interrupt`: abort then double-press exit) so we must not
-    // swallow it here — otherwise the quit arm never arms and exit needs
-    // three presses.
+    // Escape and Ctrl+C are owned by App so double-press cancellation and
+    // abort-then-quit semantics remain consistent across every focus region.
     if (imagePaste.handleChord(chord, overlay.kind, key)) return;
-
-    if (
-      overlay.kind === "none" &&
-      menuKindRef.current === "none" &&
-      chord === "escape" &&
-      services.session.getState().running
-    ) {
-      key.preventDefault();
-      services.session.abort();
-      return;
-    }
 
     if (overlay.kind !== "none") return;
 
@@ -262,6 +255,7 @@ export function ComposerEditor(props: ComposerEditorProps): ReactNode {
     if (!shouldOwnKeyboard) return;
     const text = stripAnsiSequences(decodePasteBytes(event.bytes));
     if (imagePaste.handlePaste(text, event)) return;
+    if (imagePaste.handleDroppedImages(text, event)) return;
     if (!isLargePaste(text)) return;
     event.preventDefault();
     const entry = pasteRegistry.current.register(text);
@@ -556,17 +550,18 @@ export function ComposerEditor(props: ComposerEditorProps): ReactNode {
     const current = menuRef.current;
     const accepted = acceptedSlashRef.current;
 
-    // Abort a live turn on Esc from the textarea path (OpenTUI can swallow ESC
-    // before App's global handler). Ctrl+C is owned by App.interrupt so the
-    // double-press exit path can arm on the same first press that aborts.
-    // Menu open still wins for dismiss-menu.
+    // Esc while a turn runs: arm the double-Esc cancel via App's shared
+    // handler (first press shows "Esc again to cancel", second cancels turn +
+    // queue + Responder jobs). Handled here because OpenTUI can swallow ESC
+    // before App's global handler when the textarea owns focus. Ctrl+C stays
+    // owned by App.interrupt. Menu open still wins for dismiss-menu.
     if (
       current.kind === "none" &&
       chord === "escape" &&
       services.session.getState().running
     ) {
       key.preventDefault();
-      services.session.abort();
+      props.onEscapeCancel?.();
       return;
     }
 

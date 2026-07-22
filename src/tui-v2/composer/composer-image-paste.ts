@@ -1,5 +1,8 @@
 import { captureClipboardImage } from "../../attachments/clipboard-image.js";
-import { formatAttachmentReference } from "../../ui/mentions.js";
+import {
+  formatAttachmentReference,
+  stabilizeDroppedImagesInText,
+} from "../../ui/mentions.js";
 import type { AppServices } from "../bootstrap/composition-root.js";
 import { notify } from "../notify.js";
 
@@ -25,6 +28,7 @@ interface ComposerImagePaste {
     key: PreventableEvent,
   ): boolean;
   handlePaste(text: string, event: PreventableEvent): boolean;
+  handleDroppedImages(text: string, event: PreventableEvent): boolean;
 }
 
 const activePastes = new WeakSet<AppServices>();
@@ -77,6 +81,28 @@ export function createComposerImagePaste(
       if (text.trim()) return false;
       event.preventDefault();
       pasteImage();
+      return true;
+    },
+    handleDroppedImages(text, event) {
+      if (!text.trim()) return false;
+      const { text: rewritten, images } = stabilizeDroppedImagesInText(text);
+      if (images.length === 0) return false;
+      event.preventDefault();
+      const editor = editorRef.current;
+      if (!editor) return true;
+      const before = editor.plainText[editor.cursorOffset - 1] ?? "";
+      const leadingSpace = before && !/\s/.test(before) ? " " : "";
+      editor.insertText(`${leadingSpace}${rewritten} `);
+      services.focus.focusRegion("composer");
+      editor.focus();
+      notify(
+        services,
+        images.length > 1
+          ? `${images.length} images attached`
+          : "Image attached",
+        { key: "image-paste", durationMs: 1600 },
+      );
+      queueMicrotask(refresh);
       return true;
     },
   };

@@ -92,6 +92,7 @@ import {
 import { isCtrlC, isCtrlO, isCtrlP, isCtrlT, isEscape } from "./ui/keys.js";
 import { imageAttachmentPaths } from "./ui/mentions.js";
 import { imageOcr } from "./tools/image.js";
+import { jobManager } from "./tools/jobs.js";
 import {
   handleDraftPlanDecision,
   IMPLEMENT_DIRECTIVE,
@@ -341,17 +342,14 @@ async function withAbortableInput<T>(
   const ac = new AbortController();
   const abortFromRawData = (chunk: Buffer | string): void => {
     const text = typeof chunk === "string" ? chunk : chunk.toString("utf8");
-    if (text.includes("\x03") || text === "\x1b") {
-      ac.abort();
-    }
+    if (text.includes("\x03")) ac.abort();
   };
 
   currentAbortController = ac;
   if (input.isTTY) input.setRawMode(true);
   input.resume();
-  // readline's keypress normalization is not equally reliable in every
-  // terminal (notably Windows PowerShell after raw-mode transitions). Watch
-  // raw bytes as a fallback so Ctrl+C and a bare ESC can always abort a run.
+  // Raw Ctrl+C fallback for terminals whose keypress normalization is
+  // unreliable. Escape is handled by the REPL keypress double-press gate.
   input.on("data", abortFromRawData);
   try {
     return await run(ac.signal);
@@ -387,7 +385,7 @@ function help(): string {
   return (
     lines +
     chalk.dim(
-      "\n\n  ESC abort  │  Ctrl+C clears input (twice to exit)  │  Ctrl+T toggle thinking  │  Ctrl+O opens tool output pager (q to close)",
+      "\n\n  ESC twice cancels turn + jobs  │  Ctrl+C clears input (twice to exit)  │  Ctrl+T toggle thinking  │  Ctrl+O opens tool output pager (q to close)",
     )
   );
 }
@@ -1663,6 +1661,7 @@ export async function startRepl(options: ReplOptions = {}): Promise<void> {
   let outputShortcutBusy = false;
   let lastOutputShortcutAt = 0;
   let abortPressCount = 0;
+  let lastEscapeAt = 0;
 
   emitKeypressEvents(input);
 
@@ -1687,7 +1686,7 @@ export async function startRepl(options: ReplOptions = {}): Promise<void> {
   process.on("unhandledRejection", handleUnhandledRejection);
   process.on("uncaughtException", handleUncaughtException);
 
-  // ESC / Ctrl+C abort; Ctrl+T toggles hidden thinking
+  // Double Esc cancels the turn + jobs; Ctrl+C aborts; Ctrl+T toggles thinking
   if (process.stdin.isTTY) {
     process.stdin.setRawMode(false);
   }
@@ -1779,17 +1778,28 @@ export async function startRepl(options: ReplOptions = {}): Promise<void> {
     if (isCtrlP(key) && !isReadingPrompt) {
       void handlePlanShortcut();
     }
-    if ((isEscape(key) || isCtrlC(key)) && currentAbortController) {
+    if (isEscape(key) && currentAbortController) {
+      const now = Date.now();
+      if (lastEscapeAt > 0 && now - lastEscapeAt < 1_500) {
+        lastEscapeAt = 0;
+        abortPressCount += 1;
+        currentAbortController.abort();
+        void jobManager.cancelAll(state.session.sessionId);
+        process.stdout.write(
+          chalk.yellow("\n  ⏹ cancelling turn + session background jobs…\n"),
+        );
+      } else {
+        lastEscapeAt = now;
+        process.stdout.write(
+          chalk.dim("\n  (press Esc again to cancel turn + session jobs)\n"),
+        );
+      }
+    } else if (isCtrlC(key) && currentAbortController) {
       abortPressCount += 1;
       currentAbortController.abort();
-      // Escalate: after the first abort attempt the child process
-      // receives SIGTERM, which tools like ffuf may catch and handle
-      // gracefully (taking several seconds). Show feedback so the
-      // user knows the abort registered, and on subsequent presses
-      // hint that force-kill is in progress.
       if (abortPressCount === 1) {
         process.stdout.write(chalk.yellow("\n  ⏹ aborting…\n"));
-      } else if (abortPressCount >= 2) {
+      } else {
         process.stdout.write(chalk.yellow("  ⏹ force-killing…\n"));
       }
     }
@@ -1958,6 +1968,7 @@ export async function startRepl(options: ReplOptions = {}): Promise<void> {
       try {
         clearThinking();
         abortPressCount = 0;
+        lastEscapeAt = 0;
         let assistantContent = "";
         // Expand @file mentions and drag-and-dropped paths into real context.
         // The user-visible `line` stays readable in history; the model gets

@@ -2,7 +2,10 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { JobManager } from "../src/tools/jobs.js";
+import {
+  JobManager,
+  type BackgroundJob,
+} from "../src/tools/jobs.js";
 
 const dirs: string[] = [];
 const managers: JobManager[] = [];
@@ -80,6 +83,7 @@ describe("durable background jobs", () => {
     expect(id).toBeTruthy();
     await waitForStatus(manager, id!, ["failed"]);
     expect(manager.getJob(id!)).toMatchObject({ status: "failed", exitCode: 7 });
+    expect(manager.getPendingNotifications()).toHaveLength(0);
     const tail = await manager.tailJob(id!);
     expect(tail.output).toContain(`[${id}] failed exit=7`);
     expect(tail.backgroundJob).toMatchObject({ status: "failed", exitCode: 7 });
@@ -234,5 +238,193 @@ describe("durable job safety edges", () => {
     expect(result.output).not.toContain("The command did not start");
     expect(result.backgroundJob).toMatchObject({ status: "running" });
     await manager.stopJob(result.backgroundJob!.id, { graceMs: 300 });
+  });
+
+  it("emits a completion notification when the first registry write fails", async () => {
+    const { dir, manager } = await fixture();
+    const changes: string[] = [];
+    const unsubscribe = manager.subscribe((change) => {
+      if (change.type === "notification") changes.push(change.notificationId);
+    });
+    const started = await manager.startJob(
+      `${JSON.stringify(process.execPath)} -e "setTimeout(() => process.exit(0), 150)"`,
+      { ownerSessionId: "persist-retry", responder: true, wakeOnCompletion: true },
+    );
+    const id = started.backgroundJob?.id;
+    expect(id).toBeTruthy();
+
+    const internal = manager as unknown as { persistSync: () => boolean };
+    const persistSync = internal.persistSync.bind(manager);
+    let failNext = true;
+    internal.persistSync = () => {
+      if (failNext) {
+        failNext = false;
+        return false;
+      }
+      return persistSync();
+    };
+
+    await waitForStatus(manager, id!, ["exited"]);
+    internal.persistSync = persistSync;
+    unsubscribe();
+    expect(changes).toHaveLength(1);
+    expect(manager.getPendingNotifications("persist-retry")).toHaveLength(1);
+    await sleep(350);
+    const restarted = new JobManager(dir);
+    managers.push(restarted);
+    expect(restarted.getJob(id!)).toMatchObject({ status: "exited", exitCode: 0 });
+    expect(restarted.getPendingNotifications("persist-retry")).toHaveLength(1);
+  });
+});
+
+
+
+describe("authoritative job completion", () => {
+  function trackedJob(
+    dir: string,
+    id: string,
+    status: BackgroundJob["status"],
+    responder = false,
+  ): BackgroundJob {
+    const stdout = join(dir, `${id}.stdout.log`);
+    const stderr = join(dir, `${id}.stderr.log`);
+    return {
+      id,
+      command: "npm run build",
+      commandDisplay: "npm run build",
+      cwd: dir,
+      pid: 999_999,
+      status,
+      startedAt: "2026-07-22T14:30:30.399Z",
+      artifactPath: stdout,
+      stdoutArtifact: stdout,
+      stderrArtifact: stderr,
+      artifacts: {
+        stdout: {
+          path: stdout,
+          chunks: [],
+          bytes: 0,
+          droppedBytes: 0,
+          redacted: false,
+          sha256: "",
+        },
+        stderr: {
+          path: stderr,
+          chunks: [],
+          bytes: 0,
+          droppedBytes: 0,
+          redacted: false,
+          sha256: "",
+        },
+      },
+      redactionProfile: "provider-secrets-v1",
+      ownerSessionId: "authoritative-session",
+      kind: "durable",
+      responder,
+      wakeOnCompletion: responder,
+      ...(responder ? { taskId: "t5" } : {}),
+    };
+  }
+
+  it("never declares a child lost while this manager still owns it", async () => {
+    const { dir, manager } = await fixture();
+    const job = trackedJob(dir, "managed1", "running");
+    manager.registerJob("managed1", job, undefined, {} as never);
+
+    expect(manager.getJob("managed1")?.status).toBe("running");
+    expect(manager.listJobs("authoritative-session").output).toContain(
+      "managed1] running",
+    );
+
+    manager.updateJobStatus("managed1", "exited", 0);
+    await waitForStatus(manager, "managed1", ["exited"]);
+  });
+
+  it("corrects a delivered lost receipt with authoritative exit data and artifacts", async () => {
+    const { dir, manager } = await fixture();
+    const job = trackedJob(dir, "correct1", "lost", true);
+    manager.registerJob("correct1", job);
+    manager.updateJobStatus("correct1", "lost");
+    const deadline = Date.now() + 2_000;
+    while (
+      Date.now() < deadline &&
+      manager.getPendingNotifications("authoritative-session").length === 0
+    ) {
+      await sleep(20);
+    }
+    const original = manager.getPendingNotifications("authoritative-session")[0];
+    expect(original).toMatchObject({ status: "lost", jobId: "correct1" });
+    expect(manager.markDelivered(original!.id)).toBe(true);
+    const deliveredAt = manager.getPendingNotifications(
+      "authoritative-session",
+    )[0]?.deliveredAt;
+
+    const current = manager.getJob("correct1")!;
+    current.artifacts.stdout.bytes = 473;
+    current.artifacts.stdout.sha256 = "authoritative-sha";
+    current.artifacts.stdout.chunks = [current.stdoutArtifact];
+    manager.updateJobStatus("correct1", "exited", 0);
+    await waitForStatus(manager, "correct1", ["exited"]);
+
+    const corrected = manager.getPendingNotifications(
+      "authoritative-session",
+    )[0];
+    expect(corrected).toMatchObject({
+      id: original!.id,
+      status: "exited",
+      exitCode: 0,
+      deliveredAt,
+      stdoutArtifact: { bytes: 473, sha256: "authoritative-sha" },
+    });
+
+    const restarted = new JobManager(dir);
+    managers.push(restarted);
+    expect(restarted.getPendingNotifications("authoritative-session")[0]).toMatchObject({
+      id: original!.id,
+      status: "exited",
+      exitCode: 0,
+      stdoutArtifact: { bytes: 473, sha256: "authoritative-sha" },
+    });
+  });
+
+  it("preserves an authoritative terminal result against a later conflicting update", async () => {
+    const { manager } = await fixture();
+    const started = await manager.startJob(
+      `${JSON.stringify(process.execPath)} -e "process.exit(0)"`,
+      { ownerSessionId: "monotonic" },
+    );
+    const id = started.backgroundJob?.id;
+    expect(id).toBeTruthy();
+    await waitForStatus(manager, id!, ["exited"]);
+    expect(manager.getJob(id!)).toMatchObject({ status: "exited", exitCode: 0 });
+
+    manager.updateJobStatus(id!, "failed", 7);
+    manager.updateJobStatus(id!, "killed");
+    expect(manager.getJob(id!)).toMatchObject({ status: "exited", exitCode: 0 });
+  });
+
+  it("requires analysis before acknowledgement and persists the analyzed marker across restart", async () => {
+    const { dir, manager } = await fixture();
+    const started = await manager.startJob(
+      `${JSON.stringify(process.execPath)} -e "process.exit(0)"`,
+      { ownerSessionId: "analyze-gate", responder: true, wakeOnCompletion: true },
+    );
+    const id = started.backgroundJob?.id;
+    expect(id).toBeTruthy();
+    await waitForStatus(manager, id!, ["exited"]);
+    const notificationId = manager.getPendingNotifications("analyze-gate")[0]?.id;
+    expect(notificationId).toBeTruthy();
+
+    expect(manager.acknowledge(notificationId!)).toBe(false);
+    expect(manager.markDelivered(notificationId!)).toBe(true);
+    expect(manager.acknowledge(notificationId!)).toBe(false);
+    expect(manager.markAnalyzed(notificationId!)).toBe(true);
+
+    const restarted = new JobManager(dir);
+    managers.push(restarted);
+    const recovered = restarted.getPendingNotifications("analyze-gate")[0];
+    expect(recovered).toMatchObject({ id: notificationId, analyzedAt: expect.any(String) });
+    expect(restarted.acknowledge(notificationId!)).toBe(true);
+    expect(restarted.getPendingNotifications("analyze-gate")).toHaveLength(0);
   });
 });

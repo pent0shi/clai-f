@@ -78,7 +78,7 @@ describe('config store', () => {
     const { getConfig } = await loadConfigStore();
     const c = getConfig();
     expect(c.softEarlyCompact).toBe(true);
-    expect(c.softCompactTokenBudget).toBe(100_000);
+    expect(c.softCompactTokenBudget).toBe(72_000);
     expect(c.fsPassthroughCapChars).toBe(64_000);
     expect(c.adaptiveMaxTokens).toBe(true);
     expect(c.freeTierContextGuard).toBe(true);

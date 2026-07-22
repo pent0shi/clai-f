@@ -11,5 +11,12 @@ export function createCurrentJobsPort(manager: JobManager = jobManager): JobsPor
     tail: (id, bytes) => manager.tailJob(id, bytes),
     stop: (id) => manager.stopJob(id),
     start: (command, options) => manager.startJob(command, options),
+    pendingNotifications: (sessionId) => manager.getPendingNotifications(sessionId),
+    markDelivered: (notificationId) => manager.markDelivered(notificationId),
+    markAnalyzed: (notificationId) => manager.markAnalyzed(notificationId),
+    acknowledge: (notificationId) => manager.acknowledge(notificationId),
+    subscribe: (listener) => manager.subscribe(listener),
+    linkJob: (jobId, metadata) => manager.linkJob(jobId, metadata),
+    cancelAll: (sessionId) => manager.cancelAll(sessionId),
   };
 }

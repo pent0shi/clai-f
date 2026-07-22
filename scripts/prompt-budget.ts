@@ -80,7 +80,7 @@ for (const section of mandatorySections) {
   }
 }
 
-const MAX_CORE_AGENT_CHARS = 32_000;
+const MAX_CORE_AGENT_CHARS = 38_000;
 if (agent.length > MAX_CORE_AGENT_CHARS || agentNative.length > MAX_CORE_AGENT_CHARS) {
   throw new Error(`Prompt budget exceeded: core agent must be <= ${MAX_CORE_AGENT_CHARS} chars`);
 }

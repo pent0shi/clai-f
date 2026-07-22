@@ -204,18 +204,41 @@ export function actionFromUrl(input: {
   redirectChain?: string[] | undefined;
   resolvedAddresses?: string[] | undefined;
 }): EngagementAction {
-  const parsed = new URL(input.url);
+  // The url may be a model-supplied argument or a token scraped out of a shell
+  // command (e.g. a ripgrep regex containing "https://a|/b"). Never let a
+  // malformed value throw a raw "cannot be parsed as a URL" and abort the turn.
+  const parsed = safeParseUrl(input.url);
+  const target = parsed?.hostname ?? hostnameFromLoose(input.url) ?? input.url;
   return {
-    target: parsed.hostname,
+    target,
     url: input.url,
-    port: parsed.port ? Number(parsed.port) : parsed.protocol === "https:" ? 443 : 80,
-    path: parsed.pathname || "/",
+    port: parsed?.port ? Number(parsed.port) : parsed?.protocol === "https:" ? 443 : 80,
+    path: parsed?.pathname || "/",
     method: input.method ?? "GET",
     phase: input.phase ?? "enumeration",
     capability: input.capability ?? (/^(?:GET|HEAD|OPTIONS)$/i.test(input.method ?? "GET") ? "passive" : "active-enumeration"),
     redirectChain: input.redirectChain,
     resolvedAddresses: input.resolvedAddresses,
   };
+}
+
+/** Parse a URL without ever throwing; returns undefined on malformed input. */
+function safeParseUrl(raw: string): URL | undefined {
+  try {
+    return new URL(raw);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Best-effort hostname from a loose URL-like token that `new URL()` rejects
+ * (e.g. an authority containing regex metacharacters). Returns the first
+ * host-looking label after the scheme, or undefined.
+ */
+function hostnameFromLoose(raw: string): string | undefined {
+  const match = /https?:\/\/([a-z0-9.-]+)/i.exec(raw);
+  return match?.[1]?.toLowerCase();
 }
 
 export function engagementActionForToolCall(call: ToolCall): EngagementAction | undefined {
@@ -266,11 +289,15 @@ export function engagementActionForToolCall(call: ToolCall): EngagementAction | 
   }
   if (call.name !== "shell.exec" && call.name !== "shell.start") return undefined;
   const command = String(call.args.command ?? "");
-  const url = command.match(/https?:\/\/[^\s'"<>]+/i)?.[0];
+  const urlToken = command.match(/https?:\/\/[^\s'"<>]+/i)?.[0];
+  const parsedUrl = urlToken ? safeParseUrl(urlToken) : undefined;
   const hostCandidates = [...command.matchAll(/(?:^|\s)((?:[a-z0-9-]+\.)+[a-z]{2,}|(?:\d{1,3}\.){3}\d{1,3})(?=\s|$)/gi)]
     .map((match) => match[1])
     .filter((candidate): candidate is string => Boolean(candidate));
-  const host = url ? new URL(url).hostname : hostCandidates.at(-1);
+  // A URL-looking token that does not parse (regex passed to rg/grep, etc.) is
+  // not a real network destination — fall back to bare host candidates.
+  const url = parsedUrl ? urlToken : undefined;
+  const host = parsedUrl ? parsedUrl.hostname : hostCandidates.at(-1);
   if (!host) return undefined;
   const method =
     /\bcurl\b[^\n]*\s-X\s+([A-Z]+)/i.exec(command)?.[1] ?? "GET";
@@ -306,7 +333,13 @@ export function engagementActionForToolCall(call: ToolCall): EngagementAction | 
           : "active-enumeration";
   return {
     target: host,
-    ...(url ? { url, port: Number(new URL(url).port || (new URL(url).protocol === "https:" ? 443 : 80)), path: new URL(url).pathname } : {}),
+    ...(parsedUrl
+      ? {
+          url: url,
+          port: Number(parsedUrl.port || (parsedUrl.protocol === "https:" ? 443 : 80)),
+          path: parsedUrl.pathname,
+        }
+      : {}),
     method,
     phase,
     capability,

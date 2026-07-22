@@ -7,9 +7,14 @@
  * pager instead of leaving output to a separate agent tool call.
  */
 
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useKeyboard } from "@opentui/react";
-import type { BackgroundJob } from "../../../app/ports/jobs-port.js";
+import { TextAttributes, type MouseEvent } from "@opentui/core";
+import type {
+  BackgroundJob,
+  ResponderNotification,
+} from "../../../app/ports/jobs-port.js";
+import { formatJobElapsed } from "../../../tools/jobs.js";
 import type { AppServices } from "../../bootstrap/composition-root.js";
 import type { Theme } from "../../rendering/theme.js";
 import { chordFromKeyEvent } from "../../actions/chord-from-key.js";
@@ -20,6 +25,10 @@ export interface JobsPanelProps {
 }
 
 const POLL_MS = 1000;
+/** Rows the inline Responder widget shows before deferring to the Jobs overlay.
+ * Kept small so the bottom docked stack (prompt + composer + status) never
+ * overflows a short terminal; the full list lives in the Ctrl+J overlay. */
+const RESPONDER_MAX_ROWS = 3;
 
 function statusView(job: BackgroundJob, theme: Theme): { text: string; fg: string } {
   if (job.status === "running") {
@@ -41,9 +50,28 @@ function statusView(job: BackgroundJob, theme: Theme): { text: string; fg: strin
   return { text: job.status, fg: theme.accent };
 }
 
-function elapsedLabel(job: BackgroundJob): string {
-  const end = job.endedAt ? new Date(job.endedAt).getTime() : Date.now();
-  return `${Math.round((end - new Date(job.startedAt).getTime()) / 1000)}s`;
+// Live jobs read as a running phase (never a bare duration that looks finished);
+// pending = an unacknowledged completion receipt exists.
+function jobPhase(
+  job: BackgroundJob,
+  pending: boolean,
+): { glyph: string; label: string } {
+  if (pending) return { glyph: "✓", label: "result ready" };
+  switch (job.status) {
+    case "starting":
+    case "running":
+      return { glyph: "⟳", label: "running" };
+    case "stopping":
+      return { glyph: "⊗", label: "stopping" };
+    case "exited":
+      return { glyph: "✓", label: "exited" };
+    case "failed":
+      return { glyph: "✗", label: "failed" };
+    case "killed":
+      return { glyph: "✗", label: "killed" };
+    default:
+      return { glyph: "•", label: job.status };
+  }
 }
 
 export function JobsPanel(props: JobsPanelProps): ReactNode {
@@ -57,11 +85,16 @@ export function JobsPanel(props: JobsPanelProps): ReactNode {
     );
   };
   const [jobs, setJobs] = useState<BackgroundJob[]>(readJobs);
+  const [now, setNow] = useState(() => Date.now());
   const [selected, setSelected] = useState(0);
   const [note, setNote] = useState("");
 
   useEffect(() => {
-    const interval = setInterval(() => setJobs(readJobs()), POLL_MS);
+    const refresh = (): void => {
+      setJobs(readJobs());
+      setNow(Date.now());
+    };
+    const interval = setInterval(refresh, POLL_MS);
     return () => clearInterval(interval);
   }, [services.ports.jobs, services.session.sessionId]);
 
@@ -108,6 +141,11 @@ export function JobsPanel(props: JobsPanelProps): ReactNode {
   const titleLine = `Background jobs · session ${services.session.sessionId}`;
   const helpLine =
     "up/down:select · enter/t:tail · k:kill · q/esc:close";
+  const pendingIds = new Set(
+    services.ports.jobs
+      .pendingNotifications(services.session.sessionId)
+      .map((notification) => notification.jobId),
+  );
 
   return (
     <box
@@ -117,8 +155,8 @@ export function JobsPanel(props: JobsPanelProps): ReactNode {
       borderStyle="rounded"
       style={{
         flexDirection: "column",
-        width: "70%",
-        height: "70%",
+        width: "82%",
+        height: "80%",
         borderColor: theme.border,
         backgroundColor: theme.background,
         paddingLeft: 1,
@@ -140,7 +178,9 @@ export function JobsPanel(props: JobsPanelProps): ReactNode {
         style={{ fg: theme.border, height: 1, width: "100%" }}
       />
       <text content=" " wrapMode="none" style={{ height: 1 }} />
-      <scrollbox scrollY scrollX={false} viewportCulling style={{ flexGrow: 1, width: "100%" }}>
+      {/* No viewportCulling: rows are variable-height (wrapped command),
+          which culling mis-measures; the list is capped so this is cheap. */}
+      <scrollbox scrollY scrollX={false} style={{ flexGrow: 1, width: "100%" }}>
       {jobs.length === 0 ? (
         <text
           content="no background jobs for this session"
@@ -151,18 +191,54 @@ export function JobsPanel(props: JobsPanelProps): ReactNode {
         jobs.map((job, index) => {
           const status = statusView(job, theme);
           const focused = index === selected;
-          const line = `${focused ? "❯ " : "  "}[${job.id}] ${status.text}  ${elapsedLabel(job)}  ${job.command.slice(0, 48)}`;
+          const ready = pendingIds.has(job.id);
+          const phase = jobPhase(job, ready);
+          const kindTag = job.responder ? "responder" : "background";
+          const linkage = [
+            job.parentTaskId ? `parent=${job.parentTaskId}` : undefined,
+            job.taskId ? `task=${job.taskId}` : undefined,
+            `job=${job.id}`,
+            job.pid ? `pid=${job.pid}` : undefined,
+          ]
+            .filter(Boolean)
+            .join(" ");
+          // Line 1: glyph + rich status + elapsed (short, never clipped).
+          // Line 2: kind + linkage ids. Line 3: full command, word-wrapped so
+          // long fuzzers/URLs are always readable. Blank spacer separates jobs.
+          const marker = focused ? "❯ " : "  ";
+          const headline = `${marker}${phase.glyph} ${status.text}${ready ? " · result ready" : ""}  ·  ${formatJobElapsed(job, now)}`;
+          const meta = `    ${kindTag} · ${linkage}`;
+          const command = job.name ? `${job.name}: ${job.command}` : job.command;
           return (
-            <box key={job.id} onMouseDown={() => setSelected(index)} style={{ flexDirection: "row", height: 1 }}>
+            <box
+              key={job.id}
+              onMouseDown={() => setSelected(index)}
+              style={{ flexDirection: "column", width: "100%", flexShrink: 0 }}
+            >
               <text
-                content={line}
+                content={headline}
                 wrapMode="none"
                 style={{
-                  fg: focused ? theme.accent : theme.foreground,
+                  fg: focused ? theme.accent : status.fg,
                   height: 1,
+                  width: "100%",
+                  ...(focused ? { attributes: TextAttributes.BOLD } : {}),
+                }}
+              />
+              <text
+                content={meta}
+                wrapMode="none"
+                style={{ fg: theme.muted, height: 1, width: "100%" }}
+              />
+              <text
+                content={`    ${command}`}
+                wrapMode="word"
+                style={{
+                  fg: focused ? theme.foreground : theme.muted,
                   width: "100%",
                 }}
               />
+              <text content=" " wrapMode="none" style={{ height: 1 }} />
             </box>
           );
         })
@@ -173,6 +249,211 @@ export function JobsPanel(props: JobsPanelProps): ReactNode {
           content={note}
           wrapMode="none"
           style={{ fg: theme.muted, height: 1 }}
+        />
+      ) : null}
+    </box>
+  );
+}
+
+
+export interface ResponderPanelProps {
+  readonly services: AppServices;
+  readonly theme: Theme;
+  readonly width: number;
+  /**
+   * True while a blocking docked prompt (password/confirm/scope/keys) is open.
+   * The widget hides so the prompt + composer always fit the bottom stack with
+   * no overflow; jobs keep running and reappear once the prompt is answered.
+   */
+  readonly blockingOverlay?: boolean | undefined;
+}
+
+interface ResponderProjection {
+  jobs: BackgroundJob[];
+  notifications: ResponderNotification[];
+}
+
+function readResponderProjection(services: AppServices): ResponderProjection {
+  const sessionId = services.session.sessionId;
+  // Responder shows ONLY jobs explicitly delegated to it (responder:true).
+  // Plain background jobs (servers, ad-hoc commands) live in shell.jobs /
+  // the Ctrl+J overlay and are polled by the agent, not surfaced here.
+  const notifications = services.ports.jobs
+    .pendingNotifications(sessionId)
+    .filter((notification) => notification.responder);
+  const live = services.ports.jobs
+    .running(sessionId)
+    .filter((job) => job.responder);
+  const byId = new Map(live.map((job) => [job.id, job]));
+  for (const notification of notifications) {
+    const job = services.ports.jobs.get(notification.jobId);
+    if (job) byId.set(job.id, job);
+  }
+  return {
+    jobs: [...byId.values()].sort((a, b) =>
+      b.startedAt.localeCompare(a.startedAt),
+    ),
+    notifications,
+  };
+}
+
+function responderStatusColor(job: BackgroundJob, theme: Theme): string {
+  if (job.status === "running" || job.status === "starting") return theme.cyan;
+  if (job.status === "exited") return theme.success;
+  if (job.status === "stopping") return theme.queued;
+  return theme.accent;
+}
+
+function responderHeadline(
+  job: BackgroundJob,
+  pending: boolean,
+  now: number,
+): string {
+  const { glyph, label } = jobPhase(job, pending);
+  const taskRef = job.taskId ? ` · task ${job.taskId}` : "";
+  return `${glyph} ${label} · ${formatJobElapsed(job, now)}${taskRef}`;
+}
+
+export function ResponderPanel(props: ResponderPanelProps): ReactNode {
+  const { services, theme, width, blockingOverlay } = props;
+  const [collapsed, setCollapsed] = useState(false);
+  const [projection, setProjection] = useState(() =>
+    readResponderProjection(services),
+  );
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    const refresh = (): void => {
+      setProjection(readResponderProjection(services));
+      setNow(Date.now());
+    };
+    refresh();
+    const unsubscribe = services.ports.jobs.subscribe(refresh);
+    const timer = setInterval(refresh, POLL_MS);
+    return () => {
+      unsubscribe();
+      clearInterval(timer);
+    };
+  }, [services.ports.jobs, services.session.sessionId]);
+
+  const pendingIds = useMemo(
+    () => new Set(
+      projection.notifications.map((notification) => notification.jobId),
+    ),
+    [projection.notifications],
+  );
+  const liveCount = projection.jobs.filter((job) =>
+    ["starting", "running", "stopping"].includes(job.status),
+  ).length;
+  const readyCount = projection.notifications.length;
+  // The agent is "parked on the Responder" when it is idle but delegated jobs
+  // are still running: no turn is live, yet work it is waiting on continues in
+  // the background. Surfaced with a distinct amber state + a one-time toast so
+  // a stopped-looking agent is never mistaken for a dead one.
+  const sessionRunning = services.session.getState().running;
+  const waiting = !sessionRunning && liveCount > 0 && readyCount === 0;
+
+  const waitingRef = useRef(false);
+  useEffect(() => {
+    if (waiting && !waitingRef.current) {
+      services.toast.show(
+        `Waiting on Responder · ${liveCount} job(s) running — analysis resumes automatically on completion`,
+        { level: "info", key: "responder-waiting", durationMs: 2800 },
+      );
+    }
+    waitingRef.current = waiting;
+  }, [waiting, liveCount, services]);
+
+  // Yield the bottom stack to a blocking prompt; also nothing to show when idle.
+  if (
+    blockingOverlay ||
+    (projection.jobs.length === 0 && projection.notifications.length === 0)
+  ) {
+    return null;
+  }
+
+  const shown = projection.jobs.slice(0, RESPONDER_MAX_ROWS);
+  const hidden = Math.max(0, projection.jobs.length - shown.length);
+  const stateColor = readyCount > 0
+    ? theme.success
+    : waiting
+      ? theme.mode
+      : theme.cyan;
+  const statusText = readyCount > 0
+    ? `${readyCount} result${readyCount > 1 ? "s" : ""} ready → delivering to agent`
+    : waiting
+      ? `waiting · ${liveCount} running (agent resumes on completion)`
+      : `${liveCount} active`;
+  const header = `${collapsed ? "▸" : "▾"} Responder · ${statusText}`;
+
+  function toggle(event: MouseEvent): void {
+    event.preventDefault();
+    event.stopPropagation();
+    setCollapsed((value) => !value);
+  }
+
+  return (
+    <box
+      border
+      borderStyle="rounded"
+      style={{
+        flexDirection: "column",
+        width,
+        flexShrink: 0,
+        borderColor: stateColor,
+        backgroundColor: theme.statusBackground,
+        paddingLeft: 1,
+        paddingRight: 1,
+      }}
+    >
+      <box
+        onMouseDown={toggle}
+        style={{ width: "100%", height: 1, flexShrink: 0 }}
+      >
+        <text
+          content={header}
+          wrapMode="none"
+          style={{
+            width: "100%",
+            height: 1,
+            fg: stateColor,
+            attributes: TextAttributes.BOLD,
+          }}
+        />
+      </box>
+      {!collapsed
+        ? shown.map((job) => (
+            <box
+              key={job.id}
+              onMouseDown={(event: MouseEvent) => {
+                event.preventDefault();
+                event.stopPropagation();
+                services.overlay.openJobs();
+              }}
+              style={{ flexDirection: "column", width: "100%", flexShrink: 0 }}
+            >
+              <text
+                content={`  ${responderHeadline(job, pendingIds.has(job.id), now)}`}
+                wrapMode="none"
+                style={{
+                  width: "100%",
+                  height: 1,
+                  fg: responderStatusColor(job, theme),
+                }}
+              />
+              <text
+                content={`    ${(job.name ?? job.commandDisplay).replace(/\s+/g, " ").trim()}`}
+                wrapMode="word"
+                style={{ width: "100%", fg: theme.foreground }}
+              />
+            </box>
+          ))
+        : null}
+      {!collapsed && hidden > 0 ? (
+        <text
+          content={`  +${hidden} more · press Ctrl+J for all ${projection.jobs.length} jobs (full command, artifacts, actions)`}
+          wrapMode="none"
+          style={{ width: "100%", height: 1, fg: theme.muted }}
         />
       ) : null}
     </box>

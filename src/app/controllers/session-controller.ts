@@ -1,4 +1,10 @@
-import type { ChatMessage, Mode, ProviderId, TokenUsage } from "../../types.js";
+import type {
+  ChatMessage,
+  Mode,
+  ProviderId,
+  TokenUsage,
+  ToolResult,
+} from "../../types.js";
 import {
   compactMessagesWithSummary,
   estimateMessagesTokens,
@@ -18,11 +24,7 @@ import { resolveTurnInput } from "../../attachments/service.js";
 import { generateSessionTitle } from "../../agent/session-title.js";
 import { clearTextOnlyModels } from "../../llm/tool-protocol.js";
 import { getConfig, getProviderModel } from "../../store/config.js";
-import {
-  beginSessionWorkspace,
-  getActiveSessionWorkspace,
-  type SessionWorkspace,
-} from "../../store/session-workspace.js";
+import { beginSessionWorkspace, getActiveSessionWorkspace, type SessionWorkspace } from "../../store/session-workspace.js";
 import { summarizeForSessionCompact } from "./session-compact-helper.js";
 import type { TranscriptItem as ClassicTranscriptItem } from "../../tui/state.js";
 import {
@@ -38,6 +40,7 @@ import {
 } from "../events/sequencer.js";
 import { OutputSpool } from "../events/event-buffer.js";
 import type { AgentPort, RunTurnRequest } from "../ports/agent-port.js";
+import type { JobsPort } from "../ports/jobs-port.js";
 import type { PersistencePort } from "../ports/persistence-port.js";
 import type { ConfirmationPort } from "../ports/confirm-port.js";
 import type { SecretPort } from "../ports/secret-port.js";
@@ -47,6 +50,11 @@ import {
   persistedContextUsage,
   SessionPersistenceQueue,
 } from "./session-persistence.js";
+import {
+  SessionPromptQueue,
+  type TurnDisplayOptions,
+} from "./session-prompt-queue.js";
+import { SessionResponder } from "./session-responder.js";
 
 export interface SessionState {
   readonly sessionId: SessionId;
@@ -74,6 +82,7 @@ export type NoticeLevel = "info" | "warn";
 export interface SessionControllerDeps {
   readonly agent: AgentPort;
   readonly persistence: PersistencePort;
+  readonly jobs?: JobsPort | undefined;
   readonly emit: (event: AnyAppEvent) => void;
   readonly sessionId?: string | undefined;
   readonly provider?: ProviderId | undefined;
@@ -88,6 +97,11 @@ export interface SessionControllerDeps {
   readonly getTranscriptSnapshot?: (() => ClassicTranscriptItem[] | undefined) | undefined;
   /** When true, never persist sessions or generate AI titles (CLI --no-history). */
   readonly noHistory?: boolean | undefined;
+  /**
+   * UI hook fired when the Responder hands a completed job's result to the
+   * model. Wired to a green success toast; only called on a committed send.
+   */
+  readonly notifyResponderDelivery?: ((summary: string) => void) | undefined;
 }
 
 
@@ -110,20 +124,8 @@ export class SessionController implements Disposable {
   private readonly stateListeners = new Set<SessionStateListener>();
 
   private history: ChatMessage[] = [];
-  private readonly queue: string[] = [];
-  /**
-   * Prompt promoted by "Send now" while a turn was running. After the abort
-   * settles, {@link continueQueue} runs this before any remaining queue items.
-   */
-  private priorityPrompt: string | undefined;
-  /**
-   * Display override for the next turn only (`null` = hide YOU bubble).
-   * Used when implement/revision directives are queued while a turn is running.
-   */
-  private nextTurnDisplayPrompt: string | null | undefined = undefined;
-  private nextTurnDisplayArmed = false;
-  /** Re-entrancy guard for {@link continueQueue}. */
-  private continuingQueue = false;
+  private readonly prompts: SessionPromptQueue;
+  private readonly responder: SessionResponder | undefined;
   private provider: ProviderId | undefined;
   private model: string | undefined;
   private mode: Mode;
@@ -165,6 +167,37 @@ export class SessionController implements Disposable {
         mintTurnId: deps.mintTurnId,
       }),
     );
+    this.prompts = new SessionPromptQueue({
+      isRunning: () => this.turn.running,
+      abort: () => this.turn.abort(),
+      notifyState: () => this.notifyState(),
+      notice: (text) => this.notice("info", text),
+      runTurn: (prompt, options) => this.runTurn(prompt, options),
+    });
+    if (deps.jobs) {
+      this.responder = new SessionResponder({
+        jobs: deps.jobs,
+        persistence: deps.persistence,
+        sequencer: this.sequencer,
+        emit: deps.emit,
+        sessionId: () => this.sessionIdValue,
+        isBusy: () => this.turn.running || this.compactingFlag,
+        hasQueuedWork: () => this.prompts.hasPending(),
+        continueQueue: () => this.prompts.continue(),
+        runTurn: (prompt) => this.runTurn(prompt, { displayPrompt: null }),
+        notifyState: () => this.notifyState(),
+        ...(deps.notifyResponderDelivery
+          ? { notifyDelivery: deps.notifyResponderDelivery }
+          : {}),
+      });
+      const unsubscribe = deps.jobs.subscribe((change) => {
+        this.responder?.handleChange(change);
+      });
+      this.disposables.add({ dispose: unsubscribe });
+      this.responder.scheduleWake();
+    } else {
+      this.responder = undefined;
+    }
   }
 
   /** Current per-session scratch/output workspace (always bound while live). */
@@ -186,7 +219,7 @@ export class SessionController implements Disposable {
       running: this.turn.running,
       compacting: this.compactingFlag,
       historyLength: this.history.length,
-      queued: [...this.queue],
+      queued: this.prompts.snapshot(),
       title: this.sessionTitle,
       contextUsage,
       contextChip: contextUsage
@@ -313,13 +346,13 @@ export class SessionController implements Disposable {
     } = {},
   ): void {
     if (this.turn.running) this.turn.abort();
+    this.responder?.invalidateWake();
     // Deep-copy then heal broken assistant/tool pairs from aborted turns so
     // /history resume + "continue" never dies on invalid native tool protocol.
     const healed: ChatMessage[] = messages.map((m) => ({ ...m }));
     repairToolProtocol(healed);
     this.history = healed;
-    this.queue.length = 0;
-    this.priorityPrompt = undefined;
+    this.prompts.clear();
     this.spool.clear();
     // Keep the resumed session's existing title; only refresh after the user
     // adds more turns (same cadence as classic TUI).
@@ -361,6 +394,7 @@ export class SessionController implements Disposable {
       code: options.workspaceCode,
     });
     this.notifyState();
+    this.responder?.scheduleWake();
   }
 
   notice(level: NoticeLevel, text: string): void {
@@ -386,9 +420,9 @@ export class SessionController implements Disposable {
    */
   reset(options: { mintNewId?: boolean } = {}): void {
     if (this.turn.running) this.turn.abort();
+    this.responder?.invalidateWake();
     this.history = [];
-    this.queue.length = 0;
-    this.priorityPrompt = undefined;
+    this.prompts.clear();
     this.sessionTitle = undefined;
     this.titledAtUserCount = 0;
     this.titleInFlight = false;
@@ -403,6 +437,7 @@ export class SessionController implements Disposable {
     }
     this.policy = createSessionPolicy(this.sessionIdValue);
     this.notifyState();
+    this.responder?.scheduleWake();
   }
 
   /** Roll back history after a rejected plan-implement compaction. */
@@ -481,6 +516,11 @@ export class SessionController implements Disposable {
     } finally {
       this.compactingFlag = false;
       this.notifyState();
+      // Becoming idle after compaction is an idle transition just like a turn
+      // ending: a responder completion that arrived while compactingFlag was
+      // set had its wake suppressed by isBusy(). Re-arm it here or the agent
+      // stays stranded (job exited, no wake, no delivery) until the next turn.
+      this.responder?.scheduleWake();
     }
   }
 
@@ -547,117 +587,51 @@ export class SessionController implements Disposable {
     };
   }
 
-  /**
-   * Queue a prompt while a turn is running. Optional displayPrompt is applied
-   * to the next dequeued turn (null hides the YOU bubble).
-   */
-  enqueue(
-    prompt: string,
-    opts?: { displayPrompt?: string | null | undefined },
-  ): void {
-    if (opts && "displayPrompt" in opts) {
-      this.nextTurnDisplayPrompt = opts.displayPrompt;
-      this.nextTurnDisplayArmed = true;
-    }
-    const text = prompt.trim();
-    if (!text) return;
-    this.queue.push(text);
+  async cancelAll(): Promise<ToolResult> {
+    this.responder?.invalidateWake();
+    this.turn.abort();
+    this.prompts.clear(true);
     this.notifyState();
+    if (!this.deps.jobs) {
+      return { ok: true, output: "Turn cancelled; no background-job service is configured." };
+    }
+    return this.deps.jobs.cancelAll(this.sessionIdValue);
+  }
+
+  enqueue(prompt: string, opts?: TurnDisplayOptions): void {
+    this.prompts.enqueue(prompt, opts);
   }
 
   queued(): readonly string[] {
-    return [...this.queue];
+    return this.prompts.snapshot();
   }
 
   removeQueued(index: number): void {
-    if (index >= 0 && index < this.queue.length) {
-      this.queue.splice(index, 1);
-      this.notifyState();
-    }
+    this.prompts.remove(index);
   }
 
-  
   takeQueued(index: number): string | undefined {
-    if (index < 0 || index >= this.queue.length) return undefined;
-    const [text] = this.queue.splice(index, 1);
-    this.notifyState();
-    return text;
+    return this.prompts.take(index);
   }
 
-  /** Edit a queued draft in place before it runs (INPUT-007). */
   editQueued(index: number, text: string): void {
-    if (index >= 0 && index < this.queue.length) {
-      this.queue[index] = text;
-      this.notifyState();
-    }
+    this.prompts.edit(index, text);
   }
 
-  /** Move a queued draft to a new position before it runs (INPUT-007). */
   reorderQueued(fromIndex: number, toIndex: number): void {
-    if (
-      fromIndex < 0 ||
-      fromIndex >= this.queue.length ||
-      toIndex < 0 ||
-      toIndex >= this.queue.length ||
-      fromIndex === toIndex
-    ) {
-      return;
-    }
-    const [moved] = this.queue.splice(fromIndex, 1);
-    if (moved !== undefined) this.queue.splice(toIndex, 0, moved);
-    this.notifyState();
+    this.prompts.reorder(fromIndex, toIndex);
   }
 
-  
   sendQueuedNow(index: number): void {
-    const text = this.takeQueued(index);
-    if (text === undefined) return;
-    if (this.turn.running) {
-      this.priorityPrompt = text;
-      this.turn.abort();
-      this.notice("info", "interrupting · sending queued prompt now");
-      return;
-    }
-    void this.submit(text).then(() => this.continueQueue());
+    this.prompts.sendNow(index);
   }
 
   abort(): void {
     this.turn.abort();
   }
 
- 
   async continueQueue(): Promise<void> {
-    if (this.continuingQueue || this.turn.running) return;
-    this.continuingQueue = true;
-    try {
-      while (!this.turn.running) {
-        let next: string | undefined;
-        if (this.priorityPrompt !== undefined) {
-          next = this.priorityPrompt;
-          this.priorityPrompt = undefined;
-        } else if (this.queue.length > 0) {
-          next = this.queue.shift();
-          this.notifyState();
-        } else {
-          break;
-        }
-        if (next === undefined || !next.trim()) continue;
-        const displayOpts = this.consumeNextTurnDisplay();
-        await this.runTurn(next, displayOpts);
-      }
-    } finally {
-      this.continuingQueue = false;
-    }
-  }
-
-  private consumeNextTurnDisplay():
-    | { displayPrompt?: string | null | undefined }
-    | undefined {
-    if (!this.nextTurnDisplayArmed) return undefined;
-    this.nextTurnDisplayArmed = false;
-    const displayPrompt = this.nextTurnDisplayPrompt;
-    this.nextTurnDisplayPrompt = undefined;
-    return { displayPrompt };
+    await this.prompts.continue();
   }
 
   /** In-memory plan-approval flag consumed by the agent gate (CORE-005). */
@@ -677,37 +651,13 @@ export class SessionController implements Disposable {
 
   async submit(
     prompt: string,
-    opts?: { displayPrompt?: string | null | undefined },
+    opts?: TurnDisplayOptions,
   ): Promise<TurnResult> {
-    if (this.turn.running) {
-      throw new Error("a turn is already running; enqueue() while busy");
-    }
-    // Explicit submit opts win over any armed queue display override.
-    if (opts && "displayPrompt" in opts) {
-      this.nextTurnDisplayArmed = false;
-      this.nextTurnDisplayPrompt = undefined;
-      return this.runTurn(prompt, opts);
-    }
-    const displayOpts = this.consumeNextTurnDisplay();
-    return this.runTurn(prompt, displayOpts ?? opts);
+    return this.prompts.submit(prompt, opts);
   }
 
-  /**
-   * Runs queued prompts one at a time while idle; stops on first
-   * non-completion. Prefer {@link continueQueue} from the UI so priority
-   * ("send now") prompts are honored too.
-   */
   async drain(): Promise<TurnResult[]> {
-    const results: TurnResult[] = [];
-    while (this.queue.length > 0 && !this.turn.running) {
-      const next = this.queue.shift();
-      if (next === undefined) break;
-      this.notifyState();
-      const result = await this.runTurn(next);
-      results.push(result);
-      if (result.status !== "completed") break;
-    }
-    return results;
+    return this.prompts.drain();
   }
 
   private async runTurn(
@@ -766,6 +716,7 @@ export class SessionController implements Disposable {
       void this.maybeRefreshTitle();
     }
     for (const listener of this.turnEndListeners) listener(result);
+    this.responder?.scheduleWake();
     return result;
   }
 
@@ -789,6 +740,7 @@ export class SessionController implements Disposable {
   }
 
   dispose(): void {
+    this.responder?.invalidateWake();
     this.turnEndListeners.clear();
     this.stateListeners.clear();
     this.disposables.dispose();

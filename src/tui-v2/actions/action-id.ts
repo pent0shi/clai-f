@@ -25,7 +25,7 @@ export type ActionContext = (typeof ACTION_CONTEXTS)[number];
 export const ACTION_IDS = [
   // global
   "app.quit",
-  /** Esc: abort a running turn / dismiss — never exits the process. */
+  /** Esc arms/dismisses; a second press cancels turn, queue, and session jobs. */
   "app.cancel",
   /**
    * Ctrl+C: first press aborts a running turn (or arms quit); second press

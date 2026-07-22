@@ -75,6 +75,13 @@ export interface PlanTask {
   dependencies?: string[] | undefined;
   resourceLocks?: string[] | undefined;
   supersededBy?: string | undefined;
+  /** Display hierarchy only; dependency order remains explicit in dependencies. */
+  parentTaskId?: string | undefined;
+  /** Durable background process linked to this task. */
+  jobId?: string | undefined;
+  processId?: number | undefined;
+  /** Responder-owned tasks advance from job lifecycle events, not task.update. */
+  responderOwned?: boolean | undefined;
 }
 
 /** Durable side-channel facts that survive compaction/resume. */
@@ -230,7 +237,8 @@ export function normalizeTaskDependencies(tasks: PlanTask[]): boolean {
   let changed = false;
   for (let i = 0; i < tasks.length; i++) {
     const task = tasks[i]!;
-    const earlier = new Set(tasks.slice(0, i).map((t) => t.id));
+    const earlierTasks = tasks.slice(0, i);
+    const earlier = new Set(earlierTasks.map((candidate) => candidate.id));
     const cleaned = [
       ...new Set(
         (task.dependencies ?? []).filter(
@@ -238,8 +246,16 @@ export function normalizeTaskDependencies(tasks: PlanTask[]): boolean {
         ),
       ),
     ];
-    const next =
-      cleaned.length > 0 ? cleaned : i > 0 ? [tasks[i - 1]!.id] : [];
+    const previousManual = [...earlierTasks]
+      .reverse()
+      .find((candidate) => !candidate.responderOwned);
+    const next = task.responderOwned
+      ? cleaned
+      : cleaned.length > 0
+        ? cleaned
+        : previousManual
+          ? [previousManual.id]
+          : [];
     const prev = task.dependencies ?? [];
     if (
       prev.length !== next.length ||
@@ -545,6 +561,10 @@ function toVersionedTaskPlan(plan: SessionPlan): VersionedTaskPlan {
       dependencies: [...(task.dependencies ?? [])],
       resourceLocks: [...(task.resourceLocks ?? [])],
       supersededBy: task.supersededBy,
+      parentTaskId: task.parentTaskId,
+      jobId: task.jobId,
+      processId: task.processId,
+      responderOwned: task.responderOwned,
     })),
   };
 }
@@ -569,12 +589,69 @@ export function applySessionPlanOperation(
       dependencies: [...(step.dependencies ?? [])],
       resourceLocks: [...(step.resourceLocks ?? [])],
       supersededBy: step.supersededBy,
+      parentTaskId: step.parentTaskId,
+      jobId: step.jobId,
+      processId: step.processId,
+      responderOwned: step.responderOwned,
     })),
   };
 }
 
 export function validateSessionPlan(plan: SessionPlan): { ok: true } | { ok: false; reason: string } {
   return validatePlanDag(toVersionedTaskPlan(plan));
+}
+
+export function nextPlanTaskId(tasks: readonly Pick<PlanTask, "id">[]): string {
+  let max = 0;
+  for (const task of tasks) {
+    const match = /^t(\d+)$/i.exec(task.id);
+    if (match) max = Math.max(max, Number(match[1]));
+  }
+  let candidate = `t${max + 1}`;
+  const used = new Set(tasks.map((task) => task.id));
+  while (used.has(candidate)) candidate = `t${++max + 1}`;
+  return candidate;
+}
+
+export function appendPlanTask(
+  plan: SessionPlan,
+  input: Omit<PlanTask, "id"> & { id?: string | undefined },
+): PlanTask {
+  const task: PlanTask = {
+    ...input,
+    id: input.id ?? nextPlanTaskId(plan.tasks),
+    dependencies: [...(input.dependencies ?? [])],
+    resourceLocks: [...(input.resourceLocks ?? [])],
+  };
+  if (plan.tasks.some((candidate) => candidate.id === task.id)) {
+    throw new Error(`duplicate task id: ${task.id}`);
+  }
+  if (
+    task.parentTaskId &&
+    !plan.tasks.some((candidate) => candidate.id === task.parentTaskId)
+  ) {
+    throw new Error(`unknown parent task: ${task.parentTaskId}`);
+  }
+  let index = plan.tasks.length;
+  if (task.parentTaskId) {
+    const parentIndex = plan.tasks.findIndex(
+      (candidate) => candidate.id === task.parentTaskId,
+    );
+    index = parentIndex + 1;
+    while (
+      index < plan.tasks.length &&
+      plan.tasks[index]?.parentTaskId === task.parentTaskId
+    ) {
+      index += 1;
+    }
+  }
+  plan.tasks.splice(index, 0, task);
+  plan.version = (plan.version ?? 1) + 1;
+  plan.updatedAt = new Date().toISOString();
+  if (plan.status === "completed" || plan.status === "abandoned") {
+    plan.status = "in_progress";
+  }
+  return task;
 }
 
 export function readyPlanTasks(plan: SessionPlan): PlanTask[] {
@@ -585,12 +662,13 @@ export function readyPlanTasks(plan: SessionPlan): PlanTask[] {
   );
   const held = new Set(
     plan.tasks
-      .filter((task) => task.state === "in_progress")
+      .filter((task) => task.state === "in_progress" && !task.responderOwned)
       .flatMap((task) => task.resourceLocks ?? []),
   );
   return plan.tasks.filter(
     (task) =>
       task.state === "pending" &&
+      !task.responderOwned &&
       !task.supersededBy &&
       (task.dependencies ?? []).every((dependency) => done.has(dependency)) &&
       !(task.resourceLocks ?? []).some((resource) => held.has(resource)),

@@ -54,6 +54,22 @@ function levelGlyph(level: ToastLevel): string {
 }
 
 /**
+ * Solid chip plate per level. Success is a green plate (Responder delivered a
+ * completion to the model, copy confirmations, mode switches); error is red;
+ * info/warn keep the amber mode plate. White body text stays crisp on all.
+ */
+function levelPlate(level: ToastLevel, theme: Theme): string {
+  switch (level) {
+    case "success":
+      return theme.successBg;
+    case "error":
+      return theme.failedBg;
+    default:
+      return theme.mode;
+  }
+}
+
+/**
  * Word-wrap toast body to `innerWidth` columns (no side pads).
  * First line includes the level glyph; later lines are indented to match.
  */
@@ -164,7 +180,7 @@ function ToastPill(props: {
   const { item, theme, top, left, width, bodyLines, visibility } = props;
   if (visibility <= 0.02) return null;
 
-  const plate = theme.mode;
+  const plate = levelPlate(item.level, theme);
   const textFg = theme.white;
   const dim = visibility < 0.85;
   const attrs = dim

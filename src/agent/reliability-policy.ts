@@ -14,9 +14,10 @@ import { AUTO_COMPACT_TOKEN_BUDGET } from "./context-manager.js";
 /** Hard auto-compact ceiling — never raise soft past this. */
 export const HARD_COMPACT_TOKEN_BUDGET = AUTO_COMPACT_TOKEN_BUDGET;
 
-/** E1 default: auto-compact trigger. Matches the hard ceiling so compaction
- * fires at ~100k estimated tokens; lower via config/env for earlier compaction. */
-export const DEFAULT_SOFT_COMPACT_TOKEN_BUDGET = 100_000;
+/** E1 default: auto-compact trigger. Fires at ~72k estimated tokens (soft
+ * path, on by default); the hard ceiling stays at HARD_COMPACT_TOKEN_BUDGET.
+ * Lower further via config/env for earlier compaction. */
+export const DEFAULT_SOFT_COMPACT_TOKEN_BUDGET = 72_000;
 
 /** E2 default fs passthrough (was 400k). Full body always on disk when truncated. */
 export const DEFAULT_FS_PASSTHROUGH_CAP_CHARS = 64_000;

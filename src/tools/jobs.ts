@@ -3,6 +3,7 @@ import { createWriteStream, existsSync, mkdirSync, readFileSync, renameSync, wri
 import { mkdir, open, stat } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
+import { StringDecoder } from "node:string_decoder";
 import type { ToolResult } from "../types.js";
 import { redactSecrets } from "../llm/provider.js";
 import { safeCwd } from "../os/cwd.js";
@@ -10,6 +11,7 @@ import { getJobsDir } from "../store/paths.js";
 import { resolveShell } from "./shell.js";
 
 export type JobStatus = "starting" | "running" | "exited" | "failed" | "stopping" | "killed" | "lost";
+export type JobTerminalStatus = Exclude<JobStatus, "starting" | "running" | "stopping">;
 
 export interface JobArtifactReceipt {
   path: string;
@@ -20,13 +22,29 @@ export interface JobArtifactReceipt {
   sha256: string;
 }
 
+export type JobMonitorMetadata = Record<string, unknown>;
+
+export interface JobLinkMetadata {
+  taskId?: string | undefined;
+  parentTaskId?: string | undefined;
+  wakeOnCompletion?: boolean | undefined;
+  monitor?: JobMonitorMetadata | undefined;
+  /**
+   * Opt-in delegation to the Responder: fire-and-continue, plan subtask +
+   * auto-wake on completion, and inclusion in the Responder inbox/UI. When
+   * false/absent the job is a plain background job the agent polls itself
+   * (shell.jobs/shell.tail) exactly as before Responder existed.
+   */
+  responder?: boolean | undefined;
+}
+
 /**
  * durable  — shell.start / auto-backgrounded servers (listed by shell.jobs, persisted)
  * ephemeral — per-tool stall tracking in the agent runner (never listed, never persisted)
  */
 export type JobKind = "durable" | "ephemeral";
 
-export interface BackgroundJob {
+export interface BackgroundJob extends JobLinkMetadata {
   id: string;
   command: string;
   commandDisplay: string;
@@ -54,7 +72,55 @@ export interface BackgroundJob {
   timeoutAt?: string | undefined;
 }
 
-interface PersistedRegistry { schemaVersion: 1; jobs: BackgroundJob[] }
+export function formatJobElapsed(
+  job: Pick<BackgroundJob, "startedAt" | "endedAt">,
+  now = Date.now(),
+): string {
+  const startedAt = Date.parse(job.startedAt);
+  const endedAt = job.endedAt ? Date.parse(job.endedAt) : now;
+  if (!Number.isFinite(startedAt) || !Number.isFinite(endedAt)) return "unknown";
+  const seconds = Math.max(0, Math.floor((endedAt - startedAt) / 1000));
+  if (seconds < 1) return "<1s";
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  return `${minutes}m${seconds % 60}s`;
+}
+
+export interface ResponderNotification {
+  id: string;
+  ownerSessionId: string;
+  jobId: string;
+  taskId?: string | undefined;
+  parentTaskId?: string | undefined;
+  status: JobTerminalStatus;
+  createdAt: string;
+  startedAt: string;
+  endedAt: string;
+  exitCode?: number | undefined;
+  signal?: string | undefined;
+  stdoutArtifact: JobArtifactReceipt;
+  stderrArtifact: JobArtifactReceipt;
+  commandDisplay: string;
+  wakeOnCompletion: boolean;
+  responder: boolean;
+  monitor?: JobMonitorMetadata | undefined;
+  deliveredAt?: string | undefined;
+  analyzedAt?: string | undefined;
+  acknowledgedAt?: string | undefined;
+}
+
+export type JobManagerChange =
+  | { type: "job"; jobId: string }
+  | { type: "notification"; jobId: string; notificationId: string };
+export type JobManagerListener = (change: JobManagerChange) => void;
+
+interface PersistedRegistryV1 { schemaVersion: 1; jobs: BackgroundJob[] }
+interface PersistedRegistryV2 {
+  schemaVersion: 2;
+  jobs: BackgroundJob[];
+  notifications: ResponderNotification[];
+}
+type PersistedRegistry = PersistedRegistryV1 | PersistedRegistryV2;
 interface TailCursor { stream?: "stdout" | "stderr" | "combined"; offset?: number; bytes?: number }
 
 /** Safe detached process form. stdinText is written once, then stdin is closed. */
@@ -66,7 +132,7 @@ export interface BackgroundSpawnSpec {
   display?: string | undefined;
 }
 
-export interface StartJobOptions {
+export interface StartJobOptions extends JobLinkMetadata {
   cwd?: string | undefined;
   name?: string | undefined;
   ownerSessionId?: string | undefined;
@@ -89,15 +155,18 @@ function commandDisplay(command: string | BackgroundSpawnSpec): string {
 }
 
 const PER_FILE_BYTES = 1024 * 1024;
-const TOTAL_STREAM_BYTES = 16 * 1024 * 1024;
+const MAX_STREAM_BYTES = 16 * 1024 * 1024;
 const DEFAULT_TAIL_BYTES = 8_000;
 const REGISTRY_FILE = "registry-v1.json";
+const TRANSIENT_V2_REGISTRY_FILE = "registry-v2.json";
 /** Cap durable terminal jobs kept on disk/in memory (per process). */
 const MAX_DURABLE_TERMINAL_JOBS = 80;
 /** Drop terminal durable jobs older than this on load/list. */
 const TERMINAL_JOB_MAX_AGE_MS = 48 * 60 * 60 * 1000;
 /** Max lines shell.jobs returns to the model (running first, then recent). */
 const LIST_JOBS_MAX_LINES = 40;
+/** Coalesce window for chatty stdout/stderr progress persistence + UI events. */
+const PROGRESS_FLUSH_MS = 250;
 
 /**
  * Number of trailing bytes in `buf` that form an incomplete multi-byte UTF-8
@@ -126,7 +195,13 @@ function processAlive(pid: number | undefined): boolean {
 function processIdentity(pid: number | undefined): string | undefined {
   if (!pid || process.platform === "win32") return undefined;
   try {
-    const value = execFileSync("ps", ["-p", String(pid), "-o", "lstart=", "-o", "command="], {
+    // Start time only: it is invariant for a pid's lifetime and changes on
+    // reuse, so it is a sufficient pid-reuse guard. The command line is
+    // deliberately excluded — `sh -c "cmd"` execs into `cmd`, mutating
+    // `ps command=` mid-run, which made a live job fail its OWN identity check
+    // (stop refused with "process identity no longer matches", liveness falsely
+    // marked lost, and double-Esc cancel unable to kill the process).
+    const value = execFileSync("ps", ["-p", String(pid), "-o", "lstart="], {
       encoding: "utf8",
       timeout: 2_000,
       stdio: ["ignore", "pipe", "ignore"],
@@ -154,19 +229,26 @@ function looksLikeEphemeralToolTrack(job: BackgroundJob): boolean {
 
 class RotatingRedactedWriter {
   private stream: WriteStream | undefined;
+  private streamDone: Promise<void> | undefined;
+  private readonly completedStreams: Promise<void>[] = [];
   private index = 0;
   private currentBytes = 0;
   private hash = createHash("sha256");
+  private readonly decoder = new StringDecoder("utf8");
   private pending = "";
+  private closePromise: Promise<void> | undefined;
+  private writeError: Error | undefined;
+  private closed = false;
+  private acceptedBytes: number;
   private static readonly REDACTION_OVERLAP_CHARS = 4096;
 
-  constructor(private readonly receipt: JobArtifactReceipt) {}
+  constructor(private readonly receipt: JobArtifactReceipt) {
+    this.acceptedBytes = receipt.bytes;
+  }
 
   append(raw: Buffer | string): void {
-    this.pending += Buffer.isBuffer(raw) ? raw.toString("utf8") : raw;
-    // Complete lines are safe to redact as a unit, including secrets split
-    // across arbitrary process data events. Keep an unterminated tail as the
-    // overlap window for the next event.
+    if (this.closed) throw new Error("Cannot append to a closed job artifact");
+    this.pending += Buffer.isBuffer(raw) ? this.decoder.write(raw) : raw;
     const lastNewline = this.pending.lastIndexOf("\n");
     if (lastNewline >= 0) {
       this.writeRedacted(this.pending.slice(0, lastNewline + 1));
@@ -178,59 +260,92 @@ class RotatingRedactedWriter {
     this.pending = this.pending.slice(flushLength);
   }
 
-  close(): void {
+  close(): Promise<void> {
+    if (this.closePromise) return this.closePromise;
+    this.pending += this.decoder.end();
     if (this.pending) this.writeRedacted(this.pending);
     this.pending = "";
-    this.stream?.end();
-    this.stream = undefined;
+    this.closed = true;
+    this.finishCurrentStream();
+    this.closePromise = Promise.all(this.completedStreams).then(() => {
+      if (this.writeError) throw this.writeError;
+    });
+    return this.closePromise;
   }
 
   private writeRedacted(source: string): void {
     const safe = redactSecrets(source);
     if (safe !== source) this.receipt.redacted = true;
     let data = Buffer.from(safe, "utf8");
-    if (this.receipt.bytes >= TOTAL_STREAM_BYTES) {
-      this.receipt.droppedBytes += data.length;
-      return;
+    const remaining = Math.max(0, MAX_STREAM_BYTES - this.acceptedBytes);
+    if (data.length > remaining) {
+      this.receipt.droppedBytes += data.length - remaining;
+      data = data.subarray(0, remaining);
     }
-    if (this.receipt.bytes + data.length > TOTAL_STREAM_BYTES) {
-      const keep = TOTAL_STREAM_BYTES - this.receipt.bytes;
-      this.receipt.droppedBytes += data.length - keep;
-      data = data.subarray(0, keep);
-    }
+    this.acceptedBytes += data.length;
     while (data.length > 0) {
       if (!this.stream || this.currentBytes >= PER_FILE_BYTES) this.rotate();
       const room = PER_FILE_BYTES - this.currentBytes;
       const part = data.subarray(0, room);
-      this.stream!.write(part);
-      this.hash.update(part);
+      const stream = this.stream!;
+      stream.write(part, (error) => {
+        if (error) {
+          this.writeError ??= error;
+          return;
+        }
+        this.hash.update(part);
+        this.receipt.bytes += part.length;
+        this.receipt.sha256 = this.hash.copy().digest("hex");
+      });
       this.currentBytes += part.length;
-      this.receipt.bytes += part.length;
       data = data.subarray(part.length);
     }
-    this.receipt.sha256 = this.hash.copy().digest("hex");
+  }
+
+  private finishCurrentStream(): void {
+    if (!this.stream || !this.streamDone) return;
+    const stream = this.stream;
+    const done = this.streamDone;
+    this.stream = undefined;
+    this.streamDone = undefined;
+    stream.end();
+    this.completedStreams.push(done);
   }
 
   private rotate(): void {
-    this.stream?.end();
+    this.finishCurrentStream();
     const path = this.index === 0 ? this.receipt.path : `${this.receipt.path}.${this.index}`;
     this.index += 1;
     this.currentBytes = 0;
     this.receipt.chunks.push(path);
-    this.stream = createWriteStream(path, { flags: "w", mode: 0o600 });
+    const stream = createWriteStream(path, { flags: "w", mode: 0o600 });
+    this.stream = stream;
+    this.streamDone = new Promise<void>((resolve) => {
+      stream.once("finish", resolve);
+      stream.once("error", (error) => {
+        this.writeError ??= error;
+        resolve();
+      });
+    });
   }
 }
 
 export class JobManager {
   private jobs = new Map<string, BackgroundJob>();
+  private notifications = new Map<string, ResponderNotification>();
   private processes = new Map<string, ChildProcess>();
   private writers = new Map<string, { stdout: RotatingRedactedWriter; stderr: RotatingRedactedWriter }>();
   private abortControllers = new Map<string, AbortController>();
   private deadlineTimers = new Map<string, NodeJS.Timeout>();
+  private finalizations = new Map<string, Promise<boolean>>();
+  private listeners = new Set<JobManagerListener>();
+  private registryRetryTimer: ReturnType<typeof setTimeout> | undefined;
   private readonly registryPath: string;
+  private readonly transientV2RegistryPath: string;
 
   constructor(private readonly jobsDir = getJobsDir()) {
     this.registryPath = join(this.jobsDir, REGISTRY_FILE);
+    this.transientV2RegistryPath = join(this.jobsDir, TRANSIENT_V2_REGISTRY_FILE);
     this.loadAndReconcile();
   }
 
@@ -246,12 +361,26 @@ export class JobManager {
     );
   }
 
+  private isTerminalStatus(status: JobStatus): status is JobTerminalStatus {
+    return status === "exited" || status === "failed" || status === "killed" || status === "lost";
+  }
+
+  private emit(change: JobManagerChange): void {
+    for (const listener of this.listeners) {
+      try { listener(change); } catch { /* listeners cannot break job persistence */ }
+    }
+  }
+
+  subscribe(listener: JobManagerListener): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+
   private matchesSession(
     job: BackgroundJob,
     sessionId: string | undefined,
   ): boolean {
     if (!sessionId) return true;
-    // Strict: only this session's durable jobs (never leak other sessions).
     return job.ownerSessionId === sessionId;
   }
 
@@ -259,6 +388,150 @@ export class JobManager {
     const timer = this.deadlineTimers.get(id);
     if (timer) clearTimeout(timer);
     this.deadlineTimers.delete(id);
+  }
+
+  private cloneReceipt(receipt: JobArtifactReceipt): JobArtifactReceipt {
+    return { ...receipt, chunks: [...receipt.chunks] };
+  }
+
+  private notificationForJob(jobId: string): ResponderNotification | undefined {
+    return [...this.notifications.values()].find((notification) => notification.jobId === jobId);
+  }
+
+  private ensureCompletionNotification(job: BackgroundJob): {
+    notification?: ResponderNotification;
+    created: boolean;
+    updated: boolean;
+  } {
+    if (
+      !this.isDurable(job) ||
+      !this.isTerminalStatus(job.status) ||
+      !job.responder
+    ) {
+      return { created: false, updated: false };
+    }
+    const existing = this.notificationForJob(job.id);
+    const endedAt = job.endedAt ?? new Date().toISOString();
+    const stdoutArtifact = this.cloneReceipt(job.artifacts.stdout);
+    const stderrArtifact = this.cloneReceipt(job.artifacts.stderr);
+    const completionChanged = Boolean(
+      existing &&
+        (existing.status !== job.status ||
+          existing.endedAt !== endedAt ||
+          existing.exitCode !== job.exitCode ||
+          existing.signal !== job.signal ||
+          JSON.stringify(existing.stdoutArtifact) !==
+            JSON.stringify(stdoutArtifact) ||
+          JSON.stringify(existing.stderrArtifact) !==
+            JSON.stringify(stderrArtifact)),
+    );
+    const reopenSettlement = Boolean(
+      existing?.acknowledgedAt && completionChanged,
+    );
+    const notification: ResponderNotification = {
+      id:
+        existing?.id ??
+        `completion:${createHash("sha256").update(`${job.ownerSessionId}\0${job.id}\0${job.startedAt}`).digest("hex").slice(0, 24)}`,
+      ownerSessionId: job.ownerSessionId,
+      jobId: job.id,
+      status: job.status,
+      createdAt: existing?.createdAt ?? endedAt,
+      startedAt: job.startedAt,
+      endedAt,
+      stdoutArtifact,
+      stderrArtifact,
+      commandDisplay: job.commandDisplay,
+      wakeOnCompletion: job.wakeOnCompletion ?? false,
+      responder: job.responder ?? false,
+      ...(job.taskId ? { taskId: job.taskId } : {}),
+      ...(job.parentTaskId ? { parentTaskId: job.parentTaskId } : {}),
+      ...(job.exitCode !== undefined ? { exitCode: job.exitCode } : {}),
+      ...(job.signal !== undefined ? { signal: job.signal } : {}),
+      ...(job.monitor !== undefined ? { monitor: job.monitor } : {}),
+      ...(existing?.deliveredAt ? { deliveredAt: existing.deliveredAt } : {}),
+      ...((existing?.analyzedAt ?? existing?.acknowledgedAt)
+        ? { analyzedAt: existing?.analyzedAt ?? existing?.acknowledgedAt }
+        : {}),
+      ...(!reopenSettlement && existing?.acknowledgedAt
+        ? { acknowledgedAt: existing.acknowledgedAt }
+        : {}),
+    };
+    const updated = Boolean(
+      existing && JSON.stringify(existing) !== JSON.stringify(notification),
+    );
+    this.notifications.set(notification.id, notification);
+    return { notification, created: !existing, updated };
+  }
+
+  private async closeWriters(id: string): Promise<boolean> {
+    const writers = this.writers.get(id);
+    if (!writers) return true;
+    const results = await Promise.allSettled([writers.stdout.close(), writers.stderr.close()]);
+    this.writers.delete(id);
+    return results.every((result) => result.status === "fulfilled");
+  }
+
+  private async finalizeJob(
+    job: BackgroundJob,
+    status: JobTerminalStatus,
+    details: { exitCode?: number | undefined; signal?: string | undefined; endedAt?: string | undefined } = {},
+  ): Promise<boolean> {
+    const pending = this.finalizations.get(job.id);
+    if (pending) return pending;
+    const correctsLost = job.status === "lost" && status !== "lost";
+    if (this.isTerminalStatus(job.status) && !correctsLost) {
+      const completion = this.ensureCompletionNotification(job);
+      if (
+        (!completion.created && !completion.updated) ||
+        !completion.notification
+      ) {
+        return true;
+      }
+      const persisted = this.persistSync();
+      if (!persisted) this.scheduleRegistryRetry();
+      this.emit({ type: "job", jobId: job.id });
+      this.emit({
+        type: "notification",
+        jobId: job.id,
+        notificationId: completion.notification.id,
+      });
+      return persisted;
+    }
+    const finalization = (async (): Promise<boolean> => {
+      this.clearJobDeadline(job.id);
+      const streamsFlushed = await this.closeWriters(job.id);
+      job.status = streamsFlushed ? status : "failed";
+      if (details.exitCode !== undefined) job.exitCode = details.exitCode;
+      if (!streamsFlushed && (job.exitCode === undefined || job.exitCode === 0)) {
+        job.exitCode = 1;
+      }
+      if (details.signal !== undefined) job.signal = details.signal;
+      job.endedAt = details.endedAt ?? new Date().toISOString();
+      this.abortControllers.delete(job.id);
+      this.processes.delete(job.id);
+      const completion = this.ensureCompletionNotification(job);
+      this.pruneTerminalJobs();
+      const persisted = this.persistSync();
+      if (!persisted) this.scheduleRegistryRetry();
+      this.emit({ type: "job", jobId: job.id });
+      if (
+        (completion.created || completion.updated) &&
+        completion.notification
+      ) {
+        this.emit({
+          type: "notification",
+          jobId: job.id,
+          notificationId: completion.notification.id,
+        });
+      }
+      return persisted;
+    })();
+    this.finalizations.set(job.id, finalization);
+    try {
+      return await finalization;
+    } finally {
+      this.finalizations.delete(job.id);
+    }
   }
 
   /** Reconcile a restored process that no longer has a ChildProcess close event. */
@@ -276,7 +549,20 @@ export class JobManager {
     job.status = "lost";
     job.endedAt = new Date().toISOString();
     this.clearJobDeadline(job.id);
-    void this.persist();
+    const completion = this.ensureCompletionNotification(job);
+    this.pruneTerminalJobs();
+    if (!this.persistSync()) this.scheduleRegistryRetry();
+    this.emit({ type: "job", jobId: job.id });
+    if (
+      (completion.created || completion.updated) &&
+      completion.notification
+    ) {
+      this.emit({
+        type: "notification",
+        jobId: job.id,
+        notificationId: completion.notification.id,
+      });
+    }
   }
 
   /** Arm or restore a persisted finite-job deadline. */
@@ -303,31 +589,33 @@ export class JobManager {
     this.jobs.set(id, tracked);
     if (ac) this.abortControllers.set(id, ac);
     if (child) this.processes.set(id, child);
-    // Ephemeral tool-track rows must not bloat registry-v1.json (was the
-    // root cause of 1000+ fake "jobs" and multi-GB RAM).
-    if (this.isDurable(tracked)) void this.persist();
+    if (this.isDurable(tracked)) this.persistSync();
+    this.emit({ type: "job", jobId: id });
   }
 
   updateJobStatus(id: string, status: JobStatus, exitCode?: number): void {
     const job = this.jobs.get(id);
     if (!job) return;
+    if (this.isDurable(job) && this.isTerminalStatus(status)) {
+      void this.finalizeJob(job, status, { ...(exitCode !== undefined ? { exitCode } : {}) });
+      return;
+    }
     job.status = status;
     if (exitCode !== undefined) job.exitCode = exitCode;
-    if (!["running", "starting", "stopping"].includes(status)) {
-      job.endedAt = new Date().toISOString();
-    }
+    if (!this.isLive(job)) job.endedAt = new Date().toISOString();
     this.abortControllers.delete(id);
     this.processes.delete(id);
     if (!this.isLive(job)) this.clearJobDeadline(id);
-    // Drop finished tool-track rows immediately — they are not background jobs.
     if (!this.isDurable(job) && !this.isLive(job)) {
       this.jobs.delete(id);
+      this.emit({ type: "job", jobId: id });
       return;
     }
     if (this.isDurable(job)) {
       this.pruneTerminalJobs();
-      void this.persist();
+      this.persistSync();
     }
+    this.emit({ type: "job", jobId: id });
   }
 
   async startJob(command: string | BackgroundSpawnSpec, options?: StartJobOptions): Promise<ToolResult> {
@@ -375,6 +663,13 @@ export class JobManager {
     const stderrArtifact = join(this.jobsDir, `${prefix}.stderr.log`);
     const makeReceipt = (path: string): JobArtifactReceipt => ({ path, chunks: [], bytes: 0, droppedBytes: 0, redacted: false, sha256: "" });
     const safeDisplay = redactSecrets(commandDisplay(command));
+    const monitor = options?.monitor !== undefined || options?.profile !== undefined || options?.estimatedSeconds !== undefined
+      ? {
+          ...(options?.monitor ?? {}),
+          ...(options?.profile !== undefined ? { profile: options.profile } : {}),
+          ...(options?.estimatedSeconds !== undefined ? { estimatedSeconds: options.estimatedSeconds } : {}),
+        }
+      : undefined;
     const job: BackgroundJob = {
       id,
       command: safeDisplay,
@@ -390,6 +685,11 @@ export class JobManager {
       ownerSessionId: options?.ownerSessionId ?? "unknown",
       kind: "durable",
       ...(options?.name ? { name: options.name } : {}),
+      ...(options?.taskId ? { taskId: options.taskId } : {}),
+      ...(options?.parentTaskId ? { parentTaskId: options.parentTaskId } : {}),
+      ...(options?.wakeOnCompletion !== undefined ? { wakeOnCompletion: options.wakeOnCompletion } : {}),
+      ...(options?.responder !== undefined ? { responder: options.responder } : {}),
+      ...(monitor !== undefined ? { monitor } : {}),
       ...(options?.timeoutMs !== undefined
         ? {
             timeoutAt: new Date(
@@ -401,7 +701,17 @@ export class JobManager {
     };
     this.jobs.set(id, job);
     this.pruneTerminalJobs();
-    await this.persist();
+    try {
+      await this.persist();
+    } catch {
+      this.jobs.delete(id);
+      return {
+        ok: false,
+        output: "Background command launch error [PERSIST_FAILED]: could not persist the job registry; the command was not started.",
+        exitCode: 1,
+      };
+    }
+    this.emit({ type: "job", jobId: id });
 
     let launchConfirmed = false;
     try {
@@ -423,6 +733,7 @@ export class JobManager {
       let child = spawnChild();
       const stdout = new RotatingRedactedWriter(job.artifacts.stdout);
       const stderr = new RotatingRedactedWriter(job.artifacts.stderr);
+      this.writers.set(id, { stdout, stderr });
       stdout.append(`$ ${job.commandDisplay}\n\n`);
 
       // A ChildProcess object is returned before the OS confirms launch. Wait
@@ -473,12 +784,7 @@ export class JobManager {
           `${fields.join("; ")}\n` +
           "The command did not start. Do not rewrite its syntax to work around this infrastructure error; verify the target and cwd.";
         stderr.append(`${detail}\n`);
-        stdout.close();
-        stderr.close();
-        job.status = "failed";
-        job.exitCode = 127;
-        job.endedAt = new Date().toISOString();
-        await this.persist();
+        await this.finalizeJob(job, "failed", { exitCode: 127 });
         return {
           ok: false,
           output: detail,
@@ -513,41 +819,82 @@ export class JobManager {
         : undefined;
       expiryTimer?.unref?.();
       this.scheduleJobDeadline(job);
-      child.stdout?.on("data", (chunk: Buffer) => { stdout.append(chunk); job.heartbeatAt = new Date().toISOString(); void this.persist(); });
-      child.stderr?.on("data", (chunk: Buffer) => { stderr.append(chunk); job.heartbeatAt = new Date().toISOString(); void this.persist(); });
+      let lastProgressFlush = 0;
+      let progressDirty = false;
+      let progressTimer: ReturnType<typeof setTimeout> | undefined;
+      const flushProgress = (): void => {
+        progressDirty = false;
+        lastProgressFlush = Date.now();
+        this.persistSync();
+        this.emit({ type: "job", jobId: id });
+      };
+      // Coalesce high-frequency stdout/stderr chunks: a chatty job (scanner,
+      // dev server) must not force a registry write + UI rerender per data
+      // event. Flush at most every PROGRESS_FLUSH_MS, with a trailing flush so
+      // the last chunk before a quiet gap is never dropped. Terminal
+      // finalize/close always persists authoritatively and clears the timer.
+      const scheduleProgressFlush = (): void => {
+        const elapsed = Date.now() - lastProgressFlush;
+        if (elapsed >= PROGRESS_FLUSH_MS) {
+          if (progressTimer) {
+            clearTimeout(progressTimer);
+            progressTimer = undefined;
+          }
+          flushProgress();
+          return;
+        }
+        progressDirty = true;
+        if (progressTimer) return;
+        progressTimer = setTimeout(() => {
+          progressTimer = undefined;
+          if (progressDirty) flushProgress();
+        }, PROGRESS_FLUSH_MS - elapsed);
+        progressTimer.unref?.();
+      };
+      const stopProgressFlush = (): void => {
+        if (progressTimer) {
+          clearTimeout(progressTimer);
+          progressTimer = undefined;
+        }
+        progressDirty = false;
+      };
+      const recordOutput = (writer: RotatingRedactedWriter, chunk: Buffer): void => {
+        writer.append(chunk);
+        job.heartbeatAt = new Date().toISOString();
+        scheduleProgressFlush();
+      };
+      child.stdout?.on("data", (chunk: Buffer) => recordOutput(stdout, chunk));
+      child.stderr?.on("data", (chunk: Buffer) => recordOutput(stderr, chunk));
       child.on("close", (code, signal) => {
         if (expiryTimer) clearTimeout(expiryTimer);
-        this.clearJobDeadline(id);
-        job.exitCode = code ?? undefined;
-        job.signal = signal ?? undefined;
-        job.status = signal ? "killed" : code === 0 ? "exited" : "failed";
-        job.endedAt = new Date().toISOString();
-        stdout.close(); stderr.close();
-        this.processes.delete(id); this.writers.delete(id);
-        void this.persist();
+        stopProgressFlush();
+        const status: JobTerminalStatus = signal ? "killed" : code === 0 ? "exited" : "failed";
+        void this.finalizeJob(job, status, {
+          ...(code !== null ? { exitCode: code } : {}),
+          ...(signal !== null ? { signal } : {}),
+        });
       });
       child.on("error", (error: NodeJS.ErrnoException) => {
         if (expiryTimer) clearTimeout(expiryTimer);
-        this.clearJobDeadline(id);
+        stopProgressFlush();
         const code = error.code ?? "UNKNOWN";
-        stderr.append(`Background process error [${code}]: ${error.message}\n`);
-        job.status = "failed";
-        job.exitCode = 127;
-        job.endedAt = new Date().toISOString();
-        stdout.close(); stderr.close();
-        this.processes.delete(id); this.writers.delete(id);
-        void this.persist();
+        try { stderr.append(`Background process error [${code}]: ${error.message}\n`); } catch { /* finalization already owns the writers */ }
+        void this.finalizeJob(job, "failed", { exitCode: 127 });
       });
+      this.persistSync();
+      this.emit({ type: "job", jobId: id });
 
       // Best-effort detection for shell-level failures such as command-not-found
       // immediately after the command shell launches. This bounded window is
       // not an application readiness guarantee; callers must tail/probe.
+      let closedEarly = false;
       await new Promise<void>((resolve) => {
         if (!this.isLive(job)) {
           resolve();
           return;
         }
         const onClose = (): void => {
+          closedEarly = true;
           clearTimeout(timer);
           resolve();
         };
@@ -557,6 +904,10 @@ export class JobManager {
         }, 30);
         child.once("close", onClose);
       });
+      if (closedEarly) {
+        const finalization = this.finalizations.get(id);
+        if (finalization) await finalization;
+      }
       const earlyStatus = this.getJob(id)?.status;
       if (earlyStatus === "failed") {
         await this.persist();
@@ -600,12 +951,13 @@ export class JobManager {
       const detail = error instanceof Error ? error.message : String(error);
       if (launchConfirmed) {
         const alive = processAlive(job.pid);
-        job.status = alive ? "running" : "failed";
-        if (!alive) {
-          job.exitCode ??= 1;
-          job.endedAt ??= new Date().toISOString();
+        if (!alive && this.isLive(job)) {
+          await this.finalizeJob(job, "failed", { exitCode: job.exitCode ?? 1 });
+        } else if (alive) {
+          job.status = "running";
+          this.persistSync();
+          this.emit({ type: "job", jobId: id });
         }
-        await this.persist().catch(() => undefined);
         return {
           ok: alive,
           output:
@@ -622,10 +974,7 @@ export class JobManager {
           },
         };
       }
-      job.status = "failed";
-      job.exitCode = 127;
-      job.endedAt = new Date().toISOString();
-      await this.persist().catch(() => undefined);
+      await this.finalizeJob(job, "failed", { exitCode: 127 });
       return {
         ok: false,
         output:
@@ -664,21 +1013,12 @@ export class JobManager {
     const shown = ordered.slice(0, LIST_JOBS_MAX_LINES);
     const omitted = ordered.length - shown.length;
     const format = (job: BackgroundJob): string => {
-      const elapsedEnd = job.endedAt
-        ? new Date(job.endedAt).getTime()
-        : Date.now();
-      const elapsed = Math.max(
-        0,
-        Math.round(
-          (elapsedEnd - new Date(job.startedAt).getTime()) / 1000,
-        ),
-      );
       const health = this.isLive(job)
         ? processAlive(job.pid)
           ? "alive"
           : "unresponsive"
         : "terminal";
-      return `[${job.id}] ${job.status} health=${health} exit=${job.exitCode ?? "?"} ${elapsed}s  ${job.commandDisplay.slice(0, 80)}`;
+      return `[${job.id}] ${job.status} health=${health} exit=${job.exitCode ?? "?"} ${formatJobElapsed(job)}  ${job.commandDisplay.slice(0, 80)}`;
     };
     const header = sessionId
       ? `Session background jobs (${durable.length} total, session ${sessionId}):`
@@ -720,6 +1060,126 @@ export class JobManager {
     const resolved = this.resolveJobId(id);
     const job = resolved ? this.jobs.get(resolved) : undefined;
     if (job) this.refreshJobLiveness(job);
+    return job;
+  }
+
+  getPendingNotifications(sessionId?: string): ResponderNotification[] {
+    return [...this.notifications.values()]
+      .filter((notification) =>
+        !notification.acknowledgedAt &&
+        (!sessionId || notification.ownerSessionId === sessionId),
+      )
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  }
+
+  pendingNotifications(sessionId?: string): ResponderNotification[] {
+    return this.getPendingNotifications(sessionId);
+  }
+
+  markDelivered(notificationId: string): boolean {
+    const notification = this.notifications.get(notificationId);
+    if (!notification) return false;
+    if (!notification.deliveredAt) {
+      const deliveredAt = new Date().toISOString();
+      notification.deliveredAt = deliveredAt;
+      if (!this.persistSync()) {
+        notification.deliveredAt = undefined;
+        return false;
+      }
+      this.emit({ type: "notification", jobId: notification.jobId, notificationId });
+    }
+    return true;
+  }
+
+  markAnalyzed(notificationId: string): boolean {
+    const notification = this.notifications.get(notificationId);
+    if (!notification?.deliveredAt) return false;
+    if (!notification.analyzedAt) {
+      notification.analyzedAt = new Date().toISOString();
+      if (!this.persistSync()) {
+        notification.analyzedAt = undefined;
+        return false;
+      }
+      this.emit({
+        type: "notification",
+        jobId: notification.jobId,
+        notificationId,
+      });
+    }
+    return true;
+  }
+
+  acknowledge(notificationId: string): boolean {
+    const notification = this.notifications.get(notificationId);
+    if (!notification?.analyzedAt) return false;
+    if (!notification.acknowledgedAt) {
+      notification.acknowledgedAt = new Date().toISOString();
+      if (!this.persistSync()) {
+        notification.acknowledgedAt = undefined;
+        return false;
+      }
+      this.pruneTerminalJobs();
+      this.persistSync();
+      this.emit({ type: "notification", jobId: notification.jobId, notificationId });
+    }
+    return true;
+  }
+
+  linkJob(jobId: string, metadata: JobLinkMetadata): BackgroundJob | undefined {
+    const resolved = this.resolveJobId(jobId);
+    const job = resolved ? this.jobs.get(resolved) : undefined;
+    if (!job || !this.isDurable(job)) return undefined;
+    const previousJob: JobLinkMetadata = {
+      taskId: job.taskId,
+      parentTaskId: job.parentTaskId,
+      wakeOnCompletion: job.wakeOnCompletion,
+      monitor: job.monitor,
+      responder: job.responder,
+    };
+    const existingNotification = this.notificationForJob(job.id);
+    const previousNotification = existingNotification
+      ? {
+          taskId: existingNotification.taskId,
+          parentTaskId: existingNotification.parentTaskId,
+          wakeOnCompletion: existingNotification.wakeOnCompletion,
+          monitor: existingNotification.monitor,
+          responder: existingNotification.responder,
+        }
+      : undefined;
+    if (metadata.taskId !== undefined) job.taskId = metadata.taskId;
+    if (metadata.parentTaskId !== undefined) job.parentTaskId = metadata.parentTaskId;
+    if (metadata.wakeOnCompletion !== undefined) job.wakeOnCompletion = metadata.wakeOnCompletion;
+    if (metadata.monitor !== undefined) job.monitor = metadata.monitor;
+    if (metadata.responder !== undefined) job.responder = metadata.responder;
+    const completion = this.ensureCompletionNotification(job);
+    if (completion.notification) {
+      if (metadata.taskId !== undefined) completion.notification.taskId = metadata.taskId;
+      if (metadata.parentTaskId !== undefined) completion.notification.parentTaskId = metadata.parentTaskId;
+      if (metadata.wakeOnCompletion !== undefined) completion.notification.wakeOnCompletion = metadata.wakeOnCompletion;
+      if (metadata.monitor !== undefined) completion.notification.monitor = metadata.monitor;
+      if (metadata.responder !== undefined) completion.notification.responder = metadata.responder;
+    }
+    if (!this.persistSync()) {
+      job.taskId = previousJob.taskId;
+      job.parentTaskId = previousJob.parentTaskId;
+      job.wakeOnCompletion = previousJob.wakeOnCompletion;
+      job.monitor = previousJob.monitor;
+      job.responder = previousJob.responder;
+      if (completion.created && completion.notification) {
+        this.notifications.delete(completion.notification.id);
+      } else if (completion.notification && previousNotification) {
+        completion.notification.taskId = previousNotification.taskId;
+        completion.notification.parentTaskId = previousNotification.parentTaskId;
+        completion.notification.wakeOnCompletion = previousNotification.wakeOnCompletion;
+        completion.notification.monitor = previousNotification.monitor;
+        completion.notification.responder = previousNotification.responder;
+      }
+      return undefined;
+    }
+    this.emit({ type: "job", jobId: job.id });
+    if (completion.notification) {
+      this.emit({ type: "notification", jobId: job.id, notificationId: completion.notification.id });
+    }
     return job;
   }
 
@@ -795,35 +1255,234 @@ export class JobManager {
     }
   }
 
-  async stopJob(id: string, options?: { signal?: NodeJS.Signals; graceMs?: number; escalate?: boolean }): Promise<ToolResult> {
+  async stopJob(
+    id: string,
+    options?: { signal?: NodeJS.Signals; graceMs?: number; escalate?: boolean; suppressWake?: boolean },
+  ): Promise<ToolResult> {
     const resolved = this.resolveJobId(id);
     const job = resolved ? this.jobs.get(resolved) : undefined;
     if (!job || !resolved) return { ok: false, output: `Job "${id}" not found.`, exitCode: 1 };
     id = resolved;
-    if (job.status !== "running" && job.status !== "starting") return { ok: false, output: `Job "${id}" is already ${job.status}.`, exitCode: 1 };
-    this.clearJobDeadline(id);
-    job.status = "stopping"; await this.persist();
-    this.abortControllers.get(id)?.abort();
+    const inFlightFinalization = this.finalizations.get(id);
+    if (inFlightFinalization) {
+      const persisted = await inFlightFinalization;
+      return persisted
+        ? { ok: true, output: `Job "${id}" completed while stop was requested.` }
+        : { ok: false, output: `Job "${id}" completed, but its terminal state could not be persisted.`, exitCode: 1 };
+    }
+    if (!this.isLive(job)) return { ok: false, output: `Job "${id}" is already ${job.status}.`, exitCode: 1 };
     const pid = job.pid;
-    const send = (signal: NodeJS.Signals): boolean => {
-      if (!pid) return false;
-      try { process.platform !== "win32" && job.processGroupId ? process.kill(-job.processGroupId, signal) : process.kill(pid, signal); return true; } catch { return !processAlive(pid); }
+    if (!pid) return { ok: false, output: `Job "${id}" has no process id to stop.`, exitCode: 1 };
+
+    const processGroupId = process.platform !== "win32" ? job.processGroupId : undefined;
+    const targetAlive = (): boolean => {
+      if (!processGroupId) return processAlive(pid);
+      try { process.kill(-processGroupId, 0); return true; } catch (error) {
+        return (error as NodeJS.ErrnoException).code === "EPERM";
+      }
+    };
+    const identityMatches = (): boolean => {
+      if (process.platform === "win32") return processAlive(pid);
+      const current = processIdentity(pid);
+      return Boolean(current && job.processIdentity && current === job.processIdentity);
+    };
+    if (targetAlive() && (!processAlive(pid) || !identityMatches())) {
+      return {
+        ok: false,
+        output: `Refused to signal job "${id}": its persisted process identity no longer matches pid ${pid}.`,
+        exitCode: 1,
+      };
+    }
+    const child = this.processes.get(id);
+    const childClose = child
+      ? new Promise<void>((resolve) => child.once("close", () => resolve()))
+      : undefined;
+
+    this.clearJobDeadline(id);
+    const previousStatus = job.status;
+    const previousWakeOnCompletion = job.wakeOnCompletion;
+    if (options?.suppressWake) job.wakeOnCompletion = false;
+    job.status = "stopping";
+    if (!this.persistSync()) {
+      job.status = previousStatus;
+      job.wakeOnCompletion = previousWakeOnCompletion;
+      if (!job.timeoutAt || Date.parse(job.timeoutAt) > Date.now()) this.scheduleJobDeadline(job);
+      return { ok: false, output: `Failed to persist stop state for job "${id}"; no signal was sent.`, exitCode: 1 };
+    }
+    this.emit({ type: "job", jobId: id });
+    this.abortControllers.get(id)?.abort();
+    let processGroupVerified = false;
+    const send = (
+      signal: NodeJS.Signals,
+      allowVerifiedGroup: boolean,
+    ): "sent" | "gone" | "identity-mismatch" | "failed" => {
+      if (!targetAlive()) return "gone";
+      if (processAlive(pid) && identityMatches()) {
+        processGroupVerified = true;
+      } else if (!(processGroupId && processGroupVerified && allowVerifiedGroup)) {
+        return "identity-mismatch";
+      }
+      try {
+        processGroupId ? process.kill(-processGroupId, signal) : process.kill(pid, signal);
+        return "sent";
+      } catch {
+        return targetAlive() ? "failed" : "gone";
+      }
+    };
+    const restoreRunning = (): void => {
+      job.status = "running";
+      if (!job.timeoutAt || Date.parse(job.timeoutAt) > Date.now()) this.scheduleJobDeadline(job);
+      this.persistSync();
+      this.emit({ type: "job", jobId: id });
     };
     const graceful = options?.signal ?? "SIGTERM";
-    if (!send(graceful) && processAlive(pid)) { job.status = "running"; if (!job.timeoutAt || Date.parse(job.timeoutAt) > Date.now()) this.scheduleJobDeadline(job); await this.persist(); return { ok: false, output: `Failed to signal job "${id}".`, exitCode: 1 }; }
+    const firstSignal = send(graceful, false);
+    if (firstSignal === "identity-mismatch" || firstSignal === "failed") {
+      restoreRunning();
+      return {
+        ok: false,
+        output: firstSignal === "identity-mismatch"
+          ? `Refused to signal job "${id}": process identity changed immediately before stop.`
+          : `Failed to signal job "${id}".`,
+        exitCode: 1,
+      };
+    }
     const waitForExit = async (ms: number): Promise<boolean> => {
       const deadline = Date.now() + ms;
-      while (Date.now() < deadline) { if (!processAlive(pid)) return true; await new Promise((resolve) => setTimeout(resolve, 25)); }
-      return !processAlive(pid);
+      while (Date.now() < deadline) {
+        if (!targetAlive()) return true;
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      return !targetAlive();
     };
-    let stopped = await waitForExit(options?.graceMs ?? 2_000);
+    let stopped = firstSignal === "gone" || await waitForExit(options?.graceMs ?? 2_000);
     let actualSignal: NodeJS.Signals = graceful;
-    if (!stopped && options?.escalate !== false) { actualSignal = "SIGKILL"; send(actualSignal); stopped = await waitForExit(1_000); }
-    if (!stopped) { job.status = "running"; if (!job.timeoutAt || Date.parse(job.timeoutAt) > Date.now()) this.scheduleJobDeadline(job); await this.persist(); return { ok: false, output: `Job "${id}" remains alive after ${actualSignal}.`, exitCode: 1 }; }
-    job.status = "killed"; job.signal = actualSignal; job.endedAt = new Date().toISOString();
-    this.abortControllers.delete(id); this.processes.delete(id); this.writers.get(id)?.stdout.close(); this.writers.get(id)?.stderr.close(); this.writers.delete(id);
-    await this.persist();
+    if (!stopped && options?.escalate !== false) {
+      actualSignal = "SIGKILL";
+      const escalated = send(actualSignal, true);
+      if (escalated === "identity-mismatch" || escalated === "failed") {
+        restoreRunning();
+        return {
+          ok: false,
+          output: escalated === "identity-mismatch"
+            ? `Refused to escalate job "${id}": process identity changed before SIGKILL.`
+            : `Failed to escalate job "${id}" with SIGKILL.`,
+          exitCode: 1,
+        };
+      }
+      stopped = escalated === "gone" || await waitForExit(1_000);
+    }
+    if (!stopped) {
+      restoreRunning();
+      return { ok: false, output: `Job "${id}" remains alive after ${actualSignal}.`, exitCode: 1 };
+    }
+
+    if (childClose) await childClose;
+    let terminalPersisted = true;
+    const eventFinalization = this.finalizations.get(id);
+    if (eventFinalization) terminalPersisted = await eventFinalization;
+    if (this.isLive(job)) {
+      terminalPersisted = await this.finalizeJob(job, "killed", { signal: actualSignal });
+    }
+    if (!terminalPersisted) {
+      return {
+        ok: false,
+        output: `Job "${id}" stopped, but its terminal state and completion notification could not be persisted.`,
+        exitCode: 1,
+      };
+    }
     return { ok: true, output: `Job "${id}" stopped and termination verified (${actualSignal}).` };
+  }
+
+  async cancelAll(sessionId: string): Promise<ToolResult> {
+    if (!sessionId) {
+      return { ok: false, output: "cancelAll requires a non-empty session id.", exitCode: 1 };
+    }
+    const targets = [...this.jobs.values()].filter(
+      (job) => this.isDurable(job) && job.ownerSessionId === sessionId && this.isLive(job),
+    );
+    const priorWake = new Map(targets.map((job) => [job.id, job.wakeOnCompletion]));
+    for (const job of targets) {
+      job.wakeOnCompletion = false;
+      const notification = this.notificationForJob(job.id);
+      if (notification) notification.wakeOnCompletion = false;
+    }
+    if (!this.persistSync()) {
+      for (const job of targets) job.wakeOnCompletion = priorWake.get(job.id);
+      return {
+        ok: false,
+        output: `Failed to persist wake suppression for session ${sessionId}; no jobs were cancelled.`,
+        exitCode: 1,
+      };
+    }
+    for (const job of targets) this.emit({ type: "job", jobId: job.id });
+
+    const outcomes = await Promise.all(targets.map(async (job) => {
+      const current = this.jobs.get(job.id);
+      if (!current || !this.isLive(current)) return { id: job.id, ok: true, output: "already terminal" };
+      try {
+        const result = await this.stopJob(job.id, { suppressWake: true });
+        return { id: job.id, ok: result.ok, output: result.output };
+      } catch (error) {
+        return { id: job.id, ok: false, output: error instanceof Error ? error.message : String(error) };
+      }
+    }));
+
+    const acknowledgedAt = new Date().toISOString();
+    const notificationSnapshots: Array<{
+      notification: ResponderNotification;
+      wakeOnCompletion: boolean;
+      deliveredAt?: string | undefined;
+      acknowledgedAt?: string | undefined;
+    }> = [];
+    for (const notification of this.notifications.values()) {
+      if (notification.ownerSessionId !== sessionId || notification.acknowledgedAt) continue;
+      notificationSnapshots.push({
+        notification,
+        wakeOnCompletion: notification.wakeOnCompletion,
+        deliveredAt: notification.deliveredAt,
+        acknowledgedAt: notification.acknowledgedAt,
+      });
+      notification.wakeOnCompletion = false;
+      notification.deliveredAt ??= acknowledgedAt;
+      notification.acknowledgedAt = acknowledgedAt;
+    }
+    const acknowledgementsPersisted = this.persistSync();
+    if (!acknowledgementsPersisted) {
+      for (const snapshot of notificationSnapshots) {
+        snapshot.notification.wakeOnCompletion = snapshot.wakeOnCompletion;
+        snapshot.notification.deliveredAt = snapshot.deliveredAt;
+        snapshot.notification.acknowledgedAt = snapshot.acknowledgedAt;
+      }
+    } else {
+      for (const snapshot of notificationSnapshots) {
+        this.emit({
+          type: "notification",
+          jobId: snapshot.notification.jobId,
+          notificationId: snapshot.notification.id,
+        });
+      }
+      this.pruneTerminalJobs();
+      this.persistSync();
+    }
+    const failures = outcomes.filter((outcome) => !outcome.ok);
+    if (failures.length > 0 || !acknowledgementsPersisted) {
+      const details = failures.map((failure) => `[${failure.id}] ${failure.output}`);
+      if (!acknowledgementsPersisted) details.push("Completion notifications could not be durably acknowledged.");
+      return {
+        ok: false,
+        output:
+          `Cancelled ${outcomes.length - failures.length}/${outcomes.length} background job(s) for session ${sessionId}; ` +
+          `${details.length} failure(s):\n${details.join("\n")}`,
+        exitCode: 1,
+      };
+    }
+    return {
+      ok: true,
+      output: targets.length === 0
+        ? `No running background jobs for session ${sessionId}; pending notifications were acknowledged.`
+        : `Cancelled ${targets.length} background job(s) for session ${sessionId}; wake notifications were suppressed and acknowledged.`,
+    };
   }
 
   getRunningJobs(sessionId?: string): BackgroundJob[] {
@@ -849,6 +1508,15 @@ export class JobManager {
   /** Drop stale terminal durable jobs and all leftover ephemeral rows. */
   pruneTerminalJobs(): void {
     const now = Date.now();
+    for (const [id, notification] of this.notifications) {
+      const job = this.jobs.get(notification.jobId);
+      if (
+        !job ||
+        (notification.acknowledgedAt && job.status !== "lost")
+      ) {
+        this.notifications.delete(id);
+      }
+    }
     const durableTerminal: BackgroundJob[] = [];
     for (const [id, job] of this.jobs) {
       if (!this.isDurable(job)) {
@@ -857,6 +1525,8 @@ export class JobManager {
         continue;
       }
       if (this.isLive(job)) continue;
+      const notification = this.notificationForJob(job.id);
+      if (notification && !notification.acknowledgedAt) continue;
       const ended = job.endedAt ? Date.parse(job.endedAt) : Date.parse(job.startedAt);
       if (Number.isFinite(ended) && now - ended > TERMINAL_JOB_MAX_AGE_MS) {
         this.jobs.delete(id);
@@ -873,14 +1543,29 @@ export class JobManager {
 
   private loadAndReconcile(): void {
     try {
-      if (!existsSync(this.registryPath)) return;
-      const parsed = JSON.parse(readFileSync(this.registryPath, "utf8")) as PersistedRegistry;
-      if (parsed.schemaVersion !== 1 || !Array.isArray(parsed.jobs)) return;
+      let parsed: PersistedRegistry | undefined;
+      const sourcePath = existsSync(this.registryPath)
+        ? this.registryPath
+        : this.transientV2RegistryPath;
+      if (!existsSync(sourcePath)) return;
+      try {
+        const candidate = JSON.parse(readFileSync(sourcePath, "utf8")) as PersistedRegistry;
+        if ((candidate.schemaVersion === 1 || candidate.schemaVersion === 2) && Array.isArray(candidate.jobs)) {
+          parsed = candidate;
+        }
+      } catch { /* a corrupt current registry must not replay stale v1 state */ }
+      if (!parsed) return;
+      if (parsed.schemaVersion === 2 && Array.isArray(parsed.notifications)) {
+        const notifiedJobs = new Set<string>();
+        for (const notification of parsed.notifications) {
+          if (!notification || typeof notification.id !== "string" || typeof notification.jobId !== "string") continue;
+          if (notifiedJobs.has(notification.jobId)) continue;
+          notifiedJobs.add(notification.jobId);
+          this.notifications.set(notification.id, notification);
+        }
+      }
       for (const job of parsed.jobs) {
-        // Historical pollution: tool-stall rows were persisted as if they were
-        // background jobs (command like "fs.list /path"). Drop them on load.
-        if (job.kind === "ephemeral") continue;
-        if (looksLikeEphemeralToolTrack(job)) continue;
+        if (job.kind === "ephemeral" || looksLikeEphemeralToolTrack(job)) continue;
         job.kind = "durable";
         if (["starting", "running", "stopping"].includes(job.status)) {
           const identity = processIdentity(job.pid);
@@ -888,38 +1573,54 @@ export class JobManager {
             job.status = "lost";
             job.endedAt = new Date().toISOString();
           } else {
-            // The process identity is still verified. Restore any persisted
-            // deadline after insertion; an already-expired deadline schedules
-            // immediate stopJob(), which verifies termination before marking it.
             job.status = "running";
             job.heartbeatAt = new Date().toISOString();
           }
         }
         this.jobs.set(job.id, job);
+        this.ensureCompletionNotification(job);
         this.scheduleJobDeadline(job);
+      }
+      for (const [id, notification] of this.notifications) {
+        const job = this.jobs.get(notification.jobId);
+        if (!job?.responder) this.notifications.delete(id);
       }
       this.pruneTerminalJobs();
       this.persistSync();
     } catch { /* Corrupt registries are ignored, never trusted as running. */ }
   }
 
-  /** Only durable jobs are written to disk. */
-  private registry(): PersistedRegistry {
+  /** Only durable jobs and responder notifications are written to disk. */
+  private registry(): PersistedRegistryV2 {
     return {
-      schemaVersion: 1,
-      jobs: [...this.jobs.values()].filter((j) => this.isDurable(j)),
+      schemaVersion: 2,
+      jobs: [...this.jobs.values()].filter((job) => this.isDurable(job)),
+      notifications: [...this.notifications.values()],
     };
   }
-  private persistSync(): void {
+  private scheduleRegistryRetry(): void {
+    if (this.registryRetryTimer) return;
+    const timer = setTimeout(() => {
+      this.registryRetryTimer = undefined;
+      if (!this.persistSync()) this.scheduleRegistryRetry();
+    }, 250);
+    timer.unref?.();
+    this.registryRetryTimer = timer;
+  }
+
+  private persistSync(): boolean {
     try {
       mkdirSync(this.jobsDir, { recursive: true });
       const temp = `${this.registryPath}.${process.pid}.${randomUUID()}.tmp`;
       writeFileSync(temp, `${JSON.stringify(this.registry(), null, 2)}\n`, { mode: 0o600 });
       renameSync(temp, this.registryPath);
-    } catch { /* best effort during constructor reconciliation */ }
+      return true;
+    } catch {
+      return false;
+    }
   }
   private async persist(): Promise<void> {
-    this.persistSync();
+    if (!this.persistSync()) throw new Error("Failed to persist the background-job registry.");
   }
 }
 

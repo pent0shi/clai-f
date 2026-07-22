@@ -41,7 +41,6 @@ function flash(
 export function handleMode(services: AppServices, mode: Mode): void {
   services.session.setMode(mode);
   setDefaultMode(mode);
-  notice(services, "info", `mode → ${mode}`);
   flash(services, `Mode · ${mode}`, { key: "mode", level: "success" });
 }
 
@@ -51,7 +50,6 @@ export function handleClear(services: AppServices): void {
   // Drop in-memory plan; session id is unchanged so the on-disk plan remains
   // for this session, but the UI should not show a stale card after clear.
   void services.plan.load(services.session.sessionId).catch(() => undefined);
-  notice(services, "info", "context cleared");
   flash(services, "Context cleared", { key: "session", level: "success" });
 }
 
@@ -68,7 +66,6 @@ export async function handleNew(services: AppServices): Promise<void> {
   // New session id → no plan until the agent creates one.
   await services.plan.load(services.session.sessionId).catch(() => undefined);
   services.session.setPlanApproved(false);
-  notice(services, "info", "fresh session started");
   flash(services, "Fresh session", { key: "session", level: "success" });
 }
 
@@ -79,7 +76,6 @@ export function handleClean(services: AppServices): void {
   services.transcript.reset();
   void services.plan.load(services.session.sessionId).catch(() => undefined);
   services.session.setPlanApproved(false);
-  notice(services, "info", "fresh session started");
   flash(services, "Fresh session", { key: "session", level: "success" });
 }
 
@@ -105,7 +101,6 @@ export function handleContext(services: AppServices): void {
       : "";
   const text = `context: ${messages} messages · ${usedLabel}${sessionBits}`;
   notice(services, "info", text);
-  flash(services, text, { key: "context" });
 }
 
 export async function handleCompact(services: AppServices): Promise<void> {

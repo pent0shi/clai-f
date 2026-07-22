@@ -203,6 +203,9 @@ export function ToolCard(props: {
   expanded: boolean;
   services: AppServices;
   onToggle: () => void;
+  /** Collapse/expand every tool OUTPUT card (collapse all / expand all). */
+  onCollapseAllOutput?: () => void;
+  onExpandAllOutput?: () => void;
   /** File-diff hunks visible (vs one-line collapsed title). */
   fileDiffExpanded?: boolean;
   onToggleFileDiff?: () => void;
@@ -215,6 +218,9 @@ export function ToolCard(props: {
     spool,
     expanded,
     services,
+    onToggle,
+    onCollapseAllOutput,
+    onExpandAllOutput,
     fileDiffExpanded = true,
     onToggleFileDiff,
     onCollapseAllFileDiffs,
@@ -303,6 +309,18 @@ export function ToolCard(props: {
     Boolean(mdPreview && mdPreview.length > 0) ||
     item.outputBytes > 0 ||
     Boolean(item.artifactPath);
+
+  // shell.exec-style OUTPUT cards get collapse / collapse-all chips (parity
+  // with file-diff cards). Shown only when there is genuinely collapsible
+  // body — expanded, or collapsed with more lines hidden.
+  const canToggleOutput =
+    !isFileDiff &&
+    !isBatch &&
+    !isBatchLive &&
+    hasBody &&
+    (expanded ||
+      hiddenAboveCount > 0 ||
+      (formatMdRead && (mdPreview?.length ?? 0) > 0));
 
   /** Open unbounded pager for the whole tool (or full batch / file diff). */
   const openFull = (): void => {
@@ -479,6 +497,22 @@ export function ToolCard(props: {
                 fileDiffExpanded
                   ? onCollapseAllFileDiffs?.()
                   : onExpandAllFileDiffs?.()
+              }
+            />
+          </>
+        ) : null}
+        {canToggleOutput ? (
+          <>
+            <DiffActionButton
+              label={expanded ? "collapse" : "expand"}
+              theme={theme}
+              onClick={() => onToggle()}
+            />
+            <DiffActionButton
+              label={expanded ? "collapse all" : "expand all"}
+              theme={theme}
+              onClick={() =>
+                expanded ? onCollapseAllOutput?.() : onExpandAllOutput?.()
               }
             />
           </>

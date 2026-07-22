@@ -172,6 +172,10 @@ export interface VersionedPlanStep extends PlanStep {
   dependencies?: string[] | undefined;
   resourceLocks?: string[] | undefined;
   supersededBy?: string | undefined;
+  parentTaskId?: string | undefined;
+  jobId?: string | undefined;
+  processId?: number | undefined;
+  responderOwned?: boolean | undefined;
 }
 
 export interface VersionedTaskPlan extends Omit<TaskPlan, "steps"> {

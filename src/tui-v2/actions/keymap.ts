@@ -47,7 +47,7 @@ function binding(
 
 export const defaultKeymap: readonly KeyBinding[] = [
   // global
-  // Ctrl+C: abort-then-quit (double press). Esc: abort/dismiss only — never quit.
+  // Ctrl+C: abort-then-quit (double press). Esc: dismiss/arm, then cancel all.
   // Exit: double Ctrl+C or /exit. (Ctrl+D is chat jump-to-bottom, not quit.)
   binding("ctrl+c", "app.interrupt", "global"),
   binding("escape", "app.cancel", "global"),

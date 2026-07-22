@@ -48,7 +48,7 @@ const emptyObject = {
 };
 
 /** Plan tools dispatched specially in the runner (not in toolRegistry). */
-export const PLAN_TOOL_NAMES = new Set(["plan.create", "task.update"]);
+export const PLAN_TOOL_NAMES = new Set(["plan.create", "task.add", "task.update"]);
 
 /** Meta tools with no registry handler (plan + ask-mode handoff). */
 export const NON_REGISTRY_TOOL_NAMES = new Set([
@@ -270,13 +270,18 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   ),
   def(
     "shell.exec",
-    "Run a finite shell command and wait for completion. Default timeoutMs is 40000; choose a larger timeout for builds/installs/scaffolds. Known long installs get a safe automatic budget when omitted. Potentially long nmap/ffuf/find-style commands are automatically launched as durable background jobs; when a backgroundJob receipt is returned, poll shell.tail using nextOffset and shell.jobs until terminal status instead of launching a duplicate. Pass cwd instead of cd; use shell.start for persistent servers/watchers/listeners.",
+    "Run a finite shell command and wait for completion. Default timeoutMs is 40000; choose a larger timeout for builds/installs/scaffolds. Known long installs get a safe automatic budget when omitted. Potentially long nmap/ffuf/find-style commands are automatically launched as durable background jobs; when a backgroundJob receipt is returned, poll shell.tail using nextOffset and shell.jobs until terminal status instead of launching a duplicate. Pass cwd instead of cd; use shell.start for persistent servers/watchers/listeners. Set responder:true ONLY for a long, self-completing scan (ffuf/nmap/gobuster and similar) you want to fire-and-forget: the Responder then tracks it, wakes you with the result, and you must NOT poll it. Leave responder off (default) for everything else and poll normally.",
     {
       type: "object",
       properties: {
         command: { type: "string" },
         cwd: { type: "string" },
         timeoutMs: { type: "integer" },
+        responder: {
+          type: "boolean",
+          description:
+            "Delegate this durable job to the Responder (fire-and-forget, auto-wake on completion). Default false: a normal background job you poll yourself.",
+        },
       },
       required: ["command"],
       additionalProperties: false,
@@ -285,7 +290,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   ),
   def(
     "shell.start",
-    "Start a persistent server/watcher/listener as a tracked background job. Returns a stable job id and persists registry/status across turns and CLI restarts. Captured output is incrementally available while this CLI process owns the child pipes; after a restart, status is reconciled but detached output pipes cannot be reattached. Launch success does not prove readiness: use shell.tail with offset/nextOffset, shell.jobs, and an application readiness probe. Do not start duplicates; use shell.stop for cleanup. If timeoutMs is supplied it becomes the job execution deadline; finite installs/builds belong in shell.exec with an appropriate timeoutMs.",
+    "Start a persistent server/watcher/listener as a tracked background job. Returns a stable job id and persists registry/status across turns and CLI restarts. Captured output is incrementally available while this CLI process owns the child pipes; after a restart, status is reconciled but detached output pipes cannot be reattached. Launch success does not prove readiness: use shell.tail with offset/nextOffset, shell.jobs, and an application readiness probe. Do not start duplicates; use shell.stop for cleanup. If timeoutMs is supplied it becomes the job execution deadline; finite installs/builds belong in shell.exec with an appropriate timeoutMs. Servers do not self-complete, so leave responder off here and poll/probe as usual.",
     {
       type: "object",
       properties: {
@@ -296,6 +301,11 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
           type: "integer",
           description:
             "Optional execution deadline for the background job in milliseconds; omitted means no job deadline.",
+        },
+        responder: {
+          type: "boolean",
+          description:
+            "Delegate to the Responder (fire-and-forget, auto-wake on completion). Default false. Only useful for a job that exits on its own; leave off for long-lived servers/watchers.",
         },
       },
       required: ["command"],
@@ -546,7 +556,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   ),
   def(
     "pentest.webDiscover",
-    "Discover a scoped web surface with bounded concurrent requests to common and supplied paths.",
+    "Quick bounded probe of specific known/guessed paths (returns a high-signal status/size/redirect/tech summary). This is NOT wordlist content discovery — for real directory/content enumeration run ffuf/gobuster/feroxbuster with a wordlist as a durable background job.",
     {
       type: "object",
       properties: {
@@ -894,6 +904,33 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     { mutates: true },
   ),
   def(
+    "task.add",
+    "Append one newly discovered task or child task to the active plan without rewriting existing tasks or reopening completed work.",
+    {
+      type: "object",
+      properties: {
+        title: { type: "string" },
+        parentTaskId: {
+          type: "string",
+          description: "Optional canonical parent id from ACTIVE PLAN",
+        },
+        dependencies: {
+          type: "array",
+          items: { type: "string" },
+          description: "Optional canonical task ids that must finish first",
+        },
+        resourceLocks: {
+          type: "array",
+          items: { type: "string" },
+        },
+        note: { type: "string" },
+      },
+      required: ["title"],
+      additionalProperties: false,
+    },
+    { mutates: true },
+  ),
+  def(
     "task.update",
     "Update a plan task state. taskId MUST be t1, t2, … from the ACTIVE PLAN context (not a free-form title slug).",
     {
@@ -989,6 +1026,7 @@ export function getToolDefinitions(filter?: {
       "sysinfo",
       "tool.check",
       "plan.create",
+      "task.add",
       "task.update",
     ]);
     defs = defs.filter((d) => core.has(d.name));

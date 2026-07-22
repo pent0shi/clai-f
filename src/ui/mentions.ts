@@ -534,54 +534,105 @@ function canonicalizeName(name: string): string {
     .replace(/[\u00a0\u2007\u202f\u2009\u200a\u2002\u2003\u3000]/g, " ");
 }
 
-/**
- * Filesystem-aware path extraction for the SUBMIT path. Terminals are
- * inconsistent about escaping spaces in drag-dropped paths (some escape
- * every space, some none, some only the first). A filename like
- * "Screenshot 2026-05-28 at 11.42.27 PM.png" followed by trailing prompt
- * text ("what is this") cannot be split by a regex alone. So, for each
- * place a path could start (an absolute/home/relative prefix at the line
- * start or after whitespace), we take the rest of the line and find the
- * LONGEST word-boundary prefix that resolves to a real file on disk
- * (tolerant of Unicode whitespace variants). This resolves real files with
- * spaces while leaving the trailing question out.
- *
- * Returns absolute paths (already resolved against baseDir).
- */
-export function extractExistingPathsFs(
-  line: string,
-  baseDir: string,
-): string[] {
-  const found: string[] = [];
+interface ScannedPath {
+  /** Exact substring of the input line (for in-place rewrite). */
+  raw: string;
+  /** Absolute on-disk path the substring resolved to. */
+  resolved: string;
+}
+
+/** End offsets (exclusive) of each whitespace-delimited word in `rest`,
+ *  treating a backslash-escaped space ("\ ") as part of the word so
+ *  drag-dropped paths with escaped spaces stay intact. */
+function wordEndOffsets(rest: string): number[] {
+  const ends: number[] = [];
+  let i = 0;
+  const n = rest.length;
+  while (i < n) {
+    while (i < n && /\s/.test(rest[i] ?? "")) i += 1;
+    if (i >= n) break;
+    while (i < n) {
+      if (rest[i] === "\\" && rest[i + 1] === " ") {
+        i += 2;
+        continue;
+      }
+      if (/\s/.test(rest[i] ?? "")) break;
+      i += 1;
+    }
+    ends.push(i);
+  }
+  return ends;
+}
+
+/** Shared core for submit-time path extraction and drop-time stabilization.
+ *  For each place a path could start, take the LONGEST word-boundary prefix
+ *  that resolves to a real file (tolerant of Unicode whitespace variants) and
+ *  return both the raw span and the resolved absolute path. */
+function scanExistingPaths(line: string, baseDir: string): ScannedPath[] {
+  const results: ScannedPath[] = [];
   const seen = new Set<string>();
   const startRe = /(?:^|\s|["'])((?:file:\/\/|(?:~|\.{1,2})?[\\/]|[A-Za-z]:[\\/]|\\\\))/gi;
   let m: RegExpExecArray | null;
   while ((m = startRe.exec(line)) !== null) {
     const startIdx = m.index + m[0].length - (m[1]?.length ?? 0);
     const rest = line.slice(startIdx);
-    // Protect escaped spaces, then split on real (unescaped) spaces.
-    const PLACEHOLDER = "\u0000";
-    const protectedRest = rest.replace(/\\ /g, PLACEHOLDER);
-    const words = protectedRest.split(/\s+/);
-    // Try the longest prefix first so "a b.png" wins over "a".
-    for (let k = words.length; k >= 1; k -= 1) {
-      const candidateRaw = words.slice(0, k).join(" ");
-      const candidate = normalizeDroppedPath(
-        candidateRaw.replaceAll(PLACEHOLDER, "\\ "),
-      );
+    const ends = wordEndOffsets(rest);
+    for (let k = ends.length; k >= 1; k -= 1) {
+      const rawSpan = rest.slice(0, ends[k - 1]);
+      const candidate = normalizeDroppedPath(rawSpan);
       const expanded = expandHome(candidate);
       const abs = isAbsolute(expanded) ? expanded : resolve(baseDir, expanded);
       const resolved = resolveExistingFile(abs);
       if (resolved) {
         if (!seen.has(resolved)) {
           seen.add(resolved);
-          found.push(resolved);
+          results.push({ raw: rawSpan, resolved });
         }
         break; // longest match for this start wins
       }
     }
   }
-  return found;
+  return results;
+}
+
+export function extractExistingPathsFs(
+  line: string,
+  baseDir: string,
+): string[] {
+  return scanExistingPaths(line, baseDir).map((match) => match.resolved);
+}
+
+/** Non-path residual budget: a paste dominated by prose is not a file drop. */
+const MAX_DROP_RESIDUAL = 512;
+
+/**
+ * Stabilize image paths inside just-dropped/pasted text. macOS screenshot
+ * drags reference a transient TemporaryItems/NSIRD_screencaptureui file that
+ * is deleted moments after the drag, so submit-time resolution fails ("can't
+ * find the image"). Copying the image to the durable attachments dir at drop
+ * time — while the source still exists — and rewriting the text to a stable
+ * file:// reference fixes this. Non-image drops are left untouched.
+ */
+export function stabilizeDroppedImagesInText(
+  text: string,
+  baseDir: string = safeCwd(),
+): { text: string; images: string[] } {
+  const matches = scanExistingPaths(text, baseDir).filter((match) =>
+    Boolean(imageMediaType(match.resolved)),
+  );
+  if (matches.length === 0) return { text, images: [] };
+  const matchedChars = matches.reduce((sum, match) => sum + match.raw.length, 0);
+  if (text.trim().length - matchedChars > MAX_DROP_RESIDUAL) {
+    return { text, images: [] };
+  }
+  let rewritten = text;
+  const images: string[] = [];
+  for (const match of matches) {
+    const stable = stabilizeImagePaths([match.resolved], baseDir)[0] ?? match.resolved;
+    rewritten = rewritten.replace(match.raw, formatAttachmentReference(stable));
+    images.push(stable);
+  }
+  return { text: rewritten, images };
 }
 
 function tokenToPath(token: string, baseDir: string): string {

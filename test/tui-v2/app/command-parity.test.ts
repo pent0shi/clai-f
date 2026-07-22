@@ -166,7 +166,7 @@ describe("command parity (V2-080)", () => {
     expect(services.session.sessionId).toBe(id);
     // Clear feedback is toast-only — transcript stays empty of notice rows.
     expect(services.transcript.getState().order).toHaveLength(0);
-    expect(notices(services).some((t) => t.includes("context cleared"))).toBe(true);
+    expect(notices(services).some((t) => t.includes("Context cleared"))).toBe(true);
   });
 
   it("/clean mints a new session id", async () => {
@@ -174,7 +174,7 @@ describe("command parity (V2-080)", () => {
     const before = services.session.sessionId;
     await services.commands.dispatch({ name: "clean", args: "" });
     expect(services.session.sessionId).not.toBe(before);
-    expect(notices(services).some((t) => t.includes("fresh session"))).toBe(true);
+    expect(notices(services).some((t) => t.includes("Fresh session"))).toBe(true);
   });
 
   it("/new and /clean clear the projected plan before loading the new session", async () => {

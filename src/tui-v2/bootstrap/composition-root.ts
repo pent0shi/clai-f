@@ -175,6 +175,7 @@ export function createCompositionRoot(
   const session = new SessionController({
     agent: ports.agent,
     persistence: ports.persistence,
+    jobs: ports.jobs,
     emit,
     confirm: ports.confirm,
     requestSecret: ports.requestSecret,
@@ -185,6 +186,8 @@ export function createCompositionRoot(
     idFactory: options.idFactory,
     clock: options.clock,
     noHistory: options.noHistory,
+    notifyResponderDelivery: (summary) =>
+      toast.success(summary, { key: "responder-delivery", durationMs: 3200 }),
     getTranscriptSnapshot: () => {
       const live = sessionRef;
       if (!live) return undefined;

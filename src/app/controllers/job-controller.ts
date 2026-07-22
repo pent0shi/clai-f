@@ -1,7 +1,13 @@
 import type { ToolResult } from "../../types.js";
-import type { BackgroundJob, JobsPort } from "../ports/jobs-port.js";
+import type {
+  BackgroundJob,
+  JobLinkMetadata,
+  JobManagerListener,
+  JobsPort,
+  ResponderNotification,
+  StartJobOptions,
+} from "../ports/jobs-port.js";
 import type { Disposable } from "./disposable.js";
-
 
 export class JobController implements Disposable {
   constructor(private readonly jobs: JobsPort) {}
@@ -26,15 +32,36 @@ export class JobController implements Disposable {
     return this.jobs.stop(id);
   }
 
-  start(
-    command: string,
-    options?: {
-      cwd?: string | undefined;
-      name?: string | undefined;
-      ownerSessionId?: string | undefined;
-    },
-  ): Promise<ToolResult> {
+  start(command: string, options?: StartJobOptions): Promise<ToolResult> {
     return this.jobs.start(command, options);
+  }
+
+  pendingNotifications(sessionId?: string): ResponderNotification[] {
+    return this.jobs.pendingNotifications(sessionId);
+  }
+
+  markDelivered(notificationId: string): boolean {
+    return this.jobs.markDelivered(notificationId);
+  }
+
+  markAnalyzed(notificationId: string): boolean {
+    return this.jobs.markAnalyzed(notificationId);
+  }
+
+  acknowledge(notificationId: string): boolean {
+    return this.jobs.acknowledge(notificationId);
+  }
+
+  subscribe(listener: JobManagerListener): () => void {
+    return this.jobs.subscribe(listener);
+  }
+
+  linkJob(jobId: string, metadata: JobLinkMetadata): BackgroundJob | undefined {
+    return this.jobs.linkJob(jobId, metadata);
+  }
+
+  cancelAll(sessionId: string): Promise<ToolResult> {
+    return this.jobs.cancelAll(sessionId);
   }
 
   hasRunning(sessionId?: string): boolean {

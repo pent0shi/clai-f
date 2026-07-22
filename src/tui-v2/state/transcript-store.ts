@@ -40,6 +40,20 @@ export class TranscriptStore {
     this.setState({ ...this.state, expandOutputGlobal: !this.state.expandOutputGlobal });
   }
 
+  /** Expand/collapse every tool OUTPUT card at once (collapse all / expand
+   *  all chips). Clears only tool/compacted per-item overrides so thinking
+   *  overrides survive. */
+  setOutputGlobal(expanded: boolean): void {
+    const overrides = new Map(this.state.itemOverrides);
+    for (const id of [...overrides.keys()]) {
+      const item = this.state.byId.get(id);
+      if (item && (item.kind === "tool" || item.kind === "compacted")) {
+        overrides.delete(id);
+      }
+    }
+    this.setState({ ...this.state, expandOutputGlobal: expanded, itemOverrides: overrides });
+  }
+
   /** Expand/collapse every file-diff card in chat (hunks vs title-only). */
   setFileDiffsGlobal(expanded: boolean): void {
     this.setState({

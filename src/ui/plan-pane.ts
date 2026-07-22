@@ -21,9 +21,13 @@ function renderTaskLine(task: PlanTask, index: number): string {
   const color = STATE_COLOR[task.state];
   const box = color(CHECKBOX[task.state]);
   const num = chalk.dim(`${index + 1}.`);
-  const title = task.state === "done" ? chalk.dim(task.title) : task.title;
+  const titleText = task.parentTaskId ? `↳ ${task.title}` : task.title;
+  const title = task.state === "done" ? chalk.dim(titleText) : titleText;
+  const job = task.jobId
+    ? chalk.dim(` [job=${task.jobId}${task.processId ? ` pid=${task.processId}` : ""}]`)
+    : "";
   const note = task.note ? chalk.dim(` — ${task.note}`) : "";
-  return `  ${box} ${num} ${title}${note}`;
+  return `  ${box} ${num} ${title}${job}${note}`;
 }
 
 /**

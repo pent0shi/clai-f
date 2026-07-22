@@ -2,7 +2,11 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { JobManager, type BackgroundJob } from "../src/tools/jobs.js";
+import {
+  formatJobElapsed,
+  JobManager,
+  type BackgroundJob,
+} from "../src/tools/jobs.js";
 import { formatToolContext } from "../src/agent/tool-output-formatting.js";
 
 const dirs: string[] = [];
@@ -103,6 +107,20 @@ describe("session-scoped jobs", () => {
 
     await manager.stopJob(idA!, { graceMs: 300 });
     await manager.stopJob(idB!, { graceMs: 300 });
+  });
+
+  it("formats live and terminal elapsed time from stable timestamps", () => {
+    const now = Date.parse("2026-07-22T13:05:42.700Z");
+    const job = ephemeralToolTrack("clock1", "s1", "ffuf");
+    job.startedAt = "2026-07-22T13:05:40.900Z";
+    expect(formatJobElapsed(job, now)).toBe("1s");
+
+    job.startedAt = "2026-07-22T13:05:42.500Z";
+    expect(formatJobElapsed(job, now)).toBe("<1s");
+
+    job.startedAt = "2026-07-22T13:04:37.000Z";
+    job.endedAt = "2026-07-22T13:05:42.000Z";
+    expect(formatJobElapsed(job, now + 60_000)).toBe("1m5s");
   });
 
   it("drops finished ephemeral rows and does not persist them", async () => {

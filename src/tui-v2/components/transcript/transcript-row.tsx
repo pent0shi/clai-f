@@ -104,6 +104,8 @@ export function TranscriptRow(props: {
           services={services}
           expanded={isItemExpanded(state, item)}
           onToggle={() => store.toggleItemOverride(item.id, state.expandOutputGlobal)}
+          onCollapseAllOutput={() => store.setOutputGlobal(false)}
+          onExpandAllOutput={() => store.setOutputGlobal(true)}
           fileDiffExpanded={isFileDiffExpanded(state, item.id)}
           onToggleFileDiff={() =>
             store.toggleFileDiffOverride(item.id, state.expandFileDiffsGlobal)

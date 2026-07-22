@@ -8,6 +8,7 @@ import {
   isPlanTerminal,
   isPlanSuccessful,
   readyPlanTasks,
+  appendPlanTask,
   validateSessionPlan,
   normalizeTaskDependencies,
   type SessionPlan,
@@ -440,10 +441,14 @@ export function planContextMessage(plan: SessionPlan, approved: boolean): string
     const evidenceHint = t.evidence?.successWorkCount
       ? ` [evidence: ${t.evidence.successWorkCount} successful tool${t.evidence.successWorkCount === 1 ? "" : "s"}${t.evidence.lastOkTool ? `; last ${t.evidence.lastOkTool}` : ""}]`
       : "";
-    lines.push(`  ${i + 1}. [${t.id}] (${t.state}) ${t.title}${aliasHint}${dependencyHint}${resourceHint}${evidenceHint}`);
+    const hierarchyHint = t.parentTaskId ? ` [child of ${t.parentTaskId}]` : "";
+    const jobHint = t.jobId
+      ? ` [responder job=${t.jobId}${t.processId ? ` pid=${t.processId}` : ""}]`
+      : "";
+    lines.push(`  ${i + 1}. [${t.id}] (${t.state}) ${t.title}${hierarchyHint}${jobHint}${aliasHint}${dependencyHint}${resourceHint}${evidenceHint}`);
   });
   lines.push(
-    "task.update taskId MUST be t1, t2, … from this list (or a listed alias) — never invent free-form slugs alone.",
+    "task.update taskId MUST be t1, t2, … from this list (or a listed alias). Use task.add to append newly discovered work or a child task without rewriting the plan. Responder-owned job tasks advance automatically; never task.update them.",
   );
   if (plan.meta?.projectRoot) {
     lines.push(`project_root: ${plan.meta.projectRoot}`);
@@ -452,14 +457,19 @@ export function planContextMessage(plan: SessionPlan, approved: boolean): string
     lines.push(`package_manager: ${plan.meta.packageManager}`);
   }
   if (approved) {
-    const inProgress = plan.tasks.find((t) => t.state === "in_progress");
-    const failed = plan.tasks.find((t) => t.state === "failed");
+    const inProgress = plan.tasks.find(
+      (task) => task.state === "in_progress" && !task.responderOwned,
+    );
+    const failed = plan.tasks.find(
+      (task) => task.state === "failed" && !task.responderOwned,
+    );
     const firstPending = readyPlanTasks(plan)[0];
     const hasOpenWork = plan.tasks.some(
-      (t) =>
-        t.state === "in_progress" ||
-        t.state === "pending" ||
-        t.state === "failed",
+      (task) =>
+        !task.responderOwned &&
+        (task.state === "in_progress" ||
+          task.state === "pending" ||
+          task.state === "failed"),
     );
     lines.push(
       "The user APPROVED this plan. Execute it NOW. Tasks are checkpoints — you still own the whole goal.",
@@ -498,7 +508,9 @@ export function planContextMessage(plan: SessionPlan, approved: boolean): string
     lines.push(
       "Flow: task.update in_progress → real work → WAIT for and READ every tool result for that task → " +
         "only then mark done when the task outcome is satisfied → immediately open the next task. " +
-        "Never mark done right after firing a command on the hope it will succeed — analyze the actual output first. " +
+        "Never mark done right after firing a foreground command on the hope it will succeed — analyze the actual output first. " +
+        "A durable background launch creates a Responder-owned child task: launch high-value slow enumeration/fuzzing early, continue independent fast work, and never busy-poll or start a duplicate. " +
+        "If only Responder-owned child tasks remain, yield honestly; Responder will inject the durable completion and wake the session without forcing an empty turn. " +
         "Durable evidence shown beside a task survives resume; use it to close that task rather than repeating already-confirmed work. " +
         "Independent read-only lookups may parallelize within a task. " +
         "If a tool fails: mark failed or stay in progress, fix, retry until the task is truly done. " +
@@ -660,6 +672,10 @@ export async function handlePlanTool(
             state: match.state,
             note: match.note,
             evidence: match.evidence,
+            parentTaskId: match.parentTaskId,
+            jobId: match.jobId,
+            processId: match.processId,
+            responderOwned: match.responderOwned,
           };
         }
         return task;
@@ -701,6 +717,7 @@ export async function handlePlanTool(
               ),
           )
           .map((oldTask) => {
+            if (oldTask.responderOwned) return oldTask;
             if (
               oldTask.state === "done" ||
               oldTask.state === "skipped" ||
@@ -897,21 +914,109 @@ export async function handlePlanTool(
     };
   }
 
-  // task.update
+  // task.add / task.update
   const plan = await loadPlan(session.sessionId).catch(() => undefined);
   if (!plan) {
     return {
       handled: true,
       ok: false,
       display: chalk.red(
-        "  ✗ task.update: no active plan — call plan.create first\n",
+        `  ✗ ${call.name}: no active plan — call plan.create first\n`,
       ),
       modelNote:
-        "task.update failed: there is no active plan. Call plan.create first.",
+        `${call.name} failed: there is no active plan. Call plan.create first.`,
     };
   }
-  // Heal broken forward edges (e.g. t2 → t9) left by older id remaps so the
-  // agent can progress without re-planning mid-build.
+
+  if (call.name === "task.add") {
+    const title = normalizeTaskTitle(
+      call.args.title ?? call.args.task ?? call.args.name,
+    );
+    if (!title || isBareTaskIdTitle(title)) {
+      return {
+        handled: true,
+        ok: false,
+        display: chalk.red("  ✗ task.add needs a descriptive title\n"),
+        modelNote: "task.add failed: provide a descriptive title, not a bare task id.",
+      };
+    }
+    const parentRaw =
+      typeof call.args.parentTaskId === "string"
+        ? call.args.parentTaskId
+        : typeof call.args.parentId === "string"
+          ? call.args.parentId
+          : undefined;
+    const parentTaskId = parentRaw
+      ? resolvePlanTaskId(plan, parentRaw)
+      : undefined;
+    if (parentRaw && !parentTaskId) {
+      return {
+        handled: true,
+        ok: false,
+        display: chalk.red(`  ✗ task.add: unknown parent "${parentRaw}"\n`),
+        modelNote: `task.add failed: unknown parentTaskId "${parentRaw}". Use a canonical id from ACTIVE PLAN.`,
+      };
+    }
+    const stringArray = (value: unknown): string[] =>
+      Array.isArray(value)
+        ? [...new Set(value.filter((item): item is string => typeof item === "string").map((item) => item.trim()).filter(Boolean))]
+        : [];
+    const dependencies = stringArray(
+      call.args.dependencies ?? call.args.dependsOn,
+    ).map((dependency) => resolvePlanTaskId(plan, dependency) ?? dependency);
+    const unknownDependency = dependencies.find(
+      (dependency) => !plan.tasks.some((task) => task.id === dependency),
+    );
+    if (unknownDependency) {
+      return {
+        handled: true,
+        ok: false,
+        display: chalk.red(`  ✗ task.add: unknown dependency "${unknownDependency}"\n`),
+        modelNote: `task.add failed: unknown dependency "${unknownDependency}". Use canonical ids from ACTIVE PLAN.`,
+      };
+    }
+    const task = appendPlanTask(plan, {
+      title,
+      state: "pending",
+      note: typeof call.args.note === "string" ? call.args.note : undefined,
+      aliases: [slugifyTaskId(title)].filter(Boolean),
+      dependencies,
+      resourceLocks: stringArray(
+        call.args.resourceLocks ?? call.args.resources,
+      ),
+      parentTaskId,
+    });
+    if (
+      session.planApproved.value &&
+      (plan.status === "approved" || plan.status === "completed" || plan.status === "abandoned")
+    ) {
+      plan.status = "in_progress";
+    }
+    const validation = validateSessionPlan(plan);
+    if (!validation.ok) {
+      plan.tasks = plan.tasks.filter((candidate) => candidate.id !== task.id);
+      return {
+        handled: true,
+        ok: false,
+        display: chalk.red(`  ✗ task.add: ${validation.reason}\n`),
+        modelNote: `task.add failed: ${validation.reason}.`,
+      };
+    }
+    await savePlan(plan).catch(() => undefined);
+    return {
+      handled: true,
+      ok: true,
+      plan,
+      display: renderPlanForTerminal(plan) + "\n",
+      modelNote:
+        `Added [${task.id}] "${task.title}"${parentTaskId ? ` under [${parentTaskId}]` : ""} without rewriting existing tasks. ` +
+        `Open it with task.update when it becomes ready. Preserve completed work and continue the current task unless this new task is the immediate evidence-driven next action.`,
+    };
+  }
+
+  // task.update
+  // Heal broken forward edges left by older id remaps without making
+  // responder-owned child jobs part of the manual task chain.
   if (normalizeTaskDependencies(plan.tasks)) {
     await savePlan(plan).catch(() => undefined);
   }
@@ -942,6 +1047,19 @@ export async function handlePlanTool(
   }
   // X3: accept t1..tn or model slug aliases / title slugs.
   const taskId = resolvePlanTaskId(plan, taskIdRaw) ?? taskIdRaw;
+  const taskTarget = plan.tasks.find((task) => task.id === taskId);
+  if (taskTarget?.responderOwned) {
+    return {
+      handled: true,
+      ok: false,
+      display: chalk.yellow(
+        `  ⚠ task.update: [${taskId}] is owned by Responder job ${taskTarget.jobId ?? "?"}\n`,
+      ),
+      modelNote:
+        `task.update held: [${taskId}] is a Responder-owned background-job subtask. ` +
+        `Do not change it manually; continue independent work or yield. Responder will advance it from the real process result and wake you when analysis is actionable.`,
+    };
+  }
   
   if (stateRaw === "in_progress") {
     const target = plan.tasks.find((task) => task.id === taskId);

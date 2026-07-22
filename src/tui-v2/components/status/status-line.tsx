@@ -416,7 +416,7 @@ export function StatusLine(props: StatusLineProps): ReactNode {
               style={{ fg: theme.activity, flexShrink: 1 }}
             />
           ) : null}
-          {/* Esc:cancel sits after the timer — clickable abort, never in the right rail */}
+          {/* Double Esc cancels turn, queue, and Responder jobs; click is explicit. */}
           {density !== "xs" && !state.compacting ? (
             <>
               <text
@@ -425,13 +425,13 @@ export function StatusLine(props: StatusLineProps): ReactNode {
                 style={{ flexShrink: 0 }}
               />
               <ClickableHint
-                short={density === "sm" ? "Esc" : "Esc · cancel"}
-                expand="cancel turn"
+                short={density === "sm" ? "Esc×2" : "Esc×2 · cancel all"}
+                expand="cancel turn, queue, and jobs"
                 active={false}
                 theme={theme}
                 accent
                 onClick={() => {
-                  if (session.getState().running) session.abort();
+                  void session.cancelAll();
                 }}
               />
             </>

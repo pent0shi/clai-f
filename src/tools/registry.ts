@@ -46,7 +46,7 @@ import { getNetworkContext } from "./network-context.js";
 import { pingSweep } from "./net-ping-sweep.js";
 import { toolCheckHandler } from "./capabilities.js";
 import { wordlistFind } from "./wordlists.js";
-import { jobManager } from "./jobs.js";
+import { jobManager, type StartJobOptions } from "./jobs.js";
 import {
   looksLikeLongFiniteCommand,
   looksLongRunning,
@@ -138,6 +138,16 @@ function optionalBoolean(
   return typeof value === "boolean" ? value : undefined;
 }
 
+function responderJobOptions(options?: ToolRunOptions): StartJobOptions {
+  return {
+    ...(options?.sessionId ? { ownerSessionId: options.sessionId } : {}),
+    ...(options?.taskId ? { taskId: options.taskId } : {}),
+    ...(options?.parentTaskId ? { parentTaskId: options.parentTaskId } : {}),
+    ...(options?.wakeOnCompletion !== undefined ? { wakeOnCompletion: options.wakeOnCompletion } : {}),
+    ...(options?.monitor !== undefined ? { monitor: options.monitor } : {}),
+  };
+}
+
 export interface ScanResourceEstimate {
   profile: "standard" | "deep" | "full";
   estimatedSeconds: number;
@@ -163,15 +173,23 @@ export function buildPentestReconNmapArgv(
 ): string[] {
   const argv = ["-sS", "-sV"];
   const full = args.full === true || args.full === "true";
-  const ports =
+  const portsRaw =
     typeof args.ports === "string" && args.ports.trim()
       ? args.ports.trim()
       : undefined;
+  // "top-1000" / "top ports 1000" style specs map to --top-ports, not -p.
+  const topPortsSpec = portsRaw
+    ? /^top[\s_-]*(?:ports?[\s_-]*)?(\d{1,5})$/i.exec(portsRaw)
+    : null;
+  const ports = portsRaw && !topPortsSpec ? portsRaw : undefined;
   let topPorts: number | undefined;
   if (typeof args.topPorts === "number" && Number.isFinite(args.topPorts)) {
     topPorts = Math.max(1, Math.min(65535, Math.floor(args.topPorts)));
   } else if (typeof args.topPorts === "string" && /^\d+$/.test(args.topPorts)) {
     topPorts = Math.max(1, Math.min(65535, Number(args.topPorts)));
+  }
+  if (topPortsSpec && topPorts === undefined) {
+    topPorts = Math.max(1, Math.min(65535, Number(topPortsSpec[1])));
   }
   if (full) {
     argv.push("-p-");
@@ -206,9 +224,14 @@ export const toolRegistry: Record<string, ToolHandler> = {
     // run as durable jobs. This avoids false 40s termination while preserving
     // status/output across turns and process restarts.
     const requestedTimeoutMs = optionalNumber(args, "timeoutMs");
-    const finiteBackgroundJob =
-      requestedTimeoutMs === undefined && looksLikeLongFiniteCommand(command);
-    if (looksLongRunning(command) || finiteBackgroundJob) {
+    const responder = optionalBoolean(args, "responder") ?? false;
+    // Known-long scanners (ffuf/nmap/gobuster/find/…) and any responder-
+    // delegated job ALWAYS run as durable background jobs. A full wordlist
+    // fuzz must never block the turn in the foreground — even when the model
+    // supplies its own timeoutMs, which becomes the job deadline rather than a
+    // foreground wait.
+    const finiteBackgroundJob = looksLikeLongFiniteCommand(command);
+    if (looksLongRunning(command) || finiteBackgroundJob || responder) {
       const elevated = await prepareElevatedBackgroundCommand(command, {
         signal: options?.signal,
         onOutput: options?.onOutput,
@@ -222,9 +245,9 @@ export const toolRegistry: Record<string, ToolHandler> = {
           ...(requestedTimeoutMs !== undefined
             ? { timeoutMs: requestedTimeoutMs }
             : {}),
-          ...(options?.sessionId
-            ? { ownerSessionId: options.sessionId }
-            : {}),
+          ...responderJobOptions(options),
+          responder,
+          wakeOnCompletion: responder,
         },
       );
       if (job.ok) {
@@ -232,9 +255,11 @@ export const toolRegistry: Record<string, ToolHandler> = {
           ...job,
           output:
             `${job.output}\n\n` +
-            (finiteBackgroundJob
-              ? "This potentially long finite command was started as a durable BACKGROUND job instead of risking a foreground timeout. Poll shell.tail with the returned id until status is exited/failed; use nextOffset for incremental output. Do not launch a duplicate or mark its task complete while it is still running."
-              : "This persistent command was started in the BACKGROUND. It is not proof of readiness — inspect shell.tail, run a readiness probe, use shell.jobs for status, and shell.stop when appropriate."),
+            (responder
+              ? "This was started as a Responder BACKGROUND job. Do NOT poll, tail, or fs.read it to watch progress — the Responder tracks the process and delivers the completed result to you automatically. Mark your launch step done and continue with other work."
+              : finiteBackgroundJob
+                ? "This potentially long finite command was started as a durable BACKGROUND job instead of risking a foreground timeout. Poll shell.tail with the returned id until status is exited/failed; use nextOffset for incremental output. Do not launch a duplicate or mark its task complete while it is still running."
+                : "This persistent command was started in the BACKGROUND. It is not proof of readiness — inspect shell.tail, run a readiness probe, use shell.jobs for status, and shell.stop when appropriate."),
         };
       }
       return job;
@@ -375,13 +400,24 @@ export const toolRegistry: Record<string, ToolHandler> = {
   async "net.scan"(args, options) {
     const host = parseHost(requireString(args, "target"));
     const portsRaw = optionalString(args, "ports");
-    const ports = portsRaw ? parsePortSpec(portsRaw) : undefined;
+    // Accept natural "top ports" intents (top-1000, top1000, top-ports 1000,
+    // "top 1000") as a topPorts profile instead of rejecting them as an
+    // invalid literal port spec.
+    const topPortsMatch = portsRaw
+      ? /^top[\s_-]*(?:ports?[\s_-]*)?(\d{1,5})$/i.exec(portsRaw.trim())
+      : null;
+    const ports =
+      portsRaw && !topPortsMatch ? parsePortSpec(portsRaw) : undefined;
     let profile =
       args.profile &&
       typeof args.profile === "object" &&
       !Array.isArray(args.profile)
         ? (args.profile as ScanProfile)
         : undefined;
+    if (topPortsMatch) {
+      const n = Math.max(1, Math.min(65535, Number(topPortsMatch[1])));
+      profile = { ...(profile ?? {}), topPorts: profile?.topPorts ?? n };
+    }
 
     const userPrompt = options?.userPrompt;
     const isConnectRequested = Boolean(
@@ -428,9 +464,9 @@ export const toolRegistry: Record<string, ToolHandler> = {
         ...(optionalNumber(args, "timeoutMs") !== undefined
           ? { timeoutMs: optionalNumber(args, "timeoutMs") as number }
           : {}),
-        ...(options?.sessionId
-          ? { ownerSessionId: options.sessionId }
-          : {}),
+        ...responderJobOptions(options),
+        responder: true,
+        wakeOnCompletion: true,
         ...(options?.engagementAuthorization ? { authorization: options.engagementAuthorization } : {}),
       });
     }
@@ -766,9 +802,7 @@ export const toolRegistry: Record<string, ToolHandler> = {
                   ...(optionalNumber(args, "timeoutMs") !== undefined
                     ? { timeoutMs: optionalNumber(args, "timeoutMs") as number }
                     : {}),
-                  ...(options?.sessionId
-                    ? { ownerSessionId: options.sessionId }
-                    : {}),
+                  ...responderJobOptions(options),
                   ...(options?.engagementAuthorization ? { authorization: options.engagementAuthorization } : {}),
                 })
               : prepared.result;
@@ -930,15 +964,16 @@ export const toolRegistry: Record<string, ToolHandler> = {
       requestSecret: options?.requestSecret,
     });
     if (elevated && !elevated.prepared) return elevated.result;
+    const responder = optionalBoolean(args, "responder") ?? false;
     return jobManager.startJob(elevated?.prepared ? elevated.spec : command, {
       cwd: optionalString(args, "cwd"),
       name: optionalString(args, "name"),
       ...(optionalNumber(args, "timeoutMs") !== undefined
         ? { timeoutMs: optionalNumber(args, "timeoutMs") as number }
         : {}),
-      ...(options?.sessionId
-        ? { ownerSessionId: options.sessionId }
-        : {}),
+      ...responderJobOptions(options),
+      responder,
+      wakeOnCompletion: responder,
     });
   },
   async "shell.jobs"(_args, options) {
@@ -1572,6 +1607,13 @@ async function runToolBatch(
               ...(options?.engagementAuthorization
                 ? { engagementAuthorization: options.engagementAuthorization }
                 : {}),
+              ...(options?.sessionId ? { sessionId: options.sessionId } : {}),
+              ...(options?.taskId ? { taskId: options.taskId } : {}),
+              ...(options?.parentTaskId ? { parentTaskId: options.parentTaskId } : {}),
+              ...(options?.wakeOnCompletion !== undefined
+                ? { wakeOnCompletion: options.wakeOnCompletion }
+                : {}),
+              ...(options?.monitor !== undefined ? { monitor: options.monitor } : {}),
             },
           );
         } finally {
