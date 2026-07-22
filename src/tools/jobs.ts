@@ -167,6 +167,15 @@ const TERMINAL_JOB_MAX_AGE_MS = 48 * 60 * 60 * 1000;
 const LIST_JOBS_MAX_LINES = 40;
 /** Coalesce window for chatty stdout/stderr progress persistence + UI events. */
 const PROGRESS_FLUSH_MS = 250;
+/**
+ * A live job with no in-process ChildProcess handle (resumed session, or a
+ * handle that was released) is only declared "lost" after failing the liveness
+ * check continuously for this long. A single transient `ps`/`kill` hiccup — or
+ * an identity read that momentarily fails — must never finalize a job that is
+ * actually still running (which produced premature "result ready", a "<1s"
+ * elapsed, and a ✗ status=lost that later flipped back to exit=0).
+ */
+const LIVENESS_LOST_GRACE_MS = 8_000;
 
 /**
  * Number of trailing bytes in `buf` that form an incomplete multi-byte UTF-8
@@ -189,7 +198,15 @@ function trailingIncompleteBytes(buf: Buffer): number {
 
 function processAlive(pid: number | undefined): boolean {
   if (!pid) return false;
-  try { process.kill(pid, 0); return true; } catch { return false; }
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    // EPERM means the process EXISTS but we lack permission to signal it
+    // (common for detached jobs in another process group) — that is alive, not
+    // gone. Only ESRCH ("no such process") proves it is truly dead.
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
 }
 
 function processIdentity(pid: number | undefined): string | undefined {
@@ -339,6 +356,13 @@ export class JobManager {
   private deadlineTimers = new Map<string, NodeJS.Timeout>();
   private finalizations = new Map<string, Promise<boolean>>();
   private listeners = new Set<JobManagerListener>();
+  /**
+   * Tracks the first time a live job (with no ChildProcess handle) failed the
+   * liveness check, so we only finalize it as "lost" after a sustained grace
+   * window instead of on a single transient miss. Cleared as soon as the job is
+   * observed alive again or finalized.
+   */
+  private livenessMisses = new Map<string, number>();
   private registryRetryTimer: ReturnType<typeof setTimeout> | undefined;
   private readonly registryPath: string;
   private readonly transientV2RegistryPath: string;
@@ -499,6 +523,7 @@ export class JobManager {
     }
     const finalization = (async (): Promise<boolean> => {
       this.clearJobDeadline(job.id);
+      this.livenessMisses.delete(job.id);
       const streamsFlushed = await this.closeWriters(job.id);
       job.status = streamsFlushed ? status : "failed";
       if (details.exitCode !== undefined) job.exitCode = details.exitCode;
@@ -536,16 +561,36 @@ export class JobManager {
 
   /** Reconcile a restored process that no longer has a ChildProcess close event. */
   private refreshJobLiveness(job: BackgroundJob): void {
-    if (!this.isLive(job) || this.processes.has(job.id)) return;
-    const identity = processIdentity(job.pid);
-    if (
-      processAlive(job.pid) &&
-      identity &&
-      job.processIdentity &&
-      identity === job.processIdentity
-    ) {
+    if (!this.isLive(job) || this.processes.has(job.id)) {
+      this.livenessMisses.delete(job.id);
       return;
     }
+    // Primary signal is the pid itself. If the process is alive we keep the job
+    // running and only ever declare "lost" on a PROVEN pid reuse (both the
+    // stored and the current identity are present AND differ). An identity read
+    // that fails or returns nothing is "unknown", never "dead" — treating it as
+    // dead is exactly what flipped live jobs to lost mid-run.
+    if (processAlive(job.pid)) {
+      const identity = processIdentity(job.pid);
+      const provenReuse = Boolean(
+        identity && job.processIdentity && identity !== job.processIdentity,
+      );
+      if (!provenReuse) {
+        this.livenessMisses.delete(job.id);
+        return;
+      }
+    }
+    // The process looks gone (or is a proven pid reuse). Require the miss to
+    // persist across a grace window before finalizing — a single transient
+    // hiccup must not kill a job whose real close event is still in flight.
+    const nowMs = Date.now();
+    const firstMiss = this.livenessMisses.get(job.id);
+    if (firstMiss === undefined) {
+      this.livenessMisses.set(job.id, nowMs);
+      return;
+    }
+    if (nowMs - firstMiss < LIVENESS_LOST_GRACE_MS) return;
+    this.livenessMisses.delete(job.id);
     job.status = "lost";
     job.endedAt = new Date().toISOString();
     this.clearJobDeadline(job.id);
@@ -1568,8 +1613,16 @@ export class JobManager {
         if (job.kind === "ephemeral" || looksLikeEphemeralToolTrack(job)) continue;
         job.kind = "durable";
         if (["starting", "running", "stopping"].includes(job.status)) {
-          const identity = processIdentity(job.pid);
-          if (!processAlive(job.pid) || !identity || !job.processIdentity || identity !== job.processIdentity) {
+          const alive = processAlive(job.pid);
+          const identity = alive ? processIdentity(job.pid) : undefined;
+          // Only declare lost when the process is truly gone, or when we can
+          // PROVE a pid reuse (stored + current identity both known and
+          // different). An alive pid whose identity is unknown/unreadable is
+          // kept running — never kill a live process over a failed `ps` read.
+          const provenReuse = Boolean(
+            identity && job.processIdentity && identity !== job.processIdentity,
+          );
+          if (!alive || provenReuse) {
             job.status = "lost";
             job.endedAt = new Date().toISOString();
           } else {

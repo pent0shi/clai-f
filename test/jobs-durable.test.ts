@@ -148,6 +148,35 @@ describe("durable background jobs", () => {
     expect(restarted.getJob(id)?.status).toBe("lost");
     await manager.stopJob(id, { graceMs: 200 });
   });
+
+  it("keeps an alive persisted running job running when its identity is absent (never falsely lost)", async () => {
+    const { dir, manager } = await fixture();
+    const started = await manager.startJob(
+      `${JSON.stringify(process.execPath)} -e "setInterval(() => {}, 1000)"`,
+    );
+    const id = /id=([a-f0-9]+)/.exec(started.output)?.[1]!;
+    await sleep(80);
+    const registryPath = join(dir, "registry-v1.json");
+    const registry = JSON.parse(await readFile(registryPath, "utf8"));
+    const record = registry.jobs.find((job: { id: string }) => job.id === id);
+    // An unreadable/absent identity must NOT be treated as a dead process: the
+    // pid is alive and there is no PROVEN reuse, so the job stays running.
+    delete record.processIdentity;
+    await import("node:fs/promises").then(({ writeFile }) =>
+      writeFile(registryPath, JSON.stringify(registry)),
+    );
+
+    const restarted = new JobManager(dir);
+    managers.push(restarted);
+    expect(restarted.getJob(id)?.status).toBe("running");
+    // Repeated liveness re-checks (as the UI polls) keep it running, never
+    // flipping a live job to a premature terminal "lost".
+    expect(restarted.getJob(id)?.status).toBe("running");
+    expect(
+      restarted.getRunningJobs().some((job) => job.id === id),
+    ).toBe(true);
+    await manager.stopJob(id, { graceMs: 200 });
+  });
 });
 
 

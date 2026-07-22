@@ -224,14 +224,20 @@ export const toolRegistry: Record<string, ToolHandler> = {
     // run as durable jobs. This avoids false 40s termination while preserving
     // status/output across turns and process restarts.
     const requestedTimeoutMs = optionalNumber(args, "timeoutMs");
-    const responder = optionalBoolean(args, "responder") ?? false;
-    // Known-long scanners (ffuf/nmap/gobuster/find/…) and any responder-
-    // delegated job ALWAYS run as durable background jobs. A full wordlist
-    // fuzz must never block the turn in the foreground — even when the model
-    // supplies its own timeoutMs, which becomes the job deadline rather than a
-    // foreground wait.
+    const responderRequested = optionalBoolean(args, "responder") ?? false;
+    // Known-long scanners (ffuf/nmap/gobuster/feroxbuster/nuclei/sqlmap/find…)
+    // and any responder-delegated job ALWAYS run as durable background jobs. A
+    // full wordlist fuzz must never block the turn in the foreground — even
+    // when the model supplies its own timeoutMs, which becomes the job deadline
+    // rather than a foreground wait.
     const finiteBackgroundJob = looksLikeLongFiniteCommand(command);
-    if (looksLongRunning(command) || finiteBackgroundJob || responder) {
+    // These finite scanners exit on their own after a while and emit large
+    // output — exactly what the Responder is for. Auto-delegate them so the
+    // agent fires-and-continues instead of blocking or polling. Persistent
+    // servers (looksLongRunning) are deliberately NOT responder jobs: they
+    // never "complete", so the agent probes them and leaves them running.
+    const responder = responderRequested || finiteBackgroundJob;
+    if (looksLongRunning(command) || finiteBackgroundJob || responderRequested) {
       const elevated = await prepareElevatedBackgroundCommand(command, {
         signal: options?.signal,
         onOutput: options?.onOutput,
@@ -256,10 +262,11 @@ export const toolRegistry: Record<string, ToolHandler> = {
           output:
             `${job.output}\n\n` +
             (responder
-              ? "This was started as a Responder BACKGROUND job. Do NOT poll, tail, or fs.read it to watch progress — the Responder tracks the process and delivers the completed result to you automatically. Mark your launch step done and continue with other work."
-              : finiteBackgroundJob
-                ? "This potentially long finite command was started as a durable BACKGROUND job instead of risking a foreground timeout. Poll shell.tail with the returned id until status is exited/failed; use nextOffset for incremental output. Do not launch a duplicate or mark its task complete while it is still running."
-                : "This persistent command was started in the BACKGROUND. It is not proof of readiness — inspect shell.tail, run a readiness probe, use shell.jobs for status, and shell.stop when appropriate."),
+              ? "Auto-delegated to the RESPONDER as a durable background job (it finishes on its own after a while and can emit a lot of output). " +
+                "Do NOT poll, shell.tail, shell.jobs, sleep, or fs.read it to watch progress — the Responder tracks the process and delivers the completed result into your context automatically between turns. " +
+                "Mark your launch step done and move to the next task now. " +
+                "When the result arrives, read ONLY the key lines you need (matched status codes / hits / findings) with a filtered shell.tail byte-window or a grep of the artifact — never a full read of a noisy scanner log, and make sure the command you ran preserves those key fields (e.g. keep status codes, not just the wordlist name)."
+              : "This persistent command was started in the BACKGROUND. It is not proof of readiness — inspect shell.tail, run a readiness probe, use shell.jobs for status, and shell.stop when appropriate."),
         };
       }
       return job;
