@@ -1,7 +1,19 @@
 /**
- * Locate wordlist files for fuzzing tools. Searches known paths first, then
- * broadens to locate DB, full filesystem, and cached-credential sudo search so
- * wordlists are found regardless of install location or OS.
+ * Locate wordlist files for fuzzing tools. The goal is simple: if a wordlist
+ * exists anywhere reasonable on disk, find it — regardless of how the model
+ * phrased the query.
+ *
+ * Models rarely pass an exact filename. They pass things like
+ * "directory common medium", "rockyou password list", or "medium directory
+ * wordlist for fuzzing". So instead of a naive exact `-name` match we:
+ *   1. Tokenize the query into keywords (dropping noise words like "wordlist").
+ *   2. Expand well-known aliases (common → common.txt, medium →
+ *      directory-list-2.3-medium.txt, rockyou → rockyou.txt/.gz, …).
+ *   3. Build case-insensitive substring globs (`*keyword*.txt`) so partial and
+ *      differently-cased names still match.
+ *   4. Search progressively wider: known install roots → broader user dirs →
+ *      locate DB → full filesystem → cached-credential sudo — stopping at the
+ *      first pass that yields hits.
  *
  * All external searches run through async execFile (never execFileSync) so a
  * slow `find /` can never block the render loop, and sudo is only ever invoked
@@ -22,6 +34,9 @@ const IS_MAC = platform() === "darwin";
 function getHome(): string {
   return process.env.HOME || process.env.USERPROFILE || homedir();
 }
+
+/** Cap on how many hits we surface — enough to choose from, not a flood. */
+const MAX_HITS = 60;
 
 /**
  * Run a capture command without inheriting any std stream. Returns stdout on
@@ -79,6 +94,7 @@ function knownRoots(): string[] {
       ...common,
       "/opt/homebrew/share/seclists",
       "/opt/homebrew/share/wordlists",
+      "/opt/homebrew/share/nmap/nselib/data",
       "/usr/local/share/seclists",
       "/usr/local/share/wordlists",
       "/opt/local/share/seclists",
@@ -103,21 +119,121 @@ function knownRoots(): string[] {
 
 // --- Aliases ---
 
+// Maps a human keyword (or full query) to the real filenames it usually means.
+// Keys are matched case-insensitively against the whole query AND each token.
 const NAME_ALIASES: Record<string, string[]> = {
-  common: ["common.txt", "common.txt.gz"],
+  common: ["common.txt"],
   "common.txt": ["common.txt"],
   big: ["big.txt"],
   medium: ["directory-list-2.3-medium.txt"],
+  "directory-medium": ["directory-list-2.3-medium.txt"],
   small: ["directory-list-2.3-small.txt"],
+  "directory-small": ["directory-list-2.3-small.txt"],
+  directories: ["directory-list-2.3-medium.txt", "raft-medium-directories.txt"],
   rockyou: ["rockyou.txt", "rockyou.txt.gz"],
-  subdomains: ["subdomains-top1million-5000.txt", "subdomains-top1million-20000.txt"],
-  "raft-small": ["raft-small-words.txt", "raft-small-directories.txt"],
-  "raft-medium": ["raft-medium-words.txt", "raft-medium-directories.txt"],
+  passwords: ["rockyou.txt", "rockyou.txt.gz"],
+  password: ["rockyou.txt", "rockyou.txt.gz"],
+  subdomains: [
+    "subdomains-top1million-5000.txt",
+    "subdomains-top1million-20000.txt",
+    "subdomains-top1million-110000.txt",
+  ],
+  subdomain: ["subdomains-top1million-5000.txt"],
+  dns: ["subdomains-top1million-5000.txt"],
+  vhosts: ["subdomains-top1million-5000.txt"],
+  "raft-small": [
+    "raft-small-words.txt",
+    "raft-small-directories.txt",
+    "raft-small-files.txt",
+  ],
+  "raft-medium": [
+    "raft-medium-words.txt",
+    "raft-medium-directories.txt",
+    "raft-medium-files.txt",
+  ],
+  "raft-large": [
+    "raft-large-words.txt",
+    "raft-large-directories.txt",
+    "raft-large-files.txt",
+  ],
+  quickhits: ["quickhits.txt"],
+  api: ["api-endpoints.txt", "actions-lowercase.txt"],
+  usernames: ["top-usernames-shortlist.txt", "xato-net-10-million-usernames.txt"],
+  users: ["top-usernames-shortlist.txt"],
+  fuzz: ["fuzz-Bo0oM.txt"],
+  fuzzing: ["fuzz-Bo0oM.txt"],
+  lfi: ["LFI-Jhaddix.txt"],
 };
 
-function candidateFilenames(query: string): string[] {
+// Extensions that identify wordlist-ish files. Substring globs are restricted
+// to these so a broad `find /` doesn't drown us in unrelated files.
+const WL_EXTS = ["txt", "lst", "dic", "words", "wordlist", "list", "gz"];
+const WL_FILE_RE = /\.(txt|lst|dic|words|wordlist|list|gz)$/i;
+
+// Words that carry no signal as a filename keyword.
+const STOPWORDS = new Set([
+  "wordlist", "wordlists", "list", "lists", "the", "a", "an", "and", "or",
+  "for", "of", "to", "in", "on", "find", "search", "locate", "please", "get",
+  "me", "with", "some", "any", "best", "top", "file", "files", "txt", "using",
+  "use", "used", "need", "want", "looking", "look", "good", "default", "path",
+  "scan", "scanning", "fuzzing",
+]);
+
+interface SearchPlan {
+  /** Precise: exact filenames + alias expansions. */
+  names: string[];
+  /** Extension-restricted case-insensitive substring globs (`*kw*.txt`). */
+  globs: string[];
+  /** Broad case-insensitive substring globs (`*kw*`) — wordlist roots only. */
+  broad: string[];
+  /** Extracted keyword tokens, for locate + diagnostics. */
+  keywords: string[];
+}
+
+function looksLikeFilename(s: string): boolean {
+  return !/\s/.test(s) && /\.[a-z0-9]{1,8}(\.[a-z0-9]{1,4})?$/i.test(s);
+}
+
+function tokenize(query: string): string[] {
+  return query
+    .toLowerCase()
+    .split(/[^a-z0-9]+/i)
+    .filter(Boolean);
+}
+
+function buildSearchPlan(query: string): SearchPlan {
   const lower = query.toLowerCase().trim();
-  return NAME_ALIASES[lower] ?? [query];
+  const names = new Set<string>();
+  const globs = new Set<string>();
+  const broad = new Set<string>();
+
+  // Exact literal query when it is already filename-shaped (e.g. "common.txt").
+  if (looksLikeFilename(lower)) names.add(lower);
+  // Whole-query alias (e.g. "raft-medium", "directory-small").
+  for (const a of NAME_ALIASES[lower] ?? []) names.add(a);
+
+  // Keyword extraction with graceful fallback so we never end up with nothing.
+  const rawTokens = tokenize(query);
+  let keywords = rawTokens.filter((t) => t.length >= 3 && !STOPWORDS.has(t));
+  if (keywords.length === 0) keywords = rawTokens.filter((t) => t.length >= 3);
+  if (keywords.length === 0) keywords = rawTokens.slice();
+  keywords = [...new Set(keywords)].slice(0, 6);
+
+  for (const kw of keywords) {
+    for (const a of NAME_ALIASES[kw] ?? []) names.add(a);
+    for (const ext of WL_EXTS) globs.add(`*${kw}*.${ext}`);
+    broad.add(`*${kw}*`);
+  }
+
+  // Absolute last resort: search for the raw query verbatim.
+  if (names.size === 0 && globs.size === 0) names.add(query);
+
+  return {
+    names: [...names],
+    globs: [...globs],
+    broad: [...broad],
+    keywords,
+  };
 }
 
 // --- Search helpers ---
@@ -126,25 +242,40 @@ function parseLines(raw: string): string[] {
   return raw.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
 }
 
-function buildFindNameExpr(filenames: string[]): string[] {
-  return filenames.flatMap((f, i) => (i === 0 ? ["-name", f] : ["-o", "-name", f]));
+function dedupe(items: string[]): string[] {
+  return [...new Set(items.filter(Boolean))];
+}
+
+// POSIX `find` name expression from a list of literal names / globs. Uses
+// -iname throughout so matching is always case-insensitive.
+function buildFindNameExpr(patterns: string[]): string[] {
+  return patterns.flatMap((p, i) => (i === 0 ? ["-iname", p] : ["-o", "-iname", p]));
+}
+
+// PowerShell array literal of quoted patterns for -like matching.
+function psPatternArray(patterns: string[]): string {
+  return patterns.map((p) => `'${p.replace(/'/g, "''")}'`).join(",");
 }
 
 // Quiet directory search: capped depth, timeout, stderr never inherited.
-async function searchRoot(root: string, filenames: string[], maxDepth: number): Promise<string[]> {
-  if (!existsSync(root)) return [];
+async function searchRoot(
+  root: string,
+  patterns: string[],
+  maxDepth: number,
+): Promise<string[]> {
+  if (!existsSync(root) || patterns.length === 0) return [];
   if (IS_WIN) {
-    const namePattern = filenames.map((f) => `'${f.replace(/'/g, "''")}'`).join(",");
     const script =
+      `$pats=@(${psPatternArray(patterns)}); ` +
       `Get-ChildItem -Path '${root.replace(/'/g, "''")}' -Recurse -File ` +
       `-Depth ${maxDepth} -ErrorAction SilentlyContinue ` +
-      `| Where-Object { @(${namePattern}) -contains $_.Name } ` +
-      `| Select-Object -First 20 -ExpandProperty FullName`;
+      `| Where-Object { $n=$_.Name; @($pats | Where-Object { $n -like $_ }).Count -gt 0 } ` +
+      `| Select-Object -First ${MAX_HITS} -ExpandProperty FullName`;
     return parseLines(
       await runCapture("powershell.exe", ["-NoProfile", "-Command", script], 8_000),
     );
   }
-  const nameExpr = buildFindNameExpr(filenames);
+  const nameExpr = buildFindNameExpr(patterns);
   return parseLines(
     await runCapture(
       "find",
@@ -154,21 +285,31 @@ async function searchRoot(root: string, filenames: string[], maxDepth: number): 
   );
 }
 
-// Query the locate/mlocate DB — fast, no root needed. POSIX only.
-async function searchLocate(filenames: string[]): Promise<string[]> {
+// Query the locate/mlocate DB — fast, no root needed. POSIX only. Matches on
+// keywords/names as substrings, then keeps only wordlist-ish files.
+async function searchLocate(plan: SearchPlan): Promise<string[]> {
   if (IS_WIN) return [];
+  const terms = dedupe([...plan.names, ...plan.keywords]);
   const hits: string[] = [];
-  for (const f of filenames) {
-    hits.push(...parseLines(await runCapture("locate", ["-i", "-l", "20", f], 5_000)));
-    if (hits.length > 0) break;
+  for (const term of terms) {
+    const lines = parseLines(
+      await runCapture("locate", ["-i", "-l", String(MAX_HITS), term], 5_000),
+    );
+    for (const line of lines) {
+      if (WL_FILE_RE.test(line) || plan.names.some((n) => line.toLowerCase().endsWith(n.toLowerCase()))) {
+        hits.push(line);
+      }
+    }
+    if (hits.length >= MAX_HITS) break;
   }
   return hits;
 }
 
-// Full filesystem search. POSIX: find /, Windows: all drive letters.
-async function searchFullFilesystem(filenames: string[]): Promise<string[]> {
+// Full filesystem search. POSIX: find /, Windows: all drive letters. Uses only
+// precise names + extension-restricted globs to keep the result set relevant.
+async function searchFullFilesystem(patterns: string[]): Promise<string[]> {
+  if (patterns.length === 0) return [];
   if (IS_WIN) {
-    const namePattern = filenames.map((f) => `'${f.replace(/'/g, "''")}'`).join(",");
     const drives = parseLines(
       (
         await runCapture(
@@ -181,15 +322,16 @@ async function searchFullFilesystem(filenames: string[]): Promise<string[]> {
     if (drives.length === 0) return [];
     const paths = drives.map((d) => `'${d.replace(/'/g, "''")}'`).join(",");
     const script =
+      `$pats=@(${psPatternArray(patterns)}); ` +
       `Get-ChildItem -Path ${paths} -Recurse -File ` +
       `-Depth 6 -ErrorAction SilentlyContinue ` +
-      `| Where-Object { @(${namePattern}) -contains $_.Name } ` +
-      `| Select-Object -First 20 -ExpandProperty FullName`;
+      `| Where-Object { $n=$_.Name; @($pats | Where-Object { $n -like $_ }).Count -gt 0 } ` +
+      `| Select-Object -First ${MAX_HITS} -ExpandProperty FullName`;
     return parseLines(
       await runCapture("powershell.exe", ["-NoProfile", "-Command", script], 15_000),
     );
   }
-  const nameExpr = buildFindNameExpr(filenames);
+  const nameExpr = buildFindNameExpr(patterns);
   return parseLines(
     await runCapture(
       "find",
@@ -207,18 +349,19 @@ async function searchFullFilesystem(filenames: string[]): Promise<string[]> {
  * terminal, corrupting the TUI, freezing the keyboard, and never routing
  * through clai's secure modal. POSIX only.
  */
-async function searchSudo(filenames: string[]): Promise<string[]> {
-  if (IS_WIN) return [];
-  const nameExpr = buildFindNameExpr(filenames);
+async function searchSudo(patterns: string[]): Promise<string[]> {
+  if (IS_WIN || patterns.length === 0) return [];
+  const nameExpr = buildFindNameExpr(patterns);
   const findArgs = ["/", "-maxdepth", "8", "-type", "f", "(", ...nameExpr, ")"];
   return parseLines(await runCapture("sudo", ["-n", "find", ...findArgs], 15_000));
 }
 
-
 // --- Result builder ---
 
 function found(hits: string[], source: string): ToolResult {
-  return { ok: true, output: `${source}:\n${hits.join("\n")}`, exitCode: 0 };
+  const uniq = dedupe(hits).slice(0, MAX_HITS);
+  const label = `${source} (${uniq.length} match${uniq.length === 1 ? "" : "es"})`;
+  return { ok: true, output: `${label}:\n${uniq.join("\n")}`, exitCode: 0 };
 }
 
 // --- Main ---
@@ -231,14 +374,22 @@ export interface WordlistFindArgs {
 export async function wordlistFind(args: WordlistFindArgs): Promise<ToolResult> {
   const query = args.query?.trim();
   if (!query) {
-    return { ok: false, output: "wordlist.find requires a query, e.g. \"common.txt\" or \"rockyou\".", exitCode: 1 };
+    return {
+      ok: false,
+      output: 'wordlist.find requires a query, e.g. "common.txt", "rockyou", or "medium directory list".',
+      exitCode: 1,
+    };
   }
-  const filenames = candidateFilenames(query);
+
+  const plan = buildSearchPlan(query);
+  const precisePatterns = dedupe([...plan.names, ...plan.globs]);
+  // Inside wordlist-dedicated roots we can afford broad substring globs too.
+  const rootPatterns = dedupe([...plan.names, ...plan.globs, ...plan.broad]);
   const roots = knownRoots();
 
-  // Pass 1: well-known install locations (shallow, fast).
+  // Pass 1: well-known install locations (shallow, fast, broad matching ok).
   for (const root of roots) {
-    const hits = await searchRoot(root, filenames, 6);
+    const hits = await searchRoot(root, rootPatterns, 6);
     if (hits.length > 0) return found(hits, "Found in a known wordlist location");
   }
 
@@ -247,13 +398,14 @@ export async function wordlistFind(args: WordlistFindArgs): Promise<ToolResult> 
       ok: false,
       output:
         `No match for "${query}" in known wordlist locations for ${platform()}.\n` +
+        `Tried keywords: ${plan.keywords.join(", ") || query}.\n` +
         `Checked: ${roots.join(", ")}\n` +
         `Retry with expand=true to broaden the search, or pkg.install seclists.`,
       exitCode: 1,
     };
   }
 
-  // Pass 2: broader user directories.
+  // Pass 2: broader user directories (precise + extension globs only).
   const home = getHome();
   const broaderRoots = [
     join(home, "Downloads"), join(home, "Desktop"),
@@ -261,30 +413,32 @@ export async function wordlistFind(args: WordlistFindArgs): Promise<ToolResult> 
     join(home, "tools"), join(home, "Tools"),
     join(home, "github"), join(home, "repos"),
     join(home, "pentesting"), join(home, "pentest"),
+    join(home, "src"), join(home, "code"),
     "/opt",
   ].filter((r) => !roots.includes(r));
 
   for (const root of broaderRoots) {
-    const hits = await searchRoot(root, filenames, 4);
+    const hits = await searchRoot(root, precisePatterns, 5);
     if (hits.length > 0) return found(hits, "Found in user directory");
   }
 
   // Pass 3: locate database (fast indexed search, POSIX only).
-  const locateHits = await searchLocate(filenames);
+  const locateHits = await searchLocate(plan);
   if (locateHits.length > 0) return found(locateHits, "Found via locate database");
 
   // Pass 4: full filesystem search (find / or all Windows drives).
-  const fsHits = await searchFullFilesystem(filenames);
+  const fsHits = await searchFullFilesystem(precisePatterns);
   if (fsHits.length > 0) return found(fsHits, "Found via full filesystem search");
 
   // Pass 5: cached-credential sudo search (POSIX only, never prompts).
-  const sudoHits = await searchSudo(filenames);
+  const sudoHits = await searchSudo(precisePatterns);
   if (sudoHits.length > 0) return found(sudoHits, "Found via elevated filesystem search");
 
   return {
     ok: false,
     output:
-      `No wordlist matching "${query}" found after searching the entire filesystem.\n` +
+      `No wordlist matching "${query}" found after searching known locations, ` +
+      `the locate database, and the filesystem (keywords: ${plan.keywords.join(", ") || query}).\n` +
       `Install one: pkg.install seclists (Linux/macOS) or clone https://github.com/danielmiessler/SecLists.\n` +
       `If credentials are not cached, an elevated search was skipped (clai never opens a raw sudo prompt).`,
     exitCode: 1,
