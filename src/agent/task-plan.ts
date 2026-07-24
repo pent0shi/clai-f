@@ -193,6 +193,7 @@ export type PlanOperation = VersionedPlanOperation & (
   | { type: "addTask"; step: VersionedPlanStep; index?: number }
   | { type: "editTask"; stepId: string; changes: Partial<Omit<VersionedPlanStep, "id">> }
   | { type: "removeTask"; stepId: string }
+  | { type: "moveTask"; stepId: string; index: number }
   | { type: "supersedeTask"; stepId: string; replacement: VersionedPlanStep }
   | { type: "splitTask"; stepId: string; steps: VersionedPlanStep[] }
   | { type: "mergeTasks"; stepIds: string[]; step: VersionedPlanStep }
@@ -285,7 +286,13 @@ export function applyPlanOperation(plan: VersionedTaskPlan, operation: PlanOpera
   };
   if (operation.type === "addTask") steps.splice(operation.index ?? steps.length, 0, normalizeStep(operation.step));
   else if (operation.type === "editTask") { const index = indexOf(operation.stepId); steps[index] = normalizeStep({ ...steps[index]!, ...operation.changes, id: operation.stepId }); }
-  else if (operation.type === "removeTask") {
+  else if (operation.type === "moveTask") {
+    const from = indexOf(operation.stepId);
+    if (!Number.isInteger(operation.index)) throw new Error("move index must be an integer");
+    const [moved] = steps.splice(from, 1);
+    const to = Math.max(0, Math.min(operation.index, steps.length));
+    steps.splice(to, 0, moved!);
+  } else if (operation.type === "removeTask") {
     indexOf(operation.stepId);
     if (steps.some((step) => (step.dependencies ?? []).includes(operation.stepId))) throw new Error(`cannot remove depended-on step: ${operation.stepId}`);
     steps = steps.filter((step) => step.id !== operation.stepId);

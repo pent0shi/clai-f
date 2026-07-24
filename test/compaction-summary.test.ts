@@ -10,8 +10,51 @@ import {
   compactMessagesWithSummary,
   isCompactionMemoryMessage,
 } from "../src/agent/context-manager.js";
+import {
+  RESPONDER_RESULT_LEDGER_PREFIX,
+  upsertResponderResultLedger,
+} from "../src/agent/responder-context.js";
+import { buildTurnHistory } from "../src/agent/tool-call-parser.js";
+import type { ResponderNotification } from "../src/tools/jobs.js";
 import type { ChatMessage } from "../src/types.js";
 
+
+function consumedResponderResult(): ResponderNotification {
+  return {
+    id: "completion:job-ledger",
+    ownerSessionId: "ledger-session",
+    jobId: "job-ledger",
+    taskId: "t4",
+    parentTaskId: "t2",
+    status: "exited",
+    createdAt: "2026-01-01T00:00:00.000Z",
+    startedAt: "2026-01-01T00:00:00.000Z",
+    endedAt: "2026-01-01T00:00:01.000Z",
+    exitCode: 0,
+    stdoutArtifact: {
+      path: "/tmp/job-ledger.stdout.log",
+      chunks: [],
+      bytes: 42,
+      droppedBytes: 0,
+      redacted: false,
+      sha256: "abc",
+    },
+    stderrArtifact: {
+      path: "/tmp/job-ledger.stderr.log",
+      chunks: [],
+      bytes: 0,
+      droppedBytes: 0,
+      redacted: false,
+      sha256: "def",
+    },
+    commandDisplay: "scan target",
+    wakeOnCompletion: true,
+    responder: true,
+    responderLeaseId: "lease-1",
+    deliveredAt: "2026-01-01T00:00:02.000Z",
+    analyzedAt: "2026-01-01T00:00:03.000Z",
+  };
+}
 describe("compaction-summary prompts", () => {
   it("system prompt demands fidelity and sections", () => {
     expect(COMPACTION_SYSTEM_PROMPT).toMatch(/Never invent/i);
@@ -246,5 +289,73 @@ describe("LLM compaction integration shape", () => {
     expect(memories).toHaveLength(1);
     expect(memories[0]?.content).toContain("Earlier turns in this session");
     expect(result.some((message) => message.content.includes("stale resumed memory"))).toBe(false);
+  });
+});
+
+
+describe("responder result compaction durability", () => {
+  it("keeps the consumed ledger in persisted turn history and mechanical compaction", () => {
+    const messages: ChatMessage[] = [
+      { role: "system", content: "main system prompt" },
+      { role: "user", content: "start work" },
+      { role: "assistant", content: "working" },
+    ];
+    upsertResponderResultLedger(messages, consumedResponderResult());
+    messages.push(
+      { role: "user", content: "continue" },
+      { role: "assistant", content: "continued" },
+      { role: "user", content: "finish" },
+      { role: "assistant", content: "finished" },
+    );
+
+    const history = buildTurnHistory(messages, "finished");
+    const ledger = history.find(
+      (message) =>
+        message.role === "system" &&
+        message.content.startsWith(RESPONDER_RESULT_LEDGER_PREFIX),
+    );
+    expect(ledger?.content).toContain("notification=completion:job-ledger");
+    expect(ledger?.content).toContain("consumed=true");
+
+    const compacted = compactMessages(history, {
+      budgetTokens: 0,
+      keepRecent: 2,
+    });
+    expect(compacted).toContain(ledger);
+  });
+
+  it("injects the consumed ledger as trusted durable state for model compaction", async () => {
+    const messages: ChatMessage[] = [
+      { role: "system", content: "main system prompt" },
+      { role: "user", content: "old request" },
+      { role: "assistant", content: "old response" },
+    ];
+    upsertResponderResultLedger(messages, consumedResponderResult());
+    messages.push(
+      { role: "user", content: "recent request" },
+      { role: "assistant", content: "recent response" },
+    );
+    let prompt = "";
+
+    const result = await compactMessagesWithSummary(
+      messages,
+      async (value) => {
+        prompt = value;
+        return "## Work completed\nConsumed job-ledger findings.\n## Remaining work\nContinue.";
+      },
+      { budgetTokens: 0, keepRecent: 2 },
+    );
+
+    expect(prompt).toContain(RESPONDER_RESULT_LEDGER_PREFIX);
+    expect(prompt).toContain("notification=completion:job-ledger");
+    expect(prompt).toContain("consumed=true");
+    expect(prompt).toMatch(/never describe.*unread/i);
+    const ledger = result.messages.find(
+      (message) =>
+        message.role === "system" &&
+        message.content.startsWith(RESPONDER_RESULT_LEDGER_PREFIX),
+    );
+    expect(ledger?.content).toContain("notification=completion:job-ledger");
+    expect(ledger?.content).toContain("consumed=true");
   });
 });

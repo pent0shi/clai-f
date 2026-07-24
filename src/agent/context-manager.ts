@@ -11,6 +11,10 @@ import {
   trimTranscriptForCompaction,
 } from "./compaction-summary.js";
 import {
+  isResponderResultLedgerMessage,
+  RESPONDER_RESULT_LEDGER_PREFIX,
+} from "./responder-context.js";
+import {
   measureToolCallsChars,
   slimToolArgs,
 } from "./message-slim.js";
@@ -209,7 +213,16 @@ export function compactMessages(
       bullets.join("\n"),
   };
 
-  return [...head, memo, ...tail];
+  let ledger: ChatMessage | undefined;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (isResponderResultLedgerMessage(messages[index]!)) {
+      ledger = messages[index];
+      break;
+    }
+  }
+  const preservedLedger =
+    ledger && !head.includes(ledger) && !tail.includes(ledger) ? [ledger] : [];
+  return [...head, memo, ...preservedLedger, ...tail];
 }
 
 /**
@@ -266,6 +279,7 @@ export async function compactMessagesWithSummary(
     content.startsWith("SESSION STATE") ||
     content.startsWith("ENGAGEMENT SCOPE") ||
     content.startsWith("TASK ANALYSIS") ||
+    isResponderResultLedgerMessage({ role: "system", content }) ||
     content.includes("\nACTIVE PLAN") ||
     content.includes("SESSION STATE / WORKING MEMORY");
 
@@ -307,6 +321,7 @@ export async function compactMessagesWithSummary(
           "SESSION STATE / WORKING MEMORY",
           "ENGAGEMENT SCOPE",
           "TASK ANALYSIS",
+          RESPONDER_RESULT_LEDGER_PREFIX,
         ]) {
           const idx = m.content.indexOf(marker);
           if (idx >= 0) chunks.push(m.content.slice(idx, idx + 2_500));
@@ -339,6 +354,19 @@ export async function compactMessagesWithSummary(
 
   const head = preserveSystemHead ? [messages[0]!] : [];
   const rawTail = messages.slice(tailStart);
+  let responderLedger: ChatMessage | undefined;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (isResponderResultLedgerMessage(messages[index]!)) {
+      responderLedger = messages[index];
+      break;
+    }
+  }
+  const compactHead =
+    responderLedger &&
+    !head.includes(responderLedger) &&
+    !rawTail.includes(responderLedger)
+      ? [...head, responderLedger]
+      : head;
   const memoryPrefix = compactionMemoryPrefixForPurpose(options.purpose);
   const memoryMsg: ChatMessage = {
     role: "system",
@@ -348,12 +376,22 @@ export async function compactMessagesWithSummary(
   // Prefer ~16–20k: start with a generous lean tail, then progressively
   // soft-trim oversized dumps only while still over the soft upper band.
   // Never drop messages or tool pairs. If still high after last tier, accept.
-  let compacted = buildLeanCompact(head, memoryMsg, rawTail, TAIL_SOFT_TIERS[0]!);
+  let compacted = buildLeanCompact(
+    compactHead,
+    memoryMsg,
+    rawTail,
+    TAIL_SOFT_TIERS[0]!,
+  );
   for (let i = 1; i < TAIL_SOFT_TIERS.length; i += 1) {
     if (estimateMessagesTokens(compacted) <= POST_COMPACT_SOFT_UPPER_BAND_TOKENS) {
       break;
     }
-    compacted = buildLeanCompact(head, memoryMsg, rawTail, TAIL_SOFT_TIERS[i]!);
+    compacted = buildLeanCompact(
+      compactHead,
+      memoryMsg,
+      rawTail,
+      TAIL_SOFT_TIERS[i]!,
+    );
   }
 
   // Structural safety only — never reject because afterTokens > soft band.

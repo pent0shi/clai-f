@@ -27,7 +27,13 @@ interface SessionResponderDeps {
   readonly isBusy: () => boolean;
   readonly hasQueuedWork: () => boolean;
   readonly continueQueue: () => Promise<void>;
-  readonly runTurn: (prompt: string) => Promise<ResponderTurnResult>;
+  readonly runTurn: (
+    prompt: string,
+    onStarted: () => void,
+  ) => Promise<ResponderTurnResult>;
+  readonly recordConsumed?: (
+    notification: ResponderNotification,
+  ) => Promise<void>;
   readonly notifyState: () => void;
   readonly notifyDelivery?: ((summary: string) => void) | undefined;
 }
@@ -162,11 +168,29 @@ export class SessionResponder {
     this.deps.notifyState();
     const preview = await this.preview(notification);
     const foreground = await this.foregroundTask(sessionId);
-    this.deps.notifyDelivery?.(summarizeDelivery(notification));
+    if (
+      generation !== this.generation ||
+      leaseId !== this.leaseId ||
+      sessionId !== this.deps.sessionId() ||
+      this.deps.isBusy()
+    ) {
+      this.deps.jobs.releaseResponderNotificationClaim?.(notification.id);
+      this.deps.notifyState();
+      return;
+    }
     let result: ResponderTurnResult;
     try {
       result = await this.deps.runTurn(
         deliveryPrompt(notification, preview, foreground),
+        () => {
+          if (!this.deps.jobs.markDelivered(notification.id)) {
+            throw new Error(
+              `failed to persist responder delivery ${notification.id}`,
+            );
+          }
+          this.deps.notifyState();
+          this.deps.notifyDelivery?.(summarizeDelivery(notification));
+        },
       );
     } catch {
       result = { status: "error" };
@@ -178,11 +202,20 @@ export class SessionResponder {
       leaseId !== this.leaseId ||
       sessionId !== this.deps.sessionId()
     ) {
+      if (!notification.deliveredAt) {
+        this.deps.jobs.releaseResponderNotificationClaim?.(notification.id);
+      }
       this.wakeRequested = false;
       this.deps.notifyState();
       return;
     }
 
+    try {
+      await this.deps.recordConsumed?.(notification);
+    } catch {
+      this.deps.notifyState();
+      return;
+    }
     if (this.deps.jobs.markAnalyzed(notification.id)) {
       this.deps.jobs.acknowledge(notification.id);
     }
@@ -198,6 +231,7 @@ export class SessionResponder {
         notification.responder &&
         notification.responderLeaseId === leaseId &&
         !notification.archivedAt &&
+        !notification.deliveredAt &&
         !notification.analyzedAt,
     );
   }

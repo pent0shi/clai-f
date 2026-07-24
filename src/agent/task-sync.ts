@@ -139,22 +139,17 @@ export function buildMultiUpdateReminder(
   );
 }
 
-/**
- * Model-facing reminder when a task is opened before its dependencies finish.
- * Confirmed by re-issuing the identical task.update.
- */
+// Model-facing warning when a task is deliberately opened before prerequisites finish.
 export function buildDependencyReminder(input: DependencyReminderInput): string {
   const title = input.title.trim() || "(untitled task)";
   const blockers = input.blockers
     .map((blocker) => `[${blocker.id}] ${blocker.title.trim() || "(untitled)"}`)
     .join(", ");
   return (
-    `HELD — [${input.taskId}] "${title}" was set ${input.targetState}, ` +
-    `but its prerequisite task(s) are not complete: ${blockers}. ` +
-    "Nothing was changed. Normally you finish dependencies first so work stays in order. " +
-    `If [${input.taskId}] genuinely does not depend on them or they are already effectively satisfied, ` +
-    "re-issue this exact task.update to CONFIRM and it will be opened. " +
-    "Otherwise complete the prerequisite(s) first (in_progress → verify → done), then open this task."
+    `WARNING — [${input.taskId}] "${title}" is now ${input.targetState} while ` +
+    `these prerequisite task(s) remain open: ${blockers}. ` +
+    "The transition was applied; this is not a block. Continue deliberately only if the earlier task is effectively satisfied, was left unmarked, or the work is intentionally out of order. " +
+    "Otherwise return to the prerequisite before claiming this task complete. Completion still requires all declared dependencies to be done or skipped."
   );
 }
 
@@ -165,5 +160,5 @@ export function multiUpdateToast(count: number): string {
 
 /** Short, identifiable toast for opening a task before its dependencies. */
 export function dependencyToast(taskId: string): string {
-  return `[${taskId}] opened early · confirm or finish prerequisites first`;
+  return `[${taskId}] opened with prerequisites still pending`;
 }

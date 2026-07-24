@@ -70,6 +70,7 @@ export interface CompositionOptions {
   readonly confirm?: ConfirmationPort | undefined;
   readonly requestSecret?: SecretPort["request"] | undefined;
   readonly emit?: ((event: AnyAppEvent) => void) | undefined;
+  readonly captureEvents?: boolean | undefined;
   readonly capabilities?: TerminalCapabilityReport | undefined;
   /** SEL-006: auto-copy a non-empty mouse selection on release. Default true. */
   readonly copyOnRelease?: boolean | undefined;
@@ -103,7 +104,7 @@ export interface AppServices {
   readonly pagerExport: PagerExportPort;
   readonly requestExit: () => void;
   readonly capabilities: TerminalCapabilityReport;
-  /** Events captured when no external `emit` sink is supplied (test aid). */
+  /** Bounded raw events when captureEvents is explicitly enabled. */
   readonly recordedEvents: readonly AnyAppEvent[];
   dispose(): void;
 }
@@ -112,6 +113,7 @@ export function createCompositionRoot(
   options: CompositionOptions = {},
 ): AppServices {
   const recorded: AnyAppEvent[] = [];
+  const captureEvents = options.captureEvents === true;
   const transcript = new TranscriptStore();
   const persistence = options.persistence ?? createCurrentPersistencePort();
   const plan = new PlanController(persistence);
@@ -153,8 +155,11 @@ export function createCompositionRoot(
         durationMs: apiKeyRotation ? 3000 : level === "info" ? 2000 : 2500,
       });
     }
-    if (externalEmit) externalEmit(event);
-    else recorded.push(event);
+    if (captureEvents) {
+      recorded.push(event);
+      if (recorded.length > 2_000) recorded.splice(0, recorded.length - 2_000);
+    }
+    externalEmit?.(event);
   };
 
   const ports: AppPorts = {

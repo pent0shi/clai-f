@@ -9,6 +9,7 @@ import {
   isPlanSuccessful,
   readyPlanTasks,
   appendPlanTask,
+  applySessionPlanOperation,
   validateSessionPlan,
   normalizeTaskDependencies,
   type SessionPlan,
@@ -18,9 +19,10 @@ import { renderPlanChecklist } from "../ui/plan-pane.js";
 import type { LoopGuard } from "./loop-guard.js";
 import type { SessionPolicy } from "./session-policy.js";
 import { isLumpedSingleTask } from "./tool-call-parser.js";
-import { buildDependencyReminder, dependencySignature, dependencyToast } from "./task-sync.js";
+import { buildDependencyReminder, dependencyToast } from "./task-sync.js";
 import type { ToolCall } from "../types.js";
 import { getActiveProjectRoot } from "./project-root.js";
+import { classifyTaskTitle } from "./task-evidence.js";
 import { detectPackageManager } from "./workspace-orient.js";
 
 /** Titles match for plan merge (exact or mutual long substring). */
@@ -448,7 +450,7 @@ export function planContextMessage(plan: SessionPlan, approved: boolean): string
     lines.push(`  ${i + 1}. [${t.id}] (${t.state}) ${t.title}${hierarchyHint}${jobHint}${aliasHint}${dependencyHint}${resourceHint}${evidenceHint}`);
   });
   lines.push(
-    "task.update taskId MUST be t1, t2, … from this list (or a listed alias). Use task.add to append newly discovered work or a child task without rewriting the plan. Responder-owned job tasks advance automatically; never task.update them.",
+    "task.update taskId MUST be t1, t2, … from this list (or a listed alias). Use task.add for newly discovered work; it is placed before unfinished report creation. Use task.move with position/beforeTaskId/afterTaskId to rearrange work without changing ids or evidence. Responder-owned job tasks advance automatically; never task.update them.",
   );
   if (plan.meta?.projectRoot) {
     lines.push(`project_root: ${plan.meta.projectRoot}`);
@@ -928,6 +930,75 @@ export async function handlePlanTool(
     };
   }
 
+  if (call.name === "task.move") {
+    const taskRaw =
+      typeof call.args.taskId === "string" ? call.args.taskId.trim() : "";
+    const taskId = resolvePlanTaskId(plan, taskRaw) ?? taskRaw;
+    const beforeRaw =
+      typeof call.args.beforeTaskId === "string"
+        ? call.args.beforeTaskId.trim()
+        : "";
+    const afterRaw =
+      typeof call.args.afterTaskId === "string"
+        ? call.args.afterTaskId.trim()
+        : "";
+    const position =
+      typeof call.args.position === "number" ? call.args.position : undefined;
+    const selectors = [Boolean(beforeRaw), Boolean(afterRaw), position !== undefined]
+      .filter(Boolean).length;
+    if (!plan.tasks.some((task) => task.id === taskId) || selectors !== 1) {
+      return {
+        handled: true,
+        ok: false,
+        display: chalk.red("  ✗ task.move needs a valid taskId and exactly one destination\n"),
+        modelNote:
+          "task.move failed: use a valid taskId plus exactly one of position, beforeTaskId, or afterTaskId.",
+      };
+    }
+    const remaining = plan.tasks.filter((task) => task.id !== taskId);
+    let index = 0;
+    if (position !== undefined) {
+      if (!Number.isInteger(position) || position < 1) {
+        return {
+          handled: true,
+          ok: false,
+          display: chalk.red("  ✗ task.move position must be a positive integer\n"),
+          modelNote: "task.move failed: position is one-based and must be a positive integer.",
+        };
+      }
+      index = Math.min(position - 1, remaining.length);
+    } else {
+      const anchorRaw = beforeRaw || afterRaw;
+      const anchorId = resolvePlanTaskId(plan, anchorRaw) ?? anchorRaw;
+      if (anchorId === taskId || !remaining.some((task) => task.id === anchorId)) {
+        return {
+          handled: true,
+          ok: false,
+          display: chalk.red(`  ✗ task.move: invalid anchor "${anchorRaw}"\n`),
+          modelNote: `task.move failed: "${anchorRaw}" is not a different task in ACTIVE PLAN.`,
+        };
+      }
+      const anchorIndex = remaining.findIndex((task) => task.id === anchorId);
+      index = beforeRaw ? anchorIndex : anchorIndex + 1;
+    }
+    const updated = applySessionPlanOperation(plan, {
+      type: "moveTask",
+      expectedVersion: plan.version ?? 1,
+      stepId: taskId,
+      index,
+    });
+    await savePlan(updated).catch(() => undefined);
+    return {
+      handled: true,
+      ok: true,
+      plan: updated,
+      display: renderPlanForTerminal(updated) + "\n",
+      modelNote:
+        `Moved [${taskId}] to position ${updated.tasks.findIndex((task) => task.id === taskId) + 1}. ` +
+        "Task id, state, evidence, dependencies, and responder linkage were preserved.",
+    };
+  }
+
   if (call.name === "task.add") {
     const title = normalizeTaskTitle(
       call.args.title ?? call.args.task ?? call.args.name,
@@ -975,6 +1046,14 @@ export async function handlePlanTool(
         modelNote: `task.add failed: unknown dependency "${unknownDependency}". Use canonical ids from ACTIVE PLAN.`,
       };
     }
+    const tasksBeforeAdd = plan.tasks.map((candidate) => ({
+      ...candidate,
+      dependencies: [...(candidate.dependencies ?? [])],
+      resourceLocks: [...(candidate.resourceLocks ?? [])],
+    }));
+    const statusBeforeAdd = plan.status;
+    const versionBeforeAdd = plan.version;
+    const updatedAtBeforeAdd = plan.updatedAt;
     const task = appendPlanTask(plan, {
       title,
       state: "pending",
@@ -986,6 +1065,42 @@ export async function handlePlanTool(
       ),
       parentTaskId,
     });
+    let reportDeferral = "";
+    if (classifyTaskTitle(task.title, { planKind: plan.kind }) !== "report") {
+      const report = plan.tasks.find(
+        (candidate) =>
+          !candidate.responderOwned &&
+          classifyTaskTitle(candidate.title, { planKind: plan.kind }) === "report",
+      );
+      if (
+        report &&
+        report.id !== task.id &&
+        report.state !== "done" &&
+        report.state !== "skipped" &&
+        !task.dependencies?.includes(report.id)
+      ) {
+        const taskIndex = plan.tasks.findIndex((candidate) => candidate.id === task.id);
+        plan.tasks.splice(taskIndex, 1);
+        const reportIndex = plan.tasks.findIndex((candidate) => candidate.id === report.id);
+        plan.tasks.splice(reportIndex, 0, task);
+        report.dependencies = [...new Set([...(report.dependencies ?? []), task.id])];
+        if (report.state === "in_progress") report.state = "pending";
+        report.note = report.note
+          ? `${report.note}; deferred for newly discovered work ${task.id}`
+          : `deferred for newly discovered work ${task.id}`;
+        reportDeferral = ` Report [${report.id}] was deferred behind this new work.`;
+      } else if (report?.state === "done") {
+        const update = appendPlanTask(plan, {
+          title: `Update final report with findings from ${task.id}`,
+          state: "pending",
+          aliases: [],
+          dependencies: [task.id],
+          resourceLocks: [],
+          note: `final report update after newly discovered work ${task.id}`,
+        });
+        reportDeferral = ` Added [${update.id}] to update the completed report after this work.`;
+      }
+    }
     if (
       session.planApproved.value &&
       (plan.status === "approved" || plan.status === "completed" || plan.status === "abandoned")
@@ -994,7 +1109,10 @@ export async function handlePlanTool(
     }
     const validation = validateSessionPlan(plan);
     if (!validation.ok) {
-      plan.tasks = plan.tasks.filter((candidate) => candidate.id !== task.id);
+      plan.tasks = tasksBeforeAdd;
+      plan.status = statusBeforeAdd;
+      plan.version = versionBeforeAdd;
+      plan.updatedAt = updatedAtBeforeAdd;
       return {
         handled: true,
         ok: false,
@@ -1009,17 +1127,11 @@ export async function handlePlanTool(
       plan,
       display: renderPlanForTerminal(plan) + "\n",
       modelNote:
-        `Added [${task.id}] "${task.title}"${parentTaskId ? ` under [${parentTaskId}]` : ""} without rewriting existing tasks. ` +
+        `Added [${task.id}] "${task.title}"${parentTaskId ? ` under [${parentTaskId}]` : ""} without rewriting existing tasks.${reportDeferral} ` +
         `Open it with task.update when it becomes ready. Preserve completed work and continue the current task unless this new task is the immediate evidence-driven next action.`,
     };
   }
 
-  // task.update
-  // Heal broken forward edges left by older id remaps without making
-  // responder-owned child jobs part of the manual task chain.
-  if (normalizeTaskDependencies(plan.tasks)) {
-    await savePlan(plan).catch(() => undefined);
-  }
   const taskIdRaw =
     typeof call.args.taskId === "string"
       ? call.args.taskId
@@ -1061,6 +1173,9 @@ export async function handlePlanTool(
     };
   }
   
+  let dependencyWarning: string | undefined;
+  let dependencyWarningToast: string | undefined;
+
   if (stateRaw === "in_progress") {
     const target = plan.tasks.find((task) => task.id === taskId);
     const ready = readyPlanTasks(plan).some((task) => task.id === taskId);
@@ -1092,38 +1207,22 @@ export async function handlePlanTool(
           .flatMap((task) => task.resourceLocks ?? []),
       );
       const conflictingLocks = (target?.resourceLocks ?? []).filter((lock) => heldLocks.has(lock));
-      // Opening a task before its dependencies land is a soft, model-driven
-      // decision: remind once, then apply if the model re-issues to confirm.
       if (
         target &&
         incompleteDependencies.length > 0 &&
         !retryingFailedTask &&
         conflictingLocks.length === 0
       ) {
-        const sig = dependencySignature(taskId, stateRaw, incompleteDependencies);
-        if (session.pendingDependency.value === sig) {
-          session.pendingDependency.value = undefined;
-        } else {
-          session.pendingDependency.value = sig;
-          return {
-            handled: true,
-            ok: false,
-            reminder: true,
-            display: chalk.yellow(
-              `  ⚠ [${taskId}] opened before its dependencies — confirm or finish them first\n`,
-            ),
-            modelNote: buildDependencyReminder({
-              taskId,
-              title: target.title,
-              targetState: stateRaw,
-              blockers: incompleteDependencies.map((id) => ({
-                id,
-                title: plan.tasks.find((t) => t.id === id)?.title ?? "",
-              })),
-            }),
-            toast: dependencyToast(taskId),
-          };
-        }
+        dependencyWarning = buildDependencyReminder({
+          taskId,
+          title: target.title,
+          targetState: stateRaw,
+          blockers: incompleteDependencies.map((id) => ({
+            id,
+            title: plan.tasks.find((task) => task.id === id)?.title ?? "",
+          })),
+        });
+        dependencyWarningToast = dependencyToast(taskId);
       } else if ((!ready && !retryingFailedTask) || conflictingLocks.length > 0) {
         const nextReady = readyPlanTasks(plan)[0];
         return {
@@ -1138,9 +1237,6 @@ export async function handlePlanTool(
               ? `Open the next ready task first: ${nextReady.id} ("${nextReady.title}").`
               : ""),
         };
-      } else {
-        // Ready to open — drop any stale dependency-override confirmation.
-        session.pendingDependency.value = undefined;
       }
     }
     // A retry is a new execution attempt. Previous receipts proved only the
@@ -1263,7 +1359,15 @@ export async function handlePlanTool(
     handled: true,
     ok: true,
     plan,
-    display: checklist + "\n",
-    modelNote,
+    display:
+      checklist +
+      "\n" +
+      (dependencyWarning
+        ? chalk.yellow(`  ⚠ ${dependencyWarning}\n`)
+        : ""),
+    modelNote: dependencyWarning
+      ? `${dependencyWarning}\n${modelNote}`
+      : modelNote,
+    ...(dependencyWarningToast ? { toast: dependencyWarningToast } : {}),
   };
 }

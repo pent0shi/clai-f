@@ -55,7 +55,12 @@ export interface TaskWorkSignals {
 }
 
 export function isMetaPlanTool(name: string): boolean {
-  return name === "plan.create" || name === "task.update" || name === "agent.handoff";
+  return (
+    name === "plan.create" ||
+    name === "task.move" ||
+    name === "task.update" ||
+    name === "agent.handoff"
+  );
 }
 
 /** Tools that count as real work/verify evidence for the open task. */
@@ -653,7 +658,11 @@ export function isReadOnlyReconTool(name: string): boolean {
  * recon lookups should never wipe a whole batch of http.fetch / dns calls.
  */
 export function isBatchSoftFailTool(name: string): boolean {
-  if (name === "plan.create" || name === "task.update") return true;
+  if (
+    name === "plan.create" ||
+    name === "task.move" ||
+    name === "task.update"
+  ) return true;
   if (name === "tool.batch" || name === "tool.check") return true;
   if (isReadOnlyReconTool(name)) return true;
   if (

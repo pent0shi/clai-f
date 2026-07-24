@@ -20,10 +20,15 @@ import {
 } from "../llm/tool-protocol.js";
 import { sanitizeAssistantText } from "../ui/ansi-box.js";
 import { randomUUID } from "node:crypto";
-import { jobManager, type BackgroundJob } from "../tools/jobs.js";
+import {
+  jobManager,
+  type BackgroundJob,
+  type ResponderNotification,
+} from "../tools/jobs.js";
 import {
   responderContextMessage,
   upsertResponderContextMessage,
+  upsertResponderResultLedger,
 } from "./responder-context.js";
 import {
   agentModeDirective,
@@ -227,6 +232,7 @@ import {
   absorbLooseWorkIntoLedger,
   applyDestinationCwd,
   canMarkTaskDone,
+  classifyTaskTitle,
   hasLocalRuntimeProof,
   hasRemoteWorkProof,
   isDevServerCall,
@@ -365,6 +371,39 @@ export function styleToolChatter(call: ToolCall, text: string): string {
   return shouldDimToolChatter(call) ? chalk.dim(text) : text;
 }
 
+
+export function shouldYieldForResponderBeforeReport(
+  plan: SessionPlan | undefined,
+  runningJobs: readonly BackgroundJob[],
+  notifications: readonly ResponderNotification[],
+  currentNotificationId?: string | undefined,
+): boolean {
+  if (!plan) return false;
+  const unfinished = plan.tasks.filter(
+    (task) =>
+      !task.responderOwned &&
+      (task.state === "pending" || task.state === "in_progress"),
+  );
+  if (
+    unfinished.length === 0 ||
+    !unfinished.every(
+      (task) =>
+        classifyTaskTitle(task.title, { planKind: plan.kind }) === "report",
+    )
+  ) {
+    return false;
+  }
+  return (
+    runningJobs.some((job) => job.responder) ||
+    notifications.some(
+      (notification) =>
+        (!currentNotificationId || notification.id !== currentNotificationId) &&
+        notification.responder &&
+        !notification.archivedAt &&
+        !notification.analyzedAt,
+    )
+  );
+}
 export interface AgentRunOptions {
   provider?: ProviderId | undefined;
   model?: string | undefined;
@@ -1004,24 +1043,42 @@ export async function runAgentTurn(
     ];
     liveMessages = messages;
     const responderWakeTurn = prompt.startsWith("Responder result arrived");
-    const refreshResponderInbox = (): void => {
-      const pending = responderWakeTurn
-        ? jobManager
-            .getPendingNotifications(session.sessionId)
-            .filter(
-              (notification) =>
-                notification.responder && Boolean(notification.deliveredAt),
-            )
-        : [];
+    const responderWakeNotificationId = responderWakeTurn
+      ? /^notification=(.+)$/m.exec(prompt)?.[1]?.trim()
+      : undefined;
+    const refreshResponderInbox = (): ResponderNotification | undefined => {
+      const running = jobManager
+        .getRunningJobs(session.sessionId)
+        .filter((job) => job.responder);
+      if (responderWakeTurn) {
+        const pending = jobManager
+          .getPendingNotifications(session.sessionId)
+          .filter(
+            (notification) =>
+              notification.responder &&
+              Boolean(notification.deliveredAt) &&
+              !notification.analyzedAt &&
+              !notification.archivedAt,
+          )
+          .slice(0, 1);
+        upsertResponderContextMessage(
+          messages,
+          responderContextMessage({ running, pending }),
+        );
+        return undefined;
+      }
+      const leaseId = jobManager.getResponderLeaseId(session.sessionId);
+      const delivery = leaseId
+        ? jobManager.claimNextResponderNotification(session.sessionId, leaseId)
+        : undefined;
       upsertResponderContextMessage(
         messages,
         responderContextMessage({
-          running: jobManager
-            .getRunningJobs(session.sessionId)
-            .filter((job) => job.responder),
-          pending,
+          running,
+          pending: delivery ? [delivery] : [],
         }),
       );
+      return delivery;
     };
     /** Assigned after session flags exist — see below. */
     let refreshSessionState: (
@@ -1522,6 +1579,7 @@ export async function runAgentTurn(
       if (
         call.name === "plan.create" ||
         call.name === "task.add" ||
+        call.name === "task.move" ||
         call.name === "task.update"
       ) {
         // Evidence gate: refuse done until at least one successful work tool
@@ -3238,7 +3296,7 @@ export async function runAgentTurn(
         // durable Responder inbox immediately before every provider request so
         // completions arriving mid-turn are visible without corrupting native
         // tool protocol or forcing a separate busy-wait loop.
-        refreshResponderInbox();
+        const responderDelivery = refreshResponderInbox();
 
         const streamLabel =
           step === 0 ? "waiting for model" : `step ${step + 1}`;
@@ -3339,6 +3397,17 @@ export async function runAgentTurn(
             recoveryNudge: retryWithoutThinking,
           });
           try {
+          if (
+            responderDelivery &&
+            !jobManager.markDelivered(responderDelivery.id)
+          ) {
+            jobManager.releaseResponderNotificationClaim(
+              responderDelivery.id,
+            );
+            throw new Error(
+              `failed to mark responder notification ${responderDelivery.id} delivered`,
+            );
+          }
           completion = await streamWithProvider(
             {
               provider,
@@ -3508,6 +3577,9 @@ export async function runAgentTurn(
             },
           );
           freeTierConsecutiveFailures = 0;
+          if (responderDelivery) {
+            upsertResponderResultLedger(messages, responderDelivery);
+          }
           } catch (streamError) {
             // E4: track free-tier failures for advisory notices (never blocks).
             freeTierConsecutiveFailures += 1;
@@ -4335,7 +4407,18 @@ export async function runAgentTurn(
                 !task.responderOwned &&
                 (task.state === "pending" || task.state === "in_progress"),
             );
-            if (livePlan && unfinished && unfinished.length > 0) {
+            const deferReport = shouldYieldForResponderBeforeReport(
+              livePlan,
+              jobManager.getRunningJobs(session.sessionId),
+              jobManager.getPendingNotifications(session.sessionId),
+              responderWakeNotificationId,
+            );
+            if (
+              livePlan &&
+              unfinished &&
+              unfinished.length > 0 &&
+              !deferReport
+            ) {
               const next = unfinished[0]!;
               const action = recoveryForPrematureComplete({
                 unfinished,

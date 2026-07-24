@@ -1,0 +1,24 @@
+import { readFile } from "node:fs/promises";
+import { describe, expect, it } from "vitest";
+
+async function source(path: string): Promise<string> {
+  return readFile(new URL(path, import.meta.url), "utf8");
+}
+
+describe("responder UI placement", () => {
+  it("keeps responder lifecycle text out of the composer StatusLine", async () => {
+    const text = await source("../src/tui-v2/components/status/status-line.tsx");
+    const statusLine = text.slice(text.indexOf("export function StatusLine"));
+
+    expect(statusLine).not.toContain("responderStatusText(");
+    expect(statusLine).not.toContain("state.responder");
+  });
+
+  it("initializes the dedicated responder panel collapsed", async () => {
+    const text = await source("../src/tui-v2/components/jobs/jobs-panel.tsx");
+    const panel = text.slice(text.indexOf("export function ResponderPanel"));
+
+    expect(panel).toMatch(/const \[collapsed, setCollapsed\] = useState\(true\)/);
+    expect(panel).toContain('const header = `${collapsed ? "▸" : "▾"} Responder:');
+  });
+});

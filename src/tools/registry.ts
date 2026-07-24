@@ -1207,6 +1207,7 @@ export const BATCH_SAFE_TOOLS = new Set([
 const BATCH_FORBIDDEN_TOOLS = new Set([
   "tool.batch",
   "plan.create",
+  "task.move",
   "task.update",
   "agent.handoff",
 ]);

@@ -5,6 +5,7 @@
 
 export const QUIET_META_TOOL_NAMES = new Set([
   "plan.create",
+  "task.move",
   "task.update",
 ]);
 

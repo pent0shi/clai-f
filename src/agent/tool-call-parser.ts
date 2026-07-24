@@ -9,6 +9,7 @@
 import type { ChatMessage, ToolCall } from "../types.js";
 import { currentDateTimeContext } from "../prompts/index.js";
 import { isCompactionMemoryMessage } from "./context-manager.js";
+import { isResponderResultLedgerMessage } from "./responder-context.js";
 import { safeCwd } from "../os/cwd.js";
 
 export function preprocessJson(raw: string): string {
@@ -733,6 +734,10 @@ export function inferToolFromArgs(
   if (has("query")) return "web.search";
   if (has("tools")) return "tool.check";
   if (has("goal") && has("tasks")) return "plan.create";
+  if (
+    has("taskId") &&
+    (has("position") || has("beforeTaskId") || has("afterTaskId"))
+  ) return "task.move";
   if (has("taskId") || has("state")) return "task.update";
   if (has("tool")) return "pkg.install";
   if (has("record") && has("target")) return "dns.lookup";
@@ -1157,7 +1162,10 @@ export function buildTurnHistory(
   // all re-injected each turn) EXCEPT compacted session memory, which is the
   // only record of summarized older turns and must survive a resume.
   const convo = messages.filter(
-    (m) => m.role !== "system" || isCompactionMemoryMessage(m),
+    (m) =>
+      m.role !== "system" ||
+      isCompactionMemoryMessage(m) ||
+      isResponderResultLedgerMessage(m),
   );
   const last = convo[convo.length - 1];
   if (

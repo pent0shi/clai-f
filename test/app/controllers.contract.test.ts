@@ -9,9 +9,14 @@ import type {
 } from "../../src/app/ports/agent-port.js";
 import type { PersistencePort } from "../../src/app/ports/persistence-port.js";
 import type { AnyAppEvent } from "../../src/app/events/app-event.js";
-import { asToolCallId } from "../../src/app/events/app-event.js";
-import { createCountingIdFactory } from "../../src/app/events/sequencer.js";
+import { asSessionId, asToolCallId } from "../../src/app/events/app-event.js";
+import { OutputSpool } from "../../src/app/events/event-buffer.js";
+import {
+  createCountingIdFactory,
+  EventSequencer,
+} from "../../src/app/events/sequencer.js";
 import { SessionController } from "../../src/app/controllers/session-controller.js";
+import { TurnController } from "../../src/app/controllers/turn-controller.js";
 import { PlanController } from "../../src/app/controllers/plan-controller.js";
 import { CompositeDisposable } from "../../src/app/controllers/disposable.js";
 import { createTurnOutcome, type TurnOutcome } from "../../src/agent/turn-outcome.js";
@@ -311,5 +316,46 @@ describe("V2-025 disposal is idempotent and reverse-ordered", () => {
     });
     session.dispose();
     await expect(session.submit("go")).rejects.toThrow(/disposed/);
+  });
+});
+
+
+describe("TurnController acceptance boundary", () => {
+  it("does not start the agent when onStarted rejects delivery", async () => {
+    const runTurn = vi.fn(async () =>
+      createTurnOutcome({
+        status: "succeeded",
+        answer: "unexpected",
+        steps: 1,
+        remainingCriteria: [],
+      }),
+    );
+    const controller = new TurnController({
+      agent: { runTurn },
+      sequencer: new EventSequencer(
+        asSessionId("acceptance-boundary"),
+        createCountingIdFactory("accept-"),
+        { now: () => 1_700_000_000_000 },
+      ),
+      spool: new OutputSpool(),
+      emit: () => undefined,
+    });
+
+    const result = await controller.run(
+      { prompt: "hidden responder turn", mode: "agent" },
+      {
+        onStarted: () => {
+          throw new Error("deliveredAt persistence failed");
+        },
+      },
+    );
+
+    expect(result).toMatchObject({
+      status: "error",
+      error: { message: "deliveredAt persistence failed" },
+    });
+    expect(runTurn).not.toHaveBeenCalled();
+    expect(controller.running).toBe(false);
+    controller.dispose();
   });
 });

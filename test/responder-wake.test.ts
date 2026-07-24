@@ -41,7 +41,12 @@ async function waitFor(predicate: () => boolean, timeoutMs = 4_000): Promise<voi
 
 function buildResponder(manager: JobManager, sessionId: string, busy = { value: false }) {
   const jobs = createCurrentJobsPort(manager);
-  const runTurn = vi.fn().mockResolvedValue({ status: "completed" as const });
+  const runTurn = vi.fn().mockImplementation(
+    async (_prompt: string, onStarted: () => void) => {
+      onStarted();
+      return { status: "completed" as const };
+    },
+  );
   const notifyDelivery = vi.fn();
   const responder = new SessionResponder({
     jobs,
@@ -136,9 +141,11 @@ describe("runtime responder listening lease", () => {
     const ctx = buildResponder(manager, "fifo");
     let release!: () => void;
     ctx.runTurn.mockImplementationOnce(
-      () => new Promise((resolve) => {
-        release = () => resolve({ status: "completed" as const });
-      }),
+      (_prompt: string, onStarted: () => void) =>
+        new Promise((resolve) => {
+          onStarted();
+          release = () => resolve({ status: "completed" as const });
+        }),
     );
     ctx.responder.activate();
     const leaseId = ctx.jobs.getResponderLeaseId("fifo");
@@ -185,7 +192,12 @@ describe("runtime responder listening lease", () => {
   it("does not retry an aborted responder analysis automatically", async () => {
     const { manager } = await fixture();
     const ctx = buildResponder(manager, "no-retry");
-    ctx.runTurn.mockResolvedValue({ status: "aborted" as const });
+    ctx.runTurn.mockImplementation(
+      async (_prompt: string, onStarted: () => void) => {
+        onStarted();
+        return { status: "aborted" as const };
+      },
+    );
     ctx.responder.activate();
     await startResponderJob(
       manager,
@@ -196,7 +208,27 @@ describe("runtime responder listening lease", () => {
     await sleep(300);
 
     expect(ctx.runTurn).toHaveBeenCalledTimes(1);
-    expect(manager.getPendingNotifications("no-retry")).toHaveLength(1);
+    const first = manager.getPendingNotifications("no-retry")[0];
+    expect(first).toMatchObject({ deliveredAt: expect.any(String) });
+
+    ctx.runTurn.mockImplementation(
+      async (_prompt: string, onStarted: () => void) => {
+        onStarted();
+        return { status: "completed" as const };
+      },
+    );
+    await startResponderJob(
+      manager,
+      "no-retry",
+      ctx.jobs.getResponderLeaseId("no-retry"),
+    );
+    await waitFor(() => ctx.runTurn.mock.calls.length === 2);
+    await waitFor(
+      () => manager.getPendingNotifications("no-retry").length === 1,
+    );
+
+    expect(ctx.runTurn.mock.calls[1]?.[0]).not.toContain(`job=${first?.jobId}`);
+    expect(manager.getPendingNotifications("no-retry")[0]?.id).toBe(first?.id);
     ctx.unsubscribe();
   });
 

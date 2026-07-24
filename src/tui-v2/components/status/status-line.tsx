@@ -436,17 +436,6 @@ export function StatusLine(props: StatusLineProps): ReactNode {
               style={{ fg: theme.activity, flexShrink: 1 }}
             />
           ) : null}
-          {density === "lg" ? (
-            <>
-              {sep(theme)}
-              <text
-                selectable={false}
-                content={responderStatusText(state.responder)}
-                style={{ fg: theme.muted, flexShrink: 0 }}
-              />
-            </>
-          ) : null}
-          {/* Double Esc cancels turn, queue, and Responder jobs; click is explicit. */}
           {density !== "xs" && !state.compacting ? (
             <>
               <text
@@ -542,26 +531,6 @@ export function StatusLine(props: StatusLineProps): ReactNode {
         }}
       >
         <ModeBadge mode={mode} theme={theme} short={shortMode} />
-
-        {density !== "xs" ? (
-          <>
-            {sep(theme)}
-            <text
-              selectable={false}
-              content={responderStatusText(
-                state.responder,
-                density === "sm",
-              )}
-              style={{
-                fg:
-                  state.responder.mode === "listening"
-                    ? theme.cyan
-                    : theme.muted,
-                flexShrink: 0,
-              }}
-            />
-          </>
-        ) : null}
 
         {/* Shift+Tab mode cycle hint (click to cycle ask → agent → plan) */}
         {density !== "xs" ? (

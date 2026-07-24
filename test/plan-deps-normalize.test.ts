@@ -69,7 +69,7 @@ describe("normalizeTaskDependencies", () => {
     expect(ready).not.toContain("t9");
   });
 
-  it("heals broken deps on task.update so in_progress can proceed", async () => {
+  it("preserves authored dependencies while opening early with a warning", async () => {
     const session = createSessionPolicy("heal-dag");
     session.planApproved.value = true;
     const plan = createPlan({
@@ -95,10 +95,11 @@ describe("normalizeTaskDependencies", () => {
       { loopGuard: new LoopGuard(), step: 1 },
     );
     expect(result.ok).toBe(true);
+    expect(result.modelNote).toMatch(/WARNING/);
+    expect(result.toast).toMatch(/prerequisites still pending/i);
     const live = await loadPlan("heal-dag");
     expect(live!.tasks.find((t) => t.id === "t2")?.state).toBe("in_progress");
-    // Forward edge healed
-    expect(live!.tasks.find((t) => t.id === "t2")?.dependencies).not.toContain(
+    expect(live!.tasks.find((t) => t.id === "t2")?.dependencies).toContain(
       "t3",
     );
   });

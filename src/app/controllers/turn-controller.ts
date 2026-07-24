@@ -27,6 +27,7 @@ export interface TurnRunOptions {
   readonly requestSecret?: SecretPort["request"] | undefined;
   readonly session?: SessionPolicy | undefined;
   readonly onMessages?: ((messages: ChatMessage[]) => void) | undefined;
+  readonly onStarted?: (() => void) | undefined;
   readonly signal?: AbortSignal | undefined;
 }
 
@@ -102,6 +103,7 @@ export class TurnController implements Disposable {
     }
 
     try {
+      options.onStarted?.();
       const outcome = await this.deps.agent.runTurn(request, {
         onEvent: (event) => coalescer.push(event),
         onMessages: options.onMessages,

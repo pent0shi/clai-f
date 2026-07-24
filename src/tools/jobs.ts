@@ -357,6 +357,7 @@ class RotatingRedactedWriter {
 export class JobManager {
   private jobs = new Map<string, BackgroundJob>();
   private notifications = new Map<string, ResponderNotification>();
+  private readonly claimedNotifications = new Set<string>();
   private processes = new Map<string, ChildProcess>();
   private writers = new Map<string, { stdout: RotatingRedactedWriter; stderr: RotatingRedactedWriter }>();
   private abortControllers = new Map<string, AbortController>();
@@ -459,6 +460,12 @@ export class JobManager {
     const archivedAt = new Date().toISOString();
     let changed = false;
     for (const notification of this.notifications.values()) {
+      if (
+        notification.ownerSessionId === sessionId &&
+        notification.responderLeaseId === current
+      ) {
+        this.claimedNotifications.delete(notification.id);
+      }
       if (
         notification.ownerSessionId === sessionId &&
         notification.responderLeaseId === current &&
@@ -1239,53 +1246,43 @@ export class JobManager {
           candidate.ownerSessionId === sessionId &&
           candidate.responderLeaseId === leaseId &&
           !candidate.archivedAt &&
+          !candidate.deliveredAt &&
           !candidate.analyzedAt &&
-          !candidate.acknowledgedAt,
+          !candidate.acknowledgedAt &&
+          !this.claimedNotifications.has(candidate.id),
       )
       .sort((left, right) => left.createdAt.localeCompare(right.createdAt))[0];
-    if (!notification) {
-      if (archived && !this.persistSync()) this.scheduleRegistryRetry();
-      return undefined;
-    }
-    const previous = notification.deliveredAt;
-    notification.deliveredAt ??= new Date().toISOString();
-    if (!this.persistSync()) {
-      notification.deliveredAt = previous;
-      return undefined;
-    }
-    if (archived) this.persistSync();
-    this.emit({
-      type: "notification",
-      jobId: notification.jobId,
-      notificationId: notification.id,
-    });
+    if (notification) this.claimedNotifications.add(notification.id);
+    if (archived && !this.persistSync()) this.scheduleRegistryRetry();
     return notification;
+  }
+
+  releaseResponderNotificationClaim(notificationId: string): void {
+    this.claimedNotifications.delete(notificationId);
   }
 
   markDelivered(notificationId: string): boolean {
     const notification = this.notifications.get(notificationId);
     if (!notification) return false;
     if (!notification.deliveredAt) {
-      const deliveredAt = new Date().toISOString();
-      notification.deliveredAt = deliveredAt;
+      notification.deliveredAt = new Date().toISOString();
       if (!this.persistSync()) {
         notification.deliveredAt = undefined;
         return false;
       }
       this.emit({ type: "notification", jobId: notification.jobId, notificationId });
     }
+    this.claimedNotifications.delete(notificationId);
     return true;
   }
 
   markAnalyzed(notificationId: string): boolean {
     const notification = this.notifications.get(notificationId);
     if (!notification?.deliveredAt) return false;
+    this.claimedNotifications.delete(notificationId);
     if (!notification.analyzedAt) {
       notification.analyzedAt = new Date().toISOString();
-      if (!this.persistSync()) {
-        notification.analyzedAt = undefined;
-        return false;
-      }
+      if (!this.persistSync()) this.scheduleRegistryRetry();
       this.emit({
         type: "notification",
         jobId: notification.jobId,
@@ -1298,14 +1295,15 @@ export class JobManager {
   acknowledge(notificationId: string): boolean {
     const notification = this.notifications.get(notificationId);
     if (!notification?.analyzedAt) return false;
+    this.claimedNotifications.delete(notificationId);
     if (!notification.acknowledgedAt) {
       notification.acknowledgedAt = new Date().toISOString();
-      if (!this.persistSync()) {
-        notification.acknowledgedAt = undefined;
-        return false;
+      const persisted = this.persistSync();
+      if (!persisted) this.scheduleRegistryRetry();
+      if (persisted) {
+        this.pruneTerminalJobs();
+        this.persistSync();
       }
-      this.pruneTerminalJobs();
-      this.persistSync();
       this.emit({ type: "notification", jobId: notification.jobId, notificationId });
     }
     return true;

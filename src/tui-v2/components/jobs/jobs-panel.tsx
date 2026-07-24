@@ -341,7 +341,7 @@ export function ResponderPanel(props: ResponderPanelProps): ReactNode {
   const { services, theme, width, blockingOverlay } = props;
   const sessionState = useSessionState(services.session);
   const responderState = sessionState.responder;
-  const [collapsed, setCollapsed] = useState(false);
+  const [collapsed, setCollapsed] = useState(true);
   const [projection, setProjection] = useState(() =>
     readResponderProjection(services),
   );

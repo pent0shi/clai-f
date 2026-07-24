@@ -33,6 +33,7 @@ export interface JobsPort {
     sessionId: string,
     leaseId: string,
   ): ResponderNotification | undefined;
+  releaseResponderNotificationClaim?(notificationId: string): void;
   markDelivered(notificationId: string): boolean;
   markAnalyzed(notificationId: string): boolean;
   acknowledge(notificationId: string): boolean;

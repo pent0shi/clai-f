@@ -9,6 +9,8 @@ import {
   recoveryForPrematureComplete,
   recoveryForShallowPentest,
 } from "../src/agent/must-continue.js";
+import { shouldYieldForResponderBeforeReport } from "../src/agent/runner.js";
+import { createPlan } from "../src/store/plan.js";
 import { scopeContextMessage } from "../src/agent/scope-context.js";
 import { isReadOnlyReconTool } from "../src/agent/task-evidence.js";
 
@@ -95,5 +97,67 @@ describe("scope context", () => {
     expect(
       scopeContextMessage({ authorizedTargets: [], createdAt: "x" }),
     ).toBeUndefined();
+  });
+});
+
+
+describe("final report responder deferral", () => {
+  it("yields for an outstanding responder only when all foreground work is reporting", () => {
+    const plan = createPlan({
+      sessionId: "report-yield",
+      goal: "assessment",
+      detail: "test then report",
+      kind: "pentest",
+      taskTitles: ["Enumerate endpoints", "Compile final report"],
+    });
+    plan.tasks[0]!.state = "done";
+    plan.tasks[1]!.state = "pending";
+
+    expect(
+      shouldYieldForResponderBeforeReport(
+        plan,
+        [{ responder: true } as never],
+        [],
+      ),
+    ).toBe(true);
+    expect(
+      shouldYieldForResponderBeforeReport(
+        plan,
+        [],
+        [{ responder: true, analyzedAt: undefined } as never],
+      ),
+    ).toBe(true);
+    expect(
+      shouldYieldForResponderBeforeReport(
+        plan,
+        [],
+        [{ id: "current", responder: true, analyzedAt: undefined } as never],
+        "current",
+      ),
+    ).toBe(false);
+    expect(
+      shouldYieldForResponderBeforeReport(
+        plan,
+        [],
+        [{ id: "other", responder: true, analyzedAt: undefined } as never],
+        "current",
+      ),
+    ).toBe(true);
+    expect(
+      shouldYieldForResponderBeforeReport(
+        plan,
+        [],
+        [{ responder: true, analyzedAt: "done" } as never],
+      ),
+    ).toBe(false);
+
+    plan.tasks[0]!.state = "pending";
+    expect(
+      shouldYieldForResponderBeforeReport(
+        plan,
+        [{ responder: true } as never],
+        [],
+      ),
+    ).toBe(false);
   });
 });

@@ -27,6 +27,36 @@ class StubAgent implements AgentPort {
   }
 }
 
+class BurstAgent implements AgentPort {
+  async runTurn(
+    _req: RunTurnRequest,
+    handlers: RunTurnHandlers,
+  ): Promise<TurnOutcome> {
+    const outcome = createTurnOutcome({
+      status: "succeeded",
+      answer: "done",
+      steps: 1,
+      remainingCriteria: [],
+    });
+    handlers.onEvent({ type: "turn-start", prompt: "burst" });
+    for (let index = 0; index < 2_100; index += 1) {
+      handlers.onEvent({ type: "assistant-delta", text: String(index % 10) });
+    }
+    handlers.onEvent({ type: "assistant-message", text: "done" });
+    handlers.onEvent({
+      type: "turn-end",
+      outcome,
+      finalAnswer: "done",
+      steps: 1,
+    });
+    handlers.onMessages?.([
+      { role: "user", content: "burst" },
+      { role: "assistant", content: "done" },
+    ]);
+    return outcome;
+  }
+}
+
 function fakePersistence(): PersistencePort & { saved: ChatMessage[][] } {
   const saved: ChatMessage[][] = [];
   return {
@@ -62,14 +92,16 @@ describe("createCompositionRoot", () => {
     expect(services.router.resolve("enter", "composer")).toBe("editor.submit");
     expect(services.focus.activeContext()).toBe("composer");
     expect(services.capabilities.colorMode).toBe("truecolor");
+    expect(services.recordedEvents).toHaveLength(0);
     services.dispose();
   });
 
-  it("records emitted app events when no external sink is provided", async () => {
+  it("records emitted app events only when capture is enabled", async () => {
     const services = createCompositionRoot({
       agent: new StubAgent(),
       persistence: fakePersistence(),
       capabilities: caps,
+      captureEvents: true,
     });
     const result = await services.session.submit("go");
     if (result.status === "error") throw result.error;
@@ -92,6 +124,22 @@ describe("createCompositionRoot", () => {
     await services.session.submit("go");
     expect(seen.length).toBeGreaterThan(0);
     expect(services.recordedEvents).toHaveLength(0);
+    services.dispose();
+  });
+
+  it("bounds explicit event capture during long streaming turns", async () => {
+    const services = createCompositionRoot({
+      agent: new BurstAgent(),
+      persistence: fakePersistence(),
+      capabilities: caps,
+      captureEvents: true,
+    });
+
+    await services.session.submit("burst");
+
+    expect(services.recordedEvents).toHaveLength(2_000);
+    expect(services.recordedEvents[0]?.sequence).toBeGreaterThan(1);
+    expect(services.recordedEvents.at(-1)?.type).toBe("turn-ended");
     services.dispose();
   });
 

@@ -153,7 +153,7 @@ describe("reminder + toast copy", () => {
     expect(text).toMatch(/one task at a time/i);
   });
 
-  it("names the blocking prerequisites in the dependency reminder", () => {
+  it("names open prerequisites in the advisory dependency warning", () => {
     const text = buildDependencyReminder({
       taskId: "t3",
       title: "Run and verify",
@@ -162,7 +162,8 @@ describe("reminder + toast copy", () => {
     });
     expect(text).toContain("[t3]");
     expect(text).toContain("[t2] Install deps");
-    expect(text).toMatch(/re-issue this exact task\.update to CONFIRM/i);
+    expect(text).toMatch(/transition was applied/i);
+    expect(text).toMatch(/completion still requires/i);
   });
 
   it("produces short identifiable toasts", () => {

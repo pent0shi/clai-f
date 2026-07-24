@@ -26,36 +26,30 @@ describe("dependency-open reminder", () => {
     await clearAllPlans();
   });
 
-  it("holds an early task-open behind a reminder, then applies it on identical re-issue", async () => {
+  it("opens an early task immediately with a warning but still blocks completion", async () => {
     const sessionId = "dep-remind";
     const session = createSessionPolicy(sessionId);
     session.planApproved.value = true;
     await seedPlan(sessionId);
 
-    // t2 depends on t1 (list order) which is still pending.
-    const first = await handlePlanTool(openTask(sessionId, "t2"), session, {
+    const opened = await handlePlanTool(openTask(sessionId, "t2"), session, {
       loopGuard: new LoopGuard(),
       step: 1,
     });
-    expect(first.ok).toBe(false);
-    expect(first.reminder).toBe(true);
-    expect(first.toast).toMatch(/\[t2\]/);
-    expect(first.modelNote).toMatch(/HELD/);
-    expect(session.pendingDependency.value).toBeTruthy();
-
-    // State must not have changed while held.
-    const held = await loadPlan(sessionId);
-    expect(held!.tasks.find((t) => t.id === "t2")?.state).toBe("pending");
-
-    // Identical re-issue confirms the override and opens the task.
-    const second = await handlePlanTool(openTask(sessionId, "t2"), session, {
-      loopGuard: new LoopGuard(),
-      step: 2,
-    });
-    expect(second.ok).toBe(true);
-    expect(session.pendingDependency.value).toBeUndefined();
+    expect(opened.ok).toBe(true);
+    expect(opened.reminder).toBeUndefined();
+    expect(opened.toast).toMatch(/prerequisites still pending/);
+    expect(opened.modelNote).toMatch(/WARNING/);
     const live = await loadPlan(sessionId);
-    expect(live!.tasks.find((t) => t.id === "t2")?.state).toBe("in_progress");
+    expect(live!.tasks.find((task) => task.id === "t2")?.state).toBe("in_progress");
+
+    const completed = await handlePlanTool(
+      { name: "task.update", args: { taskId: "t2", state: "done" } },
+      session,
+      { loopGuard: new LoopGuard(), step: 2 },
+    );
+    expect(completed.ok).toBe(false);
+    expect(completed.modelNote).toMatch(/not complete/);
   });
 
   it("opens a dependency-ready task normally without any reminder", async () => {

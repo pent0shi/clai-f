@@ -49,7 +49,12 @@ const emptyObject = {
 };
 
 /** Plan tools dispatched specially in the runner (not in toolRegistry). */
-export const PLAN_TOOL_NAMES = new Set(["plan.create", "task.add", "task.update"]);
+export const PLAN_TOOL_NAMES = new Set([
+  "plan.create",
+  "task.add",
+  "task.move",
+  "task.update",
+]);
 
 /** Meta tools with no registry handler (plan + ask-mode handoff). */
 export const NON_REGISTRY_TOOL_NAMES = new Set([
@@ -927,6 +932,28 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     { mutates: true },
   ),
   def(
+    "task.move",
+    "Move an existing task without changing its id, state, evidence, or responder linkage. Use one of position, beforeTaskId, or afterTaskId.",
+    {
+      type: "object",
+      properties: {
+        taskId: {
+          type: "string",
+          description: "Canonical task id or listed alias",
+        },
+        position: {
+          type: "number",
+          description: "One-based destination, for example taskId=t2 position=4",
+        },
+        beforeTaskId: { type: "string" },
+        afterTaskId: { type: "string" },
+      },
+      required: ["taskId"],
+      additionalProperties: false,
+    },
+    { mutates: true },
+  ),
+  def(
     "task.update",
     "Update a plan task state. taskId MUST be t1, t2, … from the ACTIVE PLAN context (not a free-form title slug).",
     {
@@ -1023,6 +1050,7 @@ export function getToolDefinitions(filter?: {
       "tool.check",
       "plan.create",
       "task.add",
+      "task.move",
       "task.update",
     ]);
     defs = defs.filter((d) => core.has(d.name));

@@ -105,7 +105,7 @@ export function buildCompactionUserPrompt(parts: CompactionPromptParts): string 
       "",
       "Preserve: user intentions, decisions, constraints, paths, stack/package manager,",
       "commands and key results, plan task states/hierarchy, errors and failed approaches,",
-      "Responder notification ids, linked task/parent ids, job/PID/status, durable artifact paths and whether analysis remains unacknowledged,",
+      "Responder notification ids, linked task/parent ids, job/PID/status, durable artifact paths, and the authoritative consumed/analyzed state from RESPONDER RESULT LEDGER entries. Never describe consumed=true ledger entries as unread, pending, or needing another artifact read.",
       "servers/jobs still running, and exactly what remains.",
       "",
       "AVOID BLOAT — this memory is prepended to a context that re-injects fresh ACTIVE PLAN, SESSION STATE, and ENGAGEMENT SCOPE after compaction:",

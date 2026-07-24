@@ -17,12 +17,13 @@ describe("versioned task plan domain", () => {
       { type: "addTask", expectedVersion: 1, step: step("b") },
       { type: "editTask", expectedVersion: 1, stepId: "a", changes: {} },
       { type: "removeTask", expectedVersion: 1, stepId: "a" },
+      { type: "moveTask", expectedVersion: 1, stepId: "a", index: 0 },
       { type: "supersedeTask", expectedVersion: 1, stepId: "a", replacement: step("b") },
       { type: "splitTask", expectedVersion: 1, stepId: "a", steps: [step("b"), step("c")] },
       { type: "mergeTasks", expectedVersion: 1, stepIds: ["a", "b"], step: step("c") },
       { type: "setDependencies", expectedVersion: 1, stepId: "a", dependencies: [] },
     ];
-    expect(operations.map((operation) => operation.type)).toEqual(["addTask", "editTask", "removeTask", "supersedeTask", "splitTask", "mergeTasks", "setDependencies"]);
+    expect(operations.map((operation) => operation.type)).toEqual(["addTask", "editTask", "removeTask", "moveTask", "supersedeTask", "splitTask", "mergeTasks", "setDependencies"]);
   });
 
   it("applies operations immutably, increments versions, and rejects stale writes", () => {
@@ -36,6 +37,26 @@ describe("versioned task plan domain", () => {
     expect(applyPlanOperation(deps, { type: "removeTask", expectedVersion: 4, stepId: "b" }).steps).toHaveLength(1);
   });
 
+
+  it("moves a task without changing its durable fields", () => {
+    const plan = deserializeTaskPlan({
+      ...legacy,
+      steps: [
+        { ...step("a"), status: "done" },
+        { ...step("b", ["a"]), notes: "evidence retained" },
+        step("c", ["b"]),
+      ],
+    });
+    const moved = applyPlanOperation(plan, {
+      type: "moveTask",
+      expectedVersion: 1,
+      stepId: "c",
+      index: 1,
+    });
+    expect(moved.steps.map((item) => item.id)).toEqual(["a", "c", "b"]);
+    expect(moved.steps.find((item) => item.id === "c")?.dependencies).toEqual(["b"]);
+    expect(plan.steps.map((item) => item.id)).toEqual(["a", "b", "c"]);
+  });
   it("supports supersede, split, and merge while rewiring dependencies", () => {
     let plan = deserializeTaskPlan({ ...legacy, steps: [step("a"), step("b", ["a"]), step("c", ["b"])] });
     plan = applyPlanOperation(plan, { type: "supersedeTask", expectedVersion: 1, stepId: "b", replacement: step("b2") });

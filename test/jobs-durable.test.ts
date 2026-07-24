@@ -651,3 +651,95 @@ describe("authoritative job completion", () => {
     expect(restarted.getPendingNotifications("analyze-gate")).toHaveLength(0);
   });
 });
+
+
+describe("responder receipt delivery boundaries", () => {
+  it("claims without delivery and never reselects a delivered receipt", async () => {
+    const { manager } = await fixture();
+    const sessionId = "claim-boundary";
+    const leaseId = manager.activateResponderLease(sessionId);
+    const start = async () => {
+      const result = await manager.startJob(
+        `${JSON.stringify(process.execPath)} -e "process.exit(0)"`,
+        {
+          ownerSessionId: sessionId,
+          responder: true,
+          wakeOnCompletion: true,
+          responderLeaseId: leaseId,
+        },
+      );
+      const id = result.backgroundJob?.id;
+      expect(id).toBeTruthy();
+      await waitForStatus(manager, id!, ["exited"]);
+      return id!;
+    };
+
+    const firstJobId = await start();
+    const first = manager.claimNextResponderNotification(sessionId, leaseId);
+    expect(first).toMatchObject({ jobId: firstJobId });
+    expect(first?.deliveredAt).toBeUndefined();
+    expect(manager.claimNextResponderNotification(sessionId, leaseId)).toBeUndefined();
+    manager.releaseResponderNotificationClaim(first!.id);
+    expect(
+      manager.claimNextResponderNotification(sessionId, leaseId)?.id,
+    ).toBe(first?.id);
+    expect(
+      manager.getPendingNotifications(sessionId).find((item) => item.id === first?.id)
+        ?.deliveredAt,
+    ).toBeUndefined();
+
+    expect(manager.markDelivered(first!.id)).toBe(true);
+    expect(manager.claimNextResponderNotification(sessionId, leaseId)).toBeUndefined();
+
+    const secondJobId = await start();
+    const second = manager.claimNextResponderNotification(sessionId, leaseId);
+    expect(second).toMatchObject({ jobId: secondJobId });
+    expect(second?.id).not.toBe(first?.id);
+    const retainedFirst = manager
+      .getPendingNotifications(sessionId)
+      .find((item) => item.id === first?.id);
+    expect(retainedFirst).toMatchObject({ deliveredAt: expect.any(String) });
+    expect(retainedFirst?.analyzedAt).toBeUndefined();
+  });
+});
+
+
+describe("responder delivery persistence", () => {
+  it("rolls back deliveredAt when its registry write fails", async () => {
+    const { manager } = await fixture();
+    const sessionId = "delivery-persist-failure";
+    const leaseId = manager.activateResponderLease(sessionId);
+    const result = await manager.startJob(
+      `${JSON.stringify(process.execPath)} -e "process.exit(0)"`,
+      {
+        ownerSessionId: sessionId,
+        responder: true,
+        wakeOnCompletion: true,
+        responderLeaseId: leaseId,
+      },
+    );
+    const jobId = result.backgroundJob?.id;
+    expect(jobId).toBeTruthy();
+    await waitForStatus(manager, jobId!, ["exited"]);
+    const notification = manager.claimNextResponderNotification(
+      sessionId,
+      leaseId,
+    );
+    expect(notification).toBeTruthy();
+
+    const internal = manager as unknown as { persistSync: () => boolean };
+    const persistSync = internal.persistSync.bind(manager);
+    internal.persistSync = () => false;
+    expect(manager.markDelivered(notification!.id)).toBe(false);
+    internal.persistSync = persistSync;
+
+    expect(
+      manager.getPendingNotifications(sessionId)[0]?.deliveredAt,
+    ).toBeUndefined();
+    manager.releaseResponderNotificationClaim(notification!.id);
+    expect(
+      manager.claimNextResponderNotification(sessionId, leaseId)?.id,
+    ).toBe(notification?.id);
+    expect(manager.markDelivered(notification!.id)).toBe(true);
+  });
+});

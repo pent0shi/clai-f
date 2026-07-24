@@ -12,6 +12,7 @@ import {
   type CompactResult,
 } from "../../agent/context-manager.js";
 import { repairToolProtocol } from "../../agent/tool-history.js";
+import { upsertResponderResultLedger } from "../../agent/responder-context.js";
 import {
   applyUsageToSnapshot,
   formatContextChip,
@@ -27,6 +28,7 @@ import { getConfig, getProviderModel } from "../../store/config.js";
 import { beginSessionWorkspace, getActiveSessionWorkspace, type SessionWorkspace } from "../../store/session-workspace.js";
 import { materializeHistoryImages } from "../../store/history.js";
 import { summarizeForSessionCompact } from "./session-compact-helper.js";
+import { settlePersistedResponderResults } from "./responder-settlement.js";
 import type { TranscriptItem as ClassicTranscriptItem } from "../../tui/state.js";
 import {
   asSessionId,
@@ -66,19 +68,12 @@ export interface SessionState {
   readonly provider: ProviderId | undefined;
   readonly model: string | undefined;
   readonly running: boolean;
-  /** True while /compact is awaiting the summarizer (status strip). */
   readonly compacting: boolean;
   readonly historyLength: number;
   readonly queued: readonly string[];
   readonly responder: ResponderRuntimeState;
-  /** AI-generated (or last known) display name for this session. */
   readonly title: string | undefined;
-  /**
-   * Live context / token usage for the status strip under the composer.
-   * `exact` is true when the last prompt size came from the provider API.
-   */
   readonly contextUsage: ContextUsageSnapshot | undefined;
-  /** Preformatted chip, e.g. `12,450 tok` or `~12.5k tok`. */
   readonly contextChip: string | undefined;
 }
 
@@ -102,10 +97,6 @@ export interface SessionControllerDeps {
   readonly getTranscriptSnapshot?: (() => ClassicTranscriptItem[] | undefined) | undefined;
   /** When true, never persist sessions or generate AI titles (CLI --no-history). */
   readonly noHistory?: boolean | undefined;
-  /**
-   * UI hook fired when the Responder hands a completed job's result to the
-   * model. Wired to a green success toast; only called on a committed send.
-   */
   readonly notifyResponderDelivery?: ((summary: string) => void) | undefined;
 }
 
@@ -200,11 +191,16 @@ export class SessionController implements Disposable {
         isBusy: () => this.turn.running || this.compactingFlag,
         hasQueuedWork: () => this.prompts.hasPending(),
         continueQueue: () => this.prompts.continue(),
-        runTurn: (prompt) =>
+        runTurn: (prompt, onStarted) =>
           this.runTurn(prompt, {
             displayPrompt: null,
             materializeHistoryImages: false,
+            onStarted,
           }),
+        recordConsumed: async (notification) => {
+          upsertResponderResultLedger(this.history, notification);
+          await this.persistNow();
+        },
         notifyState: () => this.notifyState(),
         ...(deps.notifyResponderDelivery
           ? { notifyDelivery: deps.notifyResponderDelivery }
@@ -420,6 +416,7 @@ export class SessionController implements Disposable {
       folderName: options.workspaceFolder,
       code: options.workspaceCode,
     });
+    this.settlePersistedResponderResults();
     this.notifyState();
   }
 
@@ -549,21 +546,35 @@ export class SessionController implements Disposable {
     }
   }
 
-  /** Persist one immutable snapshot behind every previously captured save. */
+  private settlePersistedResponderResults(): void {
+    settlePersistedResponderResults({
+      jobs: this.deps.jobs,
+      sessionId: this.sessionIdValue,
+      history: this.history,
+    });
+  }
+
   async persistNow(name?: string): Promise<void> {
-    if (this.deps.noHistory || getConfig().privateMode) return;
-    if (this.history.length === 0) return;
-    // Compaction folds user turns into a memory message; persist those too, or the trailing "compacted" card is lost on reload.
-    if (!this.history.some((m) => m.role === "user" || isCompactionMemoryMessage(m))) return;
+    if (this.deps.noHistory || getConfig().privateMode) {
+      this.settlePersistedResponderResults();
+      return;
+    }
+    if (this.history.length === 0) {
+      return;
+    }
+    if (!this.history.some((m) => m.role === "user" || isCompactionMemoryMessage(m))) {
+      return;
+    }
     if (name) this.sessionTitle = name;
 
     const contextUsage = persistedContextUsage(this.resolveContextUsage());
-    return this.persistence.save(this.history, {
+    await this.persistence.save(this.history, {
       sessionId: this.sessionIdValue,
       name: name ?? this.sessionTitle,
       transcript: this.deps.getTranscriptSnapshot?.(),
       ...(contextUsage ? { contextUsage } : {}),
     });
+    this.settlePersistedResponderResults();
   }
 
   async maybeRefreshTitle(): Promise<void> {
@@ -692,6 +703,7 @@ export class SessionController implements Disposable {
     opts?: {
       displayPrompt?: string | null | undefined;
       materializeHistoryImages?: boolean | undefined;
+      onStarted?: (() => void) | undefined;
     },
   ): Promise<TurnResult> {
     const config = getConfig();
@@ -729,28 +741,28 @@ export class SessionController implements Disposable {
         // Periodic durable snapshot so Esc/kill mid-run does not wipe tools.
         this.scheduleAutosave();
       },
+      onStarted: opts?.onStarted,
     });
     this.notifyState();
     const result = await pending;
-    // Clear the footer spinner before persistence can delay the UI.
     this.notifyState();
-    // Persist on every terminal outcome — aborted turns used to skip save,
-    // so /history only showed "Aborted." while plans still had real work.
-    if (
-      result.status === "completed" ||
-      result.status === "aborted" ||
-      result.status === "error"
-    ) {
-      await this.persistNow();
-    }
-    if (result.status === "completed") {
-      // Fire-and-forget AI title so the turn path is not blocked on a second
-      // model call; classic TUI does the same after each completed exchange.
-      void this.maybeRefreshTitle();
-    }
-    for (const listener of this.turnEndListeners) listener(result);
     this.responder?.scheduleWake();
-    return result;
+    try {
+      if (
+        result.status === "completed" ||
+        result.status === "aborted" ||
+        result.status === "error"
+      ) {
+        await this.persistNow();
+      }
+      if (result.status === "completed") {
+        void this.maybeRefreshTitle();
+      }
+      for (const listener of this.turnEndListeners) listener(result);
+      return result;
+    } finally {
+      this.responder?.scheduleWake();
+    }
   }
 
   /**
