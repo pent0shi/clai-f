@@ -21,4 +21,15 @@ describe("responder UI placement", () => {
     expect(panel).toMatch(/const \[collapsed, setCollapsed\] = useState\(true\)/);
     expect(panel).toContain('const header = `${collapsed ? "▸" : "▾"} Responder:');
   });
+
+  it("hides the responder panel when nothing is running, ready, or unread", async () => {
+    const text = await source("../src/tui-v2/components/jobs/jobs-panel.tsx");
+    const panel = text.slice(text.indexOf("export function ResponderPanel"));
+
+    expect(panel).toContain("const hasActiveWork =");
+    expect(panel).toMatch(/responderState\.running > 0/);
+    expect(panel).toMatch(/responderState\.ready > 0/);
+    expect(panel).toMatch(/responderState\.delivered > 0/);
+    expect(panel).toContain("!hasActiveWork");
+  });
 });

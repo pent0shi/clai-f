@@ -1208,6 +1208,7 @@ const BATCH_FORBIDDEN_TOOLS = new Set([
   "tool.batch",
   "plan.create",
   "task.move",
+  "task.read",
   "task.update",
   "agent.handoff",
 ]);

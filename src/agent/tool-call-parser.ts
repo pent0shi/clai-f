@@ -666,6 +666,7 @@ const TOOL_ARG_KEYS = new Set([
   "goal",
   "tasks",
   "taskId",
+  "notificationId",
   "state",
   "method",
   "body",
@@ -734,6 +735,7 @@ export function inferToolFromArgs(
   if (has("query")) return "web.search";
   if (has("tools")) return "tool.check";
   if (has("goal") && has("tasks")) return "plan.create";
+  if (has("notificationId")) return "task.read";
   if (
     has("taskId") &&
     (has("position") || has("beforeTaskId") || has("afterTaskId"))

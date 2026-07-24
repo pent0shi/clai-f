@@ -41,9 +41,17 @@ async function waitFor(predicate: () => boolean, timeoutMs = 4_000): Promise<voi
 
 function buildResponder(manager: JobManager, sessionId: string, busy = { value: false }) {
   const jobs = createCurrentJobsPort(manager);
+  const acknowledgePrompt = (prompt: string): void => {
+    const notificationId = /^notification=(.+)$/m.exec(prompt)?.[1]?.trim();
+    if (!notificationId) return;
+    if (!jobs.markRead(notificationId, sessionId)) return;
+    jobs.markAnalyzed(notificationId);
+    jobs.acknowledge(notificationId);
+  };
   const runTurn = vi.fn().mockImplementation(
-    async (_prompt: string, onStarted: () => void) => {
+    async (prompt: string, onStarted: () => void) => {
       onStarted();
+      acknowledgePrompt(prompt);
       return { status: "completed" as const };
     },
   );
@@ -65,7 +73,15 @@ function buildResponder(manager: JobManager, sessionId: string, busy = { value: 
     notifyDelivery,
   });
   const unsubscribe = jobs.subscribe((change) => responder.handleChange(change));
-  return { jobs, responder, runTurn, notifyDelivery, unsubscribe, busy };
+  return {
+    jobs,
+    responder,
+    runTurn,
+    acknowledgePrompt,
+    notifyDelivery,
+    unsubscribe,
+    busy,
+  };
 }
 
 async function startResponderJob(
@@ -141,10 +157,13 @@ describe("runtime responder listening lease", () => {
     const ctx = buildResponder(manager, "fifo");
     let release!: () => void;
     ctx.runTurn.mockImplementationOnce(
-      (_prompt: string, onStarted: () => void) =>
+      (prompt: string, onStarted: () => void) =>
         new Promise((resolve) => {
           onStarted();
-          release = () => resolve({ status: "completed" as const });
+          release = () => {
+            ctx.acknowledgePrompt(prompt);
+            resolve({ status: "completed" as const });
+          };
         }),
     );
     ctx.responder.activate();
@@ -212,8 +231,9 @@ describe("runtime responder listening lease", () => {
     expect(first).toMatchObject({ deliveredAt: expect.any(String) });
 
     ctx.runTurn.mockImplementation(
-      async (_prompt: string, onStarted: () => void) => {
+      async (prompt: string, onStarted: () => void) => {
         onStarted();
+        ctx.acknowledgePrompt(prompt);
         return { status: "completed" as const };
       },
     );

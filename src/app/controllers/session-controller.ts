@@ -12,7 +12,6 @@ import {
   type CompactResult,
 } from "../../agent/context-manager.js";
 import { repairToolProtocol } from "../../agent/tool-history.js";
-import { upsertResponderResultLedger } from "../../agent/responder-context.js";
 import {
   applyUsageToSnapshot,
   formatContextChip,
@@ -178,7 +177,7 @@ export class SessionController implements Disposable {
     );
     this.prompts = new SessionPromptQueue({
       isRunning: () => this.turn.running,
-      abort: () => this.abort(),
+      abort: (reason) => this.abort(reason),
       notifyState: () => this.notifyState(),
       notice: (text) => this.notice("info", text),
       runTurn: (prompt, options) => this.runTurn(prompt, options),
@@ -197,10 +196,6 @@ export class SessionController implements Disposable {
             materializeHistoryImages: false,
             onStarted,
           }),
-        recordConsumed: async (notification) => {
-          upsertResponderResultLedger(this.history, notification);
-          await this.persistNow();
-        },
         notifyState: () => this.notifyState(),
         ...(deps.notifyResponderDelivery
           ? { notifyDelivery: deps.notifyResponderDelivery }
@@ -662,9 +657,9 @@ export class SessionController implements Disposable {
     this.prompts.sendNow(index);
   }
 
-  abort(): void {
+  abort(reason?: string): void {
     this.responder?.deactivate();
-    this.turn.abort();
+    this.turn.abort(reason);
   }
 
   async continueQueue(): Promise<void> {

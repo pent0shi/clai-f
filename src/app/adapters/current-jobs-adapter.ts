@@ -21,6 +21,8 @@ export function createCurrentJobsPort(manager: JobManager = jobManager): JobsPor
     releaseResponderNotificationClaim: (notificationId) =>
       manager.releaseResponderNotificationClaim(notificationId),
     markDelivered: (notificationId) => manager.markDelivered(notificationId),
+    markRead: (notificationId, sessionId) =>
+      manager.markRead(notificationId, sessionId),
     markAnalyzed: (notificationId) => manager.markAnalyzed(notificationId),
     acknowledge: (notificationId) => manager.acknowledge(notificationId),
     subscribe: (listener) => manager.subscribe(listener),

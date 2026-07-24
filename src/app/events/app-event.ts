@@ -105,7 +105,7 @@ export interface AppEventPayloads {
     readonly model?: string | undefined;
   };
   "turn-ended": { readonly finalAnswer: string; readonly steps: number };
-  "turn-aborted": Record<string, never>;
+  "turn-aborted": { readonly reason?: string | undefined };
   "turn-error": { readonly message: string };
 }
 

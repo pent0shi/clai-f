@@ -96,8 +96,13 @@ export function parseOpenAiUsage(raw: unknown): TokenUsage | undefined {
 export function parseAnthropicUsage(raw: unknown): TokenUsage | undefined {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
   const u = raw as Record<string, unknown>;
+  // Prompt caching moves most context into cache_read/creation; sum all three.
+  const input = nonNegInt(u.input_tokens) ?? 0;
+  const cacheRead = nonNegInt(u.cache_read_input_tokens) ?? 0;
+  const cacheCreate = nonNegInt(u.cache_creation_input_tokens) ?? 0;
+  const prompt = input + cacheRead + cacheCreate;
   return normalizeTokenUsage({
-    promptTokens: u.input_tokens as number | undefined,
+    promptTokens: prompt > 0 ? prompt : undefined,
     completionTokens: u.output_tokens as number | undefined,
     exact: true,
   });

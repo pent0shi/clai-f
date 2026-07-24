@@ -34,6 +34,7 @@ const jobsHarness = vi.hoisted(() => {
     responder: true,
     responderLeaseId: "lease-inband",
     deliveredAt: undefined as string | undefined,
+    readAt: undefined as string | undefined,
     analyzedAt: undefined as string | undefined,
   };
   let ready = false;
@@ -52,6 +53,17 @@ const jobsHarness = vi.hoisted(() => {
     markDelivered: vi.fn((id: string) => {
       if (id !== notification.id) return false;
       notification.deliveredAt = "2026-01-01T00:00:03.000Z";
+      return true;
+    }),
+    markRead: vi.fn((id: string, sessionId: string) => {
+      if (
+        id !== notification.id ||
+        sessionId !== notification.ownerSessionId
+      ) {
+        return false;
+      }
+      notification.deliveredAt ??= "2026-01-01T00:00:03.000Z";
+      notification.readAt = "2026-01-01T00:00:04.000Z";
       return true;
     }),
     markAnalyzed: vi.fn((id: string) => {
@@ -73,6 +85,7 @@ const jobsHarness = vi.hoisted(() => {
     reset: () => {
       ready = false;
       notification.deliveredAt = undefined;
+      notification.readAt = undefined;
       notification.analyzedAt = undefined;
       manager.getRunningJobs.mockClear();
       manager.getRecentJobs.mockClear();
@@ -80,6 +93,7 @@ const jobsHarness = vi.hoisted(() => {
       manager.getResponderLeaseId.mockClear();
       manager.claimNextResponderNotification.mockClear();
       manager.markDelivered.mockClear();
+      manager.markRead.mockClear();
       manager.markAnalyzed.mockClear();
     },
   };
@@ -141,6 +155,21 @@ describe("ordinary-turn responder delivery", () => {
         }
 
         expect(jobsHarness.notification.deliveredAt).toBeTruthy();
+        if (requests.length === 2) {
+          return {
+            text: "",
+            provider: "openai",
+            model: "gpt-test",
+            toolCalls: [
+              {
+                id: "call-read-responder",
+                name: "task.read",
+                args: { notificationId: jobsHarness.notification.id },
+              },
+            ],
+            finishReason: "tool_calls",
+          };
+        }
         onToken("done");
         return {
           text: "done",
@@ -168,14 +197,27 @@ describe("ordinary-turn responder delivery", () => {
     });
 
     expect(outcome.answer).toBe("done");
-    expect(requests).toHaveLength(2);
+    expect(requests).toHaveLength(3);
     const inbox = requests[1]!.messages.find(
       (message) =>
         message.role === "system" &&
         message.content.startsWith("RESPONDER / DURABLE JOB INBOX"),
     );
     expect(inbox?.content).toContain("notification=completion:inband-job");
+    expect(inbox?.content).toContain("MANDATORY READ RECEIPT");
+    expect(
+      requests[2]!.messages.some(
+        (message) =>
+          message.role === "system" &&
+          message.content.startsWith("RESPONDER / DURABLE JOB INBOX"),
+      ),
+    ).toBe(false);
     expect(jobsHarness.manager.markDelivered).toHaveBeenCalledTimes(1);
+    expect(jobsHarness.manager.markRead).toHaveBeenCalledWith(
+      jobsHarness.notification.id,
+      "inband-session",
+    );
+    expect(jobsHarness.notification.readAt).toBeTruthy();
     expect(jobsHarness.manager.markAnalyzed).not.toHaveBeenCalled();
     expect(
       history.find((message) =>
@@ -230,6 +272,21 @@ describe("standalone responder report continuation", () => {
             finishReason: "stop",
           };
         }
+        if (requests.length === 2) {
+          return {
+            text: "",
+            provider: "openai",
+            model: "gpt-test",
+            toolCalls: [
+              {
+                id: "call-read-responder",
+                name: "task.read",
+                args: { notificationId: jobsHarness.notification.id },
+              },
+            ],
+            finishReason: "tool_calls",
+          };
+        }
         abort.abort();
         throw abort.signal.reason;
       },
@@ -255,16 +312,16 @@ describe("standalone responder report continuation", () => {
       );
 
       expect(outcome.status).toBe("aborted");
-      expect(requests).toHaveLength(2);
+      expect(requests).toHaveLength(3);
       expect(
         requests[1]?.messages.some(
           (message) =>
             message.role === "user" &&
-            /called NO tool/i.test(message.content),
+            message.content.includes("MUST call task.read"),
         ),
       ).toBe(true);
       expect(
-        requests[1]?.messages.some(
+        requests[2]?.messages.some(
           (message) =>
             message.role === "system" &&
             message.content.includes("Compile final report"),

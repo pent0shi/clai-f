@@ -17,8 +17,22 @@ export type TranscriptListener = () => void;
 export class TranscriptStore {
   private state: TranscriptState = EMPTY_TRANSCRIPT_STATE;
   private readonly listeners = new Set<TranscriptListener>();
+  private notifyTimer: ReturnType<typeof setTimeout> | undefined;
+  private notifyPending = false;
 
-  constructor(private readonly maxItems = 2_000) {
+  // Token-rate events fire dozens of times per second; notifying React on each
+  // one re-reconciles the whole transcript and starves composer input. Batch
+  // these to one paint frame while structural events still flush immediately.
+  private static readonly COALESCED_EVENT_TYPES = new Set<string>([
+    "assistant-delta",
+    "thinking-delta",
+    "tool-output",
+  ]);
+
+  constructor(
+    private readonly maxItems = 2_000,
+    private readonly coalesceMs = 16,
+  ) {
     if (!Number.isInteger(maxItems) || maxItems <= 0) throw new RangeError("maxItems must be positive");
   }
 
@@ -27,7 +41,12 @@ export class TranscriptStore {
   }
 
   dispatch(event: AnyAppEvent): void {
-    this.setState(applyAppEvent(this.state, event));
+    if (!this.applyState(applyAppEvent(this.state, event))) return;
+    if (TranscriptStore.COALESCED_EVENT_TYPES.has(event.type)) {
+      this.scheduleNotify();
+    } else {
+      this.flushNotify();
+    }
   }
 
   /** CHAT-006: Ctrl+T toggles every thinking block's default visibility. */
@@ -112,7 +131,11 @@ export class TranscriptStore {
   }
 
   private setState(next: TranscriptState): void {
-    if (next === this.state) return;
+    if (this.applyState(next)) this.flushNotify();
+  }
+
+  private applyState(next: TranscriptState): boolean {
+    if (next === this.state) return false;
     // Backfill fields for older hydrated states.
     if (next.expandFileDiffsGlobal === undefined) {
       next = { ...next, expandFileDiffsGlobal: true };
@@ -133,6 +156,24 @@ export class TranscriptStore {
       next = { ...next, order, byId, itemOverrides, fileDiffOverrides };
     }
     this.state = next;
+    return true;
+  }
+
+  private scheduleNotify(): void {
+    this.notifyPending = true;
+    if (this.notifyTimer) return;
+    this.notifyTimer = setTimeout(() => {
+      this.notifyTimer = undefined;
+      if (this.notifyPending) this.flushNotify();
+    }, this.coalesceMs);
+  }
+
+  private flushNotify(): void {
+    if (this.notifyTimer) {
+      clearTimeout(this.notifyTimer);
+      this.notifyTimer = undefined;
+    }
+    this.notifyPending = false;
     for (const listener of this.listeners) listener();
   }
 }

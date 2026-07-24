@@ -39,7 +39,7 @@ export function responderContextMessage(input: {
     }
   }
   if (input.pending.length > 0) {
-    lines.push("Unacknowledged completions (durable until a completed turn persists analysis):");
+    lines.push("Unread completions (durable until task.read and persisted analysis):");
     for (const notification of input.pending.slice(0, 12)) {
       lines.push(
         `- notification=${notification.id} job=${notification.jobId} status=${notification.status}` +
@@ -56,8 +56,9 @@ export function responderContextMessage(input: {
   lines.push(
     "FIRE AND CONTINUE: after launching, move to the next task immediately. Do NOT sleep, shell.jobs-poll, repeat shell.tail, or fs.read the job log to watch progress — this inbox delivers each completion to you automatically at the next safe model boundary.",
     "PARENT-DONE RULE: a parent task is done when its own non-Responder work is done; Responder-owned child subtasks advance from the real process lifecycle — never mark, block on, or wait for them.",
-    "TASK SETTLEMENT: Responder-owned tasks reconcile automatically from the latest authoritative job result after analysis. If the artifacts are satisfactory, report the findings and continue or stop; do not call task.update for that child.",
-    "ON COMPLETION (delivered here): extract ONLY the key result lines from the artifact with a filter — grep the matched status codes / hits / findings, or a bounded shell.tail byte-window — NEVER a full fs.read of a noisy scanner log. Analyze just those lines, task.add evidence-driven follow-ups, then test them. Never launch a duplicate while a job is live.",
+    "TASK SETTLEMENT: Responder-owned tasks reconcile automatically from the latest authoritative job result after analysis. Do not call task.update for that child.",
+    "MANDATORY READ RECEIPT: after you have seen and analyzed a delivered completion and are satisfied that responder subtask is finished, call task.read with its exact notification id. Do not call task.read before analysis is complete. You may not give a final response while a delivered notification remains unread.",
+    "ON COMPLETION (delivered here): extract ONLY the key result lines from the artifact with a filter — grep the matched status codes / hits / findings, or a bounded shell.tail byte-window — NEVER a full fs.read of a noisy scanner log. Analyze just those lines, task.add evidence-driven follow-ups, then call task.read when satisfied. Never launch a duplicate while a job is live.",
     "FINAL REPORT DEFERRAL: if the only remaining foreground task is report creation and Responder work is still running or awaiting analysis, leave the report open and STOP. Do not invent busywork or repeat completed work; the next completion resumes analysis automatically. If a completion reveals new surface, add and execute that work before returning to the report.",
     "FRAME COMMANDS TO PRESERVE THE KEY FIELDS: choose flags/output so the completed result still carries exactly what you need and little else — e.g. ffuf with -json (or a matcher on real codes, not a blanket -mc all), nmap -oX/-oG, grep -o for just the hits. Never run a command that discards the required signal.",
     "ONLY when every other non-report task is finished and nothing else remains may you call shell.jobs ONCE. If jobs are still live, STOP and report what you did plus which jobs are running — do not enter a sleep/poll/tail loop.",
@@ -78,10 +79,11 @@ export function isResponderResultLedgerMessage(message: {
 export function responderResultLedgerEntry(
   notification: ResponderNotification,
 ): string {
-  const analyzedAt = notification.analyzedAt ?? new Date().toISOString();
+  const analyzedAt =
+    notification.analyzedAt ?? notification.readAt ?? new Date().toISOString();
   return (
     `- notification=${notification.id} job=${notification.jobId}` +
-    ` status=${notification.status} consumed=true analyzedAt=${analyzedAt}` +
+    ` status=${notification.status} consumed=true readAt=${notification.readAt ?? analyzedAt} analyzedAt=${analyzedAt}` +
     `${notification.taskId ? ` task=${notification.taskId}` : ""}` +
     `${notification.parentTaskId ? ` parent=${notification.parentTaskId}` : ""}` +
     ` artifact=${receiptPath(notification)}`

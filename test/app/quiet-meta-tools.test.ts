@@ -8,6 +8,8 @@ import { isInternalChatMessage } from "../../src/types.js";
 describe("quiet meta tools", () => {
   it("recognizes plan.create and task.update", () => {
     expect(isQuietMetaTool("plan.create")).toBe(true);
+    expect(isQuietMetaTool("task.add")).toBe(true);
+    expect(isQuietMetaTool("task.read")).toBe(true);
     expect(isQuietMetaTool("task.update")).toBe(true);
     expect(isQuietMetaTool("shell.exec")).toBe(false);
   });
@@ -20,11 +22,13 @@ describe("quiet meta tools", () => {
     expect(shouldHideQuietMetaToolInChat("shell.exec", "ok")).toBe(false);
   });
 
-  it("always hides task.update regardless of outcome", () => {
-    expect(shouldHideQuietMetaToolInChat("task.update", "ok")).toBe(true);
-    expect(shouldHideQuietMetaToolInChat("task.update", "running")).toBe(true);
-    expect(shouldHideQuietMetaToolInChat("task.update", "failed")).toBe(true);
-    expect(shouldHideQuietMetaToolInChat("task.update", "blocked")).toBe(true);
+  it("always hides task.* (add/update/read/move) regardless of outcome", () => {
+    for (const name of ["task.add", "task.update", "task.read", "task.move"]) {
+      expect(shouldHideQuietMetaToolInChat(name, "ok")).toBe(true);
+      expect(shouldHideQuietMetaToolInChat(name, "running")).toBe(true);
+      expect(shouldHideQuietMetaToolInChat(name, "failed")).toBe(true);
+      expect(shouldHideQuietMetaToolInChat(name, "blocked")).toBe(true);
+    }
   });
 });
 

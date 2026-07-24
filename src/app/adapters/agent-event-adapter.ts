@@ -27,6 +27,7 @@ export class AgentEventAdapter {
     private readonly sequencer: EventSequencer,
     private readonly spool: OutputSpool,
     private readonly emit: (event: AnyAppEvent) => void,
+    private readonly getAbortReason?: () => string | undefined,
   ) {}
 
   /** Bind subsequent events to a turn; pass undefined for session-level events. */
@@ -187,9 +188,11 @@ export class AgentEventAdapter {
           steps: event.steps,
         });
         return;
-      case "turn-aborted":
-        this.push("turn-aborted", {});
+      case "turn-aborted": {
+        const reason = this.getAbortReason?.();
+        this.push("turn-aborted", reason ? { reason } : {});
         return;
+      }
       case "turn-error":
         this.push("turn-error", { message: event.message });
         return;

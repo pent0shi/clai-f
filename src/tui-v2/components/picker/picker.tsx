@@ -6,8 +6,9 @@
  * Provider rows show the configured model in green (classic parity).
  */
 
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useKeyboard, useTerminalDimensions } from "@opentui/react";
+import type { ScrollBoxRenderable } from "@opentui/core";
 import type { AppServices } from "../../bootstrap/composition-root.js";
 import type { Theme } from "../../rendering/theme.js";
 import { chordFromKeyEvent } from "../../actions/chord-from-key.js";
@@ -99,6 +100,22 @@ export function Picker(props: PickerProps): ReactNode {
   }, [filtered]);
 
   const selected = Math.min(hovered ?? cursor, Math.max(0, filtered.length - 1));
+
+  const scrollRef = useRef<ScrollBoxRenderable>(null);
+  const rowHeight = request.twoLine || isHistory ? 2 : 1;
+  useEffect(() => {
+    const sb = scrollRef.current;
+    if (!sb) return;
+    const viewportHeight = sb.viewport?.height ?? 0;
+    if (viewportHeight <= 0) return;
+    const top = selected * rowHeight;
+    const bottom = top + rowHeight;
+    if (top < sb.scrollTop) {
+      sb.scrollTo(top);
+    } else if (bottom > sb.scrollTop + viewportHeight) {
+      sb.scrollTo(bottom - viewportHeight);
+    }
+  }, [selected, rowHeight, filtered.length]);
 
   function accept(): void {
     const option = filtered[selected];
@@ -246,6 +263,7 @@ export function Picker(props: PickerProps): ReactNode {
       ) : null}
 
       <scrollbox
+        ref={scrollRef}
         viewportCulling
         scrollY
         scrollX={false}

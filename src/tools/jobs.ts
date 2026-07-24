@@ -4,6 +4,7 @@ import { mkdir, open, stat } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { StringDecoder } from "node:string_decoder";
+import type { Readable } from "node:stream";
 import type { ToolResult } from "../types.js";
 import { redactSecrets } from "../llm/provider.js";
 import { safeCwd } from "../os/cwd.js";
@@ -108,6 +109,7 @@ export interface ResponderNotification {
   monitor?: JobMonitorMetadata | undefined;
   responderLeaseId?: string | undefined;
   deliveredAt?: string | undefined;
+  readAt?: string | undefined;
   analyzedAt?: string | undefined;
   acknowledgedAt?: string | undefined;
   archivedAt?: string | undefined;
@@ -264,24 +266,53 @@ class RotatingRedactedWriter {
   private writeError: Error | undefined;
   private closed = false;
   private acceptedBytes: number;
+  private readonly backpressuredStreams = new Set<WriteStream>();
   private static readonly REDACTION_OVERLAP_CHARS = 4096;
 
   constructor(private readonly receipt: JobArtifactReceipt) {
     this.acceptedBytes = receipt.bytes;
   }
 
-  append(raw: Buffer | string): void {
+  append(raw: Buffer | string): boolean {
     if (this.closed) throw new Error("Cannot append to a closed job artifact");
     this.pending += Buffer.isBuffer(raw) ? this.decoder.write(raw) : raw;
+    let writable = true;
     const lastNewline = this.pending.lastIndexOf("\n");
     if (lastNewline >= 0) {
-      this.writeRedacted(this.pending.slice(0, lastNewline + 1));
+      writable = this.writeRedacted(this.pending.slice(0, lastNewline + 1));
       this.pending = this.pending.slice(lastNewline + 1);
     }
-    if (this.pending.length <= RotatingRedactedWriter.REDACTION_OVERLAP_CHARS) return;
+    if (this.pending.length <= RotatingRedactedWriter.REDACTION_OVERLAP_CHARS) {
+      return writable;
+    }
     const flushLength = this.pending.length - RotatingRedactedWriter.REDACTION_OVERLAP_CHARS;
-    this.writeRedacted(this.pending.slice(0, flushLength));
+    writable = this.writeRedacted(this.pending.slice(0, flushLength)) && writable;
     this.pending = this.pending.slice(flushLength);
+    return writable;
+  }
+
+  waitForDrain(): Promise<void> {
+    const blocked = [...this.backpressuredStreams].filter(
+      (stream) => stream.writableNeedDrain,
+    );
+    if (blocked.length === 0) return Promise.resolve();
+    return Promise.all(
+      blocked.map(
+        (stream) =>
+          new Promise<void>((resolve) => {
+            const done = (): void => {
+              stream.off("drain", done);
+              stream.off("finish", done);
+              stream.off("error", done);
+              this.backpressuredStreams.delete(stream);
+              resolve();
+            };
+            stream.once("drain", done);
+            stream.once("finish", done);
+            stream.once("error", done);
+          }),
+      ),
+    ).then(() => undefined);
   }
 
   close(): Promise<void> {
@@ -297,7 +328,7 @@ class RotatingRedactedWriter {
     return this.closePromise;
   }
 
-  private writeRedacted(source: string): void {
+  private writeRedacted(source: string): boolean {
     const safe = redactSecrets(source);
     if (safe !== source) this.receipt.redacted = true;
     let data = Buffer.from(safe, "utf8");
@@ -307,23 +338,22 @@ class RotatingRedactedWriter {
       data = data.subarray(0, remaining);
     }
     this.acceptedBytes += data.length;
+    let writable = true;
     while (data.length > 0) {
       if (!this.stream || this.currentBytes >= PER_FILE_BYTES) this.rotate();
       const room = PER_FILE_BYTES - this.currentBytes;
       const part = data.subarray(0, room);
       const stream = this.stream!;
-      stream.write(part, (error) => {
-        if (error) {
-          this.writeError ??= error;
-          return;
-        }
-        this.hash.update(part);
-        this.receipt.bytes += part.length;
-        this.receipt.sha256 = this.hash.copy().digest("hex");
-      });
+      const accepted = stream.write(part);
+      if (!accepted) this.backpressuredStreams.add(stream);
+      writable = accepted && writable;
+      this.hash.update(part);
+      this.receipt.bytes += part.length;
+      this.receipt.sha256 = this.hash.copy().digest("hex");
       this.currentBytes += part.length;
       data = data.subarray(part.length);
     }
+    return writable;
   }
 
   private finishCurrentStream(): void {
@@ -546,6 +576,7 @@ export class JobManager {
       ...(job.monitor !== undefined ? { monitor: job.monitor } : {}),
       ...(responderLeaseId ? { responderLeaseId } : {}),
       ...(existing?.deliveredAt ? { deliveredAt: existing.deliveredAt } : {}),
+      ...(existing?.readAt ? { readAt: existing.readAt } : {}),
       ...((existing?.analyzedAt ?? existing?.acknowledgedAt)
         ? { analyzedAt: existing?.analyzedAt ?? existing?.acknowledgedAt }
         : {}),
@@ -693,7 +724,7 @@ export class JobManager {
   }
 
   private scheduleTaskSettlement(job: BackgroundJob, delayMs = 0): void {
-    if (!job.responder || !this.isTerminalStatus(job.status)) return;
+    if (!job.responder || !job.taskId || !this.isTerminalStatus(job.status)) return;
     const existing = this.settlementTimers.get(job.id);
     if (existing) clearTimeout(existing);
     const timer = setTimeout(() => {
@@ -1006,13 +1037,27 @@ export class JobManager {
         }
         progressDirty = false;
       };
-      const recordOutput = (writer: RotatingRedactedWriter, chunk: Buffer): void => {
-        writer.append(chunk);
+      const recordOutput = (
+        writer: RotatingRedactedWriter,
+        source: Readable,
+        chunk: Buffer,
+      ): void => {
+        const writable = writer.append(chunk);
+        if (!writable) {
+          source.pause();
+          void writer.waitForDrain().then(() => {
+            if (this.isLive(job) && !source.destroyed) source.resume();
+          });
+        }
         job.heartbeatAt = new Date().toISOString();
         scheduleProgressFlush();
       };
-      child.stdout?.on("data", (chunk: Buffer) => recordOutput(stdout, chunk));
-      child.stderr?.on("data", (chunk: Buffer) => recordOutput(stderr, chunk));
+      child.stdout?.on("data", (chunk: Buffer) =>
+        recordOutput(stdout, child.stdout!, chunk),
+      );
+      child.stderr?.on("data", (chunk: Buffer) =>
+        recordOutput(stderr, child.stderr!, chunk),
+      );
       child.on("close", (code, signal) => {
         stopProgressFlush();
         const status: JobTerminalStatus = signal ? "killed" : code === 0 ? "exited" : "failed";
@@ -1247,6 +1292,7 @@ export class JobManager {
           candidate.responderLeaseId === leaseId &&
           !candidate.archivedAt &&
           !candidate.deliveredAt &&
+          !candidate.readAt &&
           !candidate.analyzedAt &&
           !candidate.acknowledgedAt &&
           !this.claimedNotifications.has(candidate.id),
@@ -1273,6 +1319,35 @@ export class JobManager {
       this.emit({ type: "notification", jobId: notification.jobId, notificationId });
     }
     this.claimedNotifications.delete(notificationId);
+    return true;
+  }
+
+  markRead(notificationId: string, sessionId: string): boolean {
+    const notification = this.notifications.get(notificationId);
+    if (
+      !notification ||
+      notification.ownerSessionId !== sessionId ||
+      !notification.responder ||
+      notification.archivedAt
+    ) {
+      return false;
+    }
+    const previousDeliveredAt = notification.deliveredAt;
+    const previousReadAt = notification.readAt;
+    const readAt = new Date().toISOString();
+    notification.deliveredAt ??= readAt;
+    notification.readAt ??= readAt;
+    if (!this.persistSync()) {
+      notification.deliveredAt = previousDeliveredAt;
+      notification.readAt = previousReadAt;
+      return false;
+    }
+    this.claimedNotifications.delete(notificationId);
+    this.emit({
+      type: "notification",
+      jobId: notification.jobId,
+      notificationId,
+    });
     return true;
   }
 

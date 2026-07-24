@@ -64,6 +64,7 @@ export class TurnController implements Disposable {
   private ac: AbortController | undefined;
   private active = false;
   private disposed = false;
+  private abortReason: string | undefined;
 
   constructor(private readonly deps: TurnControllerDeps) {}
 
@@ -71,7 +72,8 @@ export class TurnController implements Disposable {
     return this.active;
   }
 
-  abort(): void {
+  abort(reason?: string): void {
+    this.abortReason = reason;
     this.ac?.abort();
   }
 
@@ -86,11 +88,13 @@ export class TurnController implements Disposable {
     const ac = new AbortController();
     this.ac = ac;
     this.active = true;
+    this.abortReason = undefined;
 
     const adapter = new AgentEventAdapter(
       this.deps.sequencer,
       this.deps.spool,
       this.deps.emit,
+      () => this.abortReason,
     );
     adapter.setTurn(turnId);
     const coalescer = new DeltaCoalescer((event) => adapter.ingest(event));

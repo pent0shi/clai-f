@@ -641,6 +641,16 @@ describe("bare-JSON tool-call recovery", () => {
     expect(result?.call?.name).toBe("shell.exec");
   });
 
+  it("infers task.read from an exact notification id", () => {
+    const result = recognizeBareToolJson(
+      '{"notificationId":"completion:responder-1"}',
+    );
+    expect(result?.call?.name).toBe("task.read");
+    expect(result?.call?.args).toEqual({
+      notificationId: "completion:responder-1",
+    });
+  });
+
   it("still flags a lone ambiguous path object as argsOnly", () => {
     // A lone `path` could be fs.read / fs.list / pdf.read / image.ocr — too
     // ambiguous to infer, so we still nudge for a properly named tool call.

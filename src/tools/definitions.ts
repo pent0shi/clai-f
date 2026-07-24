@@ -53,6 +53,7 @@ export const PLAN_TOOL_NAMES = new Set([
   "plan.create",
   "task.add",
   "task.move",
+  "task.read",
   "task.update",
 ]);
 
@@ -954,6 +955,23 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     { mutates: true },
   ),
   def(
+    "task.read",
+    "Mark one delivered Responder subtask result read. Call this only after you have seen and analyzed that notification's result and are satisfied the responder subtask is finished. This is mandatory before continuing to a final response; never call it merely because a result arrived.",
+    {
+      type: "object",
+      properties: {
+        notificationId: {
+          type: "string",
+          description:
+            "Exact notification id from the Responder inbox entry you finished analyzing",
+        },
+      },
+      required: ["notificationId"],
+      additionalProperties: false,
+    },
+    { mutates: true },
+  ),
+  def(
     "task.update",
     "Update a plan task state. taskId MUST be t1, t2, … from the ACTIVE PLAN context (not a free-form title slug).",
     {
@@ -1051,6 +1069,7 @@ export function getToolDefinitions(filter?: {
       "plan.create",
       "task.add",
       "task.move",
+      "task.read",
       "task.update",
     ]);
     defs = defs.filter((d) => core.has(d.name));

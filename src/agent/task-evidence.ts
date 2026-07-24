@@ -58,6 +58,7 @@ export function isMetaPlanTool(name: string): boolean {
   return (
     name === "plan.create" ||
     name === "task.move" ||
+    name === "task.read" ||
     name === "task.update" ||
     name === "agent.handoff"
   );
@@ -661,6 +662,7 @@ export function isBatchSoftFailTool(name: string): boolean {
   if (
     name === "plan.create" ||
     name === "task.move" ||
+    name === "task.read" ||
     name === "task.update"
   ) return true;
   if (name === "tool.batch" || name === "tool.check") return true;

@@ -6,7 +6,7 @@ export interface TurnDisplayOptions {
 
 interface SessionPromptQueueDeps {
   readonly isRunning: () => boolean;
-  readonly abort: () => void;
+  readonly abort: (reason?: string) => void;
   readonly notifyState: () => void;
   readonly notice: (text: string) => void;
   readonly runTurn: (
@@ -91,8 +91,7 @@ export class SessionPromptQueue {
     if (text === undefined) return;
     if (this.deps.isRunning()) {
       this.priorityPrompt = text;
-      this.deps.abort();
-      this.deps.notice("interrupting · sending queued prompt now");
+      this.deps.abort("steer");
       return;
     }
     void this.submit(text).then(() => this.continue());

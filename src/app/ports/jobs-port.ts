@@ -35,6 +35,7 @@ export interface JobsPort {
   ): ResponderNotification | undefined;
   releaseResponderNotificationClaim?(notificationId: string): void;
   markDelivered(notificationId: string): boolean;
+  markRead(notificationId: string, sessionId: string): boolean;
   markAnalyzed(notificationId: string): boolean;
   acknowledge(notificationId: string): boolean;
   subscribe(listener: JobManagerListener): () => void;

@@ -1,7 +1,8 @@
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { Readable } from "node:stream";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   JobManager,
   type BackgroundJob,
@@ -741,5 +742,151 @@ describe("responder delivery persistence", () => {
       manager.claimNextResponderNotification(sessionId, leaseId)?.id,
     ).toBe(notification?.id);
     expect(manager.markDelivered(notification!.id)).toBe(true);
+  });
+});
+
+
+describe("responder memory and explicit read receipts", () => {
+  it("pauses a noisy responder pipe when artifact persistence applies backpressure", async () => {
+    const { manager } = await fixture();
+    const pause = vi.spyOn(Readable.prototype, "pause");
+    try {
+      const script =
+        "for(let i=0;i<512;i++) process.stdout.write('x'.repeat(8192));";
+      const started = await manager.startJob(
+        `${JSON.stringify(process.execPath)} -e ${JSON.stringify(script)}`,
+        { ownerSessionId: "backpressure", responder: true },
+      );
+      const id = started.backgroundJob?.id;
+      expect(id).toBeTruthy();
+      await waitForStatus(manager, id!, ["exited"]);
+      expect(pause).toHaveBeenCalled();
+      expect(manager.getJob(id!)?.artifacts.stdout.bytes).toBeGreaterThan(
+        3 * 1024 * 1024,
+      );
+      const internal = manager as unknown as {
+        processes: Map<string, unknown>;
+        writers: Map<string, unknown>;
+      };
+      expect(internal.processes.size).toBe(0);
+      expect(internal.writers.size).toBe(0);
+    } finally {
+      pause.mockRestore();
+    }
+  });
+
+  it("atomically marks a model-read notification delivered and read across restart", async () => {
+    const { dir, manager } = await fixture();
+    const sessionId = "explicit-read";
+    const leaseId = manager.activateResponderLease(sessionId);
+    const started = await manager.startJob(
+      `${JSON.stringify(process.execPath)} -e "process.exit(0)"`,
+      {
+        ownerSessionId: sessionId,
+        responder: true,
+        wakeOnCompletion: true,
+        responderLeaseId: leaseId,
+      },
+    );
+    const id = started.backgroundJob?.id;
+    expect(id).toBeTruthy();
+    await waitForStatus(manager, id!, ["exited"]);
+    const notification = manager.getPendingNotifications(sessionId)[0];
+    expect(notification?.deliveredAt).toBeUndefined();
+    expect(notification?.readAt).toBeUndefined();
+
+    expect(manager.markRead(notification!.id, sessionId)).toBe(true);
+    expect(notification).toMatchObject({
+      deliveredAt: expect.any(String),
+      readAt: expect.any(String),
+    });
+    expect(notification?.analyzedAt).toBeUndefined();
+    expect(
+      manager.claimNextResponderNotification(sessionId, leaseId),
+    ).toBeUndefined();
+
+    const restarted = new JobManager(dir);
+    managers.push(restarted);
+    expect(restarted.getPendingNotifications(sessionId)[0]).toMatchObject({
+      id: notification?.id,
+      deliveredAt: notification?.deliveredAt,
+      readAt: notification?.readAt,
+    });
+  });
+
+  it("releases runtime maps across a long responder session", async () => {
+    const { manager } = await fixture();
+    const sessionId = "bounded-runtime";
+    const leaseId = manager.activateResponderLease(sessionId);
+    for (let batch = 0; batch < 6; batch += 1) {
+      await Promise.all(
+        Array.from({ length: 5 }, () =>
+          manager.startJob(
+            `${JSON.stringify(process.execPath)} -e "process.stdout.write('ok')"`,
+            {
+              ownerSessionId: sessionId,
+              responder: true,
+              wakeOnCompletion: true,
+              responderLeaseId: leaseId,
+            },
+          ),
+        ),
+      );
+      await waitFor(() => manager.getRunningJobs(sessionId).length === 0);
+      for (const notification of manager.getPendingNotifications(sessionId)) {
+        expect(manager.markRead(notification.id, sessionId)).toBe(true);
+        expect(manager.markAnalyzed(notification.id)).toBe(true);
+        expect(manager.acknowledge(notification.id)).toBe(true);
+      }
+    }
+
+    const internal = manager as unknown as {
+      jobs: Map<string, unknown>;
+      notifications: Map<string, unknown>;
+      processes: Map<string, unknown>;
+      writers: Map<string, unknown>;
+      abortControllers: Map<string, unknown>;
+      settlementTimers: Map<string, unknown>;
+      settlementAttempts: Map<string, unknown>;
+      finalizations: Map<string, unknown>;
+    };
+    expect(internal.jobs.size).toBeLessThanOrEqual(80);
+    expect(internal.notifications.size).toBe(0);
+    expect(internal.processes.size).toBe(0);
+    expect(internal.writers.size).toBe(0);
+    expect(internal.abortControllers.size).toBe(0);
+    expect(internal.settlementTimers.size).toBe(0);
+    expect(internal.settlementAttempts.size).toBe(0);
+    expect(internal.finalizations.size).toBe(0);
+  });
+});
+
+
+describe("responder read persistence", () => {
+  it("rolls back deliveredAt and readAt together when persistence fails", async () => {
+    const { manager } = await fixture();
+    const sessionId = "read-persist-failure";
+    const leaseId = manager.activateResponderLease(sessionId);
+    const started = await manager.startJob(
+      `${JSON.stringify(process.execPath)} -e "process.exit(0)"`,
+      {
+        ownerSessionId: sessionId,
+        responder: true,
+        wakeOnCompletion: true,
+        responderLeaseId: leaseId,
+      },
+    );
+    const id = started.backgroundJob?.id;
+    expect(id).toBeTruthy();
+    await waitForStatus(manager, id!, ["exited"]);
+    const notification = manager.getPendingNotifications(sessionId)[0]!;
+    const internal = manager as unknown as { persistSync: () => boolean };
+    const persistSync = internal.persistSync.bind(manager);
+    internal.persistSync = () => false;
+    expect(manager.markRead(notification.id, sessionId)).toBe(false);
+    internal.persistSync = persistSync;
+    expect(notification.deliveredAt).toBeUndefined();
+    expect(notification.readAt).toBeUndefined();
+    expect(manager.markRead(notification.id, sessionId)).toBe(true);
   });
 });

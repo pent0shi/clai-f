@@ -63,6 +63,10 @@ export class JobController implements Disposable {
     return this.jobs.markDelivered(notificationId);
   }
 
+  markRead(notificationId: string, sessionId: string): boolean {
+    return this.jobs.markRead(notificationId, sessionId);
+  }
+
   markAnalyzed(notificationId: string): boolean {
     return this.jobs.markAnalyzed(notificationId);
   }

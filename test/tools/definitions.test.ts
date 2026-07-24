@@ -54,6 +54,9 @@ describe("tool definitions", () => {
       enum?: string[];
     };
     expect(state.enum).toContain("failed");
+    const read = TOOL_DEFINITIONS.find((d) => d.name === "task.read")!;
+    expect(read.parameters.required).toEqual(["notificationId"]);
+    expect(read.mutates).toBe(true);
     const handoff = TOOL_DEFINITIONS.find((d) => d.name === "agent.handoff")!;
     expect(handoff.parameters.required).toEqual(["task", "reason"]);
     expect(handoff.askMode).toBeFalsy();

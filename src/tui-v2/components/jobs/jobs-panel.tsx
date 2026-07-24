@@ -59,6 +59,7 @@ function jobPhase(
   notification?: ResponderNotification,
 ): { glyph: string; label: string } {
   if (notification?.archivedAt) return { glyph: "◇", label: "archived" };
+  if (notification?.readAt) return { glyph: "✓", label: "read" };
   if (notification?.deliveredAt && !notification.analyzedAt) {
     return { glyph: "→", label: "delivered" };
   }
@@ -395,9 +396,16 @@ export function ResponderPanel(props: ResponderPanelProps): ReactNode {
     waitingRef.current = waiting;
   }, [waiting, liveCount, services]);
 
-  // Yield the bottom stack to a blocking prompt; also nothing to show when idle.
+  // Show only while the responder has live work: a job running, a result ready
+  // to deliver, or a delivered result the model has not read yet. Archived,
+  // read, and settled receipts leave nothing to act on, so the widget hides.
+  const hasActiveWork =
+    responderState.running > 0 ||
+    responderState.ready > 0 ||
+    responderState.delivered > 0;
   if (
     blockingOverlay ||
+    !hasActiveWork ||
     (projection.jobs.length === 0 && projection.notifications.length === 0)
   ) {
     return null;

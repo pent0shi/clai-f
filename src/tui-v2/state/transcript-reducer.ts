@@ -355,13 +355,15 @@ export function applyAppEvent(state: TranscriptState, event: AnyAppEvent): Trans
     case "turn-ended":
       return { ...closePending(withSeq), runningStatus: undefined };
 
-    case "turn-aborted":
+    case "turn-aborted": {
+      const steered = event.payload.reason === "steer";
       return pushNotice(
         { ...closePending(withSeq), runningStatus: undefined },
         event,
-        "warn",
-        "Turn aborted.",
+        steered ? "info" : "warn",
+        steered ? "Prompt steered." : "Turn aborted.",
       );
+    }
 
     case "turn-error":
       return pushNotice(

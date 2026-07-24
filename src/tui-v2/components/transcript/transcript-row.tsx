@@ -7,16 +7,11 @@
  * (ARCHITECTURE "commands are data plus handlers, not switch statements").
  */
 
-import type { ReactNode } from "react";
+import { memo, type ReactNode } from "react";
 import type { OutputSpool } from "../../../app/events/event-buffer.js";
 import type { AppServices } from "../../bootstrap/composition-root.js";
 import type { TranscriptStore } from "../../state/transcript-store.js";
-import {
-  isFileDiffExpanded,
-  isItemExpanded,
-  type TranscriptItem,
-  type TranscriptState,
-} from "../../state/transcript-types.js";
+import { type TranscriptItem } from "../../state/transcript-types.js";
 import type { Theme } from "../../rendering/theme.js";
 import { shouldHideQuietMetaToolInChat } from "../../../app/adapters/quiet-meta-tools.js";
 import { UserMessage } from "./user-message.js";
@@ -26,37 +21,43 @@ import { ToolCard } from "./tool-card.js";
 import { NoticeRow } from "./notice-row.js";
 import { CompactedRow } from "./compacted-row.js";
 
-/** Active ^R search highlight for a transcript row. */
-export interface TranscriptSearchMark {
-  /** This item contains at least one match for the current query. */
-  readonly matched: boolean;
-  /** This item is the currently selected n/N match. */
-  readonly active: boolean;
-}
-
-export function TranscriptRow(props: {
+export function TranscriptRowImpl(props: {
   item: TranscriptItem;
-  state: TranscriptState;
   theme: Theme;
   store: TranscriptStore;
   spool: OutputSpool;
   services: AppServices;
   onOpenUserPrompt: (prompt: string) => void;
+  /** Effective expand state for this item (per-item override or global). */
+  expanded: boolean;
+  /** Effective file-diff expand state (tool cards only). */
+  fileDiffExpanded: boolean;
+  /** Global toggle fallbacks used when a per-item override is set. */
+  expandThinkingGlobal: boolean;
+  expandOutputGlobal: boolean;
+  expandFileDiffsGlobal: boolean;
   /** Chat-pane columns so markdown tables reflow beside the plan pane. */
   contentWidth?: number | undefined;
-  /** Optional ^R search highlight for this item. */
-  searchMark?: TranscriptSearchMark | undefined;
+  /** This item contains at least one match for the current ^R query. */
+  searchMatched?: boolean | undefined;
+  /** This item is the currently selected n/N match. */
+  searchActiveMatch?: boolean | undefined;
 }): ReactNode {
   const {
     item,
-    state,
     theme,
     store,
     spool,
     services,
     onOpenUserPrompt,
+    expanded,
+    fileDiffExpanded,
+    expandThinkingGlobal,
+    expandOutputGlobal,
+    expandFileDiffsGlobal,
     contentWidth,
-    searchMark,
+    searchMatched,
+    searchActiveMatch,
   } = props;
 
   let body: ReactNode;
@@ -85,8 +86,8 @@ export function TranscriptRow(props: {
         <ThinkingBlock
           item={item}
           theme={theme}
-          expanded={isItemExpanded(state, item)}
-          onToggle={() => store.toggleItemOverride(item.id, state.expandThinkingGlobal)}
+          expanded={expanded}
+          onToggle={() => store.toggleItemOverride(item.id, expandThinkingGlobal)}
         />
       );
       break;
@@ -102,13 +103,13 @@ export function TranscriptRow(props: {
           theme={theme}
           spool={spool}
           services={services}
-          expanded={isItemExpanded(state, item)}
-          onToggle={() => store.toggleItemOverride(item.id, state.expandOutputGlobal)}
+          expanded={expanded}
+          onToggle={() => store.toggleItemOverride(item.id, expandOutputGlobal)}
           onCollapseAllOutput={() => store.setOutputGlobal(false)}
           onExpandAllOutput={() => store.setOutputGlobal(true)}
-          fileDiffExpanded={isFileDiffExpanded(state, item.id)}
+          fileDiffExpanded={fileDiffExpanded}
           onToggleFileDiff={() =>
-            store.toggleFileDiffOverride(item.id, state.expandFileDiffsGlobal)
+            store.toggleFileDiffOverride(item.id, expandFileDiffsGlobal)
           }
           onCollapseAllFileDiffs={() => store.setFileDiffsGlobal(false)}
           onExpandAllFileDiffs={() => store.setFileDiffsGlobal(true)}
@@ -126,7 +127,7 @@ export function TranscriptRow(props: {
           theme={theme}
           services={services}
           contentWidth={contentWidth}
-          expanded={isItemExpanded(state, item)}
+          expanded={expanded}
           onToggle={() => {
             // Ctrl+O / toggle: open pager (do not dump multi‑KB memory in chat).
             const summary = item.summary;
@@ -146,7 +147,7 @@ export function TranscriptRow(props: {
   }
 
   // Search highlight wrapper — active match gets a strong wash; other hits a soft one.
-  if (!searchMark?.matched) return body;
+  if (!searchMatched) return body;
   return (
     <box
       border
@@ -154,8 +155,8 @@ export function TranscriptRow(props: {
       style={{
         width: "100%",
         flexDirection: "column",
-        backgroundColor: searchMark.active ? theme.selection : theme.rowA,
-        borderColor: searchMark.active ? theme.activity : theme.cyan,
+        backgroundColor: searchActiveMatch ? theme.selection : theme.rowA,
+        borderColor: searchActiveMatch ? theme.activity : theme.cyan,
         marginBottom: 0,
       }}
     >
@@ -163,3 +164,5 @@ export function TranscriptRow(props: {
     </box>
   );
 }
+
+export const TranscriptRow = memo(TranscriptRowImpl);

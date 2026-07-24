@@ -400,6 +400,7 @@ export function shouldYieldForResponderBeforeReport(
         (!currentNotificationId || notification.id !== currentNotificationId) &&
         notification.responder &&
         !notification.archivedAt &&
+        !notification.readAt &&
         !notification.analyzedAt,
     )
   );
@@ -1046,6 +1047,10 @@ export async function runAgentTurn(
     const responderWakeNotificationId = responderWakeTurn
       ? /^notification=(.+)$/m.exec(prompt)?.[1]?.trim()
       : undefined;
+    const unreadResponderNotificationIds = new Set<string>();
+    if (responderWakeNotificationId) {
+      unreadResponderNotificationIds.add(responderWakeNotificationId);
+    }
     const refreshResponderInbox = (): ResponderNotification | undefined => {
       const running = jobManager
         .getRunningJobs(session.sessionId)
@@ -1056,7 +1061,8 @@ export async function runAgentTurn(
           .filter(
             (notification) =>
               notification.responder &&
-              Boolean(notification.deliveredAt) &&
+              unreadResponderNotificationIds.has(notification.id) &&
+              !notification.readAt &&
               !notification.analyzedAt &&
               !notification.archivedAt,
           )
@@ -1071,12 +1077,21 @@ export async function runAgentTurn(
       const delivery = leaseId
         ? jobManager.claimNextResponderNotification(session.sessionId, leaseId)
         : undefined;
+      if (delivery) unreadResponderNotificationIds.add(delivery.id);
+      const pending = jobManager
+        .getPendingNotifications(session.sessionId)
+        .filter(
+          (notification) =>
+            notification.responder &&
+            unreadResponderNotificationIds.has(notification.id) &&
+            !notification.readAt &&
+            !notification.analyzedAt &&
+            !notification.archivedAt,
+        )
+        .slice(0, 12);
       upsertResponderContextMessage(
         messages,
-        responderContextMessage({
-          running,
-          pending: delivery ? [delivery] : [],
-        }),
+        responderContextMessage({ running, pending }),
       );
       return delivery;
     };
@@ -1580,8 +1595,65 @@ export async function runAgentTurn(
         call.name === "plan.create" ||
         call.name === "task.add" ||
         call.name === "task.move" ||
+        call.name === "task.read" ||
         call.name === "task.update"
       ) {
+        if (call.name === "task.read") {
+          const notificationId =
+            typeof call.args.notificationId === "string"
+              ? call.args.notificationId.trim()
+              : "";
+          const notification = jobManager
+            .getPendingNotifications(session.sessionId)
+            .find((candidate) => candidate.id === notificationId);
+          const visible = unreadResponderNotificationIds.has(notificationId);
+          const marked = Boolean(
+            notification &&
+              visible &&
+              jobManager.markRead(notificationId, session.sessionId),
+          );
+          const output = marked
+            ? `Responder notification ${notificationId} marked delivered and read after model analysis.`
+            : !notificationId
+              ? "task.read failed: notificationId is required."
+              : !visible
+                ? `task.read failed: notification ${notificationId} was not delivered to this model turn. Analyze a delivered result before marking it read.`
+                : `task.read failed: notification ${notificationId} is unavailable, archived, or its read state could not be persisted.`;
+          if (marked && notification) {
+            upsertResponderResultLedger(messages, notification);
+            unreadResponderNotificationIds.delete(notificationId);
+          }
+          if (!alreadyPrintedIds.has(toolEventId)) {
+            const toolCallLine =
+              chalk.cyan(`  ▶ ${call.name}`) +
+              chalk.gray(` ${formatToolArgs(call)}`);
+            writeToolCall(
+              toolEventId,
+              call,
+              styleToolChatter(call, toolCallLine) + "\n",
+            );
+            alreadyPrintedIds.add(toolEventId);
+          }
+          const result = {
+            ok: marked,
+            output,
+            ...(marked ? {} : { exitCode: 1 }),
+          };
+          loopGuard.recordAttempt(step, call.name, call.args, marked, 0);
+          emitToolResult(toolEventId, result, output);
+          writeToolOutput(
+            toolEventId,
+            marked ? "read\n" : "failed\n",
+            marked ? chalk.green("  ✓\n") : chalk.red("  ✗\n"),
+          );
+          return {
+            ok: marked,
+            call,
+            result,
+            contextOutput: output,
+          };
+        }
+
         // Evidence gate: refuse done until at least one successful work tool
         // ran under this task (model must see results and be satisfied).
         if (call.name === "task.update") {
@@ -3577,9 +3649,6 @@ export async function runAgentTurn(
             },
           );
           freeTierConsecutiveFailures = 0;
-          if (responderDelivery) {
-            upsertResponderResultLedger(messages, responderDelivery);
-          }
           } catch (streamError) {
             // E4: track free-tier failures for advisory notices (never blocks).
             freeTierConsecutiveFailures += 1;
@@ -4168,6 +4237,17 @@ export async function runAgentTurn(
 
           const cleaned = stripSentinelTokens(assistantText.visible);
 
+          if (unreadResponderNotificationIds.size > 0) {
+            const unread = [...unreadResponderNotificationIds];
+            pushAssistantHistory(assistantText.visible);
+            messages.push(
+              recoveryUserMessage(
+                `You have ${unread.length} delivered Responder result(s) that remain unread: ${unread.join(", ")}. ` +
+                  "If analysis is incomplete, call the necessary bounded evidence tool now. If you have seen and analyzed each result and are satisfied its responder subtask is finished, you MUST call task.read for each exact notificationId before giving a final response. Do not merely say it is read.",
+              ),
+            );
+            continue;
+          }
 
           const narratedAction = looksLikeActionNarration(cleaned);
           const narratedWebAction = looksLikeWebActionNarration(cleaned);

@@ -560,6 +560,22 @@ describe("transcript reducer (V2-050)", () => {
     expect(transcriptItems(state).at(-1)).toMatchObject({ kind: "notice", level: "warn" });
   });
 
+  it("relabels a steered abort as an info 'Prompt steered.' notice", () => {
+    const seq = buildSequencer();
+    let state = EMPTY_TRANSCRIPT_STATE;
+    state = applyAppEvent(state, seq.build("status", { text: "step 1" }, undefined));
+    state = applyAppEvent(
+      state,
+      seq.build("turn-aborted", { reason: "steer" }, undefined),
+    );
+    expect(state.runningStatus).toBeUndefined();
+    expect(transcriptItems(state).at(-1)).toMatchObject({
+      kind: "notice",
+      level: "info",
+      text: "Prompt steered.",
+    });
+  });
+
   it("keeps model prose, tools, and post-tool analysis in emitted order", () => {
     const seq = buildSequencer();
     const turnId = asTurnId("turn-1");

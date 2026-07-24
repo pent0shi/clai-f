@@ -58,7 +58,7 @@ describe("responder persistence settlement", () => {
       leaseId,
     );
     expect(notification).toBeTruthy();
-    expect(manager.markDelivered(notification!.id)).toBe(true);
+    expect(manager.markRead(notification!.id, sessionId)).toBe(true);
 
     let failSave = true;
     const persistence = {
@@ -99,6 +99,7 @@ describe("responder persistence settlement", () => {
     );
     expect(manager.getPendingNotifications(sessionId)[0]).toMatchObject({
       deliveredAt: expect.any(String),
+      readAt: expect.any(String),
     });
     expect(
       manager.getPendingNotifications(sessionId)[0]?.analyzedAt,

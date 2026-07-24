@@ -31,9 +31,6 @@ interface SessionResponderDeps {
     prompt: string,
     onStarted: () => void,
   ) => Promise<ResponderTurnResult>;
-  readonly recordConsumed?: (
-    notification: ResponderNotification,
-  ) => Promise<void>;
   readonly notifyState: () => void;
   readonly notifyDelivery?: ((summary: string) => void) | undefined;
 }
@@ -96,10 +93,16 @@ export class SessionResponder {
         !notification.archivedAt,
     );
     const ready = current.filter(
-      (notification) => !notification.deliveredAt && !notification.analyzedAt,
+      (notification) =>
+        !notification.deliveredAt &&
+        !notification.readAt &&
+        !notification.analyzedAt,
     ).length;
     const delivered = current.filter(
-      (notification) => notification.deliveredAt && !notification.analyzedAt,
+      (notification) =>
+        notification.deliveredAt &&
+        !notification.readAt &&
+        !notification.analyzedAt,
     ).length;
     const archived = notifications.filter((notification) =>
       Boolean(notification.archivedAt),
@@ -210,14 +213,9 @@ export class SessionResponder {
       return;
     }
 
-    try {
-      await this.deps.recordConsumed?.(notification);
-    } catch {
+    if (!notification.readAt) {
       this.deps.notifyState();
       return;
-    }
-    if (this.deps.jobs.markAnalyzed(notification.id)) {
-      this.deps.jobs.acknowledge(notification.id);
     }
     this.deps.notifyState();
     if (this.hasDeliverable(sessionId, leaseId)) {
@@ -232,6 +230,7 @@ export class SessionResponder {
         notification.responderLeaseId === leaseId &&
         !notification.archivedAt &&
         !notification.deliveredAt &&
+        !notification.readAt &&
         !notification.analyzedAt,
     );
   }
@@ -293,6 +292,7 @@ function deliveryPrompt(
     "Preview (maximum 20 lines / 4 KiB):",
     preview,
     "Review this compact result. If it reveals useful new surface, gather only the necessary evidence and append evidence-driven follow-up tasks when needed.",
+    `MANDATORY ACKNOWLEDGMENT: after you have seen and analyzed this result and are satisfied this responder subtask is finished, call task.read with notificationId=${notification.id}. Do not call task.read before analysis is complete. You may not give a final response while this notification remains unread.`,
     "Do not rerun the completed responder command, poll it, or update its responder-owned task; settlement follows the authoritative process result independently.",
     resume,
   ].join("\n");

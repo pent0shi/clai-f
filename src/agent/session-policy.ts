@@ -36,6 +36,7 @@ export function createSessionPolicy(sessionId?: string): SessionPolicy {
 const PRE_APPROVAL_ALLOWED_TOOLS = new Set<string>([
   "plan.create",
   "task.move",
+  "task.read",
   "task.update",
   "fs.read",
   "fs.list",

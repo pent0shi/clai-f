@@ -57,6 +57,25 @@ describe("token-usage parsers", () => {
     expect(parseOpenAiUsage(undefined)).toBeUndefined();
     expect(parseOpenAiUsage({})).toBeUndefined();
   });
+
+  it("counts Anthropic cache-read/creation tokens as context fill", () => {
+    expect(
+      parseAnthropicUsage({
+        input_tokens: 16,
+        cache_read_input_tokens: 48_000,
+        cache_creation_input_tokens: 2_000,
+        output_tokens: 120,
+      }),
+    ).toEqual({
+      promptTokens: 50_016,
+      completionTokens: 120,
+      totalTokens: 50_136,
+      exact: true,
+    });
+    expect(
+      parseAnthropicUsage({ cache_read_input_tokens: 30_000, output_tokens: 5 }),
+    ).toMatchObject({ promptTokens: 30_000, completionTokens: 5 });
+  });
 });
 
 describe("token-usage format + context window", () => {

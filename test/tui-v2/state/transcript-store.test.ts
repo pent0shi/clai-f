@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { asSessionId } from "../../../src/app/events/app-event.js";
 import { EventSequencer } from "../../../src/app/events/sequencer.js";
 import { TranscriptStore } from "../../../src/tui-v2/state/transcript-store.js";
@@ -45,6 +45,51 @@ describe("TranscriptStore (V2-050)", () => {
     store.toggleThinkingGlobal();
     expect(store.getState().expandThinkingGlobal).toBe(true);
     expect(isItemExpanded(store.getState(), item)).toBe(true);
+  });
+
+  it("coalesces streaming deltas into one deferred notify but keeps state exact", () => {
+    vi.useFakeTimers();
+    try {
+      const store = new TranscriptStore();
+      const seq = new EventSequencer(asSessionId("s1"));
+      let notifications = 0;
+      store.subscribe(() => (notifications += 1));
+
+      store.dispatch(seq.build("assistant-delta", { text: "he" }, undefined));
+      store.dispatch(seq.build("assistant-delta", { text: "llo" }, undefined));
+      store.dispatch(seq.build("assistant-delta", { text: " world" }, undefined));
+      // State is up to date immediately; notifications are still batched.
+      expect(notifications).toBe(0);
+      const pending = [...store.getState().byId.values()][0];
+      expect(pending).toMatchObject({ kind: "assistant", text: "hello world" });
+
+      vi.advanceTimersByTime(16);
+      expect(notifications).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("flushes a pending delta notify immediately when a structural event lands", () => {
+    vi.useFakeTimers();
+    try {
+      const store = new TranscriptStore();
+      const seq = new EventSequencer(asSessionId("s1"));
+      let notifications = 0;
+      store.subscribe(() => (notifications += 1));
+
+      store.dispatch(seq.build("assistant-delta", { text: "hi" }, undefined));
+      expect(notifications).toBe(0);
+      store.dispatch(
+        seq.build("assistant-message", { messageId: seq.ids.message(), text: "hi" }, undefined),
+      );
+      // Structural event flushes the batched delta plus itself in one notify.
+      expect(notifications).toBe(1);
+      vi.advanceTimersByTime(32);
+      expect(notifications).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("reset clears all items and subscribers still fire", () => {

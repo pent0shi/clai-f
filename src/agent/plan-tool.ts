@@ -450,7 +450,7 @@ export function planContextMessage(plan: SessionPlan, approved: boolean): string
     lines.push(`  ${i + 1}. [${t.id}] (${t.state}) ${t.title}${hierarchyHint}${jobHint}${aliasHint}${dependencyHint}${resourceHint}${evidenceHint}`);
   });
   lines.push(
-    "task.update taskId MUST be t1, t2, … from this list (or a listed alias). Use task.add for newly discovered work; it is placed before unfinished report creation. Use task.move with position/beforeTaskId/afterTaskId to rearrange work without changing ids or evidence. Responder-owned job tasks advance automatically; never task.update them.",
+    "task.update taskId MUST be t1, t2, … from this list (or a listed alias). Use task.add for newly discovered work; it is placed before unfinished report creation. Use task.move with position/beforeTaskId/afterTaskId to rearrange work without changing ids or evidence. Responder-owned job tasks advance automatically; never task.update them. After analyzing a delivered Responder result, task.read its notification before finalizing.",
   );
   if (plan.meta?.projectRoot) {
     lines.push(`project_root: ${plan.meta.projectRoot}`);

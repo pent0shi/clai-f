@@ -9,7 +9,7 @@
  * content changes as a belt-and-suspenders for layout races.
  */
 
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useKeyboard, useTerminalDimensions } from "@opentui/react";
 import type { MouseEvent, ScrollBoxRenderable } from "@opentui/core";
 import type { AppServices } from "../../bootstrap/composition-root.js";
@@ -17,7 +17,11 @@ import type { Theme } from "../../rendering/theme.js";
 import { chordFromKeyEvent } from "../../actions/chord-from-key.js";
 import { useTranscriptState } from "../../state/use-transcript-store.js";
 import { useSessionState } from "../../state/use-session-state.js";
-import { transcriptItems } from "../../state/transcript-types.js";
+import {
+  isFileDiffExpanded,
+  isItemExpanded,
+  transcriptItems,
+} from "../../state/transcript-types.js";
 import {
   findMatches,
   nextMatchIndex,
@@ -420,34 +424,40 @@ export function TranscriptView(props: TranscriptViewProps): ReactNode {
     jumpToMatch(prevMatchIndex(matches, matchIndex));
   }
 
-  function resendPrompt(prompt: string): void {
-    void (async () => {
-      const trimmed = prompt.trim();
-      if (services.commands.looksLikeCommand(trimmed)) {
-        const invocation = services.commands.parse(trimmed);
-        if (!invocation) {
-          services.session.notice(
-            "warn",
-            `unknown command: ${trimmed.split(/\s/, 1)[0] ?? trimmed}. Try /help`,
-          );
+  const resendPrompt = useCallback(
+    (prompt: string): void => {
+      void (async () => {
+        const trimmed = prompt.trim();
+        if (services.commands.looksLikeCommand(trimmed)) {
+          const invocation = services.commands.parse(trimmed);
+          if (!invocation) {
+            services.session.notice(
+              "warn",
+              `unknown command: ${trimmed.split(/\s/, 1)[0] ?? trimmed}. Try /help`,
+            );
+            return;
+          }
+          if (!(await services.commands.dispatch(invocation))) {
+            services.session.notice(
+              "warn",
+              `command /${invocation.name} is not available right now`,
+            );
+          }
           return;
         }
-        if (!(await services.commands.dispatch(invocation))) {
-          services.session.notice(
-            "warn",
-            `command /${invocation.name} is not available right now`,
-          );
-        }
-        return;
-      }
-      if (services.session.getState().running) services.session.enqueue(prompt);
-      else await services.session.submit(prompt);
-    })();
-  }
+        if (services.session.getState().running) services.session.enqueue(prompt);
+        else await services.session.submit(prompt);
+      })();
+    },
+    [services],
+  );
 
-  function openUserPrompt(prompt: string): void {
-    services.overlay.openPromptActions({ prompt, onResend: () => resendPrompt(prompt) });
-  }
+  const openUserPrompt = useCallback(
+    (prompt: string): void => {
+      services.overlay.openPromptActions({ prompt, onResend: () => resendPrompt(prompt) });
+    },
+    [services, resendPrompt],
+  );
 
   /**
    * Wheel over the chat pane: claim focus so ↑/↓ don’t walk prompt history,
@@ -601,21 +611,21 @@ export function TranscriptView(props: TranscriptViewProps): ReactNode {
           <TranscriptRow
             key={item.id}
             item={item}
-            state={state}
+            expanded={isItemExpanded(state, item)}
+            fileDiffExpanded={
+              item.kind === "tool" ? isFileDiffExpanded(state, item.id) : false
+            }
+            expandThinkingGlobal={state.expandThinkingGlobal}
+            expandOutputGlobal={state.expandOutputGlobal}
+            expandFileDiffsGlobal={state.expandFileDiffsGlobal}
             theme={theme}
             store={services.transcript}
             spool={services.session.spool}
             services={services}
             onOpenUserPrompt={openUserPrompt}
             contentWidth={paneWidth}
-            searchMark={
-              searchActive && matchedItemIds.has(item.id)
-                ? {
-                    matched: true,
-                    active: item.id === activeMatchItemId,
-                  }
-                : undefined
-            }
+            searchMatched={searchActive && matchedItemIds.has(item.id)}
+            searchActiveMatch={item.id === activeMatchItemId}
           />
         ))}
       </scrollbox>
