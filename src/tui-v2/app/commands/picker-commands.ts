@@ -40,11 +40,12 @@ import {
 } from "../../../store/keys.js";
 import {
   getSession,
-  listSessions,
+  listSessionSummaries,
 } from "../../../store/history.js";
 import { relativeTime, shortCwd } from "../../../tui/text-format.js";
 import { conversationItemCount } from "../../state/transcript-types.js";
 import {
+  boundSessionVisualInput,
   hydrateSessionVisual,
   transcriptLooksIncomplete,
 } from "../../state/transcript-hydrate.js";
@@ -359,7 +360,7 @@ function applyReasoning(services: AppServices, value: string): void {
 export async function handleHistory(services: AppServices): Promise<void> {
   // listSessions performs one-time crash/archive recovery internally. Calling
   // recovery again here rescanned archives and backups on every picker open.
-  const sessions = await listSessions(200, { recovery: "background" });
+  const sessions = await listSessionSummaries(200, { recovery: "background" });
   const currentMessages = services.session.messages;
   const currentId = services.session.sessionId;
   const currentTitle = services.session.getState().title;
@@ -386,18 +387,7 @@ export async function handleHistory(services: AppServices): Promise<void> {
       active: true,
     },
     ...otherSessions.map((session) => {
-      const durableVisual = (session.transcript ?? []).filter(
-        (i) => i.kind !== "notice",
-      );
-      const count =
-        durableVisual.length > 0
-          ? durableVisual.length
-          : session.messages.filter(
-              (m) =>
-                m.role === "user" ||
-                m.role === "assistant" ||
-                m.role === "tool",
-            ).length;
+      const count = session.itemCount;
       const date = session.updatedAt ?? session.createdAt;
       const when = relativeTime(date) || "some time ago";
       const stamp = date.slice(0, 16).replace("T", " ");
@@ -482,11 +472,21 @@ export async function handleHistory(services: AppServices): Promise<void> {
 
       // Prefer the richer of visual transcript vs model messages (tools often
       // survive only in messages after abort-before-save of the UI snapshot).
-      const hydrated = hydrateSessionVisual(
+      const visual = boundSessionVisualInput(
         session.transcript,
         session.messages,
       );
+      const hydrated = hydrateSessionVisual(
+        visual.transcript,
+        visual.messages,
+      );
       services.transcript.hydrate(hydrated.state);
+      if (visual.omittedItems > 0 || visual.omittedMessages > 0) {
+        services.session.notice(
+          "info",
+          `Loaded recent history view; ${Math.max(visual.omittedItems, visual.omittedMessages)} older item(s) remain available to the model on continue.`,
+        );
+      }
 
       // Seed tool output spools so click-to-pager still has bodies.
       for (const [toolCallId, output] of hydrated.toolOutputs) {

@@ -35,7 +35,7 @@ import {
   updateConfig,
 } from "./store/config.js";
 import {
-  listSessions,
+  listSessionSummaries,
   upsertSession,
   clearAllHistory,
   getSession,
@@ -175,17 +175,7 @@ function isAbortLikeError(error: unknown): boolean {
   return false;
 }
 
-/**
- * Build an OCR text layer for attached images. Some providers/proxies accept
- * multimodal `image_url` parts but silently ignore the bytes upstream — the
- * model then hallucinates an answer from the filename ("Screenshot…AM.png" →
- * "a dark terminal"). To make image handling robust regardless of whether the
- * provider's vision actually fired, we OCR each attached image locally and
- * append the extracted text as supplementary grounding. Vision models still
- * get the real bytes for colors/layout/style; this only ADDS a safety net.
- *
- * Best-effort: if tesseract is missing or OCR yields nothing, returns "".
- */
+
 async function buildImageOcrGrounding(
   line: string,
   baseDir: string,
@@ -302,9 +292,7 @@ async function streamWithAbort(
   try {
     const raw = await run(signal, onToken, setStatus);
     spinner.stop();
-    // Flush the live-display pipeline, but trust the returned text as the
-    // authoritative answer (the live stream may briefly mirror a tool-call
-    // preamble during ask-mode research rounds).
+
     parser.finish();
     const result = rememberThinkingFromText(raw);
     if (sawToken) {
@@ -364,9 +352,7 @@ async function withAbortableInput<T>(
   } finally {
     input.off("data", abortFromRawData);
     currentAbortController = null;
-    // Keep stdin raw/resumed for the next prompt. Toggling back to cooked mode
-    // between a response and the following prompt can leave PowerShell waiting
-    // for Enter before keypress events flow again.
+
     if (input.isTTY) input.setRawMode(true);
     input.resume();
   }
@@ -390,10 +376,7 @@ function help(): string {
   );
 }
 
-/** Generic inline picker — renders a filterable list below the current cursor
- *  position and returns the selected value on Enter, or undefined on Escape.
- *  Supports: typing to filter, ↑/↓ to navigate, Tab to fill the filter with
- *  the highlighted item's value, Enter to confirm, Escape to cancel. */
+
 async function pickInline<T>(options: {
   items: { label: string; value: T; filterText: string }[];
   header?: string;
@@ -730,11 +713,7 @@ function maybePrintThinkingTip(provider: ProviderId, model: string): void {
   );
 }
 
-/**
- * Ask mode hit a task that needs actions it can't perform. Show the model's
- * (cleaned) explanation, then prompt the user to switch into agent mode and
- * run the task there. Returns the text to record as the assistant turn.
- */
+
 async function offerAgentSwitch(
   info: AskActionRequired,
   state: {
@@ -799,12 +778,7 @@ async function offerAgentSwitch(
   );
 }
 
-/**
- * Save or update the classic REPL's single history row for this run. The
- * first call creates a record and remembers its id on `state.historyId`;
- * every later call (a further /new flush, /history resume, or exit) updates
- * that same row instead of minting a fresh, unnamed duplicate.
- */
+
 async function persistSession(
   state: {
     messages: ChatMessage[];
@@ -1064,33 +1038,19 @@ async function handleSlash(
       return true;
     }
     case "/history": {
-      const sessions = await listSessions(50, { recovery: "background" });
+      const sessions = await listSessionSummaries(50, { recovery: "background" });
       if (sessions.length === 0) {
         console.log(chalk.dim("  no saved sessions"));
         return true;
       }
 
-      // Derive a readable name from first user message if name is an auto-generated repl-<iso>
-      const sessionLabel = (s: (typeof sessions)[0]): string => {
-        let name = s.name ?? s.id;
-        // If the name is an auto-generated "repl-..." fallback, derive from first user msg
-        if (name.startsWith("repl-")) {
-          const firstUser = s.messages.find((m) => m.role === "user");
-          if (firstUser) {
-            const preview = firstUser.content
-              .slice(0, 60)
-              .replace(/\n/g, " ")
-              .trim();
-            name = preview + (firstUser.content.length > 60 ? "…" : "");
-          }
-        }
-        return name;
-      };
+      const sessionLabel = (s: (typeof sessions)[0]): string =>
+        s.name?.trim() || s.id;
 
       const items = sessions.map((s) => {
         const name = sessionLabel(s);
         const date = chalk.dim(s.createdAt.replace("T", " ").slice(0, 19));
-        const msgs = chalk.dim(`(${s.messages.length} msgs)`);
+        const msgs = chalk.dim(`(${s.messageCount} msgs)`);
         const label = `${date}  ${chalk.white(name)}  ${msgs}`;
         return { label, value: s.id, filterText: `${name} ${s.createdAt}` };
       });
@@ -1129,9 +1089,26 @@ async function handleSlash(
         code: session.workspaceCode,
       });
 
-      // Replay messages
+      // Replay only a recent visual tail; the full path-backed model history is
+      // installed below for an explicit continuation.
       console.log(chalk.dim(`\n  ── resuming session ──\n`));
-      for (const msg of session.messages) {
+      const displayMessages = session.messages
+        .filter((message) =>
+          message.role === "user" || message.role === "assistant",
+        )
+        .slice(-120);
+      const omittedDisplay =
+        session.messages.filter((message) =>
+          message.role === "user" || message.role === "assistant",
+        ).length - displayMessages.length;
+      if (omittedDisplay > 0) {
+        console.log(
+          chalk.dim(
+            `  … ${omittedDisplay} older messages omitted from initial display …\n`,
+          ),
+        );
+      }
+      for (const msg of displayMessages) {
         if (msg.role === "user") {
           console.log(`${PROMPT}${chalk.white(msg.content)}`);
         } else if (msg.role === "assistant") {
@@ -1665,10 +1642,6 @@ export async function startRepl(options: ReplOptions = {}): Promise<void> {
 
   emitKeypressEvents(input);
 
-  // Survive stray promise rejections (eg AbortError from a cancelled
-  // SSE reader) without killing the REPL. Anything that ends up here
-  // is a bug — log it dim and keep the prompt alive so the user
-  // doesn't lose their session over a transient network hiccup.
   const handleUnhandledRejection = (reason: unknown): void => {
     if (isAbortLikeError(reason)) return; // expected during ESC/abort
     const message = reason instanceof Error ? reason.message : String(reason);
@@ -1705,14 +1678,9 @@ export async function startRepl(options: ReplOptions = {}): Promise<void> {
         process.stdout.write(chalk.dim("\n  (no tool output to expand yet)\n"));
         return;
       }
-      // Never open the pager while the agent is actively running. The
-      // pager takes over all keypress handling (isPagerActive() causes
-      // the main handler to bail), which makes ESC / Ctrl+C abort
-      // impossible. Only open when we're idle at the prompt.
+
       if (currentAbortController || !isReadingPrompt) {
-        // Give the user something actionable instead of a silent no-op:
-        // point at the live artifact file they can tail in another shell,
-        // and remind them how to open it once the run finishes.
+
         if (v.artifactPath) {
           process.stdout.write(
             chalk.dim(
@@ -1814,10 +1782,7 @@ export async function startRepl(options: ReplOptions = {}): Promise<void> {
     // SIGINFO is macOS/BSD-specific; other platforms can still use /think.
   }
   let lastSigintAt = 0;
-  // Ctrl+C while streaming → abort. While idle at a prompt, the
-  // readPromptLine handler clears the line on first press and exits on
-  // second press within 1s; so SIGINT here only acts as a fallback for
-  // the rare case where no prompt or stream is active.
+
   const handleSigint = (): void => {
     if (currentAbortController) {
       currentAbortController.abort();

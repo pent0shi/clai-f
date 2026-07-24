@@ -195,6 +195,12 @@ export function createCompositionRoot(
     },
   });
   sessionRef = session;
+  const unsubscribePlanJobs = ports.jobs.subscribe((change) => {
+    if (change.type !== "notification") return;
+    const job = ports.jobs.get(change.jobId);
+    if (!job || job.ownerSessionId !== session.sessionId) return;
+    void plan.refresh(session.sessionId);
+  });
 
   const commands = buildDefaultCommandRegistry();
   const router = new ActionRouter();
@@ -230,6 +236,7 @@ export function createCompositionRoot(
     dispose() {
       if (disposed) return;
       disposed = true;
+      unsubscribePlanJobs();
       overlay.dispose();
       selection.dispose();
       toast.dispose();

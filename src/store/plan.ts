@@ -690,9 +690,13 @@ export function markTask(
   return true;
 }
 
-/** Mark the first not-yet-finished task as the given state. */
+/** Mark the first not-yet-finished foreground task as the given state. */
 export function markNextTask(plan: SessionPlan, state: TaskState): PlanTask | undefined {
-  const task = plan.tasks.find((t) => t.state === "pending" || t.state === "in_progress");
+  const task = plan.tasks.find(
+    (candidate) =>
+      !candidate.responderOwned &&
+      (candidate.state === "pending" || candidate.state === "in_progress"),
+  );
   if (!task) return undefined;
   task.state = state;
   plan.version = (plan.version ?? 1) + 1;
@@ -700,24 +704,36 @@ export function markNextTask(plan: SessionPlan, state: TaskState): PlanTask | un
   return task;
 }
 
+function foregroundTasks(plan: SessionPlan): PlanTask[] {
+  return plan.tasks.filter((task) => !task.responderOwned);
+}
+
 export function planProgress(plan: SessionPlan): { done: number; total: number } {
-  const done = plan.tasks.filter((t) => t.state === "done").length;
-  return { done, total: plan.tasks.length };
+  const foreground = foregroundTasks(plan);
+  const done = foreground.filter((task) => task.state === "done").length;
+  return { done, total: foreground.length };
 }
 
 export function isPlanTerminal(plan: SessionPlan): boolean {
+  const foreground = foregroundTasks(plan);
   return (
-    plan.tasks.length > 0 &&
-    plan.tasks.every(
-      (t) => t.state === "done" || t.state === "skipped" || t.state === "failed",
+    foreground.length > 0 &&
+    foreground.every(
+      (task) =>
+        task.state === "done" ||
+        task.state === "skipped" ||
+        task.state === "failed",
     )
   );
 }
 
 export function isPlanSuccessful(plan: SessionPlan): boolean {
+  const foreground = foregroundTasks(plan);
   return (
-    plan.tasks.length > 0 &&
-    plan.tasks.every((t) => t.state === "done" || t.state === "skipped")
+    foreground.length > 0 &&
+    foreground.every(
+      (task) => task.state === "done" || task.state === "skipped",
+    )
   );
 }
 

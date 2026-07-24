@@ -12,6 +12,12 @@ export function createCurrentJobsPort(manager: JobManager = jobManager): JobsPor
     stop: (id) => manager.stopJob(id),
     start: (command, options) => manager.startJob(command, options),
     pendingNotifications: (sessionId) => manager.getPendingNotifications(sessionId),
+    activateResponderLease: (sessionId) => manager.activateResponderLease(sessionId),
+    getResponderLeaseId: (sessionId) => manager.getResponderLeaseId(sessionId),
+    releaseResponderLease: (sessionId, leaseId) =>
+      manager.releaseResponderLease(sessionId, leaseId),
+    claimNextResponderNotification: (sessionId, leaseId) =>
+      manager.claimNextResponderNotification(sessionId, leaseId),
     markDelivered: (notificationId) => manager.markDelivered(notificationId),
     markAnalyzed: (notificationId) => manager.markAnalyzed(notificationId),
     acknowledge: (notificationId) => manager.acknowledge(notificationId),

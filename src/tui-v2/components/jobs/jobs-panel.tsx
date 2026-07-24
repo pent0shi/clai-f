@@ -18,6 +18,8 @@ import { formatJobElapsed } from "../../../tools/jobs.js";
 import type { AppServices } from "../../bootstrap/composition-root.js";
 import type { Theme } from "../../rendering/theme.js";
 import { chordFromKeyEvent } from "../../actions/chord-from-key.js";
+import { useSessionState } from "../../state/use-session-state.js";
+import { responderStatusText } from "../status/status-line.js";
 
 export interface JobsPanelProps {
   readonly services: AppServices;
@@ -54,9 +56,17 @@ function statusView(job: BackgroundJob, theme: Theme): { text: string; fg: strin
 // pending = an unacknowledged completion receipt exists.
 function jobPhase(
   job: BackgroundJob,
-  pending: boolean,
+  notification?: ResponderNotification,
 ): { glyph: string; label: string } {
-  if (pending) return { glyph: "✓", label: "result ready" };
+  if (notification?.archivedAt) return { glyph: "◇", label: "archived" };
+  if (notification?.deliveredAt && !notification.analyzedAt) {
+    return { glyph: "→", label: "delivered" };
+  }
+  if (notification) {
+    return notification.status === "exited"
+      ? { glyph: "✓", label: "result ready" }
+      : { glyph: "✗", label: "failed result" };
+  }
   switch (job.status) {
     case "starting":
     case "running":
@@ -76,6 +86,7 @@ function jobPhase(
 
 export function JobsPanel(props: JobsPanelProps): ReactNode {
   const { services, theme } = props;
+  const sessionState = useSessionState(services.session);
   // Session-scoped durable jobs only (same filter as shell.jobs).
   const readJobs = (): BackgroundJob[] => {
     const sessionId = services.session.sessionId;
@@ -141,10 +152,10 @@ export function JobsPanel(props: JobsPanelProps): ReactNode {
   const titleLine = `Background jobs · session ${services.session.sessionId}`;
   const helpLine =
     "up/down:select · enter/t:tail · k:kill · q/esc:close";
-  const pendingIds = new Set(
+  const notificationByJob = new Map(
     services.ports.jobs
       .pendingNotifications(services.session.sessionId)
-      .map((notification) => notification.jobId),
+      .map((notification) => [notification.jobId, notification]),
   );
 
   return (
@@ -173,6 +184,18 @@ export function JobsPanel(props: JobsPanelProps): ReactNode {
         }}
       />
       <text
+        content={responderStatusText(sessionState.responder)}
+        wrapMode="none"
+        style={{
+          fg:
+            sessionState.responder.mode === "listening"
+              ? theme.cyan
+              : theme.muted,
+          height: 1,
+          width: "100%",
+        }}
+      />
+      <text
         content={"─".repeat(Math.min(48, helpLine.length + 4))}
         wrapMode="none"
         style={{ fg: theme.border, height: 1, width: "100%" }}
@@ -191,8 +214,8 @@ export function JobsPanel(props: JobsPanelProps): ReactNode {
         jobs.map((job, index) => {
           const status = statusView(job, theme);
           const focused = index === selected;
-          const ready = pendingIds.has(job.id);
-          const phase = jobPhase(job, ready);
+          const notification = notificationByJob.get(job.id);
+          const phase = jobPhase(job, notification);
           const kindTag = job.responder ? "responder" : "background";
           const linkage = [
             job.parentTaskId ? `parent=${job.parentTaskId}` : undefined,
@@ -206,7 +229,7 @@ export function JobsPanel(props: JobsPanelProps): ReactNode {
           // Line 2: kind + linkage ids. Line 3: full command, word-wrapped so
           // long fuzzers/URLs are always readable. Blank spacer separates jobs.
           const marker = focused ? "❯ " : "  ";
-          const headline = `${marker}${phase.glyph} ${status.text}${ready ? " · result ready" : ""}  ·  ${formatJobElapsed(job, now)}`;
+          const headline = `${marker}${phase.glyph} ${status.text} · ${phase.label}  ·  ${formatJobElapsed(job, now)}`;
           const meta = `    ${kindTag} · ${linkage}`;
           const command = job.name ? `${job.name}: ${job.command}` : job.command;
           return (
@@ -306,16 +329,18 @@ function responderStatusColor(job: BackgroundJob, theme: Theme): string {
 
 function responderHeadline(
   job: BackgroundJob,
-  pending: boolean,
+  notification: ResponderNotification | undefined,
   now: number,
 ): string {
-  const { glyph, label } = jobPhase(job, pending);
+  const { glyph, label } = jobPhase(job, notification);
   const taskRef = job.taskId ? ` · task ${job.taskId}` : "";
   return `${glyph} ${label} · ${formatJobElapsed(job, now)}${taskRef}`;
 }
 
 export function ResponderPanel(props: ResponderPanelProps): ReactNode {
   const { services, theme, width, blockingOverlay } = props;
+  const sessionState = useSessionState(services.session);
+  const responderState = sessionState.responder;
   const [collapsed, setCollapsed] = useState(false);
   const [projection, setProjection] = useState(() =>
     readResponderProjection(services),
@@ -336,22 +361,28 @@ export function ResponderPanel(props: ResponderPanelProps): ReactNode {
     };
   }, [services.ports.jobs, services.session.sessionId]);
 
-  const pendingIds = useMemo(
-    () => new Set(
-      projection.notifications.map((notification) => notification.jobId),
-    ),
+  const notificationByJob = useMemo(
+    () =>
+      new Map(
+        projection.notifications.map((notification) => [
+          notification.jobId,
+          notification,
+        ]),
+      ),
     [projection.notifications],
   );
-  const liveCount = projection.jobs.filter((job) =>
-    ["starting", "running", "stopping"].includes(job.status),
-  ).length;
-  const readyCount = projection.notifications.length;
+  const liveCount = responderState.running;
+  const readyCount = responderState.ready;
   // The agent is "parked on the Responder" when it is idle but delegated jobs
   // are still running: no turn is live, yet work it is waiting on continues in
   // the background. Surfaced with a distinct amber state + a one-time toast so
   // a stopped-looking agent is never mistaken for a dead one.
-  const sessionRunning = services.session.getState().running;
-  const waiting = !sessionRunning && liveCount > 0 && readyCount === 0;
+  const sessionRunning = sessionState.running;
+  const waiting =
+    responderState.mode === "listening" &&
+    !sessionRunning &&
+    liveCount > 0 &&
+    readyCount === 0;
 
   const waitingRef = useRef(false);
   useEffect(() => {
@@ -374,17 +405,18 @@ export function ResponderPanel(props: ResponderPanelProps): ReactNode {
 
   const shown = projection.jobs.slice(0, RESPONDER_MAX_ROWS);
   const hidden = Math.max(0, projection.jobs.length - shown.length);
-  const stateColor = readyCount > 0
+  const stateColor = responderState.ready > 0
     ? theme.success
-    : waiting
-      ? theme.mode
-      : theme.cyan;
-  const statusText = readyCount > 0
-    ? `${readyCount} result${readyCount > 1 ? "s" : ""} ready → delivering to agent`
-    : waiting
-      ? `waiting · ${liveCount} running (agent resumes on completion)`
-      : `${liveCount} active`;
-  const header = `${collapsed ? "▸" : "▾"} Responder · ${statusText}`;
+    : responderState.mode === "listening"
+      ? theme.cyan
+      : responderState.archived > 0
+        ? theme.queued
+        : theme.muted;
+  const statusText = responderStatusText(responderState).replace(
+    /^Responder:\s*/,
+    "",
+  );
+  const header = `${collapsed ? "▸" : "▾"} Responder: ${statusText}`;
 
   function toggle(event: MouseEvent): void {
     event.preventDefault();
@@ -433,7 +465,7 @@ export function ResponderPanel(props: ResponderPanelProps): ReactNode {
               style={{ flexDirection: "column", width: "100%", flexShrink: 0 }}
             >
               <text
-                content={`  ${responderHeadline(job, pendingIds.has(job.id), now)}`}
+                content={`  ${responderHeadline(job, notificationByJob.get(job.id), now)}`}
                 wrapMode="none"
                 style={{
                   width: "100%",

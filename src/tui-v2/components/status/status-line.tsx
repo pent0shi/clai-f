@@ -12,7 +12,10 @@
 
 import { useEffect, useState, type ReactNode } from "react";
 import { TextAttributes } from "@opentui/core";
-import type { SessionController } from "../../../app/controllers/session-controller.js";
+import type {
+  SessionController,
+} from "../../../app/controllers/session-controller.js";
+import type { ResponderRuntimeState } from "../../../app/controllers/session-responder.js";
 import type { Mode } from "../../../types.js";
 import {
   formatContextChip,
@@ -84,6 +87,23 @@ export function tasksToggleLabel(
   if (d === "xs" || d === "sm") return "^H";
   if (d === "md") return visible ? "^H hide" : "^H show";
   return visible ? "^H · hide" : "^H · show";
+}
+
+export function responderStatusText(
+  state: ResponderRuntimeState,
+  compact = false,
+): string {
+  if (state.mode === "idle") return compact ? "R: idle" : "Responder: idle";
+  if (state.mode === "off") {
+    const pending = state.running + state.ready + state.delivered + state.archived;
+    const body = pending > 0 ? `off · ${pending} pending` : "off";
+    return compact ? `R: ${body}` : `Responder: ${body}`;
+  }
+  const parts = [`${state.running} running`];
+  if (state.ready > 0) parts.push(`${state.ready} ready`);
+  if (state.delivered > 0) parts.push(`${state.delivered} delivered`);
+  const body = `listening · ${parts.join(" · ")}`;
+  return compact ? `R: ${body}` : `Responder: ${body}`;
 }
 
 function clip(value: string, max: number): string {
@@ -416,6 +436,16 @@ export function StatusLine(props: StatusLineProps): ReactNode {
               style={{ fg: theme.activity, flexShrink: 1 }}
             />
           ) : null}
+          {density === "lg" ? (
+            <>
+              {sep(theme)}
+              <text
+                selectable={false}
+                content={responderStatusText(state.responder)}
+                style={{ fg: theme.muted, flexShrink: 0 }}
+              />
+            </>
+          ) : null}
           {/* Double Esc cancels turn, queue, and Responder jobs; click is explicit. */}
           {density !== "xs" && !state.compacting ? (
             <>
@@ -512,6 +542,26 @@ export function StatusLine(props: StatusLineProps): ReactNode {
         }}
       >
         <ModeBadge mode={mode} theme={theme} short={shortMode} />
+
+        {density !== "xs" ? (
+          <>
+            {sep(theme)}
+            <text
+              selectable={false}
+              content={responderStatusText(
+                state.responder,
+                density === "sm",
+              )}
+              style={{
+                fg:
+                  state.responder.mode === "listening"
+                    ? theme.cyan
+                    : theme.muted,
+                flexShrink: 0,
+              }}
+            />
+          </>
+        ) : null}
 
         {/* Shift+Tab mode cycle hint (click to cycle ask → agent → plan) */}
         {density !== "xs" ? (

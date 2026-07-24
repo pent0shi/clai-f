@@ -11,25 +11,26 @@ function def(
   parameters: ToolDefinition["parameters"],
   flags: Partial<Pick<ToolDefinition, "readOnly" | "mutates" | "askMode">> = {},
 ): ToolDefinition {
-  // Every tool accepts the same outer wall-clock budget. Individual tools may
-  // also consume timeoutMs locally so sockets/processes are torn down cleanly;
-  // the runner remains the final safety net for implementations that do not.
-  const timedParameters: ToolDefinition["parameters"] = {
-    ...parameters,
-    properties: {
-      ...(parameters.properties ?? {}),
-      timeoutMs: {
-        type: "integer",
-        minimum: 1_000,
-        maximum: 1_800_000,
-        description:
-          "Wall-clock timeout in milliseconds (default 40000). Choose a larger value when the operation is expected to take longer.",
-        ...((parameters.properties?.timeoutMs as
-          | Record<string, unknown>
-          | undefined) ?? {}),
-      },
-    },
-  };
+  // shell.start launches a durable process with no generic execution deadline.
+  const timedParameters: ToolDefinition["parameters"] =
+    name === "shell.start"
+      ? parameters
+      : {
+          ...parameters,
+          properties: {
+            ...(parameters.properties ?? {}),
+            timeoutMs: {
+              type: "integer",
+              minimum: 1_000,
+              maximum: 1_800_000,
+              description:
+                "Wall-clock timeout in milliseconds (default 40000). Choose a larger value when the operation is expected to take longer.",
+              ...((parameters.properties?.timeoutMs as
+                | Record<string, unknown>
+                | undefined) ?? {}),
+            },
+          },
+        };
   // Primary wire keeps camelCase (fs_writeMany); also register snake alias.
   const wireName = registerWireNamesFor(name);
   return {
@@ -290,18 +291,13 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   ),
   def(
     "shell.start",
-    "Start a persistent server/watcher/listener as a tracked background job. Returns a stable job id and persists registry/status across turns and CLI restarts. Captured output is incrementally available while this CLI process owns the child pipes; after a restart, status is reconciled but detached output pipes cannot be reattached. Launch success does not prove readiness: use shell.tail with offset/nextOffset, shell.jobs, and an application readiness probe. Do not start duplicates; use shell.stop for cleanup. If timeoutMs is supplied it becomes the job execution deadline; finite installs/builds belong in shell.exec with an appropriate timeoutMs. Servers do not self-complete, so leave responder off here and poll/probe as usual.",
+    "Start a persistent server/watcher/listener as a tracked background job. Returns a stable job id and persists registry/status across turns and CLI restarts. Captured output is incrementally available while this CLI process owns the child pipes; after a restart, status is reconciled but detached output pipes cannot be reattached. Launch success does not prove readiness: use shell.tail with offset/nextOffset, shell.jobs, and an application readiness probe. Do not start duplicates; use shell.stop for cleanup. Durable background jobs have no generic execution deadline and stop only naturally, by explicit cancellation, process error, or authorization expiry. Servers do not self-complete, so leave responder off here and poll/probe as usual.",
     {
       type: "object",
       properties: {
         command: { type: "string" },
         cwd: { type: "string" },
         name: { type: "string" },
-        timeoutMs: {
-          type: "integer",
-          description:
-            "Optional execution deadline for the background job in milliseconds; omitted means no job deadline.",
-        },
         responder: {
           type: "boolean",
           description:

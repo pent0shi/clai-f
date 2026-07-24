@@ -108,6 +108,24 @@ describe("PlanController observability (V2-070)", () => {
     expect(notifications).toBe(afterLoad);
   });
 
+  it("refreshes the active plan without clearing and rejects cross-session refresh", async () => {
+    const persistence = fakePersistence();
+    persistence.saved.push(plan());
+    const controller = new PlanController(persistence);
+    await controller.load("s1");
+    let notifications = 0;
+    controller.subscribe(() => (notifications += 1));
+
+    persistence.saved[0] = plan({ status: "completed" });
+    await controller.refresh("s1");
+    expect(controller.current()?.status).toBe("completed");
+    expect(notifications).toBe(1);
+
+    await controller.refresh("another-session");
+    expect(controller.current()?.sessionId).toBe("s1");
+    expect(notifications).toBe(1);
+  });
+
   it("unsubscribe stops further notifications", () => {
     const controller = new PlanController(fakePersistence());
     let notifications = 0;

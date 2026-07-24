@@ -11,7 +11,6 @@ import {
   utimes,
   writeFile,
   chown,
-  rename,
 } from "node:fs/promises";
 import { join } from "node:path";
 import {
@@ -32,6 +31,17 @@ import { safeCwd } from "../os/cwd.js";
 import { fixOwner, fixOwnerSync, handlePermissionError, safeExists } from "../os/permissions.js";
 import { getHistoryDir } from "./paths.js";
 import { getActiveSessionWorkspace } from "./session-workspace.js";
+import {
+  findHistoryRecordStreaming,
+  historySummary,
+  readIndexedHistoryRecord,
+  readValidatedHistoryIndex,
+  rebuildHistoryIndex,
+  writeIndexedJsonl,
+  type HistorySummary,
+} from "./history-index.js";
+
+export type { HistorySummary } from "./history-index.js";
 
 /** Live paths so CLAI_DATA_DIR / CLAI_HISTORY_DIR always apply (and tests work). */
 function historyDirPath(): string {
@@ -42,6 +52,9 @@ function dbFilePath(): string {
 }
 function jsonlFilePath(): string {
   return join(historyDirPath(), "history.jsonl");
+}
+function jsonlIndexFilePath(): string {
+  return join(historyDirPath(), "history.index.json");
 }
 function jsonlLockFilePath(): string {
   return join(historyDirPath(), "history.jsonl.lock");
@@ -156,7 +169,12 @@ type DatabaseCtor = new (path: string) => DatabaseLike;
 let cachedDb: DatabaseLike | undefined;
 let sqliteUnavailable = false;
 let cachedSessionList:
-  | { historyDir: string; records: HistoryRecord[]; cachedAt: number }
+  | {
+      historyDir: string;
+      summaries: HistorySummary[];
+      cachedAt: number;
+      coversAll: boolean;
+    }
   | undefined;
 let sessionListGeneration = 0;
 /** Keep repeated /history opens fast while bounding cross-process staleness. */
@@ -188,6 +206,9 @@ async function loadDatabase(): Promise<DatabaseLike | undefined> {
         writer_generation TEXT,
         revision INTEGER NOT NULL DEFAULT 0,
         cwd TEXT NOT NULL,
+        message_count INTEGER NOT NULL DEFAULT 0,
+        item_count INTEGER NOT NULL DEFAULT 0,
+        has_images INTEGER NOT NULL DEFAULT 0,
         messages_json TEXT NOT NULL
       );
       CREATE TABLE IF NOT EXISTS tool_calls (
@@ -213,6 +234,21 @@ async function loadDatabase(): Promise<DatabaseLike | undefined> {
     if (!sessionColumns.some((column) => column.name === "revision")) {
       cachedDb.exec(
         "ALTER TABLE sessions ADD COLUMN revision INTEGER NOT NULL DEFAULT 0;",
+      );
+    }
+    if (!sessionColumns.some((column) => column.name === "message_count")) {
+      cachedDb.exec(
+        "ALTER TABLE sessions ADD COLUMN message_count INTEGER NOT NULL DEFAULT 0;",
+      );
+    }
+    if (!sessionColumns.some((column) => column.name === "item_count")) {
+      cachedDb.exec(
+        "ALTER TABLE sessions ADD COLUMN item_count INTEGER NOT NULL DEFAULT 0;",
+      );
+    }
+    if (!sessionColumns.some((column) => column.name === "has_images")) {
+      cachedDb.exec(
+        "ALTER TABLE sessions ADD COLUMN has_images INTEGER NOT NULL DEFAULT 0;",
       );
     }
     return cachedDb;
@@ -245,17 +281,32 @@ function scrubMessages(messages: ChatMessage[]): ChatMessage[] {
   });
 }
 
-function hydrateMessageImages(messages: ChatMessage[]): ChatMessage[] {
+const MAX_RESTORED_IMAGE_COUNT = 6;
+const MAX_RESTORED_IMAGE_BYTES = 15_000_000;
+
+export function materializeHistoryImages(
+  messages: readonly ChatMessage[],
+): ChatMessage[] {
+  let imageCount = 0;
+  let totalBytes = 0;
   return messages.map((message) => {
-    if (!message.images?.length) return message;
+    if (!message.images?.length) return { ...message };
     const images = message.images.flatMap((image): ChatImage[] => {
       if (image.dataBase64) return [image];
-      if (!image.path) return [];
+      if (!image.path || imageCount >= MAX_RESTORED_IMAGE_COUNT) return [];
       try {
-        if (statSync(image.path).size > MAX_IMAGE_BYTES) return [];
+        const size = statSync(image.path).size;
+        if (
+          size > MAX_IMAGE_BYTES ||
+          totalBytes + size > MAX_RESTORED_IMAGE_BYTES
+        ) {
+          return [];
+        }
         const bytes = readFileSync(image.path);
         const mediaType = detectModelImageMediaType(bytes);
         if (!mediaType) return [];
+        imageCount += 1;
+        totalBytes += bytes.length;
         return [
           {
             mediaType,
@@ -502,18 +553,6 @@ export function compareHistoryFreshness(
   return updatedAtMs(left) - updatedAtMs(right);
 }
 
-function freshestHistoryRecord(
-  records: readonly HistoryRecord[],
-): HistoryRecord | undefined {
-  let freshest: HistoryRecord | undefined;
-  for (const record of records) {
-    if (!freshest || compareHistoryFreshness(record, freshest) > 0) {
-      freshest = record;
-    }
-  }
-  return freshest;
-}
-
 /** Keep the newest captured version of each session id. */
 export function dedupeHistoryById(
   records: readonly HistoryRecord[],
@@ -614,112 +653,102 @@ async function backupActiveHistory(): Promise<void> {
   }
 }
 
-/**
- * Scan leftover write temps + the archive for sessions missing from the
- * active file and merge them back. Fixes history that was pruned by the old
- * slice(-200) retention or left in .tmp after a crashed rename.
- */
+// Restore backups only for a missing/corrupt active file, then merge orphan write temps.
 export async function recoverOrphanedHistory(): Promise<{
   recovered: number;
   sources: string[];
 }> {
   const sources: string[] = [];
-  const extras: HistoryRecord[] = [];
+  const tempSources: string[] = [];
   const releaseLock = await acquireJsonlWriteLock();
   try {
+    const activePath = jsonlFilePath();
+    const activeExists = await safeExists(activePath);
+    let activeCorrupt = false;
+    let active: HistoryRecord[] = [];
+    if (activeExists) {
+      try {
+        const raw = await readFile(activePath, "utf8");
+        const lines = raw.split("\n").filter((line) => line.trim().length > 0);
+        for (const line of lines) {
+          try {
+            active.push(JSON.parse(line) as HistoryRecord);
+          } catch {
+            activeCorrupt = true;
+          }
+        }
+      } catch (error: any) {
+        if (error?.code === "EACCES") handlePermissionError(error);
+        activeCorrupt = true;
+      }
+    }
 
-  try {
-    const names = await readdir(historyDirPath());
-    for (const name of names) {
-      // Live write temps: history.jsonl.<pid>.<stamp>.tmp
-      if (
-        name.startsWith("history.jsonl.") &&
-        name.endsWith(".tmp")
-      ) {
+    const backupRecords: HistoryRecord[] = [];
+    if (!activeExists || activeCorrupt) {
+      try {
+        const backups = (await readdir(backupDirPath()))
+          .filter((name) => name.startsWith("history-") && name.endsWith(".jsonl"))
+          .sort()
+          .reverse();
+        for (const name of backups) {
+          const rows = await readJsonlRecordsFrom(join(backupDirPath(), name));
+          if (rows.length === 0) continue;
+          backupRecords.push(...rows);
+          sources.push(`history-backups/${name}`);
+          break;
+        }
+      } catch {
+        // No usable backup directory.
+      }
+    }
+
+    const extras: HistoryRecord[] = [];
+    try {
+      const names = await readdir(historyDirPath());
+      for (const name of names) {
+        if (!name.startsWith("history.jsonl.") || !name.endsWith(".tmp")) {
+          continue;
+        }
         const path = join(historyDirPath(), name);
         const rows = await readJsonlRecordsFrom(path);
         if (rows.length === 0) {
-          // Empty crash leftovers — safe to remove.
           await rm(path, { force: true }).catch(() => undefined);
           continue;
         }
         extras.push(...rows);
         sources.push(name);
+        tempSources.push(name);
       }
+    } catch {
+      // History directory may not exist yet.
     }
-  } catch {
-    /* dir may not exist yet */
-  }
 
-  // Also fold in archive (sessions previously pruned).
-  if (await safeExists(archiveFilePath())) {
-    const archived = await readJsonlRecordsFrom(archiveFilePath());
-    if (archived.length > 0) {
-      extras.push(...archived);
-      sources.push("history-archive.jsonl");
-    }
-  }
+    const activeById = new Map(active.map((record) => [record.id, record]));
+    const merged = dedupeHistoryById([...active, ...backupRecords, ...extras]);
+    const recoveredCount = merged.filter((record) => {
+      const previous = activeById.get(record.id);
+      return !previous || compareHistoryFreshness(record, previous) > 0;
+    }).length;
+    const needsRewrite =
+      activeCorrupt ||
+      (!activeExists && backupRecords.length > 0) ||
+      recoveredCount > 0;
+    if (!needsRewrite) return { recovered: 0, sources };
 
-  // Rolling backups (last-resort recovery of wiped active files).
-  try {
-    if (await safeExists(backupDirPath())) {
-      const backups = (await readdir(backupDirPath()))
-        .filter((n) => n.startsWith("history-") && n.endsWith(".jsonl"))
-        .sort()
-        .reverse()
-        .slice(0, 3);
-      for (const name of backups) {
-        const rows = await readJsonlRecordsFrom(join(backupDirPath(), name));
-        if (rows.length > 0) {
-          extras.push(...rows);
-          sources.push(`history-backups/${name}`);
-        }
-      }
-    }
-  } catch {
-    /* ignore */
-  }
+    await mkdir(historyDirPath(), { recursive: true });
+    await fixOwner(historyDirPath());
+    if (activeExists && !activeCorrupt) await backupActiveHistory();
+    const sorted = sortHistoryByUpdatedDesc(merged);
+    sorted.reverse();
+    await writeIndexedJsonl(activePath, jsonlIndexFilePath(), sorted);
+    await Promise.all([
+      fixOwner(activePath),
+      fixOwner(jsonlIndexFilePath()),
+    ]);
 
-  if (extras.length === 0) return { recovered: 0, sources: [] };
-
-  const active = await readJsonlRecordsFrom(jsonlFilePath());
-  const activeById = new Map(active.map((record) => [record.id, record]));
-  const merged = dedupeHistoryById([...active, ...extras]);
-  const recoveredCount = merged.filter((record) => {
-    const previous = activeById.get(record.id);
-    return !previous || compareHistoryFreshness(record, previous) > 0;
-  }).length;
-  if (recoveredCount === 0) {
-    return { recovered: 0, sources };
-  }
-
-  // Write WITHOUT applying retention so recovery cannot re-prune.
-  await mkdir(historyDirPath(), { recursive: true });
-  await fixOwner(historyDirPath());
-  if (await safeExists(jsonlFilePath())) await backupActiveHistory();
-  const sorted = sortHistoryByUpdatedDesc(merged);
-  // Stable chronological file order (oldest first) for append-friendly diffs.
-  sorted.reverse();
-  const body = sorted.length
-    ? `${sorted.map((item) => JSON.stringify(item)).join("\n")}\n`
-    : "";
-  const tmpFile = `${jsonlFilePath()}.recover.${process.pid}.${Date.now().toString(36)}.tmp`;
-  await writeFile(tmpFile, body, { mode: 0o600 });
-  try {
-    await rename(tmpFile, jsonlFilePath());
-  } catch (err) {
-    await rm(tmpFile, { force: true }).catch(() => undefined);
-    throw err;
-  }
-  await fixOwner(jsonlFilePath());
-
-  // Successful recovery: drop non-empty orphan temps we already merged.
-  for (const name of sources) {
-    if (name.startsWith("history.jsonl.") && name.endsWith(".tmp")) {
+    for (const name of tempSources) {
       await rm(join(historyDirPath(), name), { force: true }).catch(() => undefined);
     }
-  }
-
     return { recovered: recoveredCount, sources };
   } finally {
     await releaseLock();
@@ -779,16 +808,15 @@ async function writeJsonlAtomic(records: HistoryRecord[]): Promise<void> {
       // Something went wrong in partitioning — keep the safer set.
       const safe = sortHistoryByUpdatedDesc(dedupeHistoryById(existing));
       safe.reverse();
-      const body = `${safe.map((item) => JSON.stringify(item)).join("\n")}\n`;
-      const tmpFile = `${jsonlFilePath()}.${process.pid}.${Date.now().toString(36)}.tmp`;
-      await writeFile(tmpFile, body, { mode: 0o600 });
-      try {
-        await rename(tmpFile, jsonlFilePath());
-      } catch (err) {
-        await rm(tmpFile, { force: true }).catch(() => undefined);
-        throw err;
-      }
-      await fixOwner(jsonlFilePath());
+      await writeIndexedJsonl(
+        jsonlFilePath(),
+        jsonlIndexFilePath(),
+        safe,
+      );
+      await Promise.all([
+        fixOwner(jsonlFilePath()),
+        fixOwner(jsonlIndexFilePath()),
+      ]);
       return;
     }
   }
@@ -796,29 +824,11 @@ async function writeJsonlAtomic(records: HistoryRecord[]): Promise<void> {
   // File order: oldest → newest (matches classic append style).
   const ordered = sortHistoryByUpdatedDesc(kept);
   ordered.reverse();
-  const body = ordered.length
-    ? `${ordered.map((item) => JSON.stringify(item)).join("\n")}\n`
-    : "";
-  const tmpFile = `${jsonlFilePath()}.${process.pid}.${Date.now().toString(36)}.${Math.random()
-    .toString(36)
-    .slice(2, 8)}.tmp`;
-  await writeFile(tmpFile, body, { mode: 0o600 });
-  try {
-    await rename(tmpFile, jsonlFilePath());
-  } catch (err) {
-    // Keep the temp file on rename failure so recovery can pick it up —
-    // only remove empty temps.
-    try {
-      const st = await readFile(tmpFile).catch(() => null);
-      if (!st || st.length === 0) {
-        await rm(tmpFile, { force: true }).catch(() => undefined);
-      }
-    } catch {
-      /* ignore */
-    }
-    throw err;
-  }
-  await fixOwner(jsonlFilePath());
+  await writeIndexedJsonl(jsonlFilePath(), jsonlIndexFilePath(), ordered);
+  await Promise.all([
+    fixOwner(jsonlFilePath()),
+    fixOwner(jsonlIndexFilePath()),
+  ]);
 }
 
 function serializeSessionPayload(record: HistoryRecord): string {
@@ -837,10 +847,12 @@ function serializeSessionPayload(record: HistoryRecord): string {
 
 /** SQLite mirror write with atomic generation/revision rejection. */
 function upsertSqlite(db: DatabaseLike, record: HistoryRecord): void {
+  const summary = historySummary(record);
   db.prepare(
     `INSERT INTO sessions
-       (id, name, created_at, updated_at, writer_generation, revision, cwd, messages_json)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+       (id, name, created_at, updated_at, writer_generation, revision, cwd,
+        message_count, item_count, has_images, messages_json)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(id) DO UPDATE SET
        name = excluded.name,
        created_at = excluded.created_at,
@@ -848,6 +860,9 @@ function upsertSqlite(db: DatabaseLike, record: HistoryRecord): void {
        writer_generation = excluded.writer_generation,
        revision = excluded.revision,
        cwd = excluded.cwd,
+       message_count = excluded.message_count,
+       item_count = excluded.item_count,
+       has_images = excluded.has_images,
        messages_json = excluded.messages_json
      WHERE (sessions.writer_generation IS NULL AND excluded.writer_generation IS NOT NULL)
         OR excluded.writer_generation > sessions.writer_generation
@@ -863,6 +878,9 @@ function upsertSqlite(db: DatabaseLike, record: HistoryRecord): void {
     historyWriterGeneration(record) ?? null,
     historyRevision(record),
     record.cwd,
+    summary.messageCount,
+    summary.itemCount,
+    summary.hasImages ? 1 : 0,
     serializeSessionPayload(record),
   );
 }
@@ -1103,6 +1121,123 @@ function rowToSession(row: unknown): HistoryRecord {
   };
 }
 
+function rowToSummary(row: unknown): HistorySummary {
+  const data = row as {
+    id: string;
+    name: string | null;
+    created_at: string;
+    updated_at: string;
+    writer_generation?: string | null | undefined;
+    revision?: number | undefined;
+    cwd: string;
+    message_count?: number | undefined;
+    item_count?: number | undefined;
+    has_images?: number | undefined;
+  };
+  return {
+    id: data.id,
+    ...(data.writer_generation
+      ? { writerGeneration: data.writer_generation }
+      : {}),
+    ...(typeof data.revision === "number" && data.revision > 0
+      ? { revision: data.revision }
+      : {}),
+    ...(data.name ? { name: data.name } : {}),
+    createdAt: data.created_at,
+    updatedAt: data.updated_at,
+    cwd: data.cwd,
+    messageCount: Math.max(0, data.message_count ?? 0),
+    itemCount: Math.max(0, data.item_count ?? data.message_count ?? 0),
+    hasImages: data.has_images === 1,
+  };
+}
+
+function sortSummaries(summaries: readonly HistorySummary[]): HistorySummary[] {
+  return [...summaries].sort(
+    (left, right) =>
+      Date.parse(right.updatedAt || right.createdAt) -
+      Date.parse(left.updatedAt || left.createdAt),
+  );
+}
+
+export async function listSessionSummaries(
+  limit = 20,
+  options: { recovery?: "blocking" | "background" } = {},
+): Promise<HistorySummary[]> {
+  if (options.recovery === "blocking") await ensureHistoryRecovered();
+  else void startHistoryRecovery();
+
+  const cacheKey = historyDirPath();
+  const requestedLimit = limit > 0 ? Math.floor(limit) : 0;
+  const now = Date.now();
+  if (
+    cachedSessionList?.historyDir === cacheKey &&
+    now - cachedSessionList.cachedAt <= SESSION_LIST_CACHE_TTL_MS &&
+    (cachedSessionList.coversAll ||
+      (requestedLimit > 0 &&
+        requestedLimit <= cachedSessionList.summaries.length))
+  ) {
+    const cached = cachedSessionList.summaries;
+    return requestedLimit > 0 ? cached.slice(0, requestedLimit) : [...cached];
+  }
+
+  const loadGeneration = sessionListGeneration;
+  let summaries: HistorySummary[] | undefined;
+  let coversAll = false;
+  const entries = await readValidatedHistoryIndex(
+    jsonlFilePath(),
+    jsonlIndexFilePath(),
+  );
+  if (entries) {
+    summaries = sortSummaries(entries.map((entry) => entry.summary));
+    coversAll = true;
+  }
+
+  if (!summaries) {
+    const db = await loadDatabase();
+    if (db) {
+      try {
+        const sql =
+          "SELECT id, name, created_at, updated_at, writer_generation, revision, cwd, " +
+          "message_count, item_count, has_images FROM sessions " +
+          "ORDER BY updated_at DESC" +
+          (requestedLimit > 0 ? " LIMIT ?" : "");
+        const rows = requestedLimit > 0
+          ? db.prepare(sql).all(requestedLimit)
+          : db.prepare(sql).all();
+        summaries = rows.map(rowToSummary);
+        coversAll = requestedLimit === 0 || rows.length < requestedLimit;
+      } catch {
+        summaries = undefined;
+      }
+    }
+  }
+
+  if (!summaries || summaries.length === 0) {
+    const rebuilt = await rebuildHistoryIndex<HistoryRecord>(
+      jsonlFilePath(),
+      jsonlIndexFilePath(),
+    );
+    summaries = sortSummaries(rebuilt.map((entry) => entry.summary));
+    coversAll = true;
+  } else {
+    void rebuildHistoryIndex<HistoryRecord>(
+      jsonlFilePath(),
+      jsonlIndexFilePath(),
+    );
+  }
+
+  if (sessionListGeneration === loadGeneration) {
+    cachedSessionList = {
+      historyDir: cacheKey,
+      summaries,
+      cachedAt: Date.now(),
+      coversAll,
+    };
+  }
+  return requestedLimit > 0 ? summaries.slice(0, requestedLimit) : [...summaries];
+}
+
 async function listJsonlSessions(limit: number): Promise<HistoryRecord[]> {
   try {
     const records = sortHistoryByUpdatedDesc(
@@ -1129,25 +1264,8 @@ export async function listSessions(
   limit = 20,
   options: { recovery?: "blocking" | "background" } = {},
 ): Promise<HistoryRecord[]> {
-  if (options.recovery === "background") {
-    void startHistoryRecovery();
-  } else {
-    await ensureHistoryRecovered();
-  }
-
-  const cacheKey = historyDirPath();
-  const now = Date.now();
-  if (
-    cachedSessionList?.historyDir === cacheKey &&
-    now - cachedSessionList.cachedAt <= SESSION_LIST_CACHE_TTL_MS
-  ) {
-    const cached = cachedSessionList.records;
-    return !limit || limit <= 0 ? [...cached] : cached.slice(0, limit);
-  }
-
-  // Do not let a slow pre-write/pre-recovery read overwrite a newer cache.
-  // Every mutation increments this generation before and after persistence.
-  const loadGeneration = sessionListGeneration;
+  if (options.recovery === "background") void startHistoryRecovery();
+  else await ensureHistoryRecovered();
 
   const [fromJsonl, db] = await Promise.all([
     listJsonlSessions(0),
@@ -1166,60 +1284,57 @@ export async function listSessions(
       fromDb = [];
     }
   }
-  // Active + SQLite only. Archive/pruned sessions are merged back into the
-  // active file by recoverOrphanedHistory() (called on /history open), so
-  // they reappear there rather than staying invisible forever.
   const merged = mergeSessionLists(fromJsonl, fromDb);
-  if (sessionListGeneration === loadGeneration) {
-    cachedSessionList = {
-      historyDir: cacheKey,
-      records: merged,
-      cachedAt: Date.now(),
-    };
-  }
-  if (!limit || limit <= 0) return [...merged];
-  return merged.slice(0, limit);
+  return !limit || limit <= 0 ? merged : merged.slice(0, limit);
 }
 
 export async function getSession(
   sessionId: string,
 ): Promise<HistoryRecord | undefined> {
-  await ensureHistoryRecovered();
+  void startHistoryRecovery();
+
+  const entries = await readValidatedHistoryIndex(
+    jsonlFilePath(),
+    jsonlIndexFilePath(),
+  );
+  const entry = entries?.find((candidate) => candidate.id === sessionId);
+  if (entry) {
+    const indexed = await readIndexedHistoryRecord<HistoryRecord>(
+      jsonlFilePath(),
+      entry,
+    );
+    if (indexed) return indexed;
+  }
+
   const db = await loadDatabase();
-  let fromDb: HistoryRecord | undefined;
   if (db) {
-    const row = db
-      .prepare(
-        "SELECT id, name, created_at, updated_at, writer_generation, revision, cwd, messages_json FROM sessions WHERE id = ?",
-      )
-      .get(sessionId);
-    if (row) fromDb = rowToSession(row);
+    try {
+      const row = db
+        .prepare(
+          "SELECT id, name, created_at, updated_at, writer_generation, revision, cwd, messages_json FROM sessions WHERE id = ?",
+        )
+        .get(sessionId);
+      if (row) return rowToSession(row);
+    } catch {
+      // Fall through to streaming JSONL lookup.
+    }
   }
-  const fromJsonl = (await readJsonlRecordsFrom(jsonlFilePath())).find(
-    (session) => session.id === sessionId,
-  );
-  // Also check archive for sessions pruned from the active set.
-  const fromArchive = fromJsonl
-    ? undefined
-    : (await readJsonlRecordsFrom(archiveFilePath())).find((s) => s.id === sessionId);
 
-  const candidates = [fromJsonl, fromDb, fromArchive].filter(
-    (record): record is HistoryRecord => Boolean(record),
+  const active = await findHistoryRecordStreaming<HistoryRecord>(
+    jsonlFilePath(),
+    sessionId,
   );
-  const freshest = freshestHistoryRecord(candidates);
-  if (!freshest) return undefined;
-
-  // Heal split-brain stores on selection. This is especially important across
-  // upgrades where optional SQLite availability changes between launches.
-  if (!fromJsonl || compareHistoryFreshness(freshest, fromJsonl) > 0) {
-    await upsertJsonl(freshest);
+  if (active) {
+    void rebuildHistoryIndex<HistoryRecord>(
+      jsonlFilePath(),
+      jsonlIndexFilePath(),
+    );
+    return active;
   }
-  if (db && (!fromDb || compareHistoryFreshness(freshest, fromDb) > 0)) {
-    upsertSqlite(db, freshest);
-    await enforceSqliteRetention(db);
-    invalidateSessionListCache();
-  }
-  return { ...freshest, messages: hydrateMessageImages(freshest.messages) };
+  return findHistoryRecordStreaming<HistoryRecord>(
+    archiveFilePath(),
+    sessionId,
+  );
 }
 
 export function getHistoryPath(): string {
@@ -1233,56 +1348,59 @@ export async function clearAllHistory(): Promise<{
   cleared: boolean;
   detail: string;
 }> {
-  let detail = "";
   await ensureHistoryRecovered();
-
-  try {
-    const snapshot = await readJsonlRecordsFrom(jsonlFilePath());
-    if (snapshot.length > 0) {
-      await backupActiveHistory();
-      detail += `backed up ${snapshot.length} session(s); `;
-    }
-  } catch (error) {
-    detail += `backup error: ${error instanceof Error ? error.message : String(error)}; `;
-  }
+  const details: string[] = [];
 
   try {
     invalidateSessionListCache();
     const db = await loadDatabase();
     if (db) {
-      db.exec("DELETE FROM sessions; DELETE FROM tool_calls;");
-      detail += "sqlite cleared; ";
+      db.exec(
+        "DELETE FROM sessions; DELETE FROM tool_calls; PRAGMA wal_checkpoint(TRUNCATE); VACUUM;",
+      );
+      details.push("sqlite cleared");
     }
   } catch (error) {
-    detail += `sqlite error: ${error instanceof Error ? error.message : String(error)}; `;
+    details.push(
+      `sqlite error: ${error instanceof Error ? error.message : String(error)}`,
+    );
   }
-  if (await safeExists(jsonlFilePath())) {
-    try {
-      // Move aside rather than unlink so crash mid-clear still leaves a file.
-      const clearedCopy = join(
-        historyDirPath(),
-        `history-cleared-${new Date().toISOString().replace(/[:.]/g, "-")}.jsonl`,
-      );
-      await rename(jsonlFilePath(), clearedCopy).catch(async () => {
-        await copyFile(jsonlFilePath(), clearedCopy).catch(() => undefined);
-        await rm(jsonlFilePath(), { force: true });
-      });
-      detail += `jsonl moved to ${clearedCopy} (recoverable)`;
-    } catch (error) {
-      detail += `jsonl error: ${error instanceof Error ? error.message : String(error)}`;
-    }
+
+  const releaseLock = await acquireJsonlWriteLock();
+  try {
+    const names = await readdir(historyDirPath()).catch(() => [] as string[]);
+    const removable = names.filter(
+      (name) =>
+        name === "history.jsonl" ||
+        name === "history.index.json" ||
+        name === "history-archive.jsonl" ||
+        name === "history-backups" ||
+        name.startsWith("history-cleared-") ||
+        (name.startsWith("history.jsonl.") && name.endsWith(".tmp")),
+    );
+    await Promise.all(
+      removable.map((name) =>
+        rm(join(historyDirPath(), name), { recursive: true, force: true }),
+      ),
+    );
+    details.push("history, index, archives, and backups deleted");
+  } catch (error) {
+    details.push(
+      `history file error: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  } finally {
+    await releaseLock();
   }
-  // Plans live alongside history (same DB / a sibling JSONL). Clearing
-  // history should clear stored plans too so nothing leaks across a reset.
+
   try {
     const { clearAllPlans } = await import("./plan.js");
     await clearAllPlans();
-    detail += "; plans cleared";
+    details.push("plans cleared");
   } catch {
-    /* plan store optional */
+    details.push("plan store unavailable");
   }
   invalidateSessionListCache();
-  return { cleared: true, detail: detail.trim() };
+  return { cleared: true, detail: details.join("; ") };
 }
 
 export function getJsonlHistoryPath(): string {

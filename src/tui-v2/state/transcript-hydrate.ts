@@ -481,9 +481,128 @@ export function transcriptLooksIncomplete(
  *
  * Classic is enriched with `fileChanges` rebuilt from message tool args when
  * a prior message-only re-save wiped the structured diffs (common after
- * resume). Prefer classic when it has more file-diff tools even if message
- * tool count is slightly higher — otherwise green/red hunks disappear.
+ * resume).
  */
+
+export interface BoundedSessionVisualInput {
+  readonly transcript: ClassicTranscriptItem[] | undefined;
+  readonly messages: ChatMessage[];
+  readonly omittedItems: number;
+  readonly omittedMessages: number;
+}
+
+const VISUAL_TRANSCRIPT_ITEMS = 300;
+const VISUAL_MESSAGE_ITEMS = 500;
+const VISUAL_FIELD_CHARS = 32_000;
+const VISUAL_TOTAL_CHARS = 2_000_000;
+
+function capVisualField(value: string): string {
+  if (value.length <= VISUAL_FIELD_CHARS) return value;
+  return `${value.slice(0, VISUAL_FIELD_CHARS)}\n…[older output omitted from initial history view]`;
+}
+
+function boundedTranscriptItem(
+  item: ClassicTranscriptItem,
+): ClassicTranscriptItem {
+  switch (item.kind) {
+    case "user":
+    case "assistant":
+      return { ...item, text: capVisualField(item.text) };
+    case "thinking":
+      return { ...item, content: capVisualField(item.content) };
+    case "notice":
+      return { ...item, text: capVisualField(item.text) };
+    case "tool":
+      return {
+        ...item,
+        argsDisplay: capVisualField(item.argsDisplay),
+        output: capVisualField(item.output),
+        ...(item.summary
+          ? { summary: capVisualField(item.summary) }
+          : {}),
+        ...(item.fileChanges && item.fileChanges.length <= 20
+          ? { fileChanges: item.fileChanges }
+          : { fileChanges: undefined }),
+      };
+    case "compacted":
+      return {
+        ...item,
+        summary: capVisualField(item.summary),
+        originalItems: [],
+      };
+    default:
+      return item;
+  }
+}
+
+export function boundSessionVisualInput(
+  transcript: readonly ClassicTranscriptItem[] | undefined,
+  messages: readonly ChatMessage[],
+): BoundedSessionVisualInput {
+  const recentMessages = messages.slice(-VISUAL_MESSAGE_ITEMS);
+  const boundedMessages: ChatMessage[] = [];
+  let messageChars = 0;
+  for (let index = recentMessages.length - 1; index >= 0; index -= 1) {
+    const message = recentMessages[index]!;
+    const content = capVisualField(message.content);
+    if (boundedMessages.length > 0 && messageChars + content.length > VISUAL_TOTAL_CHARS) {
+      break;
+    }
+    messageChars += content.length;
+    boundedMessages.push({
+      ...message,
+      content,
+      ...(message.toolCalls
+        ? {
+            toolCalls: message.toolCalls.map((call) => ({
+              ...call,
+              args: { restored: "Arguments available in the full session record" },
+              rawArguments: undefined,
+            })),
+          }
+        : {}),
+    });
+  }
+  boundedMessages.reverse();
+
+  const recentTranscript = transcript?.slice(-VISUAL_TRANSCRIPT_ITEMS);
+  const boundedTranscript: ClassicTranscriptItem[] = [];
+  let transcriptChars = 0;
+  if (recentTranscript) {
+    for (let index = recentTranscript.length - 1; index >= 0; index -= 1) {
+      const item = boundedTranscriptItem(recentTranscript[index]!);
+      const size =
+        item.kind === "tool"
+          ? item.output.length + item.argsDisplay.length
+          : item.kind === "thinking"
+            ? item.content.length
+            : item.kind === "compacted"
+              ? item.summary.length
+              : item.kind === "plan"
+                ? 4_000
+                : item.text.length;
+      if (
+        boundedTranscript.length > 0 &&
+        transcriptChars + size > VISUAL_TOTAL_CHARS
+      ) {
+        break;
+      }
+      transcriptChars += size;
+      boundedTranscript.push(item);
+    }
+    boundedTranscript.reverse();
+  }
+
+  return {
+    transcript: transcript ? boundedTranscript : undefined,
+    messages: boundedMessages,
+    omittedItems: Math.max(0, (transcript?.length ?? 0) - boundedTranscript.length),
+    omittedMessages: Math.max(0, messages.length - boundedMessages.length),
+  };
+}
+
+// Prefer the richer bounded representation. Classic wins ties to preserve
+// thinking and structured file diffs.
 export function hydrateSessionVisual(
   transcript: readonly ClassicTranscriptItem[] | undefined,
   messages: readonly ChatMessage[],

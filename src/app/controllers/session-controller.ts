@@ -25,6 +25,7 @@ import { generateSessionTitle } from "../../agent/session-title.js";
 import { clearTextOnlyModels } from "../../llm/tool-protocol.js";
 import { getConfig, getProviderModel } from "../../store/config.js";
 import { beginSessionWorkspace, getActiveSessionWorkspace, type SessionWorkspace } from "../../store/session-workspace.js";
+import { materializeHistoryImages } from "../../store/history.js";
 import { summarizeForSessionCompact } from "./session-compact-helper.js";
 import type { TranscriptItem as ClassicTranscriptItem } from "../../tui/state.js";
 import {
@@ -54,7 +55,10 @@ import {
   SessionPromptQueue,
   type TurnDisplayOptions,
 } from "./session-prompt-queue.js";
-import { SessionResponder } from "./session-responder.js";
+import {
+  SessionResponder,
+  type ResponderRuntimeState,
+} from "./session-responder.js";
 
 export interface SessionState {
   readonly sessionId: SessionId;
@@ -66,6 +70,7 @@ export interface SessionState {
   readonly compacting: boolean;
   readonly historyLength: number;
   readonly queued: readonly string[];
+  readonly responder: ResponderRuntimeState;
   /** AI-generated (or last known) display name for this session. */
   readonly title: string | undefined;
   /**
@@ -110,6 +115,19 @@ export type SessionStateListener = () => void;
 
 function mintSessionId(): string {
   return `sess-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function pathBackedMessages(messages: readonly ChatMessage[]): ChatMessage[] {
+  return messages.map((message) => {
+    if (!message.images?.length) return { ...message };
+    const images = message.images.flatMap((image) =>
+      image.path
+        ? [{ mediaType: image.mediaType, dataBase64: "", path: image.path }]
+        : [],
+    );
+    const { images: _images, ...rest } = message;
+    return images.length > 0 ? { ...rest, images } : rest;
+  });
 }
 
 export class SessionController implements Disposable {
@@ -169,7 +187,7 @@ export class SessionController implements Disposable {
     );
     this.prompts = new SessionPromptQueue({
       isRunning: () => this.turn.running,
-      abort: () => this.turn.abort(),
+      abort: () => this.abort(),
       notifyState: () => this.notifyState(),
       notice: (text) => this.notice("info", text),
       runTurn: (prompt, options) => this.runTurn(prompt, options),
@@ -178,13 +196,15 @@ export class SessionController implements Disposable {
       this.responder = new SessionResponder({
         jobs: deps.jobs,
         persistence: deps.persistence,
-        sequencer: this.sequencer,
-        emit: deps.emit,
         sessionId: () => this.sessionIdValue,
         isBusy: () => this.turn.running || this.compactingFlag,
         hasQueuedWork: () => this.prompts.hasPending(),
         continueQueue: () => this.prompts.continue(),
-        runTurn: (prompt) => this.runTurn(prompt, { displayPrompt: null }),
+        runTurn: (prompt) =>
+          this.runTurn(prompt, {
+            displayPrompt: null,
+            materializeHistoryImages: false,
+          }),
         notifyState: () => this.notifyState(),
         ...(deps.notifyResponderDelivery
           ? { notifyDelivery: deps.notifyResponderDelivery }
@@ -194,7 +214,6 @@ export class SessionController implements Disposable {
         this.responder?.handleChange(change);
       });
       this.disposables.add({ dispose: unsubscribe });
-      this.responder.scheduleWake();
     } else {
       this.responder = undefined;
     }
@@ -220,6 +239,14 @@ export class SessionController implements Disposable {
       compacting: this.compactingFlag,
       historyLength: this.history.length,
       queued: this.prompts.snapshot(),
+      responder: this.responder?.getState() ?? {
+        mode: "off",
+        running: 0,
+        ready: 0,
+        delivered: 0,
+        archived: 0,
+        failed: 0,
+      },
       title: this.sessionTitle,
       contextUsage,
       contextChip: contextUsage
@@ -394,7 +421,6 @@ export class SessionController implements Disposable {
       code: options.workspaceCode,
     });
     this.notifyState();
-    this.responder?.scheduleWake();
   }
 
   notice(level: NoticeLevel, text: string): void {
@@ -437,7 +463,6 @@ export class SessionController implements Disposable {
     }
     this.policy = createSessionPolicy(this.sessionIdValue);
     this.notifyState();
-    this.responder?.scheduleWake();
   }
 
   /** Roll back history after a rejected plan-implement compaction. */
@@ -627,6 +652,7 @@ export class SessionController implements Disposable {
   }
 
   abort(): void {
+    this.responder?.deactivate();
     this.turn.abort();
   }
 
@@ -653,6 +679,7 @@ export class SessionController implements Disposable {
     prompt: string,
     opts?: TurnDisplayOptions,
   ): Promise<TurnResult> {
+    this.responder?.activate();
     return this.prompts.submit(prompt, opts);
   }
 
@@ -662,7 +689,10 @@ export class SessionController implements Disposable {
 
   private async runTurn(
     prompt: string,
-    opts?: { displayPrompt?: string | null | undefined },
+    opts?: {
+      displayPrompt?: string | null | undefined;
+      materializeHistoryImages?: boolean | undefined;
+    },
   ): Promise<TurnResult> {
     const config = getConfig();
     const provider = this.provider ?? config.defaultProvider;
@@ -679,7 +709,10 @@ export class SessionController implements Disposable {
       mode: resolved.mode,
       provider: resolved.provider,
       model: resolved.model,
-      history: this.history,
+      history:
+        opts?.materializeHistoryImages === false
+          ? this.history
+          : materializeHistoryImages(this.history),
       attachments: resolved.attachments,
       images: resolved.images,
       ...(opts?.displayPrompt !== undefined
@@ -691,7 +724,7 @@ export class SessionController implements Disposable {
       requestSecret: this.deps.requestSecret,
       session: this.policy,
       onMessages: (messages) => {
-        this.history = messages;
+        this.history = pathBackedMessages(messages);
         this.notifyState();
         // Periodic durable snapshot so Esc/kill mid-run does not wipe tools.
         this.scheduleAutosave();

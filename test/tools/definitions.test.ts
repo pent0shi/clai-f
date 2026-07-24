@@ -73,6 +73,13 @@ describe("tool definitions", () => {
     expect(check.parameters.properties.tools).toBeDefined();
   });
 
+  it("does not expose a generic execution deadline for shell.start", () => {
+    const start = TOOL_DEFINITIONS.find((definition) => definition.name === "shell.start")!;
+    const exec = TOOL_DEFINITIONS.find((definition) => definition.name === "shell.exec")!;
+    expect(start.parameters.properties.timeoutMs).toBeUndefined();
+    expect(exec.parameters.properties.timeoutMs).toBeDefined();
+  });
+
   it("compact set includes recon essentials (P2-2)", () => {
     const compact = getToolDefinitions({ compact: true });
     const names = new Set(compact.map((d) => d.name));

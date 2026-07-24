@@ -31,7 +31,7 @@ import {
   updateConfig,
 } from "./store/config.js";
 import { assertProvider } from "./llm/provider.js";
-import { listSessions, saveSession, getSession } from "./store/history.js";
+import { listSessionSummaries, saveSession, getSession } from "./store/history.js";
 import {
   clearThinking,
   createThinkingStreamParser,
@@ -383,10 +383,10 @@ async function main(): Promise<void> {
         console.log(JSON.stringify(session, null, 2));
         return;
       }
-      const sessions = await listSessions();
+      const sessions = await listSessionSummaries();
       for (const session of sessions) {
         console.log(
-          `${session.updatedAt} ${session.name ?? session.id} (${session.messages.length} messages) ${session.cwd}`,
+          `${session.updatedAt} ${session.name ?? session.id} (${session.messageCount} messages) ${session.cwd}`,
         );
       }
     });

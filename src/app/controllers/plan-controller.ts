@@ -54,6 +54,24 @@ export class PlanController implements Disposable {
     return this.plan;
   }
 
+  async refresh(sessionId: string): Promise<SessionPlan | undefined> {
+    if (this.activeSessionId && this.activeSessionId !== sessionId) {
+      return this.plan;
+    }
+    this.activeSessionId ??= sessionId;
+    const generation = ++this.loadGeneration;
+    const loaded = await this.persistence.loadPlan(sessionId);
+    if (
+      generation !== this.loadGeneration ||
+      this.activeSessionId !== sessionId
+    ) {
+      return this.plan;
+    }
+    this.plan = loaded;
+    this.notify();
+    return this.plan;
+  }
+
   /** Drop the in-memory plan without touching disk. */
   clear(): void {
     // Always invalidate pending loads, even when the visible projection is

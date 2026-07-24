@@ -29,6 +29,8 @@ export interface JobLinkMetadata {
   parentTaskId?: string | undefined;
   wakeOnCompletion?: boolean | undefined;
   monitor?: JobMonitorMetadata | undefined;
+  /** Runtime listening lease that authorized this responder delegation. */
+  responderLeaseId?: string | undefined;
   /**
    * Opt-in delegation to the Responder: fire-and-continue, plan subtask +
    * auto-wake on completion, and inclusion in the Responder inbox/UI. When
@@ -68,7 +70,7 @@ export interface BackgroundJob extends JobLinkMetadata {
   kind?: JobKind | undefined;
   name?: string | undefined;
   authorization?: { target: string; expiresAt?: string | undefined } | undefined;
-  /** Optional execution deadline for finite durable jobs. */
+  /** Accepted when reading legacy registries but never armed or restored. */
   timeoutAt?: string | undefined;
 }
 
@@ -104,9 +106,12 @@ export interface ResponderNotification {
   wakeOnCompletion: boolean;
   responder: boolean;
   monitor?: JobMonitorMetadata | undefined;
+  responderLeaseId?: string | undefined;
   deliveredAt?: string | undefined;
   analyzedAt?: string | undefined;
   acknowledgedAt?: string | undefined;
+  archivedAt?: string | undefined;
+  settledAt?: string | undefined;
 }
 
 export type JobManagerChange =
@@ -138,7 +143,7 @@ export interface StartJobOptions extends JobLinkMetadata {
   ownerSessionId?: string | undefined;
   profile?: string | undefined;
   estimatedSeconds?: number | undefined;
-  /** Stop this finite job after the selected duration. */
+  /** Legacy compatibility input. Durable jobs no longer have generic deadlines. */
   timeoutMs?: number | undefined;
   authorization?: { target: string; expiresAt?: string | undefined } | undefined;
 }
@@ -163,6 +168,8 @@ const TRANSIENT_V2_REGISTRY_FILE = "registry-v2.json";
 const MAX_DURABLE_TERMINAL_JOBS = 80;
 /** Drop terminal durable jobs older than this on load/list. */
 const TERMINAL_JOB_MAX_AGE_MS = 48 * 60 * 60 * 1000;
+const ARCHIVED_UNSETTLED_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+const MAX_ARCHIVED_UNSETTLED_NOTIFICATIONS = 40;
 /** Max lines shell.jobs returns to the model (running first, then recent). */
 const LIST_JOBS_MAX_LINES = 40;
 /** Coalesce window for chatty stdout/stderr progress persistence + UI events. */
@@ -353,7 +360,10 @@ export class JobManager {
   private processes = new Map<string, ChildProcess>();
   private writers = new Map<string, { stdout: RotatingRedactedWriter; stderr: RotatingRedactedWriter }>();
   private abortControllers = new Map<string, AbortController>();
-  private deadlineTimers = new Map<string, NodeJS.Timeout>();
+  private authorizationTimers = new Map<string, NodeJS.Timeout>();
+  private responderLeases = new Map<string, string>();
+  private settlementTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private settlementAttempts = new Map<string, number>();
   private finalizations = new Map<string, Promise<boolean>>();
   private listeners = new Set<JobManagerListener>();
   /**
@@ -408,10 +418,59 @@ export class JobManager {
     return job.ownerSessionId === sessionId;
   }
 
-  private clearJobDeadline(id: string): void {
-    const timer = this.deadlineTimers.get(id);
+  private clearAuthorizationTimer(id: string): void {
+    const timer = this.authorizationTimers.get(id);
     if (timer) clearTimeout(timer);
-    this.deadlineTimers.delete(id);
+    this.authorizationTimers.delete(id);
+  }
+
+  private scheduleAuthorizationExpiry(job: BackgroundJob): void {
+    this.clearAuthorizationTimer(job.id);
+    const raw = job.authorization?.expiresAt;
+    if (!raw || !this.isLive(job)) return;
+    const expiresAt = Date.parse(raw);
+    if (!Number.isFinite(expiresAt)) return;
+    const timer = setTimeout(() => {
+      this.authorizationTimers.delete(job.id);
+      this.refreshJobLiveness(job);
+      if (this.isLive(job)) void this.stopJob(job.id, { graceMs: 1_000 });
+    }, Math.max(0, expiresAt - Date.now()));
+    timer.unref?.();
+    this.authorizationTimers.set(job.id, timer);
+  }
+
+  activateResponderLease(sessionId: string): string {
+    const current = this.responderLeases.get(sessionId);
+    if (current) return current;
+    const leaseId = randomUUID();
+    this.responderLeases.set(sessionId, leaseId);
+    this.emit({ type: "job", jobId: `responder:${sessionId}` });
+    return leaseId;
+  }
+
+  getResponderLeaseId(sessionId: string | undefined): string | undefined {
+    return sessionId ? this.responderLeases.get(sessionId) : undefined;
+  }
+
+  releaseResponderLease(sessionId: string, leaseId?: string): void {
+    const current = this.responderLeases.get(sessionId);
+    if (!current || (leaseId && current !== leaseId)) return;
+    this.responderLeases.delete(sessionId);
+    const archivedAt = new Date().toISOString();
+    let changed = false;
+    for (const notification of this.notifications.values()) {
+      if (
+        notification.ownerSessionId === sessionId &&
+        notification.responderLeaseId === current &&
+        !notification.acknowledgedAt &&
+        !notification.archivedAt
+      ) {
+        notification.archivedAt = archivedAt;
+        changed = true;
+      }
+    }
+    if (changed && !this.persistSync()) this.scheduleRegistryRetry();
+    this.emit({ type: "job", jobId: `responder:${sessionId}` });
   }
 
   private cloneReceipt(receipt: JobArtifactReceipt): JobArtifactReceipt {
@@ -452,6 +511,12 @@ export class JobManager {
     const reopenSettlement = Boolean(
       existing?.acknowledgedAt && completionChanged,
     );
+    const responderLeaseId =
+      job.responderLeaseId ?? existing?.responderLeaseId;
+    const leaseIsActive = Boolean(
+      responderLeaseId &&
+        this.responderLeases.get(job.ownerSessionId) === responderLeaseId,
+    );
     const notification: ResponderNotification = {
       id:
         existing?.id ??
@@ -472,6 +537,7 @@ export class JobManager {
       ...(job.exitCode !== undefined ? { exitCode: job.exitCode } : {}),
       ...(job.signal !== undefined ? { signal: job.signal } : {}),
       ...(job.monitor !== undefined ? { monitor: job.monitor } : {}),
+      ...(responderLeaseId ? { responderLeaseId } : {}),
       ...(existing?.deliveredAt ? { deliveredAt: existing.deliveredAt } : {}),
       ...((existing?.analyzedAt ?? existing?.acknowledgedAt)
         ? { analyzedAt: existing?.analyzedAt ?? existing?.acknowledgedAt }
@@ -479,6 +545,12 @@ export class JobManager {
       ...(!reopenSettlement && existing?.acknowledgedAt
         ? { acknowledgedAt: existing.acknowledgedAt }
         : {}),
+      ...(existing?.settledAt ? { settledAt: existing.settledAt } : {}),
+      ...(!leaseIsActive
+        ? { archivedAt: existing?.archivedAt ?? endedAt }
+        : existing?.archivedAt
+          ? { archivedAt: existing.archivedAt }
+          : {}),
     };
     const updated = Boolean(
       existing && JSON.stringify(existing) !== JSON.stringify(notification),
@@ -505,6 +577,7 @@ export class JobManager {
     const correctsLost = job.status === "lost" && status !== "lost";
     if (this.isTerminalStatus(job.status) && !correctsLost) {
       const completion = this.ensureCompletionNotification(job);
+      this.scheduleTaskSettlement(job);
       if (
         (!completion.created && !completion.updated) ||
         !completion.notification
@@ -522,7 +595,7 @@ export class JobManager {
       return persisted;
     }
     const finalization = (async (): Promise<boolean> => {
-      this.clearJobDeadline(job.id);
+      this.clearAuthorizationTimer(job.id);
       this.livenessMisses.delete(job.id);
       const streamsFlushed = await this.closeWriters(job.id);
       job.status = streamsFlushed ? status : "failed";
@@ -535,6 +608,7 @@ export class JobManager {
       this.abortControllers.delete(job.id);
       this.processes.delete(job.id);
       const completion = this.ensureCompletionNotification(job);
+      this.scheduleTaskSettlement(job);
       this.pruneTerminalJobs();
       const persisted = this.persistSync();
       if (!persisted) this.scheduleRegistryRetry();
@@ -593,8 +667,9 @@ export class JobManager {
     this.livenessMisses.delete(job.id);
     job.status = "lost";
     job.endedAt = new Date().toISOString();
-    this.clearJobDeadline(job.id);
+    this.clearAuthorizationTimer(job.id);
     const completion = this.ensureCompletionNotification(job);
+    this.scheduleTaskSettlement(job);
     this.pruneTerminalJobs();
     if (!this.persistSync()) this.scheduleRegistryRetry();
     this.emit({ type: "job", jobId: job.id });
@@ -610,19 +685,49 @@ export class JobManager {
     }
   }
 
-  /** Arm or restore a persisted finite-job deadline. */
-  private scheduleJobDeadline(job: BackgroundJob): void {
-    this.clearJobDeadline(job.id);
-    if (!job.timeoutAt || !this.isLive(job)) return;
-    const timeoutAt = Date.parse(job.timeoutAt);
-    if (!Number.isFinite(timeoutAt)) return;
+  private scheduleTaskSettlement(job: BackgroundJob, delayMs = 0): void {
+    if (!job.responder || !this.isTerminalStatus(job.status)) return;
+    const existing = this.settlementTimers.get(job.id);
+    if (existing) clearTimeout(existing);
     const timer = setTimeout(() => {
-      this.deadlineTimers.delete(job.id);
-      this.refreshJobLiveness(job);
-      if (this.isLive(job)) void this.stopJob(job.id, { graceMs: 1_000 });
-    }, Math.max(0, timeoutAt - Date.now()));
+      this.settlementTimers.delete(job.id);
+      void import("../store/responder-settlement.js")
+        .then(({ settleResponderJob }) => settleResponderJob({ ...job }))
+        .then((result) => {
+          if (result === "applied" || result === "noop") {
+            this.settlementAttempts.delete(job.id);
+            const notification = this.notificationForJob(job.id);
+            if (notification && !notification.settledAt) {
+              notification.settledAt = new Date().toISOString();
+              if (!this.persistSync()) this.scheduleRegistryRetry();
+              this.emit({
+                type: "notification",
+                jobId: job.id,
+                notificationId: notification.id,
+              });
+            }
+            return;
+          }
+          const attempt = (this.settlementAttempts.get(job.id) ?? 0) + 1;
+          this.settlementAttempts.set(job.id, attempt);
+          if (attempt < 8) {
+            this.scheduleTaskSettlement(job, Math.min(5_000, 50 * 2 ** attempt));
+          } else {
+            this.settlementAttempts.delete(job.id);
+          }
+        })
+        .catch(() => {
+          const attempt = (this.settlementAttempts.get(job.id) ?? 0) + 1;
+          this.settlementAttempts.set(job.id, attempt);
+          if (attempt < 8) {
+            this.scheduleTaskSettlement(job, Math.min(5_000, 50 * 2 ** attempt));
+          } else {
+            this.settlementAttempts.delete(job.id);
+          }
+        });
+    }, delayMs);
     timer.unref?.();
-    this.deadlineTimers.set(job.id, timer);
+    this.settlementTimers.set(job.id, timer);
   }
 
   /**
@@ -650,7 +755,7 @@ export class JobManager {
     if (!this.isLive(job)) job.endedAt = new Date().toISOString();
     this.abortControllers.delete(id);
     this.processes.delete(id);
-    if (!this.isLive(job)) this.clearJobDeadline(id);
+    if (!this.isLive(job)) this.clearAuthorizationTimer(id);
     if (!this.isDurable(job) && !this.isLive(job)) {
       this.jobs.delete(id);
       this.emit({ type: "job", jobId: id });
@@ -735,12 +840,8 @@ export class JobManager {
       ...(options?.wakeOnCompletion !== undefined ? { wakeOnCompletion: options.wakeOnCompletion } : {}),
       ...(options?.responder !== undefined ? { responder: options.responder } : {}),
       ...(monitor !== undefined ? { monitor } : {}),
-      ...(options?.timeoutMs !== undefined
-        ? {
-            timeoutAt: new Date(
-              Date.now() + Math.max(1_000, Math.floor(options.timeoutMs)),
-            ).toISOString(),
-          }
+      ...(options?.responderLeaseId
+        ? { responderLeaseId: options.responderLeaseId }
         : {}),
       ...(options?.authorization ? { authorization: options.authorization } : {}),
     };
@@ -858,12 +959,7 @@ export class JobManager {
       job.processIdentity = processIdentity(child.pid);
       this.processes.set(id, child);
       this.writers.set(id, { stdout, stderr });
-      const expiresAt = options?.authorization?.expiresAt ? Date.parse(options.authorization.expiresAt) : Number.NaN;
-      const expiryTimer = Number.isFinite(expiresAt) && expiresAt > Date.now()
-        ? setTimeout(() => { void this.stopJob(id, { graceMs: 1_000 }); }, expiresAt - Date.now())
-        : undefined;
-      expiryTimer?.unref?.();
-      this.scheduleJobDeadline(job);
+      this.scheduleAuthorizationExpiry(job);
       let lastProgressFlush = 0;
       let progressDirty = false;
       let progressTimer: ReturnType<typeof setTimeout> | undefined;
@@ -911,7 +1007,6 @@ export class JobManager {
       child.stdout?.on("data", (chunk: Buffer) => recordOutput(stdout, chunk));
       child.stderr?.on("data", (chunk: Buffer) => recordOutput(stderr, chunk));
       child.on("close", (code, signal) => {
-        if (expiryTimer) clearTimeout(expiryTimer);
         stopProgressFlush();
         const status: JobTerminalStatus = signal ? "killed" : code === 0 ? "exited" : "failed";
         void this.finalizeJob(job, status, {
@@ -920,7 +1015,6 @@ export class JobManager {
         });
       });
       child.on("error", (error: NodeJS.ErrnoException) => {
-        if (expiryTimer) clearTimeout(expiryTimer);
         stopProgressFlush();
         const code = error.code ?? "UNKNOWN";
         try { stderr.append(`Background process error [${code}]: ${error.message}\n`); } catch { /* finalization already owns the writers */ }
@@ -1121,6 +1215,53 @@ export class JobManager {
     return this.getPendingNotifications(sessionId);
   }
 
+  claimNextResponderNotification(
+    sessionId: string,
+    leaseId: string,
+  ): ResponderNotification | undefined {
+    if (this.responderLeases.get(sessionId) !== leaseId) return undefined;
+    const archivedAt = new Date().toISOString();
+    let archived = false;
+    for (const notification of this.notifications.values()) {
+      if (
+        notification.ownerSessionId === sessionId &&
+        !notification.acknowledgedAt &&
+        notification.responderLeaseId !== leaseId &&
+        !notification.archivedAt
+      ) {
+        notification.archivedAt = archivedAt;
+        archived = true;
+      }
+    }
+    const notification = [...this.notifications.values()]
+      .filter(
+        (candidate) =>
+          candidate.ownerSessionId === sessionId &&
+          candidate.responderLeaseId === leaseId &&
+          !candidate.archivedAt &&
+          !candidate.analyzedAt &&
+          !candidate.acknowledgedAt,
+      )
+      .sort((left, right) => left.createdAt.localeCompare(right.createdAt))[0];
+    if (!notification) {
+      if (archived && !this.persistSync()) this.scheduleRegistryRetry();
+      return undefined;
+    }
+    const previous = notification.deliveredAt;
+    notification.deliveredAt ??= new Date().toISOString();
+    if (!this.persistSync()) {
+      notification.deliveredAt = previous;
+      return undefined;
+    }
+    if (archived) this.persistSync();
+    this.emit({
+      type: "notification",
+      jobId: notification.jobId,
+      notificationId: notification.id,
+    });
+    return notification;
+  }
+
   markDelivered(notificationId: string): boolean {
     const notification = this.notifications.get(notificationId);
     if (!notification) return false;
@@ -1197,6 +1338,7 @@ export class JobManager {
     if (metadata.monitor !== undefined) job.monitor = metadata.monitor;
     if (metadata.responder !== undefined) job.responder = metadata.responder;
     const completion = this.ensureCompletionNotification(job);
+    this.scheduleTaskSettlement(job);
     if (completion.notification) {
       if (metadata.taskId !== undefined) completion.notification.taskId = metadata.taskId;
       if (metadata.parentTaskId !== undefined) completion.notification.parentTaskId = metadata.parentTaskId;
@@ -1343,7 +1485,7 @@ export class JobManager {
       ? new Promise<void>((resolve) => child.once("close", () => resolve()))
       : undefined;
 
-    this.clearJobDeadline(id);
+    this.clearAuthorizationTimer(id);
     const previousStatus = job.status;
     const previousWakeOnCompletion = job.wakeOnCompletion;
     if (options?.suppressWake) job.wakeOnCompletion = false;
@@ -1351,7 +1493,7 @@ export class JobManager {
     if (!this.persistSync()) {
       job.status = previousStatus;
       job.wakeOnCompletion = previousWakeOnCompletion;
-      if (!job.timeoutAt || Date.parse(job.timeoutAt) > Date.now()) this.scheduleJobDeadline(job);
+      this.scheduleAuthorizationExpiry(job);
       return { ok: false, output: `Failed to persist stop state for job "${id}"; no signal was sent.`, exitCode: 1 };
     }
     this.emit({ type: "job", jobId: id });
@@ -1376,7 +1518,7 @@ export class JobManager {
     };
     const restoreRunning = (): void => {
       job.status = "running";
-      if (!job.timeoutAt || Date.parse(job.timeoutAt) > Date.now()) this.scheduleJobDeadline(job);
+      this.scheduleAuthorizationExpiry(job);
       this.persistSync();
       this.emit({ type: "job", jobId: id });
     };
@@ -1553,6 +1695,32 @@ export class JobManager {
   /** Drop stale terminal durable jobs and all leftover ephemeral rows. */
   pruneTerminalJobs(): void {
     const now = Date.now();
+    const archivedUnsettled = [...this.notifications.values()]
+      .filter(
+        (notification) =>
+          Boolean(notification.archivedAt) &&
+          !notification.acknowledgedAt &&
+          !notification.settledAt,
+      )
+      .sort((left, right) =>
+        (right.archivedAt ?? right.createdAt).localeCompare(
+          left.archivedAt ?? left.createdAt,
+        ),
+      );
+    for (const [index, notification] of archivedUnsettled.entries()) {
+      const archivedAt = Date.parse(
+        notification.archivedAt ?? notification.endedAt ?? notification.createdAt,
+      );
+      const expired =
+        Number.isFinite(archivedAt) &&
+        now - archivedAt > ARCHIVED_UNSETTLED_MAX_AGE_MS;
+      if (index < MAX_ARCHIVED_UNSETTLED_NOTIFICATIONS && !expired) continue;
+      this.notifications.delete(notification.id);
+      const timer = this.settlementTimers.get(notification.jobId);
+      if (timer) clearTimeout(timer);
+      this.settlementTimers.delete(notification.jobId);
+      this.settlementAttempts.delete(notification.jobId);
+    }
     for (const [id, notification] of this.notifications) {
       const job = this.jobs.get(notification.jobId);
       if (
@@ -1571,7 +1739,13 @@ export class JobManager {
       }
       if (this.isLive(job)) continue;
       const notification = this.notificationForJob(job.id);
-      if (notification && !notification.acknowledgedAt) continue;
+      if (
+        notification &&
+        !notification.acknowledgedAt &&
+        !(notification.archivedAt && notification.settledAt)
+      ) {
+        continue;
+      }
       const ended = job.endedAt ? Date.parse(job.endedAt) : Date.parse(job.startedAt);
       if (Number.isFinite(ended) && now - ended > TERMINAL_JOB_MAX_AGE_MS) {
         this.jobs.delete(id);
@@ -1606,6 +1780,9 @@ export class JobManager {
           if (!notification || typeof notification.id !== "string" || typeof notification.jobId !== "string") continue;
           if (notifiedJobs.has(notification.jobId)) continue;
           notifiedJobs.add(notification.jobId);
+          if (!notification.acknowledgedAt && !notification.archivedAt) {
+            notification.archivedAt = new Date().toISOString();
+          }
           this.notifications.set(notification.id, notification);
         }
       }
@@ -1630,9 +1807,11 @@ export class JobManager {
             job.heartbeatAt = new Date().toISOString();
           }
         }
+        delete job.timeoutAt;
         this.jobs.set(job.id, job);
         this.ensureCompletionNotification(job);
-        this.scheduleJobDeadline(job);
+        this.scheduleAuthorizationExpiry(job);
+        this.scheduleTaskSettlement(job);
       }
       for (const [id, notification] of this.notifications) {
         const job = this.jobs.get(notification.jobId);

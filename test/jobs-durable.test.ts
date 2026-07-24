@@ -1,14 +1,22 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   JobManager,
   type BackgroundJob,
+  type ResponderNotification,
 } from "../src/tools/jobs.js";
+import {
+  createPlan,
+  deletePlan,
+  loadPlan,
+  savePlan,
+} from "../src/store/plan.js";
 
 const dirs: string[] = [];
 const managers: JobManager[] = [];
+const planSessionIds: string[] = [];
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 async function fixture(): Promise<{ dir: string; manager: JobManager }> {
@@ -28,11 +36,38 @@ async function waitForStatus(manager: JobManager, id: string, statuses: string[]
   throw new Error(`job ${id} did not reach ${statuses.join("/")}`);
 }
 
+
+async function waitForPlanTask(
+  sessionId: string,
+  taskId: string,
+  state: "done" | "failed",
+): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    const plan = await loadPlan(sessionId);
+    if (plan?.tasks.find((task) => task.id === taskId)?.state === state) return;
+    await sleep(25);
+  }
+  throw new Error(`task ${taskId} did not settle as ${state}`);
+}
+
+async function waitFor(
+  predicate: () => boolean,
+  timeoutMs = 5_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await sleep(25);
+  }
+  throw new Error("condition not reached before timeout");
+}
 afterEach(async () => {
   for (const manager of managers.splice(0)) {
     for (const job of manager.getRunningJobs()) await manager.stopJob(job.id, { graceMs: 200 });
   }
   await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
+  await Promise.all(planSessionIds.splice(0).map((sessionId) => deletePlan(sessionId)));
 });
 
 describe("durable background jobs", () => {
@@ -304,6 +339,130 @@ describe("durable job safety edges", () => {
     expect(restarted.getJob(id!)).toMatchObject({ status: "exited", exitCode: 0 });
     expect(restarted.getPendingNotifications("persist-retry")).toHaveLength(1);
   });
+
+  it("keeps timeout input inert and strips legacy timeoutAt on restart", async () => {
+    const { dir, manager } = await fixture();
+    const started = await manager.startJob(
+      `${JSON.stringify(process.execPath)} -e ${JSON.stringify(
+        "setTimeout(() => process.exit(0), 1000)",
+      )}`,
+      { timeoutMs: 5 },
+    );
+    const id = started.backgroundJob?.id;
+    expect(id).toBeTruthy();
+    await sleep(80);
+    expect(manager.getJob(id!)).toMatchObject({ status: "running" });
+    expect(manager.getJob(id!)).not.toHaveProperty("timeoutAt");
+
+    const registryPath = join(dir, "registry-v1.json");
+    const registry = JSON.parse(await readFile(registryPath, "utf8"));
+    registry.jobs.find((job: { id: string }) => job.id === id).timeoutAt =
+      "2000-01-01T00:00:00.000Z";
+    await writeFile(registryPath, `${JSON.stringify(registry)}\n`);
+
+    const restarted = new JobManager(dir);
+    managers.push(restarted);
+    expect(restarted.getJob(id!)).toMatchObject({ status: "running" });
+    expect(restarted.getJob(id!)).not.toHaveProperty("timeoutAt");
+    expect(await readFile(registryPath, "utf8")).not.toContain("timeoutAt");
+  });
+
+  it("restores authorization expiry enforcement after restart", async () => {
+    const { dir, manager } = await fixture();
+    const started = await manager.startJob(
+      `${JSON.stringify(process.execPath)} -e ${JSON.stringify(
+        "setInterval(() => {}, 1000)",
+      )}`,
+      { ownerSessionId: "authorization-restart" },
+    );
+    const id = started.backgroundJob?.id;
+    expect(id).toBeTruthy();
+
+    const registryPath = join(dir, "registry-v1.json");
+    const registry = JSON.parse(await readFile(registryPath, "utf8"));
+    registry.jobs.find((job: { id: string }) => job.id === id).authorization = {
+      target: "example.com",
+      expiresAt: new Date(Date.now() + 250).toISOString(),
+    };
+    await writeFile(registryPath, `${JSON.stringify(registry)}\n`);
+
+    const restarted = new JobManager(dir);
+    managers.push(restarted);
+    await waitForStatus(restarted, id!, ["killed"]);
+    expect(restarted.getJob(id!)).toMatchObject({
+      status: "killed",
+      signal: expect.stringMatching(/^SIG/),
+    });
+  });
+
+  it("settles an archived responder task after abort and restart without delivery", async () => {
+    const { dir, manager } = await fixture();
+    const sessionId = `settlement-${Date.now()}-${Math.random()}`;
+    planSessionIds.push(sessionId);
+    const plan = createPlan({
+      sessionId,
+      goal: "settle responder child",
+      detail: "background settlement fixture",
+      taskTitles: ["foreground work"],
+    });
+    plan.status = "completed";
+    plan.tasks[0]!.state = "done";
+    plan.tasks.push({
+      id: "responder-child",
+      title: "background verification",
+      state: "in_progress",
+      dependencies: [plan.tasks[0]!.id],
+      resourceLocks: [],
+      responderOwned: true,
+    });
+    await savePlan(plan);
+
+    const leaseId = manager.activateResponderLease(sessionId);
+    const started = await manager.startJob(
+      `${JSON.stringify(process.execPath)} -e ${JSON.stringify(
+        "setInterval(() => {}, 1000)",
+      )}`,
+      {
+        ownerSessionId: sessionId,
+        taskId: "responder-child",
+        responder: true,
+        wakeOnCompletion: true,
+        responderLeaseId: leaseId,
+      },
+    );
+    const id = started.backgroundJob?.id;
+    expect(id).toBeTruthy();
+    manager.releaseResponderLease(sessionId, leaseId);
+    expect(manager.getJob(id!)?.status).toBe("running");
+
+    const registryPath = join(dir, "registry-v1.json");
+    const registry = JSON.parse(await readFile(registryPath, "utf8"));
+    const record = registry.jobs.find((job: { id: string }) => job.id === id);
+    record.status = "exited";
+    record.exitCode = 0;
+    record.endedAt = new Date().toISOString();
+    await writeFile(registryPath, `${JSON.stringify(registry)}\n`);
+
+    const restarted = new JobManager(dir);
+    managers.push(restarted);
+    await waitForPlanTask(sessionId, "responder-child", "done");
+    await waitFor(
+      () =>
+        Boolean(
+          restarted.getPendingNotifications(sessionId)[0]?.settledAt,
+        ),
+      5_000,
+    );
+    const notification = restarted.getPendingNotifications(sessionId)[0];
+    expect(notification).toMatchObject({
+      jobId: id,
+      archivedAt: expect.any(String),
+      settledAt: expect.any(String),
+    });
+    expect(notification?.deliveredAt).toBeUndefined();
+    expect(notification?.analyzedAt).toBeUndefined();
+    expect(manager.getJob(id!)?.status).toBe("running");
+  });
 });
 
 
@@ -354,6 +513,41 @@ describe("authoritative job completion", () => {
       ...(responder ? { taskId: "t5" } : {}),
     };
   }
+
+  it("bounds archived responder receipts that cannot settle", async () => {
+    const { dir, manager } = await fixture();
+    const internal = manager as unknown as {
+      jobs: Map<string, BackgroundJob>;
+      notifications: Map<string, ResponderNotification>;
+    };
+    for (let index = 0; index < 45; index += 1) {
+      const id = `archived-${index}`;
+      const job = trackedJob(dir, id, "exited", true);
+      const endedAt = new Date(Date.now() - index * 1000).toISOString();
+      job.exitCode = 0;
+      job.endedAt = endedAt;
+      internal.jobs.set(id, job);
+      internal.notifications.set(`completion:${id}`, {
+        id: `completion:${id}`,
+        ownerSessionId: job.ownerSessionId,
+        jobId: id,
+        status: "exited",
+        exitCode: 0,
+        createdAt: endedAt,
+        startedAt: job.startedAt,
+        endedAt,
+        stdoutArtifact: { ...job.artifacts.stdout, chunks: [] },
+        stderrArtifact: { ...job.artifacts.stderr, chunks: [] },
+        commandDisplay: job.commandDisplay,
+        wakeOnCompletion: true,
+        responder: true,
+        archivedAt: endedAt,
+      });
+    }
+
+    manager.pruneTerminalJobs();
+    expect(manager.getPendingNotifications("authoritative-session")).toHaveLength(40);
+  });
 
   it("never declares a child lost while this manager still owns it", async () => {
     const { dir, manager } = await fixture();

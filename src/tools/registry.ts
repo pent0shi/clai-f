@@ -139,12 +139,14 @@ function optionalBoolean(
 }
 
 function responderJobOptions(options?: ToolRunOptions): StartJobOptions {
+  const responderLeaseId = jobManager.getResponderLeaseId(options?.sessionId);
   return {
     ...(options?.sessionId ? { ownerSessionId: options.sessionId } : {}),
     ...(options?.taskId ? { taskId: options.taskId } : {}),
     ...(options?.parentTaskId ? { parentTaskId: options.parentTaskId } : {}),
     ...(options?.wakeOnCompletion !== undefined ? { wakeOnCompletion: options.wakeOnCompletion } : {}),
     ...(options?.monitor !== undefined ? { monitor: options.monitor } : {}),
+    ...(responderLeaseId ? { responderLeaseId } : {}),
   };
 }
 
@@ -226,10 +228,8 @@ export const toolRegistry: Record<string, ToolHandler> = {
     const requestedTimeoutMs = optionalNumber(args, "timeoutMs");
     const responderRequested = optionalBoolean(args, "responder") ?? false;
     // Known-long scanners (ffuf/nmap/gobuster/feroxbuster/nuclei/sqlmap/find…)
-    // and any responder-delegated job ALWAYS run as durable background jobs. A
-    // full wordlist fuzz must never block the turn in the foreground — even
-    // when the model supplies its own timeoutMs, which becomes the job deadline
-    // rather than a foreground wait.
+    // and responder-delegated commands run durably. timeoutMs applies only
+    // when a finite command remains in the foreground.
     const finiteBackgroundJob = looksLikeLongFiniteCommand(command);
     // These finite scanners exit on their own after a while and emit large
     // output — exactly what the Responder is for. Auto-delegate them so the
@@ -248,9 +248,6 @@ export const toolRegistry: Record<string, ToolHandler> = {
         elevated?.prepared ? elevated.spec : command,
         {
           cwd: optionalString(args, "cwd"),
-          ...(requestedTimeoutMs !== undefined
-            ? { timeoutMs: requestedTimeoutMs }
-            : {}),
           ...responderJobOptions(options),
           responder,
           wakeOnCompletion: responder,
@@ -468,9 +465,6 @@ export const toolRegistry: Record<string, ToolHandler> = {
         name: `nmap-${estimate.profile}-${host.value}`,
         profile: estimate.profile,
         estimatedSeconds: estimate.estimatedSeconds,
-        ...(optionalNumber(args, "timeoutMs") !== undefined
-          ? { timeoutMs: optionalNumber(args, "timeoutMs") as number }
-          : {}),
         ...responderJobOptions(options),
         responder: true,
         wakeOnCompletion: true,
@@ -806,9 +800,6 @@ export const toolRegistry: Record<string, ToolHandler> = {
                   name: `recon-${estimate.profile}-${host.value}`,
                   profile: estimate.profile,
                   estimatedSeconds: estimate.estimatedSeconds,
-                  ...(optionalNumber(args, "timeoutMs") !== undefined
-                    ? { timeoutMs: optionalNumber(args, "timeoutMs") as number }
-                    : {}),
                   ...responderJobOptions(options),
                   ...(options?.engagementAuthorization ? { authorization: options.engagementAuthorization } : {}),
                 })
@@ -975,9 +966,6 @@ export const toolRegistry: Record<string, ToolHandler> = {
     return jobManager.startJob(elevated?.prepared ? elevated.spec : command, {
       cwd: optionalString(args, "cwd"),
       name: optionalString(args, "name"),
-      ...(optionalNumber(args, "timeoutMs") !== undefined
-        ? { timeoutMs: optionalNumber(args, "timeoutMs") as number }
-        : {}),
       ...responderJobOptions(options),
       responder,
       wakeOnCompletion: responder,

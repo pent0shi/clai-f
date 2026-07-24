@@ -2,7 +2,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   mkdtempSync,
   writeFileSync,
-  readFileSync,
   existsSync,
   mkdirSync,
 } from "node:fs";
@@ -175,71 +174,117 @@ describe("history recovery from orphan temps", () => {
     expect(existsSync(tmp)).toBe(false); // cleaned after successful merge
   });
 
-  it("recovers a newer same-session revision from another durable source", async () => {
+  it("keeps archive rows out of active recovery but allows selected lookup", async () => {
     const {
       getHistoryArchivePath,
       getJsonlHistoryPath,
+      getSession,
       listSessions,
       recoverOrphanedHistory,
     } = await import("../src/store/history.js");
     writeFileSync(
       getJsonlHistoryPath(),
       `${JSON.stringify(
-        sample(
-          "split-session",
-          "2026-07-19T10:05:00.000Z",
-          "stale-jsonl",
-          5,
-        ),
+        sample("active-session", "2026-07-19T10:05:00.000Z", "active", 5),
       )}\n`,
     );
     writeFileSync(
       getHistoryArchivePath(),
       `${JSON.stringify(
-        sample(
-          "split-session",
-          "2026-07-19T10:00:00.000Z",
-          "newer-revision",
-          6,
-        ),
+        sample("archived-session", "2026-07-19T10:00:00.000Z", "archived", 6),
       )}\n`,
     );
 
     const result = await recoverOrphanedHistory();
-    expect(result.recovered).toBe(1);
-    const selected = (await listSessions(10)).find(
-      (record) => record.id === "split-session",
+    expect(result.recovered).toBe(0);
+    expect((await listSessions(10)).map((record) => record.id)).toEqual([
+      "active-session",
+    ]);
+    expect(await getSession("archived-session")).toMatchObject({
+      id: "archived-session",
+      name: "archived",
+      revision: 6,
+    });
+  });
+
+  it("restores the newest rolling backup when active history is missing or corrupt", async () => {
+    const {
+      getHistoryBackupDir,
+      getJsonlHistoryPath,
+      listSessions,
+      recoverOrphanedHistory,
+    } = await import("../src/store/history.js");
+    const backupDir = getHistoryBackupDir();
+    mkdirSync(backupDir, { recursive: true });
+    writeFileSync(
+      join(backupDir, "history-2026-07-20T00-00-00-000Z.jsonl"),
+      `${JSON.stringify(
+        sample("backup-session", "2026-07-20T00:00:00.000Z", "from-backup", 4),
+      )}\n`,
     );
-    expect(selected?.revision).toBe(6);
-    expect(selected?.name).toBe("newer-revision");
+
+    const missing = await recoverOrphanedHistory();
+    expect(missing.sources).toContain(
+      "history-backups/history-2026-07-20T00-00-00-000Z.jsonl",
+    );
+    expect((await listSessions(10)).map((record) => record.id)).toContain(
+      "backup-session",
+    );
+
+    writeFileSync(getJsonlHistoryPath(), "malformed-json\n");
+    const corrupt = await recoverOrphanedHistory();
+    expect(corrupt.sources).toContain(
+      "history-backups/history-2026-07-20T00-00-00-000Z.jsonl",
+    );
+    expect((await listSessions(10)).map((record) => record.id)).toContain(
+      "backup-session",
+    );
   });
 });
 
-describe("history clear archives instead of destroying", () => {
-  it("clearAllHistory moves sessions to archive/backup", async () => {
-    const { clearAllHistory, getJsonlHistoryPath, listSessions } =
-      await import("../src/store/history.js");
+describe("destructive history clear", () => {
+  it("clearAllHistory removes every recoverable history copy", async () => {
+    const {
+      clearAllHistory,
+      getHistoryArchivePath,
+      getHistoryBackupDir,
+      getJsonlHistoryPath,
+      getSession,
+      listSessions,
+    } = await import("../src/store/history.js");
     const main = getJsonlHistoryPath();
+    const backupDir = getHistoryBackupDir();
+    mkdirSync(backupDir, { recursive: true });
     writeFileSync(
       main,
       `${JSON.stringify(sample("s1", "2024-06-01T00:00:00.000Z", "important"))}\n`,
     );
+    writeFileSync(
+      getHistoryArchivePath(),
+      `${JSON.stringify(sample("archived", "2023-06-01T00:00:00.000Z"))}\n`,
+    );
+    writeFileSync(join(dataDir, "history.index.json"), "{}\n");
+    writeFileSync(join(backupDir, "history-old.jsonl"), "important\n");
+    writeFileSync(join(dataDir, "history-cleared-old.jsonl"), "important\n");
+    writeFileSync(`${main}.123.old.tmp`, "important\n");
 
     const result = await clearAllHistory();
-    expect(result.cleared).toBe(true);
-    expect(result.detail).toMatch(/recoverable|backed up|moved/i);
-
-    // Active list empty
+    expect(result).toMatchObject({ cleared: true });
+    expect(result.detail).toContain("deleted");
     expect(await listSessions(50)).toEqual([]);
+    expect(await getSession("archived")).toBeUndefined();
 
-    // Cleared copy still has the session text (not permanently destroyed)
-    const dir = dataDir;
-    const cleared = (await import("node:fs")).readdirSync(dir).filter((n) =>
-      n.startsWith("history-cleared-"),
-    );
-    expect(cleared.length).toBeGreaterThanOrEqual(1);
-    const body = readFileSync(join(dir, cleared[0]!), "utf8");
-    expect(body).toContain("important");
-    expect(body).toContain("s1");
+    const remaining = (await import("node:fs")).readdirSync(dataDir);
+    expect(
+      remaining.filter(
+        (name) =>
+          name === "history.jsonl" ||
+          name === "history.index.json" ||
+          name === "history-archive.jsonl" ||
+          name === "history-backups" ||
+          name.startsWith("history-cleared-") ||
+          (name.startsWith("history.jsonl.") && name.endsWith(".tmp")),
+      ),
+    ).toEqual([]);
   });
 });

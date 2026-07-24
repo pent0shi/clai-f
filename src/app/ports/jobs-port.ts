@@ -26,6 +26,13 @@ export interface JobsPort {
   stop(id: string): Promise<ToolResult>;
   start(command: string, options?: StartJobOptions): Promise<ToolResult>;
   pendingNotifications(sessionId?: string): ResponderNotification[];
+  activateResponderLease(sessionId: string): string;
+  getResponderLeaseId(sessionId: string): string | undefined;
+  releaseResponderLease(sessionId: string, leaseId?: string): void;
+  claimNextResponderNotification(
+    sessionId: string,
+    leaseId: string,
+  ): ResponderNotification | undefined;
   markDelivered(notificationId: string): boolean;
   markAnalyzed(notificationId: string): boolean;
   acknowledge(notificationId: string): boolean;

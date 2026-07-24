@@ -40,6 +40,25 @@ export class JobController implements Disposable {
     return this.jobs.pendingNotifications(sessionId);
   }
 
+  activateResponderLease(sessionId: string): string {
+    return this.jobs.activateResponderLease(sessionId);
+  }
+
+  getResponderLeaseId(sessionId: string): string | undefined {
+    return this.jobs.getResponderLeaseId(sessionId);
+  }
+
+  releaseResponderLease(sessionId: string, leaseId?: string): void {
+    this.jobs.releaseResponderLease(sessionId, leaseId);
+  }
+
+  claimNextResponderNotification(
+    sessionId: string,
+    leaseId: string,
+  ): ResponderNotification | undefined {
+    return this.jobs.claimNextResponderNotification(sessionId, leaseId);
+  }
+
   markDelivered(notificationId: string): boolean {
     return this.jobs.markDelivered(notificationId);
   }

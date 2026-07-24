@@ -1003,7 +1003,7 @@ export async function runAgentTurn(
       userMessage,
     ];
     liveMessages = messages;
-    const responderWakeTurn = prompt.startsWith("Responder completion ready (");
+    const responderWakeTurn = prompt.startsWith("Responder result arrived");
     const refreshResponderInbox = (): void => {
       const pending = responderWakeTurn
         ? jobManager

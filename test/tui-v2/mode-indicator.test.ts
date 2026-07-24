@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   modeIndicatorPresentation,
+  responderStatusText,
   statusDensityForWidth,
   tasksToggleLabel,
 } from "../../src/tui-v2/components/status/status-line.js";
@@ -38,5 +39,38 @@ describe("composer mode indicator", () => {
       label: "PLAN",
       description: "",
     });
+  });
+
+  it("formats responder lifecycle state and counts", () => {
+    expect(
+      responderStatusText({
+        mode: "listening",
+        running: 2,
+        ready: 1,
+        delivered: 0,
+        archived: 0,
+        failed: 0,
+      }),
+    ).toBe("Responder: listening · 2 running · 1 ready");
+    expect(
+      responderStatusText({
+        mode: "off",
+        running: 1,
+        ready: 0,
+        delivered: 0,
+        archived: 2,
+        failed: 0,
+      }),
+    ).toBe("Responder: off · 3 pending");
+    expect(
+      responderStatusText({
+        mode: "idle",
+        running: 0,
+        ready: 0,
+        delivered: 0,
+        archived: 0,
+        failed: 0,
+      }),
+    ).toBe("Responder: idle");
   });
 });

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { TranscriptItem as ClassicItem } from "../../../src/tui/state.js";
 import {
+  boundSessionVisualInput,
   displayCompactSummary,
   hydrateFromClassicTranscript,
   hydrateFromMessages,
@@ -527,5 +528,56 @@ describe("displayCompactSummary", () => {
         "Session memory from compacted earlier turns:\n\nUser goals: ship it",
       ),
     ).toBe("User goals: ship it");
+  });
+});
+
+
+describe("boundSessionVisualInput", () => {
+  it("caps item counts, large fields, compacted sources, and tool arguments", () => {
+    const transcript: ClassicItem[] = Array.from({ length: 350 }, (_, index) =>
+      index === 0
+        ? {
+            kind: "compacted" as const,
+            id: `c-${index}`,
+            summary: "s".repeat(80_000),
+            originalItems: [
+              { kind: "user", id: "old", text: "old", done: true },
+            ],
+            done: true,
+          }
+        : {
+            kind: "tool" as const,
+            id: `t-${index}`,
+            name: "shell.exec",
+            argsDisplay: "a".repeat(80_000),
+            output: "o".repeat(80_000),
+            status: "ok" as const,
+            done: true,
+          },
+    );
+    const messages = Array.from({ length: 550 }, (_, index) => ({
+      role: "assistant" as const,
+      content: "m".repeat(index === 549 ? 80_000 : 20),
+      toolCalls: [
+        {
+          id: `call-${index}`,
+          name: "shell.exec",
+          args: { payload: "x".repeat(80_000) },
+        },
+      ],
+    }));
+
+    const bounded = boundSessionVisualInput(transcript, messages);
+
+    expect(bounded.transcript!.length).toBeLessThanOrEqual(300);
+    expect(bounded.messages.length).toBeLessThanOrEqual(500);
+    expect(bounded.omittedItems).toBeGreaterThan(0);
+    expect(bounded.omittedMessages).toBeGreaterThan(0);
+    const tool = bounded.transcript!.find((item) => item.kind === "tool");
+    expect(tool?.kind === "tool" ? tool.output.length : 0).toBeLessThan(33_000);
+    expect(bounded.messages.at(-1)?.content.length).toBeLessThan(33_000);
+    expect(bounded.messages.at(-1)?.toolCalls?.[0]?.args).toEqual({
+      restored: "Arguments available in the full session record",
+    });
   });
 });
