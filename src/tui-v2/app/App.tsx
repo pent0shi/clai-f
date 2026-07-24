@@ -412,7 +412,10 @@ export function App(): ReactNode {
       services.ports.jobs.running(sessionId).length > 0 ||
       services.ports.jobs.pendingNotifications(sessionId).length > 0;
     const hasCancelableWork =
-      sessionState.running || sessionState.queued.length > 0 || hasResponderWork;
+      sessionState.running ||
+      sessionState.compacting ||
+      sessionState.queued.length > 0 ||
+      hasResponderWork;
 
     if (doublePress && hasCancelableWork) {
       lastEscape.current = 0;

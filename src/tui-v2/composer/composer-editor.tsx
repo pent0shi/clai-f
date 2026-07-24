@@ -550,15 +550,17 @@ export function ComposerEditor(props: ComposerEditorProps): ReactNode {
     const current = menuRef.current;
     const accepted = acceptedSlashRef.current;
 
-    // Esc while a turn runs: arm the double-Esc cancel via App's shared
-    // handler (first press shows "Esc again to cancel", second cancels turn +
-    // queue + Responder jobs). Handled here because OpenTUI can swallow ESC
-    // before App's global handler when the textarea owns focus. Ctrl+C stays
-    // owned by App.interrupt. Menu open still wins for dismiss-menu.
+    // Esc while a turn runs (or a compaction is in progress): arm the
+    // double-Esc cancel via App's shared handler (first press shows "Esc again
+    // to cancel", second cancels turn + queue + Responder jobs + compaction).
+    // Handled here because OpenTUI can swallow ESC before App's global handler
+    // when the textarea owns focus. Ctrl+C stays owned by App.interrupt. Menu
+    // open still wins for dismiss-menu.
     if (
       current.kind === "none" &&
       chord === "escape" &&
-      services.session.getState().running
+      (services.session.getState().running ||
+        services.session.getState().compacting)
     ) {
       key.preventDefault();
       props.onEscapeCancel?.();

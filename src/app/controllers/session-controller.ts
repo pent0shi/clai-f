@@ -138,6 +138,7 @@ export class SessionController implements Disposable {
   private model: string | undefined;
   private mode: Mode;
   private compactingFlag = false;
+  private compactAbort: AbortController | undefined; // cancels in-flight /compact
   /** Display name written into history.db (AI title or explicit /save name). */
   private sessionTitle: string | undefined;
   /** User-message count at last successful AI title (classic refresh cadence). */
@@ -491,6 +492,10 @@ export class SessionController implements Disposable {
     const historySnapshot = [...this.history];
 
     this.compactingFlag = true;
+    const compactAc = new AbortController();
+    this.compactAbort = compactAc;
+    if (signal?.aborted) compactAc.abort();
+    else signal?.addEventListener("abort", () => compactAc.abort(), { once: true });
     this.notifyState();
     try {
       const result = await compactMessagesWithSummary(
@@ -499,7 +504,7 @@ export class SessionController implements Disposable {
           summarizeForSessionCompact(prompt, {
             provider,
             model,
-            signal,
+            signal: compactAc.signal,
             purpose: options.purpose,
           }),
         { budgetTokens: 0, keepRecent, purpose: options.purpose },
@@ -532,6 +537,7 @@ export class SessionController implements Disposable {
       return result;
     } finally {
       this.compactingFlag = false;
+      this.compactAbort = undefined;
       this.notifyState();
       // Becoming idle after compaction is an idle transition just like a turn
       // ending: a responder completion that arrived while compactingFlag was
@@ -621,6 +627,7 @@ export class SessionController implements Disposable {
   async cancelAll(): Promise<ToolResult> {
     this.responder?.invalidateWake();
     this.turn.abort();
+    this.compactAbort?.abort(); // cancel in-flight /compact alongside the turn
     this.prompts.clear(true);
     this.notifyState();
     if (!this.deps.jobs) {
@@ -660,6 +667,7 @@ export class SessionController implements Disposable {
   abort(reason?: string): void {
     this.responder?.deactivate();
     this.turn.abort(reason);
+    this.compactAbort?.abort(); // also cancel in-flight /compact (outside a turn)
   }
 
   async continueQueue(): Promise<void> {

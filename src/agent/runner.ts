@@ -11,7 +11,14 @@ import type {
   ToolDefinition,
   ToolResult,
 } from "../types.js";
-import { streamWithProvider, completeWithProvider, isEmptyCompletionError } from "../llm/router.js";
+import { streamWithProvider, completeWithProvider } from "../llm/router.js";
+import {
+  classifyStreamFailure,
+  planStreamRecovery,
+  recordRecoveryAttempt,
+  createStreamRecoveryState,
+  resetStreamRecoveryState,
+} from "./stream-recovery.js";
 import { resolveToolDialect } from "../llm/capabilities.js";
 import {
   syntheticToolCallId,
@@ -440,6 +447,28 @@ export interface AgentRunOptions {
    * chat; model still receives `prompt`. Omit to show `prompt`.
    */
   displayPrompt?: string | null | undefined;
+}
+
+/**
+ * Cancellable backoff. Resolves after `ms`, or rejects immediately if the
+ * signal aborts (double-Esc) so recovery waits never trap a cancelled turn.
+ */
+function delay(ms: number, signal?: AbortSignal): Promise<void> {
+  if (ms <= 0) return Promise.resolve();
+  if (signal?.aborted) {
+    return Promise.reject(signal.reason ?? new Error("Aborted"));
+  }
+  return new Promise((resolve, reject) => {
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      reject(signal?.reason ?? new Error("Aborted"));
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
 }
 
 export async function runAgentTurn(
@@ -1148,6 +1177,14 @@ export async function runAgentTurn(
     let emptyVisibleRetries = 0;
 
     let retryWithoutThinking = false;
+
+    // Robust stream-failure recovery. When a provider stream/complete fails we
+    // try working approaches (backoff, compaction, thinking-off, provider
+    // fallback) before surrendering the turn — see ./stream-recovery. Both are
+    // reset on any successful stream so each failure episode gets a fresh
+    // budget and we only give up in the worst case.
+    let allowModelFallback = false;
+    const recoveryState = createStreamRecoveryState();
 
     // Track tool calls truncated by the token limit so we can ask the model
     // to retry in smaller pieces instead of leaking broken JSON as an answer.
@@ -3137,6 +3174,10 @@ export async function runAgentTurn(
     /** E4: consecutive free-tier stream failures this turn. */
     let freeTierConsecutiveFailures = 0;
     let freeTierLargeContextWarned = false;
+    // Surface the free-tier "failed N times / switch provider" advisory at most
+    // once per turn — the recovery planner already narrates each retry, so
+    // repeating this on every failure just adds noise.
+    let freeTierAdvisoryShown = false;
 
     const summarizeForCompaction = async (
       summaryPrompt: string,
@@ -3485,7 +3526,7 @@ export async function runAgentTurn(
               provider,
               model,
 
-              allowModelFallback: false,
+              allowModelFallback,
               messages,
 
               temperature: /minimax-m3/i.test(model) ? 1.0 : 0.2,
@@ -3649,46 +3690,69 @@ export async function runAgentTurn(
             },
           );
           freeTierConsecutiveFailures = 0;
+          // Stream succeeded → the failure episode is over. Reset the recovery
+          // budget and the one-shot fallback flag so a later, unrelated failure
+          // starts fresh (and we never give up while making progress).
+          resetStreamRecoveryState(recoveryState);
+          allowModelFallback = false;
           } catch (streamError) {
+            // User cancelled (double-Esc) — never try to recover, just stop.
+            if (options.signal?.aborted) throw streamError;
+
             // E4: track free-tier failures for advisory notices (never blocks).
             freeTierConsecutiveFailures += 1;
-            for (const notice of freeTierGuardNotices({
-              provider,
-              estimatedInputTokens: contextBreakdown.estimatedTotalTokens,
-              consecutiveFailures: freeTierConsecutiveFailures,
-            })) {
-              if (notice.includes("Large context")) continue; // already shown above
-              writeNotice("warn", notice, chalk.yellow(`  ⚠ ${notice}\n`));
+            if (!freeTierAdvisoryShown) {
+              for (const notice of freeTierGuardNotices({
+                provider,
+                estimatedInputTokens: contextBreakdown.estimatedTotalTokens,
+                consecutiveFailures: freeTierConsecutiveFailures,
+              })) {
+                if (notice.includes("Large context")) continue; // already shown above
+                writeNotice("warn", notice, chalk.yellow(`  ⚠ ${notice}\n`));
+                freeTierAdvisoryShown = true;
+              }
             }
-            // A fully empty model completion (no text, no tool calls) must not
-            // kill the turn. It shows up most after auto-compaction, when the
-            // tail ends on re-injected system context and the model has nothing
-            // to answer. Append a trailing user nudge (so the turn no longer
-            // ends on system messages) and retry, bounded like the
-            // successful-but-empty path below.
-            if (
-              !options.signal?.aborted &&
-              isEmptyCompletionError(streamError) &&
-              emptyVisibleRetries < 3
-            ) {
-              emptyVisibleRetries += 1;
+
+            // Robust recovery: a single flaky provider/model (empty admission,
+            // connection glitch, capacity 5xx, rate limit, or an oversized
+            // request) must not kill the turn. Classify the failure and take a
+            // bounded, escalating recovery step — back off, compact, drop
+            // thinking, or let the router fall back to another provider/model.
+            // We only rethrow (stop the turn) in the worst case: every approach
+            // for that failure class is exhausted or the total budget is spent.
+            const failureKind = classifyStreamFailure(streamError);
+            const plan = planStreamRecovery({
+              kind: failureKind,
+              state: recoveryState,
+            });
+            if (plan.action === "give-up") {
+              throw streamError;
+            }
+            recordRecoveryAttempt(recoveryState, failureKind);
+
+            if (plan.notice) {
               writeNotice(
                 "warn",
-                "model streamed an empty response — nudging it to continue",
-                chalk.yellow(
-                  "  ⚠ model streamed an empty response — nudging it to continue\n",
-                ),
+                plan.notice,
+                chalk.yellow(`  ⚠ ${plan.notice}\n`),
               );
-              messages.push(
-                recoveryUserMessage(
-                  "Your previous response was empty. Continue the task now: emit your next tool call, " +
-                    "or give your final answer if every required step is already complete and verified. " +
-                    "Do not reply with an empty message.",
-                ),
-              );
-              continue;
             }
-            throw streamError;
+            if (plan.disableThinking) retryWithoutThinking = true;
+            if (plan.allowModelFallback) allowModelFallback = true;
+            if (plan.forceCompact) {
+              await maybeAutoCompact(`stream-recovery:${failureKind}`, true);
+            }
+            if (plan.nudge) {
+              messages.push(recoveryUserMessage(plan.nudge));
+            }
+            if (plan.delayMs > 0) {
+              emit({
+                type: "status",
+                text: `retrying in ${Math.ceil(plan.delayMs / 1000)}s (${failureKind})`,
+              });
+              await delay(plan.delayMs, options.signal);
+            }
+            continue;
           }
         } finally {
           // Always clear the spinner — abort, network error, or success.
