@@ -59,6 +59,10 @@ export class JobController implements Disposable {
     return this.jobs.claimNextResponderNotification(sessionId, leaseId);
   }
 
+  markDeliveryStarted(notificationId: string): boolean {
+    return this.jobs.markDeliveryStarted(notificationId);
+  }
+
   markDelivered(notificationId: string): boolean {
     return this.jobs.markDelivered(notificationId);
   }

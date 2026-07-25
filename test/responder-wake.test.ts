@@ -102,7 +102,7 @@ async function startResponderJob(
 }
 
 describe("runtime responder listening lease", () => {
-  it("starts off and never wakes for an old or unleased completion", async () => {
+  it("starts off, never wakes, and keeps the unleased completion claimable", async () => {
     const { manager } = await fixture();
     const ctx = buildResponder(manager, "passive");
     expect(ctx.responder.getState().mode).toBe("off");
@@ -113,7 +113,15 @@ describe("runtime responder listening lease", () => {
     await sleep(100);
 
     expect(ctx.runTurn).not.toHaveBeenCalled();
-    expect(manager.getPendingNotifications("passive")[0]?.archivedAt).toBeTruthy();
+    const pending = manager.getPendingNotifications("passive")[0];
+    expect(pending?.archivedAt).toBeUndefined();
+
+    // A later activation adopts the receipt the passive session accumulated.
+    ctx.responder.activate();
+    const leaseId = manager.getResponderLeaseId("passive")!;
+    expect(
+      manager.claimNextResponderNotification("passive", leaseId)?.id,
+    ).toBe(pending?.id);
     ctx.unsubscribe();
   });
 
@@ -184,7 +192,7 @@ describe("runtime responder listening lease", () => {
     ctx.unsubscribe();
   });
 
-  it("deactivation leaves the process alive and archives its eventual result", async () => {
+  it("deactivation leaves the process alive and keeps its eventual result", async () => {
     const { manager } = await fixture();
     const ctx = buildResponder(manager, "abort");
     ctx.responder.activate();
@@ -204,11 +212,11 @@ describe("runtime responder listening lease", () => {
     await sleep(50);
 
     expect(ctx.runTurn).not.toHaveBeenCalled();
-    expect(manager.getPendingNotifications("abort")[0]?.archivedAt).toBeTruthy();
+    expect(manager.getPendingNotifications("abort")[0]?.archivedAt).toBeUndefined();
     ctx.unsubscribe();
   });
 
-  it("does not retry an aborted responder analysis automatically", async () => {
+  it("keeps an aborted responder analysis durable without auto-retrying", async () => {
     const { manager } = await fixture();
     const ctx = buildResponder(manager, "no-retry");
     ctx.runTurn.mockImplementation(
@@ -228,7 +236,8 @@ describe("runtime responder listening lease", () => {
 
     expect(ctx.runTurn).toHaveBeenCalledTimes(1);
     const first = manager.getPendingNotifications("no-retry")[0];
-    expect(first).toMatchObject({ deliveredAt: expect.any(String) });
+    expect(first).toMatchObject({ deliveryStartedAt: expect.any(String) });
+    expect(first?.deliveredAt).toBeUndefined();
 
     ctx.runTurn.mockImplementation(
       async (prompt: string, onStarted: () => void) => {
@@ -243,12 +252,21 @@ describe("runtime responder listening lease", () => {
       ctx.jobs.getResponderLeaseId("no-retry"),
     );
     await waitFor(() => ctx.runTurn.mock.calls.length === 2);
-    await waitFor(
-      () => manager.getPendingNotifications("no-retry").length === 1,
-    );
+    await sleep(100);
 
+    // The aborted receipt is not re-presented in this runtime, but it was never
+    // consumed either: a fresh lease can still claim it.
+    expect(ctx.runTurn).toHaveBeenCalledTimes(2);
     expect(ctx.runTurn.mock.calls[1]?.[0]).not.toContain(`job=${first?.jobId}`);
-    expect(manager.getPendingNotifications("no-retry")[0]?.id).toBe(first?.id);
+    const retained = manager
+      .getPendingNotifications("no-retry")
+      .find((candidate) => candidate.id === first?.id);
+    expect(retained?.deliveredAt).toBeUndefined();
+    manager.releaseResponderLease("no-retry", ctx.jobs.getResponderLeaseId("no-retry"));
+    const freshLease = manager.activateResponderLease("no-retry");
+    expect(
+      manager.claimNextResponderNotification("no-retry", freshLease)?.id,
+    ).toBe(first?.id);
     ctx.unsubscribe();
   });
 

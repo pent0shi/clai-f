@@ -396,7 +396,7 @@ describe("durable job safety edges", () => {
     });
   });
 
-  it("settles an archived responder task after abort and restart without delivery", async () => {
+  it("settles and retains an undelivered responder receipt after restart", async () => {
     const { dir, manager } = await fixture();
     const sessionId = `settlement-${Date.now()}-${Math.random()}`;
     planSessionIds.push(sessionId);
@@ -457,9 +457,9 @@ describe("durable job safety edges", () => {
     const notification = restarted.getPendingNotifications(sessionId)[0];
     expect(notification).toMatchObject({
       jobId: id,
-      archivedAt: expect.any(String),
       settledAt: expect.any(String),
     });
+    expect(notification?.archivedAt).toBeUndefined();
     expect(notification?.deliveredAt).toBeUndefined();
     expect(notification?.analyzedAt).toBeUndefined();
     expect(manager.getJob(id!)?.status).toBe("running");
@@ -597,8 +597,16 @@ describe("authoritative job completion", () => {
       id: original!.id,
       status: "exited",
       exitCode: 0,
-      deliveredAt,
+      resultRevision: 2,
       stdoutArtifact: { bytes: 473, sha256: "authoritative-sha" },
+    });
+    // A material correction supersedes the delivered revision, so the corrected
+    // result must be reviewed again instead of inheriting its markers.
+    expect(corrected?.deliveredAt).toBeUndefined();
+    expect(corrected?.supersededRevisions?.[0]).toMatchObject({
+      resultRevision: 1,
+      status: "lost",
+      deliveredAt,
     });
 
     const restarted = new JobManager(dir);
@@ -856,7 +864,7 @@ describe("responder memory and explicit read receipts", () => {
     expect(internal.writers.size).toBe(0);
     expect(internal.abortControllers.size).toBe(0);
     expect(internal.settlementTimers.size).toBe(0);
-    expect(internal.settlementAttempts.size).toBe(0);
+    expect(internal.pendingSettlements.size).toBe(0);
     expect(internal.finalizations.size).toBe(0);
   });
 });

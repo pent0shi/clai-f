@@ -95,6 +95,20 @@ export function formatJobElapsed(
   return `${minutes}m${seconds % 60}s`;
 }
 
+export interface SupersededResultRevision {
+  resultRevision: number;
+  resultHash: string;
+  status: JobTerminalStatus;
+  endedAt: string;
+  exitCode?: number | undefined;
+  signal?: string | undefined;
+  deliveredAt?: string | undefined;
+  readAt?: string | undefined;
+  analyzedAt?: string | undefined;
+  acknowledgedAt?: string | undefined;
+  settledAt?: string | undefined;
+}
+
 export interface ResponderNotification {
   id: string;
   ownerSessionId: string;
@@ -114,10 +128,18 @@ export interface ResponderNotification {
   responder: boolean;
   monitor?: JobMonitorMetadata | undefined;
   responderLeaseId?: string | undefined;
+  /** A delivery attempt began; not durable consumption. Cleared claims may retry. */
+  deliveryStartedAt?: string | undefined;
   deliveredAt?: string | undefined;
   readAt?: string | undefined;
   analyzedAt?: string | undefined;
   acknowledgedAt?: string | undefined;
+  /** Monotonic revision of the authoritative result this receipt carries. */
+  resultRevision?: number | undefined;
+  /** Content hash of the authoritative result, used to detect a correction. */
+  resultHash?: string | undefined;
+  /** Bounded audit trail of revisions this receipt superseded. */
+  supersededRevisions?: readonly SupersededResultRevision[] | undefined;
   archivedAt?: string | undefined;
   settledAt?: string | undefined;
 }
@@ -132,6 +154,18 @@ interface PersistedRegistryV2 {
   schemaVersion: 2;
   jobs: BackgroundJob[];
   notifications: ResponderNotification[];
+  settlements?: PendingSettlement[];
+}
+
+/** Durable projection marker for a terminal result whose plan child is unsettled. */
+export interface PendingSettlement {
+  jobId: string;
+  resultRevision: number;
+  attempts: number;
+  firstAttemptAt: string;
+  lastAttemptAt: string;
+  lastReason: string;
+  deadLetteredAt?: string | undefined;
 }
 type PersistedRegistry = PersistedRegistryV1 | PersistedRegistryV2;
 interface TailCursor { stream?: "stdout" | "stderr" | "combined"; offset?: number; bytes?: number }
@@ -178,6 +212,9 @@ const MAX_DURABLE_TERMINAL_JOBS = 80;
 const TERMINAL_JOB_MAX_AGE_MS = 48 * 60 * 60 * 1000;
 const ARCHIVED_UNSETTLED_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const MAX_ARCHIVED_UNSETTLED_NOTIFICATIONS = 40;
+const MAX_SUPERSEDED_REVISIONS = 5;
+const SETTLEMENT_MAX_BACKOFF_MS = 30_000;
+const SETTLEMENT_DEAD_LETTER_MS = 10 * 60_000;
 /** Max lines shell.jobs returns to the model (running first, then recent). */
 const LIST_JOBS_MAX_LINES = 40;
 /** Coalesce window for chatty stdout/stderr progress persistence + UI events. */
@@ -400,7 +437,7 @@ export class JobManager {
   private authorizationTimers = new Map<string, NodeJS.Timeout>();
   private responderLeases = new Map<string, string>();
   private settlementTimers = new Map<string, ReturnType<typeof setTimeout>>();
-  private settlementAttempts = new Map<string, number>();
+  private pendingSettlements = new Map<string, PendingSettlement>();
   private finalizations = new Map<string, Promise<boolean>>();
   private listeners = new Set<JobManagerListener>();
   /**
@@ -493,22 +530,19 @@ export class JobManager {
     const current = this.responderLeases.get(sessionId);
     if (!current || (leaseId && current !== leaseId)) return;
     this.responderLeases.delete(sessionId);
-    const archivedAt = new Date().toISOString();
     let changed = false;
     for (const notification of this.notifications.values()) {
       if (
-        notification.ownerSessionId === sessionId &&
-        notification.responderLeaseId === current
+        notification.ownerSessionId !== sessionId ||
+        notification.responderLeaseId !== current
       ) {
-        this.claimedNotifications.delete(notification.id);
+        continue;
       }
-      if (
-        notification.ownerSessionId === sessionId &&
-        notification.responderLeaseId === current &&
-        !notification.acknowledgedAt &&
-        !notification.archivedAt
-      ) {
-        notification.archivedAt = archivedAt;
+      this.claimedNotifications.delete(notification.id);
+      // Releasing a runtime lease must not discard an unread durable result;
+      // detach it so the next lease for this session adopts it.
+      if (!notification.acknowledgedAt && !notification.archivedAt) {
+        delete notification.responderLeaseId;
         changed = true;
       }
     }
@@ -551,15 +585,56 @@ export class JobManager {
           JSON.stringify(existing.stderrArtifact) !==
             JSON.stringify(stderrArtifact)),
     );
-    const reopenSettlement = Boolean(
-      existing?.acknowledgedAt && completionChanged,
+    const resultHash = createHash("sha256")
+      .update(
+        [
+          job.status,
+          endedAt,
+          String(job.exitCode ?? ""),
+          String(job.signal ?? ""),
+          JSON.stringify(stdoutArtifact),
+          JSON.stringify(stderrArtifact),
+        ].join("\0"),
+      )
+      .digest("hex")
+      .slice(0, 24);
+    // A materially different authoritative result is a new revision: every
+    // delivery/read/analysis marker belonged to the superseded result and must
+    // not suppress review of the corrected one.
+    const supersedes = Boolean(
+      existing &&
+        completionChanged &&
+        (existing.resultHash === undefined || existing.resultHash !== resultHash),
     );
+    const resultRevision = supersedes
+      ? (existing?.resultRevision ?? 1) + 1
+      : (existing?.resultRevision ?? 1);
+    const supersededRevisions = supersedes && existing
+      ? [
+          ...(existing.supersededRevisions ?? []),
+          {
+            resultRevision: existing.resultRevision ?? 1,
+            resultHash: existing.resultHash ?? "",
+            status: existing.status,
+            endedAt: existing.endedAt,
+            ...(existing.exitCode !== undefined
+              ? { exitCode: existing.exitCode }
+              : {}),
+            ...(existing.signal !== undefined ? { signal: existing.signal } : {}),
+            ...(existing.deliveredAt ? { deliveredAt: existing.deliveredAt } : {}),
+            ...(existing.readAt ? { readAt: existing.readAt } : {}),
+            ...(existing.analyzedAt ? { analyzedAt: existing.analyzedAt } : {}),
+            ...(existing.acknowledgedAt
+              ? { acknowledgedAt: existing.acknowledgedAt }
+              : {}),
+            ...(existing.settledAt ? { settledAt: existing.settledAt } : {}),
+          },
+        ].slice(-MAX_SUPERSEDED_REVISIONS)
+      : existing?.supersededRevisions;
+    const carried = supersedes ? undefined : existing;
+    const activeLeaseId = this.responderLeases.get(job.ownerSessionId);
     const responderLeaseId =
-      job.responderLeaseId ?? existing?.responderLeaseId;
-    const leaseIsActive = Boolean(
-      responderLeaseId &&
-        this.responderLeases.get(job.ownerSessionId) === responderLeaseId,
-    );
+      activeLeaseId ?? job.responderLeaseId ?? existing?.responderLeaseId;
     const notification: ResponderNotification = {
       id:
         existing?.id ??
@@ -581,21 +656,24 @@ export class JobManager {
       ...(job.signal !== undefined ? { signal: job.signal } : {}),
       ...(job.monitor !== undefined ? { monitor: job.monitor } : {}),
       ...(responderLeaseId ? { responderLeaseId } : {}),
-      ...(existing?.deliveredAt ? { deliveredAt: existing.deliveredAt } : {}),
-      ...(existing?.readAt ? { readAt: existing.readAt } : {}),
-      ...((existing?.analyzedAt ?? existing?.acknowledgedAt)
-        ? { analyzedAt: existing?.analyzedAt ?? existing?.acknowledgedAt }
+      resultRevision,
+      resultHash,
+      ...(supersededRevisions?.length ? { supersededRevisions } : {}),
+      ...(carried?.deliveryStartedAt
+        ? { deliveryStartedAt: carried.deliveryStartedAt }
         : {}),
-      ...(!reopenSettlement && existing?.acknowledgedAt
-        ? { acknowledgedAt: existing.acknowledgedAt }
+      ...(carried?.deliveredAt ? { deliveredAt: carried.deliveredAt } : {}),
+      ...(carried?.readAt ? { readAt: carried.readAt } : {}),
+      ...((carried?.analyzedAt ?? carried?.acknowledgedAt)
+        ? { analyzedAt: carried?.analyzedAt ?? carried?.acknowledgedAt }
         : {}),
-      ...(existing?.settledAt ? { settledAt: existing.settledAt } : {}),
-      ...(!leaseIsActive
-        ? { archivedAt: existing?.archivedAt ?? endedAt }
-        : existing?.archivedAt
-          ? { archivedAt: existing.archivedAt }
-          : {}),
+      ...(carried?.acknowledgedAt
+        ? { acknowledgedAt: carried.acknowledgedAt }
+        : {}),
+      ...(carried?.settledAt ? { settledAt: carried.settledAt } : {}),
+      ...(carried?.archivedAt ? { archivedAt: carried.archivedAt } : {}),
     };
+    if (supersedes) this.claimedNotifications.delete(notification.id);
     const updated = Boolean(
       existing && JSON.stringify(existing) !== JSON.stringify(notification),
     );
@@ -735,43 +813,90 @@ export class JobManager {
     if (existing) clearTimeout(existing);
     const timer = setTimeout(() => {
       this.settlementTimers.delete(job.id);
+      const revision = this.notificationForJob(job.id)?.resultRevision ?? 1;
       void import("../store/responder-settlement.js")
-        .then(({ settleResponderJob }) => settleResponderJob({ ...job }))
+        .then(({ settleResponderJob }) =>
+          settleResponderJob({ ...job }, { resultRevision: revision }),
+        )
         .then((result) => {
           if (result === "applied" || result === "noop") {
-            this.settlementAttempts.delete(job.id);
-            const notification = this.notificationForJob(job.id);
-            if (notification && !notification.settledAt) {
-              notification.settledAt = new Date().toISOString();
-              if (!this.persistSync()) this.scheduleRegistryRetry();
-              this.emit({
-                type: "notification",
-                jobId: job.id,
-                notificationId: notification.id,
-              });
-            }
+            this.completeSettlement(job.id, revision);
             return;
           }
-          const attempt = (this.settlementAttempts.get(job.id) ?? 0) + 1;
-          this.settlementAttempts.set(job.id, attempt);
-          if (attempt < 8) {
-            this.scheduleTaskSettlement(job, Math.min(5_000, 50 * 2 ** attempt));
-          } else {
-            this.settlementAttempts.delete(job.id);
-          }
+          this.retrySettlement(job, revision, result);
         })
-        .catch(() => {
-          const attempt = (this.settlementAttempts.get(job.id) ?? 0) + 1;
-          this.settlementAttempts.set(job.id, attempt);
-          if (attempt < 8) {
-            this.scheduleTaskSettlement(job, Math.min(5_000, 50 * 2 ** attempt));
-          } else {
-            this.settlementAttempts.delete(job.id);
-          }
+        .catch((error: unknown) => {
+          this.retrySettlement(
+            job,
+            revision,
+            error instanceof Error ? error.message : String(error),
+          );
         });
     }, delayMs);
     timer.unref?.();
     this.settlementTimers.set(job.id, timer);
+  }
+
+  private completeSettlement(jobId: string, resultRevision: number): void {
+    this.pendingSettlements.delete(jobId);
+    const notification = this.notificationForJob(jobId);
+    if (
+      !notification ||
+      (notification.resultRevision ?? 1) !== resultRevision ||
+      notification.settledAt
+    ) {
+      if (!this.persistSync()) this.scheduleRegistryRetry();
+      return;
+    }
+    notification.settledAt = new Date().toISOString();
+    if (!this.persistSync()) this.scheduleRegistryRetry();
+    this.emit({
+      type: "notification",
+      jobId,
+      notificationId: notification.id,
+    });
+  }
+
+  /**
+   * Retry until the projection lands. The marker is durable, so a crash or a
+   * long-lived plan-write conflict cannot silently strand a green child, and an
+   * unrecoverable case is dead-lettered with a visible reason.
+   */
+  private retrySettlement(
+    job: BackgroundJob,
+    resultRevision: number,
+    reason: string,
+  ): void {
+    const now = new Date().toISOString();
+    const previous = this.pendingSettlements.get(job.id);
+    const carryOver =
+      previous && previous.resultRevision === resultRevision ? previous : undefined;
+    const attempts = (carryOver?.attempts ?? 0) + 1;
+    const firstAttemptAt = carryOver?.firstAttemptAt ?? now;
+    const elapsed = Date.now() - Date.parse(firstAttemptAt);
+    const deadLettered =
+      Number.isFinite(elapsed) && elapsed > SETTLEMENT_DEAD_LETTER_MS;
+    this.pendingSettlements.set(job.id, {
+      jobId: job.id,
+      resultRevision,
+      attempts,
+      firstAttemptAt,
+      lastAttemptAt: now,
+      lastReason: reason,
+      ...(deadLettered ? { deadLetteredAt: now } : {}),
+    });
+    if (!this.persistSync()) this.scheduleRegistryRetry();
+    this.emit({ type: "job", jobId: job.id });
+    if (deadLettered) return;
+    this.scheduleTaskSettlement(
+      job,
+      Math.min(SETTLEMENT_MAX_BACKOFF_MS, 50 * 2 ** Math.min(attempts, 10)),
+    );
+  }
+
+  /** Terminal results whose plan child could not be settled yet. */
+  getPendingSettlements(): PendingSettlement[] {
+    return [...this.pendingSettlements.values()];
   }
 
   /**
@@ -1279,17 +1404,18 @@ export class JobManager {
     leaseId: string,
   ): ResponderNotification | undefined {
     if (this.responderLeases.get(sessionId) !== leaseId) return undefined;
-    const archivedAt = new Date().toISOString();
-    let archived = false;
+    let adopted = false;
     for (const notification of this.notifications.values()) {
+      // Receipts belong to the session, not to a runtime lease: a new lease
+      // adopts everything unread that an earlier lease left behind.
       if (
         notification.ownerSessionId === sessionId &&
         !notification.acknowledgedAt &&
-        notification.responderLeaseId !== leaseId &&
-        !notification.archivedAt
+        !notification.archivedAt &&
+        notification.responderLeaseId !== leaseId
       ) {
-        notification.archivedAt = archivedAt;
-        archived = true;
+        notification.responderLeaseId = leaseId;
+        adopted = true;
       }
     }
     const notification = [...this.notifications.values()]
@@ -1306,7 +1432,7 @@ export class JobManager {
       )
       .sort((left, right) => left.createdAt.localeCompare(right.createdAt))[0];
     if (notification) this.claimedNotifications.add(notification.id);
-    if (archived && !this.persistSync()) this.scheduleRegistryRetry();
+    if (adopted && !this.persistSync()) this.scheduleRegistryRetry();
     return notification;
   }
 
@@ -1314,11 +1440,33 @@ export class JobManager {
     this.claimedNotifications.delete(notificationId);
   }
 
+  /**
+   * Record that a delivery attempt started. This is deliberately weaker than
+   * `markDelivered`: an aborted or failed analysis turn must remain deliverable.
+   */
+  markDeliveryStarted(notificationId: string): boolean {
+    const notification = this.notifications.get(notificationId);
+    if (!notification) return false;
+    if (notification.deliveryStartedAt) return true;
+    notification.deliveryStartedAt = new Date().toISOString();
+    if (!this.persistSync()) {
+      notification.deliveryStartedAt = undefined;
+      return false;
+    }
+    this.emit({
+      type: "notification",
+      jobId: notification.jobId,
+      notificationId,
+    });
+    return true;
+  }
+
   markDelivered(notificationId: string): boolean {
     const notification = this.notifications.get(notificationId);
     if (!notification) return false;
     if (!notification.deliveredAt) {
       notification.deliveredAt = new Date().toISOString();
+      notification.deliveryStartedAt ??= notification.deliveredAt;
       if (!this.persistSync()) {
         notification.deliveredAt = undefined;
         return false;
@@ -1360,7 +1508,9 @@ export class JobManager {
 
   markAnalyzed(notificationId: string): boolean {
     const notification = this.notifications.get(notificationId);
-    if (!notification?.deliveredAt) return false;
+    if (!notification?.deliveredAt && !notification?.deliveryStartedAt) {
+      return false;
+    }
     this.claimedNotifications.delete(notificationId);
     if (!notification.analyzedAt) {
       notification.analyzedAt = new Date().toISOString();
@@ -1799,7 +1949,7 @@ export class JobManager {
       const timer = this.settlementTimers.get(notification.jobId);
       if (timer) clearTimeout(timer);
       this.settlementTimers.delete(notification.jobId);
-      this.settlementAttempts.delete(notification.jobId);
+      this.pendingSettlements.delete(notification.jobId);
     }
     for (const [id, notification] of this.notifications) {
       const job = this.jobs.get(notification.jobId);
@@ -1854,6 +2004,12 @@ export class JobManager {
         }
       } catch { /* a corrupt current registry must not replay stale v1 state */ }
       if (!parsed) return;
+      if (parsed.schemaVersion === 2 && Array.isArray(parsed.settlements)) {
+        for (const settlement of parsed.settlements) {
+          if (!settlement || typeof settlement.jobId !== "string") continue;
+          this.pendingSettlements.set(settlement.jobId, settlement);
+        }
+      }
       if (parsed.schemaVersion === 2 && Array.isArray(parsed.notifications)) {
         const notifiedJobs = new Set<string>();
         for (const notification of parsed.notifications) {
@@ -1861,7 +2017,9 @@ export class JobManager {
           if (notifiedJobs.has(notification.jobId)) continue;
           notifiedJobs.add(notification.jobId);
           if (!notification.acknowledgedAt && !notification.archivedAt) {
-            notification.archivedAt = new Date().toISOString();
+            // A durable receipt must survive the restart it exists for. Drop the
+            // dead runtime lease so the next activated lease can adopt it.
+            delete notification.responderLeaseId;
           }
           this.notifications.set(notification.id, notification);
         }
@@ -1908,6 +2066,9 @@ export class JobManager {
       schemaVersion: 2,
       jobs: [...this.jobs.values()].filter((job) => this.isDurable(job)),
       notifications: [...this.notifications.values()],
+      ...(this.pendingSettlements.size
+        ? { settlements: [...this.pendingSettlements.values()] }
+        : {}),
     };
   }
   private scheduleRegistryRetry(): void {

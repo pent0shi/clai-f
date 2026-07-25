@@ -37,14 +37,21 @@ function updatePlanStatus(plan: SessionPlan): void {
   }
 }
 
+export interface ResponderSettlementOptions {
+  /** Authoritative result revision this settlement carries. */
+  readonly resultRevision?: number | undefined;
+}
+
 export async function settleResponderJob(
   job: BackgroundJob,
+  options?: ResponderSettlementOptions,
 ): Promise<ResponderSettlementResult> {
   if (!job.responder || !["exited", "failed", "killed", "lost"].includes(job.status)) {
     return "noop";
   }
 
   const next = settlement(job);
+  const resultRevision = options?.resultRevision ?? 1;
   let outcome: Exclude<ResponderSettlementResult, "applied"> | undefined;
 
   // Settlement is an idempotent reducer applied under a
@@ -69,13 +76,15 @@ export async function settleResponderJob(
       if (
         task.state === next.state &&
         task.note === next.note &&
-        task.jobId === job.id
+        task.jobId === job.id &&
+        (task.settledResultRevision ?? 0) >= resultRevision
       ) {
         outcome = "noop";
         return false;
       }
       task.state = next.state;
       task.note = next.note;
+      task.settledResultRevision = resultRevision;
       task.jobId = job.id;
       task.processId = job.pid;
       task.responderOwned = true;

@@ -50,6 +50,11 @@ const jobsHarness = vi.hoisted(() => {
         ? notification
         : undefined,
     ),
+    markDeliveryStarted: vi.fn((id: string) => {
+      if (id !== notification.id) return false;
+      notification.deliveryStartedAt = "2026-01-01T00:00:02.000Z";
+      return true;
+    }),
     markDelivered: vi.fn((id: string) => {
       if (id !== notification.id) return false;
       notification.deliveredAt = "2026-01-01T00:00:03.000Z";
@@ -92,6 +97,7 @@ const jobsHarness = vi.hoisted(() => {
       manager.getPendingNotifications.mockClear();
       manager.getResponderLeaseId.mockClear();
       manager.claimNextResponderNotification.mockClear();
+      manager.markDeliveryStarted.mockClear();
       manager.markDelivered.mockClear();
       manager.markRead.mockClear();
       manager.markAnalyzed.mockClear();
@@ -154,7 +160,7 @@ describe("ordinary-turn responder delivery", () => {
           };
         }
 
-        expect(jobsHarness.notification.deliveredAt).toBeTruthy();
+        expect(jobsHarness.notification.deliveryStartedAt).toBeTruthy();
         if (requests.length === 2) {
           return {
             text: "",

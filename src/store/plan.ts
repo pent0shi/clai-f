@@ -98,6 +98,8 @@ export interface PlanTask {
    * linking or the plan save lost a race.
    */
   delegationId?: string | undefined;
+  /** Authoritative result revision this responder child was settled from. */
+  settledResultRevision?: number | undefined;
 }
 
 /** Durable side-channel facts that survive compaction/resume. */

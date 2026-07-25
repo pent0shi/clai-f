@@ -186,9 +186,9 @@ export class SessionResponder {
       result = await this.deps.runTurn(
         deliveryPrompt(notification, preview, foreground),
         () => {
-          if (!this.deps.jobs.markDelivered(notification.id)) {
+          if (!this.deps.jobs.markDeliveryStarted(notification.id)) {
             throw new Error(
-              `failed to persist responder delivery ${notification.id}`,
+              `failed to persist responder delivery attempt ${notification.id}`,
             );
           }
           this.deps.notifyState();
@@ -205,10 +205,19 @@ export class SessionResponder {
       leaseId !== this.leaseId ||
       sessionId !== this.deps.sessionId()
     ) {
-      if (!notification.deliveredAt) {
+      // An attempt that did not complete is not consumption: the receipt stays
+      // durable and deliverable. The runtime claim is only released when the
+      // attempt never started, so an aborted analysis cannot spin on redelivery;
+      // a lease release or restart makes it claimable again.
+      if (!notification.deliveryStartedAt) {
         this.deps.jobs.releaseResponderNotificationClaim?.(notification.id);
       }
       this.wakeRequested = false;
+      this.deps.notifyState();
+      return;
+    }
+    if (!this.deps.jobs.markDelivered(notification.id)) {
+      this.deps.jobs.releaseResponderNotificationClaim?.(notification.id);
       this.deps.notifyState();
       return;
     }

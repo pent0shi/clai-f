@@ -3770,13 +3770,13 @@ export async function runAgentTurn(
           try {
           if (
             responderDelivery &&
-            !jobManager.markDelivered(responderDelivery.id)
+            !jobManager.markDeliveryStarted(responderDelivery.id)
           ) {
             jobManager.releaseResponderNotificationClaim(
               responderDelivery.id,
             );
             throw new Error(
-              `failed to mark responder notification ${responderDelivery.id} delivered`,
+              `failed to record responder delivery attempt ${responderDelivery.id}`,
             );
           }
           completion = await streamWithProvider(
@@ -4029,6 +4029,14 @@ export async function runAgentTurn(
         } finally {
           // Always clear the spinner — abort, network error, or success.
           spinner.stop();
+        }
+        if (responderDelivery) {
+          // The result text is now part of this turn, so consumption is durable.
+          // A stream that aborted or threw above never reaches this point and the
+          // receipt stays deliverable.
+          if (!jobManager.markDelivered(responderDelivery.id)) {
+            jobManager.releaseResponderNotificationClaim(responderDelivery.id);
+          }
         }
         provider = completion.provider;
         model = completion.model;
