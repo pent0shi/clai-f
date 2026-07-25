@@ -15,6 +15,7 @@ import {
   toCompletionResult,
   readJson,
   readStreamLines,
+  ProviderError,
 } from "./http.js";
 import {
   anthropicToolBodyFields,
@@ -24,6 +25,9 @@ import {
   parseAnthropicToolUseBlocks,
   toAnthropicToolMessages,
 } from "./adapters/anthropic-tools.js";
+import { firstSystemPrompt } from "./system-messages.js";
+import { parseAnthropicUsage } from "./token-usage.js";
+import type { TokenUsage } from "../types.js";
 
 const baseUrl = "https://bedrock-mantle.ap-south-1.api.aws/anthropic/v1";
 const openAiBaseUrl = "https://bedrock-mantle.ap-south-1.api.aws/v1";
@@ -111,6 +115,7 @@ export const mantleProvider: LlmProvider = {
     if (!isAnthropicMantleModel(model)) {
       const payload = await openAiCompatibleComplete({
         provider: "AWS Mantle",
+        providerId: "aws-mantle",
         baseUrl: openAiBaseUrl,
         apiKey: auth.apiKey,
         model,
@@ -126,9 +131,7 @@ export const mantleProvider: LlmProvider = {
       });
       return toCompletionResult("aws-mantle", model, payload);
     }
-    const system = request.messages.find(
-      (message) => message.role === "system",
-    )?.content;
+    const system = firstSystemPrompt(request.messages);
     const messages = toAnthropicToolMessages(request.messages);
     const thinking = anthropicThinkingField(request.thinking, model);
     const response = await fetch(`${baseUrl}/messages`, {
@@ -164,7 +167,9 @@ export const mantleProvider: LlmProvider = {
         input?: unknown;
       }>;
       stop_reason?: string;
+      usage?: unknown;
     }>(response);
+    const usage = parseAnthropicUsage(data.usage);
     const parsed = parseAnthropicToolUseBlocks(data.content);
     if (!parsed.text && parsed.toolCalls.length === 0) {
       throw new Error("Mantle returned no completion text");
@@ -176,6 +181,7 @@ export const mantleProvider: LlmProvider = {
       text: final,
       provider: "aws-mantle",
       model,
+      ...(usage ? { usage } : {}),
       ...(parsed.toolCalls.length ? { toolCalls: parsed.toolCalls } : {}),
       ...(data.stop_reason
         ? {
@@ -197,6 +203,7 @@ export const mantleProvider: LlmProvider = {
     if (!isAnthropicMantleModel(model)) {
       const payload = await openAiCompatibleStream({
         provider: "AWS Mantle",
+        providerId: "aws-mantle",
         baseUrl: openAiBaseUrl,
         apiKey: auth.apiKey,
         model,
@@ -214,9 +221,7 @@ export const mantleProvider: LlmProvider = {
       });
       return toCompletionResult("aws-mantle", model, payload);
     }
-    const system = request.messages.find(
-      (message) => message.role === "system",
-    )?.content;
+    const system = firstSystemPrompt(request.messages);
     const messages = toAnthropicToolMessages(request.messages);
     const thinking = anthropicThinkingField(request.thinking, model);
     const response = await fetch(`${baseUrl}/messages`, {
@@ -252,6 +257,7 @@ export const mantleProvider: LlmProvider = {
     let inThinking = false;
     const streamState = createAnthropicToolStreamState();
     let stopReason: string | undefined;
+    let streamUsage: TokenUsage | undefined;
 
     const enterThinking = (): void => {
       if (inThinking) return;
@@ -277,6 +283,9 @@ export const mantleProvider: LlmProvider = {
         const parsed = JSON.parse(payload) as {
           type?: string;
           index?: number;
+          error?: { message?: string; type?: string };
+          usage?: unknown;
+          message?: { usage?: unknown };
           content_block?: {
             type?: string;
             id?: string;
@@ -292,8 +301,36 @@ export const mantleProvider: LlmProvider = {
             stop_reason?: string;
           };
         };
-        if (parsed.type === "message_delta" && parsed.delta?.stop_reason) {
-          stopReason = parsed.delta.stop_reason;
+        // LLM-011: surface mid-stream provider error frames.
+        if (parsed.type === "error") {
+          throw new ProviderError(
+            `AWS Mantle stream error: ${parsed.error?.message ?? parsed.error?.type ?? "unknown"}`,
+            undefined,
+            payload.slice(0, 500),
+          );
+        }
+        if (parsed.type === "message_start" && parsed.message?.usage) {
+          streamUsage = parseAnthropicUsage(parsed.message.usage) ?? streamUsage;
+        }
+        if (parsed.type === "message_delta") {
+          if (parsed.delta?.stop_reason) {
+            stopReason = parsed.delta.stop_reason;
+          }
+          if (parsed.usage) {
+            const out = parseAnthropicUsage(parsed.usage);
+            if (out) {
+              streamUsage = {
+                promptTokens: streamUsage?.promptTokens ?? out.promptTokens,
+                completionTokens:
+                  out.completionTokens || (streamUsage?.completionTokens ?? 0),
+                totalTokens:
+                  (streamUsage?.promptTokens ?? out.promptTokens) +
+                  (out.completionTokens ||
+                    (streamUsage?.completionTokens ?? 0)),
+                exact: true,
+              };
+            }
+          }
         }
         if (
           parsed.type === "content_block_start" ||
@@ -322,16 +359,21 @@ export const mantleProvider: LlmProvider = {
             });
           }
         }
-      } catch {
-        // Ignore malformed keepalive lines.
+      } catch (frameError) {
+        // Only malformed JSON frames are ignorable (LLM-011).
+        if (!(frameError instanceof SyntaxError)) throw frameError;
       }
     }
     exitThinking();
     const finalized = finalizeAnthropicToolStream(streamState);
+    if (!full.trim() && finalized.toolCalls.length === 0) {
+      throw new Error("Mantle returned no completion text");
+    }
     return {
       text: full,
       provider: "aws-mantle",
       model,
+      ...(streamUsage ? { usage: streamUsage } : {}),
       ...(finalized.toolCalls.length ? { toolCalls: finalized.toolCalls } : {}),
       ...(stopReason
         ? {

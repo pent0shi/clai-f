@@ -445,6 +445,7 @@ describe("audit#6 — http helpers cap responses and watchdog streams", () => {
       await expect(
         openAiCompatibleStream({
           provider: "test",
+          providerId: "openai",
           baseUrl: "https://example.invalid/v1",
           apiKey: "test-key",
           model: "test-model",
@@ -494,6 +495,7 @@ describe("audit#6 — http helpers cap responses and watchdog streams", () => {
       await expect(
         openAiCompatibleStream({
           provider: "test",
+          providerId: "openai",
           baseUrl: "https://example.invalid/v1",
           apiKey: "test-key",
           model: "test-model",
@@ -521,6 +523,7 @@ describe("audit#6 — http helpers cap responses and watchdog streams", () => {
     try {
       const result = await openAiCompatibleStream({
         provider: "test",
+        providerId: "openai",
         baseUrl: "https://example.invalid/v1",
         apiKey: "test-key",
         model: "test-model",
@@ -549,6 +552,7 @@ describe("audit#6 — http helpers cap responses and watchdog streams", () => {
       await expect(
         openAiCompatibleStream({
           provider: "test",
+          providerId: "openai",
           baseUrl: "https://example.invalid/v1",
           apiKey: "test-key",
           model: "test-model",

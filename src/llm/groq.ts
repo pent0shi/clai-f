@@ -102,6 +102,7 @@ export const groqProvider: LlmProvider = {
     const model = request.model ?? defaultModels.groq;
     const payload = await openAiCompatibleComplete({
       provider: "Groq",
+      providerId: "groq",
       baseUrl,
       apiKey: auth.apiKey,
       model,
@@ -126,6 +127,7 @@ export const groqProvider: LlmProvider = {
     const model = request.model ?? defaultModels.groq;
     const payload = await openAiCompatibleStream({
       provider: "Groq",
+      providerId: "groq",
       baseUrl,
       apiKey: auth.apiKey,
       model,

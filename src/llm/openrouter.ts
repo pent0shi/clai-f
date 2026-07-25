@@ -60,6 +60,7 @@ export const openrouterProvider: LlmProvider = {
     const model = request.model ?? defaultModels.openrouter;
     const payload = await openAiCompatibleComplete({
       provider: "OpenRouter",
+      providerId: "openrouter",
       baseUrl,
       apiKey: auth.apiKey,
       model,
@@ -85,6 +86,7 @@ export const openrouterProvider: LlmProvider = {
     const model = request.model ?? defaultModels.openrouter;
     const payload = await openAiCompatibleStream({
       provider: "OpenRouter",
+      providerId: "openrouter",
       baseUrl,
       apiKey: auth.apiKey,
       model,

@@ -9,6 +9,7 @@ import {
 } from "../tool-protocol.js";
 // Side-effect: register wire name map before fromWireName use.
 import "../../tools/definitions.js";
+import { normalizeSystemMessages } from "../system-messages.js";
 
 /**
  * Gemini's function-calling `Schema` type only understands a specific subset
@@ -150,7 +151,9 @@ type GeminiPart =
 
 /**
  * Convert dialect-neutral history to Gemini contents with functionCall /
- * functionResponse parts. System messages are skipped (use systemInstruction).
+ * functionResponse parts. The first system message is owned by
+ * `systemInstruction`; later system messages become marked user turns in place
+ * (LLM-002).
  */
 export function toGeminiToolContents(
   messages: ChatMessage[],
@@ -158,7 +161,7 @@ export function toGeminiToolContents(
   const contents: Array<{ role: "user" | "model"; parts: GeminiPart[] }> = [];
 
   let i = 0;
-  const nonSystem = messages.filter((m) => m.role !== "system");
+  const nonSystem = normalizeSystemMessages(messages).rest;
 
   while (i < nonSystem.length) {
     const message = nonSystem[i]!;

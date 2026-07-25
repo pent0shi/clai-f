@@ -18,6 +18,7 @@ import {
 } from "./adapters/gemini-tools.js";
 import { fromWireName } from "./tool-protocol.js";
 import { parseGeminiUsage } from "./token-usage.js";
+import { firstSystemPrompt } from "./system-messages.js";
 
 type GeminiPart =
   | { text: string }
@@ -35,8 +36,8 @@ function geminiContents(
 function systemInstruction(
   messages: ChatMessage[],
 ): { parts: Array<{ text: string }> } | undefined {
-  const system = messages.find((message) => message.role === "system");
-  return system ? { parts: [{ text: system.content }] } : undefined;
+  const system = firstSystemPrompt(messages);
+  return system === undefined ? undefined : { parts: [{ text: system }] };
 }
 
 function isGemini3Model(model: string): boolean {

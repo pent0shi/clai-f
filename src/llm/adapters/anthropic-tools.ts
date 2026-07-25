@@ -10,6 +10,7 @@ import {
 } from "../tool-protocol.js";
 // Side-effect: register wire name map before fromWireName use.
 import "../../tools/definitions.js";
+import { normalizeSystemMessages } from "../system-messages.js";
 
 export function toAnthropicTools(defs: ToolDefinition[]): Array<{
   name: string;
@@ -44,7 +45,9 @@ type AnthropicContentBlock =
 
 /**
  * Convert dialect-neutral history to Anthropic Messages API messages.
- * System is filtered out; consecutive tool results collapse into one user turn.
+ * The first system message is owned by the top-level `system` field; later
+ * system messages become marked user turns in place (LLM-002). Consecutive
+ * tool results collapse into one user turn.
  */
 export function toAnthropicToolMessages(
   messages: ChatMessage[],
@@ -55,7 +58,7 @@ export function toAnthropicToolMessages(
   }> = [];
 
   let i = 0;
-  const nonSystem = messages.filter((m) => m.role !== "system");
+  const nonSystem = normalizeSystemMessages(messages).rest;
 
   while (i < nonSystem.length) {
     const message = nonSystem[i]!;

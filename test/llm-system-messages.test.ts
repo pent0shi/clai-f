@@ -1,0 +1,94 @@
+import { describe, it, expect } from "vitest";
+import { buildAnthropicBody } from "../src/llm/anthropic.js";
+import { geminiBody } from "../src/llm/gemini.js";
+import {
+  SYSTEM_TURN_MARKER,
+  normalizeSystemMessages,
+} from "../src/llm/system-messages.js";
+import type { ChatMessage } from "../src/types.js";
+
+/**
+ * LLM-002: only the first system message used to survive on Anthropic, AWS
+ * Mantle (Claude) and Gemini. Compaction memory, the live plan, engagement
+ * scope, the Responder ledger and governor steering were filtered out.
+ */
+
+const history: ChatMessage[] = [
+  { role: "system", content: "CONSTITUTION: you are clai." },
+  { role: "user", content: "scan the host" },
+  { role: "system", content: "COMPACTION MEMORY: earlier we enumerated ports." },
+  { role: "assistant", content: "on it" },
+  { role: "system", content: "LIVE PLAN: 1) recon 2) report" },
+  { role: "system", content: "ENGAGEMENT SCOPE: 10.0.0.0/24" },
+  { role: "user", content: "continue" },
+  { role: "system", content: "RESPONDER LEDGER: nmap#1 ok" },
+  { role: "system", content: "STEERING: stop repeating the same tool call." },
+];
+
+const laterSystems = [
+  "COMPACTION MEMORY: earlier we enumerated ports.",
+  "LIVE PLAN: 1) recon 2) report",
+  "ENGAGEMENT SCOPE: 10.0.0.0/24",
+  "RESPONDER LEDGER: nmap#1 ok",
+  "STEERING: stop repeating the same tool call.",
+];
+
+describe("normalizeSystemMessages", () => {
+  it("keeps the first system message as the dialect system field", () => {
+    const { systemPrompt } = normalizeSystemMessages(history);
+    expect(systemPrompt).toBe("CONSTITUTION: you are clai.");
+  });
+
+  it("preserves later system messages in place as marked user turns", () => {
+    const { rest } = normalizeSystemMessages(history);
+    expect(rest.some((m) => m.role === "system")).toBe(false);
+    const marked = rest.filter((m) => m.content.startsWith(SYSTEM_TURN_MARKER));
+    expect(marked).toHaveLength(laterSystems.length);
+    expect(marked.every((m) => m.role === "user")).toBe(true);
+    // Order relative to the surrounding turns is untouched.
+    expect(rest.map((m) => m.content)).toEqual([
+      "scan the host",
+      `${SYSTEM_TURN_MARKER}\nCOMPACTION MEMORY: earlier we enumerated ports.`,
+      "on it",
+      `${SYSTEM_TURN_MARKER}\nLIVE PLAN: 1) recon 2) report`,
+      `${SYSTEM_TURN_MARKER}\nENGAGEMENT SCOPE: 10.0.0.0/24`,
+      "continue",
+      `${SYSTEM_TURN_MARKER}\nRESPONDER LEDGER: nmap#1 ok`,
+      `${SYSTEM_TURN_MARKER}\nSTEERING: stop repeating the same tool call.`,
+    ]);
+  });
+
+  it("applies the marker exactly once", () => {
+    const { rest } = normalizeSystemMessages([
+      { role: "system", content: "first" },
+      { role: "system", content: `${SYSTEM_TURN_MARKER}\nalready tagged` },
+    ]);
+    expect(rest[0]!.content).toBe(`${SYSTEM_TURN_MARKER}\nalready tagged`);
+  });
+});
+
+describe("provider wire bodies deliver every system message", () => {
+  it("anthropic", () => {
+    const body = buildAnthropicBody({ messages: history }, false);
+    const parsed = JSON.parse(body) as { system: string; messages: unknown[] };
+    expect(parsed.system).toBe("CONSTITUTION: you are clai.");
+    for (const content of laterSystems) {
+      expect(body).toContain(content);
+    }
+    expect(JSON.stringify(parsed.messages)).toContain(SYSTEM_TURN_MARKER);
+  });
+
+  it("gemini", () => {
+    const body = geminiBody({ messages: history });
+    const parsed = JSON.parse(body) as {
+      systemInstruction?: { parts: Array<{ text: string }> };
+      contents: unknown[];
+    };
+    expect(parsed.systemInstruction?.parts[0]?.text).toBe(
+      "CONSTITUTION: you are clai.",
+    );
+    for (const content of laterSystems) {
+      expect(JSON.stringify(parsed.contents)).toContain(content);
+    }
+  });
+});

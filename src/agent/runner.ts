@@ -12,6 +12,7 @@ import type {
   ToolResult,
 } from "../types.js";
 import { streamWithProvider, completeWithProvider } from "../llm/router.js";
+import { streamAlreadyEmitted } from "../llm/stream-progress.js";
 import {
   classifyStreamFailure,
   planStreamRecovery,
@@ -3792,6 +3793,19 @@ export async function runAgentTurn(
               throw streamError;
             }
             recordRecoveryAttempt(recoveryState, failureKind);
+
+            // LLM-003: the router refuses transparent retries after emission,
+            // but the recovery ladder may still re-run the step. Say so, since
+            // the visible answer restarts from scratch.
+            if (streamAlreadyEmitted(streamError)) {
+              const restartNotice =
+                "partial answer discarded after a mid-stream failure — the reply restarts below";
+              writeNotice(
+                "warn",
+                restartNotice,
+                chalk.yellow(`  ⚠ ${restartNotice}\n`),
+              );
+            }
 
             if (plan.notice) {
               writeNotice(

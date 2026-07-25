@@ -65,6 +65,7 @@ export const bynaraProvider: LlmProvider = {
     const model = request.model ?? defaultModels.bynara;
     const payload = await openAiCompatibleComplete({
       provider: "Bynara",
+      providerId: "bynara",
       baseUrl,
       apiKey: auth.apiKey,
       model,
@@ -89,6 +90,7 @@ export const bynaraProvider: LlmProvider = {
     const model = request.model ?? defaultModels.bynara;
     const payload = await openAiCompatibleStream({
       provider: "Bynara",
+      providerId: "bynara",
       baseUrl,
       apiKey: auth.apiKey,
       model,

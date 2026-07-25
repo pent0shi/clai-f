@@ -265,7 +265,17 @@ export async function* readStreamLines(
   resetIdleTimer();
   const onCallerAbort = (): void => idleController.abort(options.signal?.reason);
   options.signal?.addEventListener("abort", onCallerAbort, { once: true });
-  // If either signal is already aborted, bail before starting the loop.
+  // LLM-011: a caller abort must surface as an abort error, not as a clean
+  // end-of-stream — otherwise the partial text is returned as a successful
+  // completion and enters history as the model's final answer.
+  const callerAbortError = (): Error =>
+    (options.signal?.reason as Error | undefined) ??
+    new DOMException("The operation was aborted.", "AbortError");
+  if (options.signal?.aborted) {
+    if (idleTimer) clearTimeout(idleTimer);
+    throw callerAbortError();
+  }
+  // If the idle watchdog already fired, bail before starting the loop.
   if (idleController.signal.aborted) {
     if (idleTimer) clearTimeout(idleTimer);
     return;
@@ -291,7 +301,7 @@ export async function* readStreamLines(
             `Provider stream stalled — no data for ${Math.round(idleTimeoutMs / 1000)}s.`,
           );
         }
-        break;
+        throw callerAbortError();
       }
       let readResult: ReadableStreamReadResult<Uint8Array>;
       try {
@@ -724,6 +734,8 @@ export function buildChatBody(options: {
 
 export async function openAiCompatibleComplete(options: {
   provider: string;
+  /** Canonical provider id used for capability lookups (LLM-001). */
+  providerId: ProviderId;
   baseUrl: string;
   apiKey: string;
   model: string;
@@ -738,10 +750,7 @@ export async function openAiCompatibleComplete(options: {
   toolChoice?: ToolChoice | undefined;
   parallelToolCalls?: boolean | undefined;
 }): Promise<OpenAiCompatibleResult> {
-  const supportsVision = modelSupportsVision(
-    options.provider.toLowerCase() as ProviderId,
-    options.model,
-  );
+  const supportsVision = modelSupportsVision(options.providerId, options.model);
   const requestBody = buildChatBody({
     model: options.model,
     messages: options.messages,
@@ -836,6 +845,8 @@ export async function openAiCompatibleComplete(options: {
 
 export async function openAiCompatibleStream(options: {
   provider: string;
+  /** Canonical provider id used for capability lookups (LLM-001). */
+  providerId: ProviderId;
   baseUrl: string;
   apiKey: string;
   model: string;
@@ -898,10 +909,7 @@ export async function openAiCompatibleStream(options: {
   const onCallerAbort = (): void => idleController.abort(options.signal?.reason);
   options.signal?.addEventListener("abort", onCallerAbort, { once: true });
 
-  const supportsVision = modelSupportsVision(
-    options.provider.toLowerCase() as ProviderId,
-    options.model,
-  );
+  const supportsVision = modelSupportsVision(options.providerId, options.model);
   const requestBody = buildChatBody({
     model: options.model,
     messages: options.messages,
@@ -1113,25 +1121,49 @@ export async function openAiCompatibleStream(options: {
             ...(streamUsage ? { usage: streamUsage } : {}),
           };
         }
+        let parsed: {
+          error?: { message?: string; type?: string } | string;
+          usage?: unknown;
+          choices?: Array<{
+            finish_reason?: string;
+            delta?: {
+              content?: string;
+              reasoning_content?: string;
+              reasoning?: string;
+              role?: string;
+              tool_calls?: Array<{
+                index?: number;
+                id?: string;
+                type?: string;
+                function?: { name?: string; arguments?: string };
+              }>;
+            };
+          }>;
+        };
         try {
-          const parsed = JSON.parse(payload) as {
-            usage?: unknown;
-            choices?: Array<{
-              finish_reason?: string;
-              delta?: {
-                content?: string;
-                reasoning_content?: string;
-                reasoning?: string;
-                role?: string;
-                tool_calls?: Array<{
-                  index?: number;
-                  id?: string;
-                  type?: string;
-                  function?: { name?: string; arguments?: string };
-                }>;
-              };
-            }>;
-          };
+          // LLM-011: only JSON.parse is allowed to fail silently here. The
+          // delta handlers below (tool-arg size guard, UI callbacks) used to be
+          // inside this try and had their errors swallowed as "keepalives".
+          parsed = JSON.parse(payload) as typeof parsed;
+        } catch {
+          // Malformed keepalive / comment line.
+          continue;
+        }
+        // LLM-011: gateways report mid-stream failures as an error frame; that
+        // used to be dropped, so an upstream overload looked like a complete
+        // (but truncated) answer.
+        if (parsed.error) {
+          const detail =
+            typeof parsed.error === "string"
+              ? parsed.error
+              : (parsed.error.message ?? parsed.error.type ?? "unknown error");
+          throw new ProviderError(
+            `${options.provider} stream error: ${detail}`,
+            undefined,
+            payload.slice(0, 500),
+          );
+        }
+        {
           const chunkUsage = parseOpenAiUsage(parsed.usage);
           if (chunkUsage) streamUsage = chunkUsage;
           const choice = parsed.choices?.[0];
@@ -1184,9 +1216,6 @@ export async function openAiCompatibleStream(options: {
               }
             }
           }
-        } catch (parseError) {
-          if (parseError instanceof ProviderError) throw parseError;
-          // Ignore malformed keepalive lines.
         }
       }
     }
@@ -1218,20 +1247,23 @@ export async function openAiCompatibleStream(options: {
       ...(streamUsage ? { usage: streamUsage } : {}),
     };
   } catch (error) {
-    cleanup();
-    
-    void reader.cancel().catch(() => undefined);
-    try {
-      reader.releaseLock();
-    } catch {
-      // already released
-    }
     if (idleFired) {
       throw new ProviderError(
         `${options.provider} stream stalled — no model output for ${Math.round(activeIdleTimeoutMs / 1000)}s. Try a smaller model or disable thinking with /variants off.`,
       );
     }
     throw error;
+  } finally {
+    // LLM-011: the success paths used to return without releasing the body, so
+    // the socket stayed locked until GC — dozens of leaked connections per
+    // long agent turn.
+    cleanup();
+    void reader.cancel().catch(() => undefined);
+    try {
+      reader.releaseLock();
+    } catch {
+      // already released
+    }
   }
 }
 

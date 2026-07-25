@@ -183,6 +183,7 @@ export const agentrouterProvider: LlmProvider = {
       withAuthorizedClient((headers) =>
         openAiCompatibleComplete({
           provider: "AgentRouter",
+          providerId: "agentrouter",
           baseUrl,
           apiKey,
           model,
@@ -220,6 +221,7 @@ export const agentrouterProvider: LlmProvider = {
       withAuthorizedClient((headers) =>
         openAiCompatibleStream({
           provider: "AgentRouter",
+          providerId: "agentrouter",
           baseUrl,
           apiKey,
           model,

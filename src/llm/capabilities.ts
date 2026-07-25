@@ -1,3 +1,4 @@
+import { providerIds } from "../types.js";
 import type { ProviderId } from "../types.js";
 import type { ToolDialect, ToolCallingMode } from "./tool-protocol.js";
 import { isTextOnlyModel } from "./tool-protocol.js";
@@ -169,6 +170,26 @@ const visionCapabilityCache = new Map<
 const capabilityKey = (provider: ProviderId, model: string): string =>
   `${provider}:${model.trim().toLowerCase()}`;
 
+const knownProviderIds = new Set<string>(providerIds);
+const warnedUnknownProviders = new Set<string>();
+
+/**
+ * Capability lookups are keyed by canonical `ProviderId`. Passing a display
+ * label (`"NVIDIA NIM"`) used to silently resolve to "no capability", which
+ * disabled vision while the rest of the app believed it was on (LLM-001).
+ * Fail loudly in dev/test and warn once per bad key in production.
+ */
+export function warnOnUnknownProviderId(site: string, provider: string): void {
+  if (knownProviderIds.has(provider)) return;
+  const message = `${site}: "${provider}" is not a canonical ProviderId — capability lookups will report no support. Pass the provider id, not the display label.`;
+  if (process.env.NODE_ENV === "test" || process.env.VITEST) {
+    throw new Error(message);
+  }
+  if (warnedUnknownProviders.has(provider)) return;
+  warnedUnknownProviders.add(provider);
+  console.warn(`[clai] ${message}`);
+}
+
 function configuredVisionModel(provider: ProviderId): string | undefined {
   const envKey = `CLAI_VISION_MODEL_${provider.toUpperCase().replace(/-/g, "_")}`;
   return process.env[envKey]?.trim() || undefined;
@@ -214,6 +235,7 @@ export function modelSupportsVision(
   provider: ProviderId,
   model: string,
 ): boolean {
+  warnOnUnknownProviderId("modelSupportsVision", provider);
   const cached = visionCapabilityCache.get(capabilityKey(provider, model));
   if (cached) return cached.vision;
   const configured = configuredVisionModel(provider);

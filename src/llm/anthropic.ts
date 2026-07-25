@@ -8,7 +8,7 @@ import {
   type LlmProvider,
   type ProviderAuth,
 } from "./provider.js";
-import { readJson, readStreamLines } from "./http.js";
+import { ProviderError, readJson, readStreamLines } from "./http.js";
 import {
   anthropicToolBodyFields,
   createAnthropicToolStreamState,
@@ -18,6 +18,7 @@ import {
   toAnthropicToolMessages,
 } from "./adapters/anthropic-tools.js";
 import { parseAnthropicUsage } from "./token-usage.js";
+import { firstSystemPrompt } from "./system-messages.js";
 import type { TokenUsage } from "../types.js";
 
 const baseUrl = "https://api.anthropic.com/v1";
@@ -64,9 +65,7 @@ function anthropicThinkingField(
 
 export function buildAnthropicBody(request: CompletionRequest, stream: boolean): string {
   const model = request.model ?? defaultModels.anthropic;
-  const system = request.messages.find(
-    (message) => message.role === "system",
-  )?.content;
+  const system = firstSystemPrompt(request.messages);
   const messages = toAnthropicToolMessages(request.messages);
   const thinking = anthropicThinkingField(request.thinking, model);
   return JSON.stringify({
@@ -211,6 +210,7 @@ export const anthropicProvider: LlmProvider = {
         const parsed = JSON.parse(payload) as {
           type?: string;
           index?: number;
+          error?: { message?: string; type?: string };
           usage?: unknown;
           message?: { usage?: unknown };
           content_block?: {
@@ -228,6 +228,15 @@ export const anthropicProvider: LlmProvider = {
             stop_reason?: string;
           };
         };
+        // LLM-011: Anthropic reports mid-stream overloads as an `error` event.
+        // It used to be dropped, so a truncated answer looked complete.
+        if (parsed.type === "error") {
+          throw new ProviderError(
+            `Anthropic stream error: ${parsed.error?.message ?? parsed.error?.type ?? "unknown"}`,
+            undefined,
+            payload.slice(0, 500),
+          );
+        }
         // message_start carries input tokens; message_delta carries output.
         if (parsed.type === "message_start" && parsed.message?.usage) {
           streamUsage = parseAnthropicUsage(parsed.message.usage) ?? streamUsage;
@@ -279,8 +288,10 @@ export const anthropicProvider: LlmProvider = {
             });
           }
         }
-      } catch {
-        // Ignore malformed keepalive lines.
+      } catch (frameError) {
+        // Only a malformed JSON frame is ignorable; real errors (provider error
+        // frames, tool-argument size guard) must propagate (LLM-011).
+        if (!(frameError instanceof SyntaxError)) throw frameError;
       }
     }
     exitThinking();

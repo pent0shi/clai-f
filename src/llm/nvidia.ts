@@ -109,6 +109,7 @@ export const nvidiaProvider: LlmProvider = {
     const model = request.model ?? defaultModels.nvidia;
     const payload = await openAiCompatibleComplete({
       provider: "NVIDIA NIM",
+      providerId: "nvidia",
       baseUrl,
       apiKey: auth.apiKey,
       model,
@@ -133,6 +134,7 @@ export const nvidiaProvider: LlmProvider = {
     const model = request.model ?? defaultModels.nvidia;
     const payload = await openAiCompatibleStream({
       provider: "NVIDIA NIM",
+      providerId: "nvidia",
       baseUrl,
       apiKey: auth.apiKey,
       model,

@@ -15,6 +15,11 @@ import { groqProvider } from "./groq.js";
 import { ProviderError, isReasoningUnsupportedError } from "./http.js";
 import { markReasoningUnsupported } from "./capabilities.js";
 import {
+  markStreamEmittedBytes,
+  streamAlreadyEmitted,
+  streamEmittedBytes,
+} from "./stream-progress.js";
+import {
   attemptsPerKey,
   buildKeyAttemptPlan,
   formatKeyEventStatus,
@@ -97,6 +102,9 @@ function isTransientNetworkError(error: unknown): boolean {
 }
 
 function isRetriableError(error: unknown): boolean {
+  // LLM-003: never retry transparently once bytes reached the caller — the
+  // second attempt would append to the same assistant message.
+  if (streamAlreadyEmitted(error)) return false;
   const message = error instanceof Error ? error.message : String(error);
   // Mid-stream stalls used to be non-retriable (to avoid infinite hangs).
   // One quick retry on the same provider recovers flaky thinking pauses
@@ -398,15 +406,26 @@ async function tryStreamOnce(
   onStatus?: (message: string) => void,
 ): Promise<CompletionResult> {
   const activeRequest = { ...request, provider: providerId, model };
+  // LLM-003: count what actually reached the caller so no layer above can
+  // retry transparently into the same assistant message.
+  let emittedBytes = 0;
+  const emit = (token: string): void => {
+    emittedBytes += token.length;
+    onToken(token);
+  };
   try {
     if (provider.stream) {
-      return await provider.stream(activeRequest, auth, onToken);
+      return await provider.stream(activeRequest, auth, emit);
     }
     const result = await provider.complete(activeRequest, auth);
-    onToken(result.text);
+    emit(result.text);
     return result;
   } catch (error) {
-    if (activeRequest.tools?.length && isToolsUnsupportedError(error)) {
+    if (
+      emittedBytes === 0 &&
+      activeRequest.tools?.length &&
+      isToolsUnsupportedError(error)
+    ) {
       markTextOnlyModel(providerId, model);
       onStatus?.(
         `ℹ ${providerId}/${model} does not support native tools — falling back to text protocol`,
@@ -417,30 +436,38 @@ async function tryStreamOnce(
         toolChoice: undefined,
         parallelToolCalls: undefined,
       };
-      if (provider.stream) {
-        return await provider.stream(textRequest, auth, onToken);
+      try {
+        if (provider.stream) {
+          return await provider.stream(textRequest, auth, emit);
+        }
+        const result = await provider.complete(textRequest, auth);
+        emit(result.text);
+        return result;
+      } catch (retryError) {
+        throw markStreamEmittedBytes(retryError, emittedBytes);
       }
-      const result = await provider.complete(textRequest, auth);
-      onToken(result.text);
-      return result;
     }
     // Model rejected a reasoning/thinking knob (e.g. chat_template_kwargs on a
     // NIM chat template that does not accept it). Mark it so buildChatBody stops
     // sending reasoning, then retry once without it. A parameter rejection is a
     // request-time 4xx, so no tokens have streamed yet — the retry is clean.
-    if (isReasoningUnsupportedError(error)) {
+    if (emittedBytes === 0 && isReasoningUnsupportedError(error)) {
       markReasoningUnsupported(model);
       onStatus?.(
         `ℹ ${providerId}/${model} rejected reasoning options — retrying without them`,
       );
-      if (provider.stream) {
-        return await provider.stream(activeRequest, auth, onToken);
+      try {
+        if (provider.stream) {
+          return await provider.stream(activeRequest, auth, emit);
+        }
+        const result = await provider.complete(activeRequest, auth);
+        emit(result.text);
+        return result;
+      } catch (retryError) {
+        throw markStreamEmittedBytes(retryError, emittedBytes);
       }
-      const result = await provider.complete(activeRequest, auth);
-      onToken(result.text);
-      return result;
     }
-    throw error;
+    throw markStreamEmittedBytes(error, emittedBytes);
   }
 }
 
@@ -706,9 +733,18 @@ export async function streamWithProvider(
         provider: providerId,
         message: summarizeProviderError(error),
       });
-      if (isKeyCircleStopError(error) || shouldStopProviderFallback(error)) {
-        throw new Error(
-          `No provider could stream the request.${formatFailures(failures)}`,
+      if (
+        isKeyCircleStopError(error) ||
+        shouldStopProviderFallback(error) ||
+        // LLM-003: partial output already reached the transcript; another
+        // provider would duplicate it.
+        streamAlreadyEmitted(error)
+      ) {
+        throw markStreamEmittedBytes(
+          new Error(
+            `No provider could stream the request.${formatFailures(failures)}`,
+          ),
+          streamEmittedBytes(error),
         );
       }
       // Continue to next provider when fallback is enabled (e.g. 413).

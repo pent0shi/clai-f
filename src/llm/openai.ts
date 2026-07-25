@@ -40,6 +40,7 @@ export const openaiProvider: LlmProvider = {
     const model = request.model ?? defaultModels.openai;
     const payload = await openAiCompatibleComplete({
       provider: "OpenAI",
+      providerId: "openai",
       baseUrl,
       apiKey: auth.apiKey,
       model,
@@ -64,6 +65,7 @@ export const openaiProvider: LlmProvider = {
     const model = request.model ?? defaultModels.openai;
     const payload = await openAiCompatibleStream({
       provider: "OpenAI",
+      providerId: "openai",
       baseUrl,
       apiKey: auth.apiKey,
       model,

@@ -60,6 +60,7 @@ export const qwenCloudProvider: LlmProvider = {
     const model = request.model ?? defaultModels["qwen-cloud"];
     const payload = await openAiCompatibleComplete({
       provider: "Qwen Cloud",
+      providerId: "qwen-cloud",
       baseUrl,
       apiKey: auth.apiKey,
       model,
@@ -84,6 +85,7 @@ export const qwenCloudProvider: LlmProvider = {
     const model = request.model ?? defaultModels["qwen-cloud"];
     const payload = await openAiCompatibleStream({
       provider: "Qwen Cloud",
+      providerId: "qwen-cloud",
       baseUrl,
       apiKey: auth.apiKey,
       model,

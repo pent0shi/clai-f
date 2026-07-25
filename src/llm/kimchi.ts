@@ -62,6 +62,7 @@ export const kimchiProvider: LlmProvider = {
     const model = request.model ?? defaultModels.kimchi;
     const payload = await openAiCompatibleComplete({
       provider: "Kimchi",
+      providerId: "kimchi",
       baseUrl,
       apiKey: auth.apiKey,
       model,
@@ -86,6 +87,7 @@ export const kimchiProvider: LlmProvider = {
     const model = request.model ?? defaultModels.kimchi;
     const payload = await openAiCompatibleStream({
       provider: "Kimchi",
+      providerId: "kimchi",
       baseUrl,
       apiKey: auth.apiKey,
       model,
