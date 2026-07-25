@@ -1,6 +1,5 @@
 import net from "node:net";
-import { execSync } from "node:child_process";
-import { homedir, platform } from "node:os";
+import { homedir } from "node:os";
 import { resolve } from "node:path";
 import type { RiskLevel, ToolCall } from "../types.js";
 import {
@@ -11,24 +10,34 @@ import {
   readOnlyShellCommands,
   subcommandSafeMap,
   commandHasMutatingArg,
+  commandHasStatefulSysadminArg,
   commandIsMutating,
+  commandIsScannerOnly,
   commandWritesOrEscalates,
+  splitCommandSegments,
+  isApprovedScannerSegment,
 } from "./patterns.js";
 import { normalizeScopeTarget, type EngagementScope } from "../store/scope.js";
 import { classifyHost } from "../tools/web/ssrf-guard.js";
 import { pathInsideSandbox } from "../tools/fs.js";
 import { packageBinaryName } from "../tools/package-binary.js";
+import { findExecutableSync } from "../os/command.js";
 
+/**
+ * Plain executable name: letters, digits and the punctuation real binaries
+ * use. Anything with a path separator, whitespace, or a shell metacharacter
+ * is rejected outright — classification must never interpret model text.
+ */
+const PLAIN_BINARY_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$/;
 
+/**
+ * Side-effect-free PATH probe. No shell, no child process: `findExecutableSync`
+ * only stats candidate paths, so a model-supplied `checkBinary` can never be
+ * interpreted as a command during safety classification.
+ */
 function isBinaryOnPath(binary: string): boolean {
-  try {
-    const probe =
-      platform() === "win32" ? `where.exe ${binary}` : `command -v ${binary}`;
-    execSync(probe, { timeout: 3_000, stdio: "ignore" });
-    return true;
-  } catch {
-    return false;
-  }
+  if (!PLAIN_BINARY_NAME_RE.test(binary)) return false;
+  return Boolean(findExecutableSync(binary));
 }
 
 export interface RiskDecision {
@@ -197,6 +206,58 @@ const SENSITIVE_WRITE_ROOTS_UNIX =
 const SENSITIVE_WRITE_ROOTS_WIN =
   /^[A-Za-z]:\/(?:Windows|Program Files(?: \(x86\))?|ProgramData)(?:\/|$)/i;
 
+function pathIsSensitiveWriteTarget(raw: string): boolean {
+  if (!raw) return false;
+  if (/^\/dev\/(null|stdout|stderr|tty|fd\/\d+)$/.test(raw)) return false;
+  if (/^(?:nul|con|\$null|-)$/i.test(raw)) return false;
+  const resolved = resolveForSecretCheck(raw).replace(/\\/g, "/");
+  if (
+    SENSITIVE_WRITE_ROOTS_UNIX.test(resolved) ||
+    SENSITIVE_WRITE_ROOTS_WIN.test(resolved)
+  ) {
+    return true;
+  }
+  const home = homedir().replace(/\\/g, "/").replace(/\/+$/, "");
+  if (home && resolved.toLowerCase().startsWith(home.toLowerCase())) {
+    const rest = resolved.slice(home.length);
+    if (/^\/+\.[^/]/.test(rest)) return true;
+  }
+  return false;
+}
+
+/**
+ * Flags used by the approved scanners to write results to a file. A scanner is
+ * only "read-only" with respect to the local filesystem when its output flags
+ * do not point at a sensitive location, so these are inspected explicitly
+ * instead of being covered by shell-redirect parsing.
+ */
+const SCANNER_OUTPUT_FLAG_RE =
+  /^(?:-o[ANXGSJ]?|-oJ|--output|--output-file|--out|-of|--report|--json-export|--csv-export|--markdown-export|--sarif-export|--log|--save|--report-file)$/i;
+
+function scannerWritesSensitiveFile(command: string): boolean {
+  for (const segment of splitCommandSegments(command)) {
+    if (!isApprovedScannerSegment(segment)) continue;
+    const tokens = segment.tokens;
+    for (let i = 1; i < tokens.length; i += 1) {
+      const token = tokens[i]!;
+      const eq = token.indexOf("=");
+      if (eq > 0) {
+        const name = token.slice(0, eq);
+        if (SCANNER_OUTPUT_FLAG_RE.test(name)) {
+          const value = token.slice(eq + 1).replace(/^['"]|['"]$/g, "");
+          if (pathIsSensitiveWriteTarget(value)) return true;
+        }
+        continue;
+      }
+      if (!SCANNER_OUTPUT_FLAG_RE.test(token)) continue;
+      const value = (tokens[i + 1] ?? "").replace(/^['"]|['"]$/g, "");
+      if (!value || value.startsWith("-")) continue;
+      if (pathIsSensitiveWriteTarget(value)) return true;
+    }
+  }
+  return false;
+}
+
 /**
  * Inspect the redirection targets in a command and report whether any writes
  * into a sensitive system directory or a home dotfile. Discards / fd-dups are
@@ -209,30 +270,9 @@ function redirectTargetIsSensitive(command: string): boolean {
   const withoutDup = command.replace(/\d*>&\d+|&>&\d+/g, " ");
   const re = /(?:&?>>?)\s*('[^']*'|"[^"]*"|[^\s;|&<>()]+)/g;
   let match: RegExpExecArray | null;
-  const home = homedir().replace(/\\/g, "/").replace(/\/+$/, "");
   while ((match = re.exec(withoutDup)) !== null) {
     const raw = (match[1] ?? "").replace(/^['"]|['"]$/g, "");
-    if (!raw) continue;
-    // Unix discards / device sinks are never real writes.
-    if (/^\/dev\/(null|stdout|stderr|tty|fd\/\d+)$/.test(raw)) continue;
-    // Windows null/console sinks (NUL, CON, $null) are not real writes either.
-    if (/^(?:nul|con|\$null)$/i.test(raw)) continue;
-    // Normalize backslashes so Windows paths match the same way isSecretPath
-    // normalizes (the classifier already treats both styles uniformly).
-    const resolved = resolveForSecretCheck(raw).replace(/\\/g, "/");
-    if (
-      SENSITIVE_WRITE_ROOTS_UNIX.test(resolved) ||
-      SENSITIVE_WRITE_ROOTS_WIN.test(resolved)
-    ) {
-      return true;
-    }
-    // Home dotfiles (~/.bashrc, ~/.zshrc, ~/.config/..., ~/.ssh/...) are
-    // sensitive. Path comparison is case-insensitive so Windows (where the
-    // filesystem and drive letter case do not matter) is handled too.
-    if (home && resolved.toLowerCase().startsWith(home.toLowerCase())) {
-      const rest = resolved.slice(home.length);
-      if (/^\/+\.[^/]/.test(rest)) return true;
-    }
+    if (pathIsSensitiveWriteTarget(raw)) return true;
   }
   return false;
 }
@@ -366,8 +406,9 @@ export function classifyShellCommand(
   }
   if (exfiltrationPatterns.some((pattern) => pattern.test(command))) {
     return {
-      level: "block",
-      reason: "Command resembles secret or data exfiltration",
+      level: "confirm",
+      reason:
+        "Command pipes remote content into a shell or sends local data to a network sink — confirm that this is intended and authorized",
     };
   }
   // A bare version/help probe (node --version, npm -v, go version, docker
@@ -375,15 +416,9 @@ export function classifyShellCommand(
   if (isVersionOrHelpProbe(command)) {
     return { level: "safe", reason: "Version/help probe is read-only" };
   }
-  // Scanner/recon commands are read-only from the local filesystem point of
-  // view. They may touch the network, but they should not trigger the generic
-  // y/n prompt; engagement authorization is handled as session policy instead.
-  if (commandContainsNetworkScanner(command)) {
-    return { level: "safe", reason: "Read-only network/security command" };
-  }
-  // Run mutation checks BEFORE the read-only base check: sed/find are
-  // read-only bases yet `sed -i` / `find -exec` mutate, and a pipe can hide a
-  // writer like `ls | tee file`.
+  // Mutation checks run BEFORE any exemption (including the scanner
+  // exemption) so risk is monotonic: adding a scanner name, another segment,
+  // or a redirect can never lower a command's risk level.
   const { base, sub } = baseAndSub(command);
   const readOnlyBase = isReadOnlyBase(base);
   const safeSub = isSafeSubcommand(base, sub);
@@ -416,6 +451,28 @@ export function classifyShellCommand(
       reason:
         "Command installs, deletes, moves, copies, or otherwise modifies state and requires confirmation",
     };
+  }
+  if (commandHasStatefulSysadminArg(command)) {
+    return {
+      level: "confirm",
+      reason:
+        "Command changes host network configuration (ip/nmcli/route/arp mutation) and requires confirmation",
+    };
+  }
+  // Scanner/recon commands are read-only from the local filesystem point of
+  // view. They may touch the network, but they should not trigger the generic
+  // y/n prompt; engagement authorization is handled as session policy instead.
+  // The exemption only applies when EVERY executable segment is a scanner or
+  // an already-read-only command, so a scanner word cannot whitelist a
+  // compound mutating command.
+  if (commandIsScannerOnly(command)) {
+    if (scannerWritesSensitiveFile(command)) {
+      return {
+        level: "confirm",
+        reason: "Scanner writes its output into a system or sensitive path",
+      };
+    }
+    return { level: "safe", reason: "Read-only network/security command" };
   }
   if (readOnlyBase) {
     return { level: "safe", reason: "Read-only command" };

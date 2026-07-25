@@ -6,11 +6,28 @@ export const destructiveCommandPatterns = [
   /\bdel\s+\/f\s+\/s\s+\/q\s+[A-Z]:\\/i,
   /\bformat\s+[A-Z]:/i,
   /\bdd\s+if=.*\s+of=\/dev\//,
+  // Raw block-device writes through redirection (`> /dev/sda`, `>> /dev/nvme0n1`).
+  />>?\s*\/dev\/(?:[sh]d[a-z]\d*|nvme\d+n\d+(?:p\d+)?|disk\d+|mmcblk\d+)\b/i,
   /mkfs\.[a-z0-9]+\s+\/dev\//i,
+  // Recursive permission/ownership destruction of the whole filesystem.
+  /\b(?:chmod|chown|chgrp)\s+(?:-[a-zA-Z]*\s+)*-[a-zA-Z]*R[a-zA-Z]*\s+\S+\s+\/(?:\s|$)/,
+  /\bchmod\s+(?:-[a-zA-Z]*\s+)*777\s+\/(?:\s|$)/,
+  // `find / -delete` / `find / -exec rm` sweeps from the filesystem root.
+  /\bfind\s+\/\s+[^|;&]*-(?:delete|exec\s+rm)\b/i,
+  // Truncating a critical system file to zero.
+  /\btruncate\s+(?:-[a-zA-Z]*\s+)*-s\s*0\s+\/(?:etc|boot|var\/lib)\//i,
   /:\(\)\s*\{\s*:\|:\s*&\s*}\s*;/,
   /\bshutdown\b.*\b(now|\/s|\/r)\b/i,
 ];
 
+/**
+ * Commands that pipe remote content into a shell or push local data into a
+ * network sink. These are RECOVERABLE and routinely legitimate — `curl
+ * https://sh.rustup.rs | sh` is a documented installer, and `base64 file | nc
+ * target 4444` is a textbook authorized-exfiltration test on an engagement —
+ * so they are CONFIRMED rather than hard-blocked. The operator is the right
+ * authority; a hard block only pushed the model into retrying variants.
+ */
 export const exfiltrationPatterns = [
   /curl\s+.*\|\s*sh/i,
   /wget\s+.*\|\s*sh/i,
@@ -22,6 +39,70 @@ export const exfiltrationPatterns = [
 ];
 
 export const networkScanTools = ['nmap', 'masscan', 'nikto', 'sqlmap', 'gobuster', 'ffuf', 'hydra', 'dirb', 'wfuzz', 'nuclei'];
+
+const networkScanToolSet = new Set(networkScanTools);
+
+/**
+ * One parsed executable segment of a command line. Every safety decision that
+ * needs to know "which programs does this command actually run" goes through
+ * {@link splitCommandSegments} so a single shared representation is used
+ * instead of per-rule substring matching.
+ */
+export interface CommandSegment {
+  raw: string;
+  tokens: string[];
+  base: string;
+  sub: string | undefined;
+  elevated: boolean;
+}
+
+const SEGMENT_SPLIT_RE = /(?:\|\||&&|;|\||\n)/g;
+
+/**
+ * Split a command line on pipes / chaining operators and resolve the real
+ * executable of each segment, seeing through env-var prefixes, `command`,
+ * `exec`, `time`, and `sudo`/`doas` (including their value-taking flags).
+ */
+export function splitCommandSegments(command: string): CommandSegment[] {
+  const segments: CommandSegment[] = [];
+  for (const raw of command.split(SEGMENT_SPLIT_RE)) {
+    const trimmed = raw.trim();
+    if (!trimmed) continue;
+    const tokens = trimmed.split(/\s+/).filter(Boolean);
+    let i = 0;
+    let elevated = false;
+    while (i < tokens.length && /^[A-Za-z_][\w]*=.*$/.test(tokens[i]!)) i += 1;
+    while (
+      i < tokens.length &&
+      (tokens[i] === "command" || tokens[i] === "exec" || tokens[i] === "time")
+    ) {
+      i += 1;
+    }
+    if (i < tokens.length && (tokens[i] === "sudo" || tokens[i] === "doas")) {
+      elevated = true;
+      i += 1;
+      while (i < tokens.length && tokens[i]!.startsWith("-")) {
+        const flag = tokens[i]!;
+        i += 1;
+        if (/^-(?:u|g|p|C|h|U|r|t|T)$/.test(flag) && i < tokens.length) i += 1;
+      }
+    }
+    const head = tokens[i];
+    if (!head) continue;
+    segments.push({
+      raw: trimmed,
+      tokens: tokens.slice(i),
+      base: head.replace(/^.*[\\/]/, "").toLowerCase(),
+      sub: tokens[i + 1],
+      elevated,
+    });
+  }
+  return segments;
+}
+
+export function isApprovedScannerSegment(segment: CommandSegment): boolean {
+  return networkScanToolSet.has(segment.base);
+}
 
 /**
  * Commands that never mutate state and never expose secrets through their
@@ -40,10 +121,11 @@ export const readOnlyShellCommands = new Set([
   'ls', 'dir', 'wc', 'file', 'stat',
   'find', 'which', 'where', 'whereis', 'type', 'readlink', 'realpath',
   'tree', 'du', 'df', 'lsof', 'md5', 'md5sum', 'sha256sum', 'shasum',
-  // networking info
-  'ifconfig', 'ipconfig', 'ip', 'ping', 'traceroute', 'tracert', 'dig',
-  'nslookup', 'host', 'whois', 'netstat', 'ss', 'route',
-  'arp', 'iwconfig', 'nmcli',
+  // networking info (state-changing CLIs like ip/nmcli/route/arp are NOT here —
+  // they live in subcommandSafeMap so only their read verbs auto-run)
+  'ifconfig', 'ipconfig', 'ping', 'traceroute', 'tracert', 'dig',
+  'nslookup', 'host', 'whois', 'netstat', 'ss',
+  'iwconfig',
   // process info
   'ps', 'top', 'htop', 'pgrep', 'lscpu', 'free', 'vmstat', 'iostat',
   // text processing (operate on stdin/files — safe by themselves)
@@ -89,7 +171,71 @@ export const subcommandSafeMap: Record<string, Set<string>> = {
   rpm: new Set(['-q', '-qa', '-qi', '-ql', '--query']),
   docker: new Set(['ps', 'images', 'inspect', 'logs', 'version', 'info', 'history']),
   kubectl: new Set(['get', 'describe', 'logs', 'version', 'cluster-info', 'api-resources', 'api-versions']),
+  // Network configuration CLIs: only the read verbs are safe. `ip link set`,
+  // `ip addr add`, `ip route del`, `nmcli con delete`, and `route delete`
+  // change host networking and must confirm.
+  ip: new Set(['show', 'list', 'sh', 'l', 'monitor', 'help']),
+  nmcli: new Set(['show', 'list', 'status', 'help']),
+  route: new Set(['show', 'list', 'get', 'print', '-n']),
+  arp: new Set(['-a', '-n', '-e', '-v', 'show', 'list']),
 };
+
+/**
+ * Second-token read verbs for the network CLIs above, so `ip addr show`,
+ * `ip -br link`, `nmcli device status`, and `nmcli connection show` auto-run
+ * while any other verb confirms. `undefined` means "no verb at all", which is
+ * a plain listing (`ip addr`, `nmcli`) and therefore read-only.
+ */
+const NETWORK_OBJECT_WORDS: Record<string, Set<string>> = {
+  ip: new Set([
+    'addr', 'a', 'address', 'link', 'l', 'route', 'r', 'neigh', 'n',
+    'neighbour', 'neighbor', 'rule', 'maddr', 'tunnel', 'netns', 'monitor',
+  ]),
+  nmcli: new Set([
+    'device', 'dev', 'd', 'connection', 'con', 'c', 'general', 'g',
+    'networking', 'n', 'radio', 'r', 'monitor', 'agent',
+  ]),
+};
+
+const NETWORK_READ_VERBS = new Set([
+  'show', 'list', 'sh', 'ls', 'l', 'status', 'get', 'print', 'monitor', 'help',
+]);
+
+/**
+ * True when a network-configuration command mutates host state. `ip`, `nmcli`,
+ * `route`, and `arp` are argument-shaped rather than subcommand-shaped, so the
+ * read verbs are enumerated explicitly and everything else (set/add/del/
+ * delete/flush/up/down/modify/replace/change) requires confirmation.
+ */
+export function commandHasStatefulSysadminArg(command: string): boolean {
+  for (const segment of splitCommandSegments(command)) {
+    const objects = NETWORK_OBJECT_WORDS[segment.base];
+    if (segment.base === 'route' || segment.base === 'arp') {
+      const words = segment.tokens
+        .slice(1)
+        .filter((token) => !token.startsWith('-'));
+      const verb = words[0]?.toLowerCase();
+      if (verb === undefined) continue;
+      if (NETWORK_READ_VERBS.has(verb)) continue;
+      return true;
+    }
+    if (!objects) continue;
+    const words = segment.tokens
+      .slice(1)
+      .filter((token) => !token.startsWith('-'));
+    const object = words[0]?.toLowerCase();
+    if (object === undefined) continue;
+    if (!objects.has(object)) {
+      // Unknown object word for this CLI — be conservative and confirm.
+      return true;
+    }
+    const verb = words[1]?.toLowerCase();
+    if (verb === undefined) continue;
+    if (NETWORK_READ_VERBS.has(verb)) continue;
+    return true;
+  }
+  return false;
+}
 
 /**
  * Patterns that move an otherwise-safe-looking command into the
@@ -308,41 +454,11 @@ export function isVersionOrHelpProbe(command: string): boolean {
  * auto-run, while a chain that includes a mutator (`cat a | tee b`) is flagged.
  */
 export function commandIsMutating(command: string): boolean {
-  const segments = command
-    .split(/(?:\|\||&&|;|\|)/g)
-    .map((segment) => segment.trim())
-    .filter(Boolean);
-  for (const segment of segments) {
-    const tokens = segment.split(/\s+/);
-    let i = 0;
-    // Skip env-var assignment prefixes ("FOO=bar cmd ...") and exec/command.
-    while (i < tokens.length && /^[A-Za-z_][\w]*=.*$/.test(tokens[i]!)) i += 1;
-    if (
-      i < tokens.length &&
-      (tokens[i] === "command" || tokens[i] === "exec" || tokens[i] === "time")
-    ) {
-      i += 1;
-    }
-    // See through a leading sudo/doas (and its flags) so the REAL command is
-    // classified: `sudo rm` / `sudo apt install` confirm, while `sudo
-    // systemctl start` / `sudo cat` stay non-mutating. sudo itself no longer
-    // forces a confirm — the OS password prompt is the real gate.
-    if (i < tokens.length && (tokens[i] === "sudo" || tokens[i] === "doas")) {
-      i += 1;
-      while (i < tokens.length && tokens[i]!.startsWith("-")) {
-        const flag = tokens[i]!;
-        i += 1;
-        // sudo flags that consume a following value.
-        if (/^-(?:u|g|p|C|h|U|r|t|T)$/.test(flag) && i < tokens.length) i += 1;
-      }
-    }
-    const head = tokens[i];
-    if (!head) continue;
-    const base = head.replace(/^.*[\\/]/, "").toLowerCase();
+  for (const segment of splitCommandSegments(command)) {
+    const { base, sub } = segment;
     if (!mutatingCommandBases.has(base)) continue;
     // A read-only subcommand of an otherwise-mutating CLI (git status,
     // docker ps, npm list) is NOT a mutation.
-    const sub = tokens[i + 1];
     const allow = subcommandSafeMap[base];
     if (allow && sub && (allow.has(sub) || allow.has(sub.replace(/^--/, "")))) {
       continue;
@@ -350,6 +466,34 @@ export function commandIsMutating(command: string): boolean {
     return true;
   }
   return false;
+}
+
+/**
+ * True only when EVERY executable segment of the command is either an
+ * approved network scanner or an already-read-only command, and at least one
+ * segment is a scanner. This is what makes the scanner exemption monotonic:
+ * a scanner token can never turn a mutating or unknown segment into `safe`,
+ * so `nmap host && rm -rf build` or `nmap host > /etc/hosts` keep the risk
+ * level they would have had without the scanner word.
+ */
+export function commandIsScannerOnly(command: string): boolean {
+  const segments = splitCommandSegments(command);
+  if (segments.length === 0) return false;
+  let sawScanner = false;
+  for (const segment of segments) {
+    if (isApprovedScannerSegment(segment)) {
+      sawScanner = true;
+      continue;
+    }
+    if (readOnlyShellCommands.has(segment.base)) continue;
+    const allow = subcommandSafeMap[segment.base];
+    const sub = segment.sub;
+    if (allow && sub && (allow.has(sub) || allow.has(sub.replace(/^--/, "")))) {
+      continue;
+    }
+    return false;
+  }
+  return sawScanner;
 }
 
 /**

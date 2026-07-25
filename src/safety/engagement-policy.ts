@@ -311,8 +311,7 @@ export function engagementActionForToolCall(call: ToolCall): EngagementAction | 
   ) {
     return undefined;
   }
-  const destructive = /\b(?:rm\s+-rf|mkfs|dd\s+if=|shutdown|reboot|drop\s+(?:database|table)|delete\s+from)\b/i.test(command);
-  const persistence = /\b(?:crontab|launchctl|systemctl\s+enable|schtasks|authorized_keys|startup|persistence)\b/i.test(command);
+  const destructive = /\b(?:rm\s+-rf|mkfs|dd\s+if=|shutdown|reboot|drop\s+(?:database|table)|delete\s+from)\b/i.test(command);  const persistence = /\b(?:crontab|launchctl|systemctl\s+enable|schtasks|authorized_keys|startup|persistence)\b/i.test(command);
   const exploitation = /\b(?:sqlmap|hydra|metasploit|msfconsole|exploit|payload|reverse.shell|csrf|xss|union\s+select)\b/i.test(command);
   const authentication = /\b(?:login|auth|password|credential|jwt|session|hydra)\b/i.test(command);
   const phase: EngagementPhase = destructive || persistence
@@ -344,4 +343,49 @@ export function engagementActionForToolCall(call: ToolCall): EngagementAction | 
     phase,
     capability,
   };
+}
+
+/**
+ * Every engagement action implied by one tool call — one per distinct network
+ * destination. A shell command can name several targets
+ * (`nmap in-scope.example.com out-of-scope.example.org`); authorizing only the
+ * last one would let the first be scanned unchecked, so callers must evaluate
+ * ALL returned actions and deny on the first failure.
+ */
+export function engagementActionsForToolCall(
+  call: ToolCall,
+): EngagementAction[] {
+  const primary = engagementActionForToolCall(call);
+  if (!primary) return [];
+  if (call.name !== "shell.exec" && call.name !== "shell.start") {
+    return [primary];
+  }
+  const command = String(call.args.command ?? "");
+  const hosts = [
+    ...new Set(
+      [
+        primary.target,
+        ...[
+          ...command.matchAll(
+            /(?:^|\s)((?:[a-z0-9-]+\.)+[a-z]{2,}|(?:\d{1,3}\.){3}\d{1,3})(?=\s|$)/gi,
+          ),
+        ]
+          .map((match) => match[1])
+          .filter((candidate): candidate is string => Boolean(candidate)),
+      ]
+        .map((host) => host.trim())
+        .filter(Boolean),
+    ),
+  ];
+  return hosts.map((host) =>
+    host === primary.target
+      ? primary
+      : {
+          ...primary,
+          target: host,
+          url: undefined,
+          port: undefined,
+          path: "/",
+        },
+  );
 }

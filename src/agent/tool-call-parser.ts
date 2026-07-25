@@ -294,12 +294,39 @@ function parseKimiToolCall(text: string): ToolCall | undefined {
 const ID_TOOL_CALL_RE =
   /<tool_call:([A-Za-z0-9_-]+)>\s*([\w.-]+)\s*/gi;
 
+/**
+ * Boundaries that end one id-tagged block. Argument JSON must be found before
+ * the first of these, so a block whose own JSON is missing or truncated can
+ * never adopt the arguments of a LATER block (SEC-006): a `fs.delete` opener
+ * must not pair with the next call's `{"path":...}`.
+ */
+const ID_BLOCK_BOUNDARY_RES: RegExp[] = [
+  /<\/tool_call\b/i,
+  /<\/tool_calls\b/i,
+  /<tool_call:/i,
+  /<tool_call>/i,
+  /<tool_calls:/i,
+  /<\|tool_call_begin\|>/i,
+  /<\|tool_calls_section_end\|>/i,
+];
+
+function boundIdTaggedBlock(after: string): string {
+  let end = after.length;
+  for (const re of ID_BLOCK_BOUNDARY_RES) {
+    const match = re.exec(after);
+    if (match && match.index < end) end = match.index;
+  }
+  return after.slice(0, end);
+}
+
 function parseIdTaggedToolCall(text: string): ToolCall | undefined {
   const match = /<tool_call:([A-Za-z0-9_-]+)>\s*([\w.-]+)\s*/i.exec(text);
   if (!match) return undefined;
   const name = match[2]!;
-  const after = text.slice(match.index + match[0].length);
-  const json = extractBalancedJson(after);
+  const block = boundIdTaggedBlock(
+    text.slice(match.index + match[0].length),
+  );
+  const json = extractBalancedJson(block);
   if (json) {
     const parsed = tryJson(json);
     if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
@@ -311,11 +338,12 @@ function parseIdTaggedToolCall(text: string): ToolCall | undefined {
       // Bare args object: {"query":"…"}
       return { name, args: obj };
     }
+    return undefined;
   }
-  // No-args tool (e.g. net.context / sysinfo)
-  if (/^[\s\n]*(?:<\/tool_call|$)/i.test(after) || after.trim() === "") {
-    return { name, args: {} };
-  }
+  // An unbalanced/undecodable `{` inside this block means the arguments are
+  // truncated. Never fall through to an empty-args call — that would run a
+  // mutating tool with a different meaning than the model intended.
+  if (block.includes("{")) return undefined;
   return { name, args: {} };
 }
 
@@ -724,7 +752,12 @@ export function inferToolFromArgs(
 ): string | undefined {
   const has = (key: string): boolean =>
     Object.prototype.hasOwnProperty.call(obj, key);
-  if (has("command")) return "shell.exec";
+  // `command` is deliberately NOT inferred: a fenced JSON object containing a
+  // "command" key routinely appears in material the model quotes from a
+  // README, web page, or config sample. Inferring shell.exec from it turns
+  // fetched content into an execution path, so the caller nudges for an
+  // explicit re-emit instead.
+  if (has("command") || has("cmd")) return undefined;
   if (has("files")) return "fs.writeMany";
   if (has("calls")) return "tool.batch";
   if (has("startLine") && has("endLine") && has("path")) return "fs.replaceLines";
@@ -818,21 +851,30 @@ export function recognizeBareToolJson(
   const primary = tryRecognizeBareArgs(inner);
   if (primary) return primary;
 
-  // Secondary path: scan for any fenced block embedded in the text
-  // This catches models that prepend prose before emitting a bare-args fence,
-  // e.g. "Let me fetch it.\n\n```web\n{\"url\":\"https://...\"}\n```"
+  // Secondary path: scan for a fenced block that is the model's OWN trailing
+  // content (the last fence in the message, with nothing but whitespace after
+  // it). Quoted material in the middle of an answer is never treated as a
+  // call, which keeps fetched README/web content out of the execution path.
   // We skip ```tool fences — those are handled by parseToolCall already.
   const embeddedFenceRe = /```([a-zA-Z]*)\s*\n?([\s\S]*?)```/g;
   let m: RegExpExecArray | null;
+  let lastFence: { lang: string; body: string; end: number } | undefined;
   while ((m = embeddedFenceRe.exec(text)) !== null) {
-    const lang = m[1] ?? "";
-    const body = (m[2] ?? "").trim();
-    // Skip ```tool blocks — parseToolCall owns those.
-    if (lang.toLowerCase() === "tool") continue;
-    // Skip empty or multi-line JSON that spans more than a simple object.
-    if (!body.startsWith("{") || !body.endsWith("}")) continue;
-    const result = tryRecognizeBareArgs(body);
-    if (result) return result;
+    lastFence = {
+      lang: m[1] ?? "",
+      body: (m[2] ?? "").trim(),
+      end: m.index + m[0].length,
+    };
+  }
+  if (lastFence && text.slice(lastFence.end).trim() === "") {
+    const lang = lastFence.lang.toLowerCase();
+    if (lang !== "tool") {
+      const body = lastFence.body;
+      if (body.startsWith("{") && body.endsWith("}")) {
+        const result = tryRecognizeBareArgs(body);
+        if (result) return result;
+      }
+    }
   }
 
   return undefined;
@@ -887,29 +929,106 @@ export function looksLikeTruncatedToolCall(text: string): boolean {
 }
 
 /**
- * Attempt to extract usable content from a truncated fs.write / fs.append /
- * fs.writeMany tool call. When the model's output is cut off mid-JSON, the
- * tool call fails to parse — but typically a large chunk of the intended file
- * content is already present in the raw text. This function extracts:
+ * Attempt to extract usable content from a truncated fs.write / fs.append
+ * tool call. When the model's output is cut off mid-JSON, the tool call fails
+ * to parse — but typically a large chunk of the intended file content is
+ * already present in the raw text. This function extracts:
+ *   - operation: which mutation the model actually asked for
  *   - path: the target file path
  *   - content: the partial file content (up to the truncation point)
  *   - lastLine: the last complete line (for telling the model where to resume)
+ *   - expectedPriorBytes: the append precondition when the model supplied one
  *
- * Returns undefined if the text doesn't look like a salvageable write call.
+ * Returns undefined when the text does not look like an unambiguous single
+ * write/append call. `fs.writeMany` is never salvaged: a truncated multi-file
+ * payload cannot be attributed to one file safely.
  */
-export function salvageTruncatedWrite(text: string): {
+/**
+ * Single-pass JSON string unescape for salvaged (possibly truncated) content.
+ * Order matters: a chained `.replace` sequence turns the escaped Windows path
+ * `C:\\new` into `C:` + newline + `ew`. Unknown escapes are kept verbatim, and
+ * a trailing incomplete escape is dropped.
+ */
+function unescapeJsonStringPrefix(raw: string): string {
+  let out = "";
+  for (let i = 0; i < raw.length; i += 1) {
+    const ch = raw[i]!;
+    if (ch !== "\\") {
+      out += ch;
+      continue;
+    }
+    const next = raw[i + 1];
+    if (next === undefined) break;
+    switch (next) {
+      case "n":
+        out += "\n";
+        i += 1;
+        break;
+      case "r":
+        out += "\r";
+        i += 1;
+        break;
+      case "t":
+        out += "\t";
+        i += 1;
+        break;
+      case "b":
+        out += "\b";
+        i += 1;
+        break;
+      case "f":
+        out += "\f";
+        i += 1;
+        break;
+      case '"':
+        out += '"';
+        i += 1;
+        break;
+      case "/":
+        out += "/";
+        i += 1;
+        break;
+      case "\\":
+        out += "\\";
+        i += 1;
+        break;
+      case "u": {
+        const hex = raw.slice(i + 2, i + 6);
+        if (/^[0-9a-fA-F]{4}$/.test(hex)) {
+          out += String.fromCharCode(Number.parseInt(hex, 16));
+          i += 5;
+        } else {
+          // Truncated \uXXXX at the cut point — drop it.
+          i = raw.length;
+        }
+        break;
+      }
+      default:
+        out += `\\${next}`;
+        i += 1;
+        break;
+    }
+  }
+  return out;
+}
+
+export interface SalvagedWrite {
+  operation: "write" | "append";
   path: string;
   content: string;
   lastLine: string;
-} | undefined {
+  expectedPriorBytes?: number | undefined;
+}
+
+export function salvageTruncatedWrite(text: string): SalvagedWrite | undefined {
   // Match fs.write or fs.append: {"name":"fs.write","args":{"path":"...","content":"...
   // Also handle "fs.append" and cases where content comes before path.
-  // Try both orderings: path before content, and content before path.
-  // Use a simpler approach: find the tool name, then extract path and content separately.
   const toolNameMatch = text.match(
-    /\{\s*"name"\s*:\s*"fs\.(?:write|append)"\s*,\s*"args"\s*:\s*\{/,
+    /\{\s*"name"\s*:\s*"fs\.(write|append)"\s*,\s*"args"\s*:\s*\{/,
   );
   if (toolNameMatch) {
+    const operation: "write" | "append" =
+      toolNameMatch[1] === "append" ? "append" : "write";
     const argsStart = text.indexOf(toolNameMatch[0]) + toolNameMatch[0].length;
     const afterArgs = text.slice(argsStart);
 
@@ -918,26 +1037,25 @@ export function salvageTruncatedWrite(text: string): {
     if (!pathMatch?.[1]) return undefined;
     const path = pathMatch[1];
 
+    const priorMatch = afterArgs.match(
+      /"expectedPriorBytes"\s*:\s*(\d{1,15})(?!\d)/,
+    );
+    const expectedPriorBytes = priorMatch?.[1]
+      ? Number(priorMatch[1])
+      : undefined;
+
     // Find where "content":" starts and extract everything after its opening quote
     const contentKeyMatch = afterArgs.match(/"content"\s*:\s*"/);
     if (!contentKeyMatch) return undefined;
     const contentStart = argsStart + afterArgs.indexOf(contentKeyMatch[0]) + contentKeyMatch[0].length;
     let raw = text.slice(contentStart);
 
-    // The content is JSON-encoded (escaped). Unescape what we can.
-    // Remove any trailing incomplete escape sequence or quote.
+    // The content is JSON-encoded (escaped). Unescape in one pass so a
+    // literal backslash sequence is not re-interpreted.
     raw = raw.replace(/\\?$/, "");
 
-    // Unescape JSON string escapes
     try {
-      // Add closing quote to make it parseable, but don't rely on JSON.parse
-      // for the whole thing since it may be truncated mid-escape.
-      const unescaped = raw
-        .replace(/\\n/g, "\n")
-        .replace(/\\r/g, "\r")
-        .replace(/\\t/g, "\t")
-        .replace(/\\"/g, '"')
-        .replace(/\\\\/g, "\\");
+      const unescaped = unescapeJsonStringPrefix(raw);
 
       // Trim to the last complete line
       const lastNewline = unescaped.lastIndexOf("\n");
@@ -950,57 +1068,19 @@ export function salvageTruncatedWrite(text: string): {
       const lastLine =
         lines[lines.length - 1]?.trim().slice(0, 80) ?? "(unknown)";
 
-      return { path, content, lastLine };
+      return { operation, path, content, lastLine, expectedPriorBytes };
     } catch {
       return undefined;
     }
   }
 
-  // Match fs.writeMany: look for the first file entry
-  const writeManyMatch = text.match(
-    /\{\s*"name"\s*:\s*"fs\.writeMany"\s*,\s*"args"\s*:\s*\{\s*"files"\s*:\s*\[/,
-  );
-  if (writeManyMatch) {
-    // Extract the first file's path and content
-    const firstFile = text.match(
-      /\{\s*"path"\s*:\s*"([^"]+)"\s*,\s*"content"\s*:\s*"/,
-    );
-    if (firstFile?.[1]) {
-      const path = firstFile[1];
-      const contentStart =
-        text.indexOf(firstFile[0]) + firstFile[0].length;
-      let raw = text.slice(contentStart);
-      // Find the end of this file's content (closing quote + })
-      const endQuote = raw.indexOf('"}');
-      if (endQuote > 0) {
-        raw = raw.slice(0, endQuote);
-      }
-      raw = raw.replace(/\\?$/, "");
-      try {
-        const unescaped = raw
-          .replace(/\\n/g, "\n")
-          .replace(/\\r/g, "\r")
-          .replace(/\\t/g, "\t")
-          .replace(/\\"/g, '"')
-          .replace(/\\\\/g, "\\");
-        const lastNewline = unescaped.lastIndexOf("\n");
-        const content =
-          lastNewline > 0 ? unescaped.slice(0, lastNewline + 1) : unescaped;
-        if (content.trim().length < 50) return undefined;
-        const lines = content.trimEnd().split("\n");
-        const lastLine =
-          lines[lines.length - 1]?.trim().slice(0, 80) ?? "(unknown)";
-        return { path, content, lastLine };
-      } catch {
-        return undefined;
-      }
-    }
-  }
-
+  // fs.writeMany is intentionally NOT salvaged: a truncated multi-file payload
+  // is ambiguous about which files were meant to be written, and guessing the
+  // first entry can silently overwrite a different file than intended.
   return undefined;
 }
 
-const NATIVE_WRITE_TOOLS = new Set(["fs.write", "fs.append", "fs.writeMany"]);
+const NATIVE_WRITE_TOOLS = new Set(["fs.write", "fs.append"]);
 
 /**
  * Salvage partial file content from a native tool call's raw argument JSON
@@ -1086,14 +1166,19 @@ export function parseAllToolCalls(text: string): ToolCall[] {
 
   found.sort((a, b) => a.index - b.index);
   // De-duplicate calls that two different matchers picked up at (nearly) the
-  // same spot so a single XML call isn't executed twice.
+  // same spot so a single XML call isn't executed twice. Identical MUTATING
+  // calls are collapsed message-wide regardless of distance: a model that
+  // repeats the same fs.append / fs.delete / shell.exec block must not double
+  // its effect. Read-only duplicates keep the proximity window so a genuinely
+  // repeated read still runs where the model expects it.
   const deduped: Array<{ index: number; call: ToolCall }> = [];
   for (const entry of found) {
+    const mutating = isMutatingToolName(entry.call.name);
     if (
       deduped.some(
         (d) =>
           sameToolCall(d.call, entry.call) &&
-          Math.abs(d.index - entry.index) < 64,
+          (mutating || Math.abs(d.index - entry.index) < 64),
       )
     ) {
       continue;
@@ -1103,9 +1188,32 @@ export function parseAllToolCalls(text: string): ToolCall[] {
   return deduped.map((f) => f.call);
 }
 
+/**
+ * Tools whose duplicate execution changes state (files, packages, processes,
+ * remote resources). Duplicate identical calls to these are collapsed across
+ * a whole message rather than only within a 64-character window.
+ */
+const MUTATING_TOOL_NAMES = new Set([
+  "fs.write",
+  "fs.writeMany",
+  "fs.append",
+  "fs.edit",
+  "fs.replaceLines",
+  "fs.delete",
+  "shell.exec",
+  "shell.start",
+  "shell.stop",
+  "pkg.install",
+  "http.fetch",
+  "tool.batch",
+]);
+
+export function isMutatingToolName(name: string): boolean {
+  return MUTATING_TOOL_NAMES.has(name.trim());
+}
+
 /** Structural equality for two tool calls (name + canonical args JSON). */
-export function sameToolCall(a: ToolCall, b: ToolCall): boolean {
-  if (a.name !== b.name) return false;
+export function sameToolCall(a: ToolCall, b: ToolCall): boolean {  if (a.name !== b.name) return false;
   try {
     return JSON.stringify(a.args) === JSON.stringify(b.args);
   } catch {

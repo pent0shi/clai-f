@@ -72,13 +72,13 @@ function safeScopeTargetForToolCall(call: ToolCall): string | undefined {
   }
 }
 
-function safeEngagementActionForToolCall(
+function safeEngagementActionsForToolCall(
   call: ToolCall,
-): ReturnType<typeof engagementActionForToolCall> {
+): ReturnType<typeof engagementActionsForToolCall> {
   try {
-    return engagementActionForToolCall(call);
+    return engagementActionsForToolCall(call);
   } catch {
-    return undefined;
+    return [];
   }
 }
 import {
@@ -160,8 +160,8 @@ import {
   type SessionPlan,
 } from "../store/plan.js";
 import type { AgentEvent } from "./events.js";
+import { stat } from "node:fs/promises";
 import {
-  fsWrite,
   isOutsideWorkingDirectory,
   resolveFsToolPath,
 } from "../tools/fs.js";
@@ -172,6 +172,7 @@ import {
   looksLikeTruncatedToolCall,
   salvageTruncatedWrite,
   salvageTruncatedWriteFromNative,
+  type SalvagedWrite,
   countToolFences,
   parseAllToolCalls,
   groupToolCallsForExecution,
@@ -297,7 +298,7 @@ import { scopeContextMessage } from "./scope-context.js";
 import {
   EngagementPolicyEngine,
   actionFromUrl,
-  engagementActionForToolCall,
+  engagementActionsForToolCall,
   evaluateEngagementAction,
   type PolicyLease,
 } from "../safety/engagement-policy.js";
@@ -1507,6 +1508,60 @@ export async function runAgentTurn(
       },
     };
 
+    /**
+     * Apply a salvaged partial write through the NORMAL tool path so the
+     * classifier, scope/engagement gates, confirmation prompt, and receipts
+     * all apply exactly as they would for a model-emitted call. Salvage must
+     * never mutate a file with `confirmed: true`, and an `fs.append` that was
+     * cut off must stay an append (with its precondition) instead of becoming
+     * a full overwrite.
+     */
+    async function applySalvagedWrite(
+      salvaged: SalvagedWrite,
+    ): Promise<{
+      ok: boolean;
+      cancelled: boolean;
+      output: string;
+      bytesOnDisk: number;
+    }> {
+      const args: Record<string, unknown> = {
+        path: salvaged.path,
+        content: salvaged.content,
+      };
+      if (salvaged.operation === "append") {
+        args.position = "end";
+        if (typeof salvaged.expectedPriorBytes === "number") {
+          args.expectedPriorBytes = salvaged.expectedPriorBytes;
+        }
+      }
+      const call: ToolCall = {
+        name: salvaged.operation === "append" ? "fs.append" : "fs.write",
+        args,
+      };
+      const eventId = `tool-${++nextToolEventId}`;
+      const res = await executeSingleTool(
+        call,
+        eventId,
+        options.signal || new AbortController().signal,
+      );
+      const ok = res.ok && res.result.ok;
+      let bytesOnDisk = Buffer.byteLength(salvaged.content, "utf8");
+      if (ok) {
+        try {
+          const stats = await stat(resolveFsToolPath(salvaged.path));
+          bytesOnDisk = stats.size;
+        } catch {
+          // Keep the content-length estimate when the file cannot be stat'ed.
+        }
+      }
+      return {
+        ok,
+        cancelled: Boolean(res.blockOrCancel),
+        output: res.result.output,
+        bytesOnDisk,
+      };
+    }
+
     async function executeSingleTool(
       rawCall: ToolCall,
       toolEventId: string,
@@ -2120,23 +2175,30 @@ export async function runAgentTurn(
       }
 
       const scopeTarget = safeScopeTargetForToolCall(call);
-      const engagementAction =
+      const engagementActions =
         pentestSession || isPentestToolCall(call) || Boolean(scope)
-          ? safeEngagementActionForToolCall(call)
-          : undefined;
-      const engagementDecision = engagementAction
-        ? evaluateEngagementAction(scope, engagementAction)
-        : undefined;
-      if (engagementAction && engagementDecision) {
+          ? safeEngagementActionsForToolCall(call)
+          : [];
+      // The primary action carries the URL/port/path detail used for leases and
+      // network-hop authorization; every action (one per named target) must pass
+      // the scope check below before the tool runs.
+      const engagementAction = engagementActions[0];
+      let engagementDecision:
+        | ReturnType<typeof evaluateEngagementAction>
+        | undefined;
+      for (const action of engagementActions) {
+        const decisionForAction = evaluateEngagementAction(scope, action);
+        if (!decisionForAction) continue;
+        if (action === engagementAction) engagementDecision = decisionForAction;
         if (scope) {
           engagementGraph = await openEngagement(scope);
           engagementRecord = beginEngagementAction(engagementGraph, {
             tool: call.name,
-            target: engagementDecision.normalizedTarget || engagementAction.target,
-            phase: engagementDecision.phase,
-            capability: engagementDecision.capability,
-            authorized: engagementDecision.allowed,
-            reason: engagementDecision.reason,
+            target: decisionForAction.normalizedTarget || action.target,
+            phase: decisionForAction.phase,
+            capability: decisionForAction.capability,
+            authorized: decisionForAction.allowed,
+            reason: decisionForAction.reason,
           });
           await saveEngagement(engagementGraph);
         }
@@ -2144,16 +2206,17 @@ export async function runAgentTurn(
           ...(engagementGraph ? { engagementId: engagementGraph.id } : {}),
           ...(engagementRecord ? { actionId: engagementRecord.id } : {}),
           tool: call.name,
-          target: engagementDecision.normalizedTarget,
-          phase: engagementDecision.phase,
-          capability: engagementDecision.capability,
-          allowed: engagementDecision.allowed,
-          reason: engagementDecision.reason,
+          target: decisionForAction.normalizedTarget,
+          phase: decisionForAction.phase,
+          capability: decisionForAction.capability,
+          allowed: decisionForAction.allowed,
+          reason: decisionForAction.reason,
         });
-        if (!engagementDecision.allowed) {
-          const target = engagementDecision.normalizedTarget || scopeTarget || engagementAction.target;
+        if (!decisionForAction.allowed) {
+          const target =
+            decisionForAction.normalizedTarget || action.target || scopeTarget;
           const reason =
-            `Blocked engagement action for ${target}: ${engagementDecision.reason}. ` +
+            `Blocked engagement action for ${target}: ${decisionForAction.reason}. ` +
             scopeHint(target);
           writeToolBlocked(
             toolEventId,
@@ -3918,11 +3981,7 @@ export async function runAgentTurn(
               truncatedToolRetries += 1;
               if (truncatedToolRetries <= 5) {
                 try {
-                  const writeResult = await fsWrite(
-                    salvaged.path,
-                    salvaged.content,
-                    { confirmed: true },
-                  );
+                  const writeResult = await applySalvagedWrite(salvaged);
                   if (writeResult.ok) {
                     const lineCount = salvaged.content.split("\n").length;
                     writeNotice(
@@ -3950,16 +4009,17 @@ export async function runAgentTurn(
                         tc.id === writeTc.id,
                       );
                     }
-                    const priorBytes = Buffer.byteLength(
-                      salvaged.content,
-                      "utf8",
-                    );
+                    const priorBytes = writeResult.bytesOnDisk;
+                    const salvagedToolName =
+                      salvaged.operation === "append"
+                        ? "fs.append"
+                        : "fs.write";
                     const appendNudge = toolsAttached
-                      ? `Your ${writeTc.name} tool call was cut off at the token limit, but the system salvaged the partial content and wrote ${lineCount} lines (${priorBytes} bytes) to ${salvaged.path}. ` +
+                      ? `Your ${salvagedToolName} tool call was cut off at the token limit, but the system salvaged the partial content and wrote ${lineCount} lines (file is now ${priorBytes} bytes) to ${salvaged.path}. ` +
                       `The file ends with: ${JSON.stringify(salvaged.lastLine)}\n\n` +
                       `CONTINUE by calling fs.append now with path=${JSON.stringify(salvaged.path)}, expectedPriorBytes=${priorBytes}, and content set to ONLY the remaining content not already on disk (prefer hundreds of lines per call). ` +
                       `Do not re-read the full file; do not re-send content already saved. Use the platform tool interface — no markdown fences.`
-                      : `Your fs.write tool call was cut off at the token limit, but the system salvaged the partial content and wrote ${lineCount} lines (${priorBytes} bytes) to ${salvaged.path}. ` +
+                      : `Your ${salvagedToolName} tool call was cut off at the token limit, but the system salvaged the partial content and wrote ${lineCount} lines (file is now ${priorBytes} bytes) to ${salvaged.path}. ` +
                       `The file ends with: ${JSON.stringify(salvaged.lastLine)}\n\n` +
                       `CONTINUE with ONE large fs.append of the remaining content:\n` +
                       '```tool\n{"name":"fs.append","args":{"path":' +
@@ -4152,11 +4212,10 @@ export async function runAgentTurn(
             const salvaged = salvageTruncatedWrite(assistantText.visible);
 
             if (salvaged && truncatedToolRetries <= 5) {
-              // Write the salvaged partial content
+              // Write the salvaged partial content through the normal
+              // authorization path (classifier + confirmation + receipt).
               try {
-                const writeResult = await fsWrite(salvaged.path, salvaged.content, {
-                  confirmed: true,
-                });
+                const writeResult = await applySalvagedWrite(salvaged);
                 if (writeResult.ok) {
                   const lineCount = salvaged.content.split("\n").length;
                   writeNotice(
@@ -4169,14 +4228,16 @@ export async function runAgentTurn(
                   pushAssistantHistory(
                     stripThinking(assistantText.visible).visible,
                   );
-                  const priorBytes = Buffer.byteLength(salvaged.content, "utf8");
+                  const priorBytes = writeResult.bytesOnDisk;
+                  const salvagedToolName =
+                    salvaged.operation === "append" ? "fs.append" : "fs.write";
                   messages.push({
                     role: "user",
                     content: toolsAttached
-                      ? `Your fs.write tool call was cut off at the token limit, but the system salvaged the partial content and wrote ${lineCount} lines (${priorBytes} bytes) to ${salvaged.path}. ` +
+                      ? `Your ${salvagedToolName} tool call was cut off at the token limit, but the system salvaged the partial content and wrote ${lineCount} lines (file is now ${priorBytes} bytes) to ${salvaged.path}. ` +
                       `The file ends with: ${JSON.stringify(salvaged.lastLine)}\n\n` +
                       `CONTINUE by calling fs.append now with path=${JSON.stringify(salvaged.path)}, expectedPriorBytes=${priorBytes}, and content set to ONLY the remaining content (prefer large chunks). Use the platform tool interface — no markdown fences.`
-                      : `Your fs.write tool call was cut off at the token limit, but the system salvaged the partial content and wrote ${lineCount} lines (${priorBytes} bytes) to ${salvaged.path}. ` +
+                      : `Your ${salvagedToolName} tool call was cut off at the token limit, but the system salvaged the partial content and wrote ${lineCount} lines (file is now ${priorBytes} bytes) to ${salvaged.path}. ` +
                       `The file ends with: ${JSON.stringify(salvaged.lastLine)}\n\n` +
                       `CONTINUE with ONE large fs.append of the remaining content (prefer hundreds of lines per call — do NOT use tiny ~100-line chunks):\n` +
                       '```tool\n{"name":"fs.append","args":{"path":' +
@@ -4237,9 +4298,7 @@ export async function runAgentTurn(
             const salvaged = salvageTruncatedWrite(assistantText.visible);
             if (salvaged) {
               try {
-                const writeResult = await fsWrite(salvaged.path, salvaged.content, {
-                  confirmed: true,
-                });
+                const writeResult = await applySalvagedWrite(salvaged);
                 if (writeResult.ok) {
                   const lineCount = salvaged.content.split("\n").length;
                   writeNotice(

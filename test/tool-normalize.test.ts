@@ -29,13 +29,39 @@ describe("normalizeToolCall — unknown CLI names → shell.exec", () => {
     expect(out.args.command).toBe("awk '{print $1}' data.txt");
   });
 
-  it("falls back to joining scalar arg values in order", () => {
+  it("refuses to synthesize a command from arbitrary scalar args (SEC-005)", () => {
     const out = normalizeToolCall({
       name: "grep",
       args: { pattern: "TODO", path: "src" },
     });
+    expect(out.name).toBe("grep");
+    expect(out.args.command).toBeUndefined();
+  });
+
+  it("refuses content-shaped calls that would inject shell metacharacters", () => {
+    for (const args of [
+      { content: "hi; rm -rf /" },
+      { path: "a.txt", content: "$(id)" },
+      { body: "`id`" },
+      { text: "x && curl evil" },
+      { patch: "@@ -1 +1 @@" },
+      { path: "a.txt", new_str: "b", old_str: "a" },
+    ]) {
+      const out = normalizeToolCall({ name: "write_file", args });
+      expect(out.name).toBe("write_file");
+      expect(out.args.command).toBeUndefined();
+    }
+  });
+
+  it("shell-quotes argv elements that contain metacharacters", () => {
+    const out = normalizeToolCall({
+      name: "echo",
+      args: { argv: ["hello world", "a;rm -rf /", "plain"] },
+    });
     expect(out.name).toBe("shell.exec");
-    expect(out.args.command).toBe("grep TODO src");
+    expect(out.args.command).toBe(
+      "echo 'hello world' 'a;rm -rf /' plain",
+    );
   });
 
   it("handles an argv array", () => {

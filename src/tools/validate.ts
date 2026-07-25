@@ -273,19 +273,112 @@ export function profileToNmapArgs(profile: ScanProfile = {}): string[] {
 }
 
 /**
- * For backwards compatibility with the legacy `flags` string. We accept a
- * whitespace-delimited list, but only if every token matches a strict
- * safe pattern (no shell metacharacters, no leading `-` followed by anything
- * we don't recognize as a benign flag).
+ * Structured allow-list for the legacy free-form `flags` string on net.scan.
+ * Value is the flag's arity. Anything not listed is rejected: the legacy path
+ * must never be able to write files (-oN/-oA/--append-output/--stylesheet),
+ * read attacker-chosen input (-iL/--resume/--datadir/--servicedb), pick
+ * arbitrary targets (-iR), or load NSE scripts (--script*, which must go
+ * through the structured `profile.scripts` field and its safe-name regex).
+ */
+const LEGACY_NMAP_FLAGS: Record<string, "none" | "value" | "script"> = {
+  "-sS": "none", "-sT": "none", "-sU": "none", "-sV": "none", "-sn": "none",
+  "-sL": "none", "-sA": "none", "-sW": "none", "-sF": "none", "-sX": "none",
+  "-sN": "none", "-sM": "none", "-sY": "none", "-sZ": "none", "-sO": "none",
+  "-Pn": "none", "-P0": "none", "-PN": "none", "-PE": "none", "-PP": "none",
+  "-PM": "none", "-PR": "none", "-PS": "value", "-PA": "value", "-PU": "value",
+  "-O": "none", "-A": "none", "-n": "none", "-R": "none", "-6": "none",
+  "-F": "none", "-r": "none", "-v": "none", "-vv": "none", "-vvv": "none",
+  "-d": "none", "-dd": "none",
+  "--open": "none", "--reason": "none", "--traceroute": "none",
+  "--osscan-guess": "none", "--osscan-limit": "none",
+  "--version-all": "none", "--version-light": "none", "--version-trace": "none",
+  "--defeat-rst-ratelimit": "none", "--defeat-icmp-ratelimit": "none",
+  "--disable-arp-ping": "none", "--system-dns": "none",
+  "--privileged": "none", "--unprivileged": "none", "--resolve-all": "none",
+  "--badsum": "none", "--packet-trace": "none", "--fuzzy": "none",
+  "-p": "value", "--exclude-ports": "value", "--top-ports": "value",
+  "--port-ratio": "value", "--min-rate": "value", "--max-rate": "value",
+  "--min-parallelism": "value", "--max-parallelism": "value",
+  "--min-hostgroup": "value", "--max-hostgroup": "value",
+  "--max-retries": "value", "--host-timeout": "value",
+  "--scan-delay": "value", "--max-scan-delay": "value",
+  "--initial-rtt-timeout": "value", "--min-rtt-timeout": "value",
+  "--max-rtt-timeout": "value", "--version-intensity": "value",
+  "--mtu": "value", "--data-length": "value", "--ttl": "value",
+  "--source-port": "value", "-g": "value", "-e": "value",
+  "--dns-servers": "value", "--exclude": "value",
+  "--script": "script",
+};
+
+const LEGACY_TIMING_RE = /^-T[0-5]$/;
+const LEGACY_FLAG_VALUE_RE = /^[A-Za-z0-9_.,:@/+-]+$/;
+
+function legacyFlagArity(flag: string): "none" | "value" | "script" | undefined {
+  if (LEGACY_TIMING_RE.test(flag)) return "none";
+  return LEGACY_NMAP_FLAGS[flag];
+}
+
+/**
+ * For backwards compatibility with the legacy `flags` string. Every token is
+ * validated by NAME against {@link LEGACY_NMAP_FLAGS} and every value by
+ * shape, so an unrecognized, file-writing, file-reading, or script-loading
+ * flag is rejected before nmap is spawned (and before any privilege
+ * escalation), in both the split (`-oN out`) and equals (`-oN=out`) forms.
  */
 export function parseLegacyFlags(raw: string): string[] {
   const value = raw.trim();
   if (!value) return [];
   const tokens = value.split(/\s+/);
-  for (const token of tokens) {
+  const out: string[] = [];
+  for (let i = 0; i < tokens.length; i += 1) {
+    const token = tokens[i]!;
     if (!/^[A-Za-z0-9_./@:=,-]+$/.test(token)) {
       throw new Error(`Invalid flag token: ${token}`);
     }
+    if (!token.startsWith("-")) {
+      throw new Error(
+        `Invalid flag token: ${token}. The legacy flags string accepts nmap flags only — pass the target in "target" and ports in "ports".`,
+      );
+    }
+    const eq = token.indexOf("=");
+    const name = eq > 0 ? token.slice(0, eq) : token;
+    const inlineValue = eq > 0 ? token.slice(eq + 1) : undefined;
+    const arity = legacyFlagArity(name);
+    if (!arity) {
+      throw new Error(
+        `Rejected nmap flag "${name}": not on the net.scan allow-list. Use the structured "profile" (scanType/topPorts/serviceDetect/scripts/timing) instead; output, input-file, script, and datadir flags are never allowed here.`,
+      );
+    }
+    if (arity === "none") {
+      if (inlineValue !== undefined) {
+        throw new Error(`Flag ${name} does not take a value`);
+      }
+      out.push(name);
+      continue;
+    }
+    const flagValue = inlineValue ?? tokens[i + 1];
+    if (flagValue === undefined || flagValue.startsWith("-")) {
+      throw new Error(`Flag ${name} requires a value`);
+    }
+    if (arity === "script") {
+      // NSE script selection goes through the same safe-name regex as the
+      // structured profile.scripts field: comma-separated script/category
+      // names only, so a path, glob, or .nse file can never be loaded here.
+      if (!SAFE_SCRIPT_RE.test(flagValue)) {
+        throw new Error(
+          `Invalid --script value "${flagValue}": use comma-separated script or category names (no paths, globs, or .nse files).`,
+        );
+      }
+      if (inlineValue === undefined) i += 1;
+      out.push(inlineValue === undefined ? name : token);
+      if (inlineValue === undefined) out.push(flagValue);
+      continue;
+    }
+    if (!LEGACY_FLAG_VALUE_RE.test(flagValue)) {
+      throw new Error(`Invalid value for ${name}: ${flagValue}`);
+    }
+    if (inlineValue === undefined) i += 1;
+    out.push(name, flagValue);
   }
-  return tokens;
+  return out;
 }

@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
-import { execSync } from "node:child_process";
 import { platform } from "node:os";
 import type { ToolResult } from "../types.js";
+import { findExecutableSync } from "../os/command.js";
 
 export interface PingSweepArgs {
   target: string;
@@ -25,13 +25,7 @@ function isPrivateCidr(target: string): boolean {
 }
 
 function commandAvailable(command: string): boolean {
-  try {
-    const cmd = platform() === "win32" ? `where.exe ${command}` : `command -v ${command}`;
-    execSync(cmd, { timeout: 3_000, stdio: "ignore" });
-    return true;
-  } catch {
-    return false;
-  }
+  return Boolean(findExecutableSync(command));
 }
 
 function runCommand(

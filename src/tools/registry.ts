@@ -423,16 +423,6 @@ export const toolRegistry: Record<string, ToolHandler> = {
       profile = { ...(profile ?? {}), topPorts: profile?.topPorts ?? n };
     }
 
-    const userPrompt = options?.userPrompt;
-    const isConnectRequested = Boolean(
-      userPrompt &&
-      /\b(?:-sT|connect scan|tcp connect|normal scan|unprivileged scan)\b/i.test(userPrompt)
-    );
-
-    if (profile && profile.scanType === "tcp" && !isConnectRequested) {
-      profile = { ...profile, scanType: "syn" };
-    }
-
     const legacyFlags = optionalString(args, "flags");
     // ports and topPorts conflict on the nmap CLI — ports takes priority
     const cleanedProfile =
@@ -440,10 +430,7 @@ export const toolRegistry: Record<string, ToolHandler> = {
         ? { ...profile, topPorts: undefined }
         : profile;
     const profileArgs = profileToNmapArgs(cleanedProfile);
-    let legacyArgs = legacyFlags ? parseLegacyFlags(legacyFlags) : [];
-    if (!isConnectRequested) {
-      legacyArgs = legacyArgs.map(arg => arg === "-sT" ? "-sS" : arg);
-    }
+    const legacyArgs = legacyFlags ? parseLegacyFlags(legacyFlags) : [];
     const argv: string[] = [];
     if (ports) argv.push("-p", ports);
     argv.push(...profileArgs, ...legacyArgs, host.value);
@@ -1045,50 +1032,99 @@ export function availableToolNames(): string[] {
 }
 
 /**
+ * Keys that mean "this is a file/content payload, not a command line". When a
+ * hallucinated call carries one of these, we refuse to synthesize shell text
+ * from it: concatenating file content into a command line is how metacharacters
+ * in model output become executed shell.
+ */
+const CONTENT_SHAPED_ARG_KEYS = new Set([
+  "content",
+  "contents",
+  "body",
+  "text",
+  "data",
+  "file_text",
+  "filetext",
+  "new_str",
+  "newstr",
+  "old_str",
+  "oldstr",
+  "patch",
+  "diff",
+  "source",
+  "stdin",
+  "input",
+]);
+
+/** Explicit command-bearing fields, in precedence order. */
+const COMMAND_ARG_KEYS = [
+  "command",
+  "cmd",
+  "commandLine",
+  "command_line",
+  "argv",
+  "args",
+  "arguments",
+] as const;
+
+const SHELL_SAFE_TOKEN_RE = /^[A-Za-z0-9_@%+=:,./-]+$/;
+
+function shellQuoteToken(token: string): string {
+  if (SHELL_SAFE_TOKEN_RE.test(token)) return token;
+  return `'${token.replace(/'/g, `'\\''`)}'`;
+}
+
+/**
  * Build a shell command string from a bare-command tool call. Models often
- * emit the binary as the tool name (`sed`, `awk`, `git`, …) and stuff the
- * rest into a `command`/`args`/`argv` field — or split it across fields. We
- * recover a runnable command from whatever shape arrived.
+ * emit the binary as the tool name (`sed`, `awk`, `git`, …) and put the rest
+ * into an explicit `command`/`cmd`/`argv`/`args` field. Only those explicit
+ * fields are honored: array forms are shell-quoted per element, and calls that
+ * look like a file-write shape (content/body/text/patch/...) are rejected so
+ * an unknown-tool error is surfaced instead of executing model text.
  */
 function buildShellCommandFromCall(
   name: string,
   args: Record<string, unknown>,
 ): string | undefined {
+  const trimmedName = name.trim();
+  const keys = Object.keys(args);
+  for (const key of keys) {
+    if (CONTENT_SHAPED_ARG_KEYS.has(key.toLowerCase())) return undefined;
+  }
+
   const asText = (value: unknown): string | undefined => {
     if (typeof value === "string") return value;
     if (typeof value === "number") return String(value);
     if (Array.isArray(value)) {
       const parts = value
         .filter((v) => typeof v === "string" || typeof v === "number")
-        .map((v) => String(v));
+        .map((v) => shellQuoteToken(String(v)));
       return parts.length > 0 ? parts.join(" ") : undefined;
     }
     return undefined;
   };
 
-  let rest =
-    asText(args.command) ??
-    asText(args.cmd) ??
-    asText(args.args) ??
-    asText(args.arguments) ??
-    asText(args.argv) ??
-    asText(args.input);
-
-  if (rest === undefined) {
-    // Last resort: concatenate scalar arg values (skipping execution knobs)
-    // in insertion order so e.g. {"expression":"s/a/b/","file":"x"} still runs.
-    const skip = new Set(["cwd", "timeoutMs", "iOwnThis", "own"]);
-    const parts: string[] = [];
-    for (const [key, value] of Object.entries(args)) {
-      if (skip.has(key)) continue;
-      const text = asText(value);
-      if (text) parts.push(text);
+  let rest: string | undefined;
+  for (const key of COMMAND_ARG_KEYS) {
+    const text = asText(args[key]);
+    if (text !== undefined) {
+      rest = text;
+      break;
     }
-    rest = parts.join(" ");
   }
 
-  const trimmedName = name.trim();
-  const trimmedRest = (rest ?? "").trim();
+  if (rest === undefined) {
+    // No explicit command field. A name-only call with no other arguments is
+    // still runnable (`whoami`); anything else is an unknown tool, not a
+    // command to be assembled out of arbitrary model values.
+    const meaningful = keys.filter(
+      (key) => !["cwd", "timeoutMs", "iOwnThis", "own"].includes(key),
+    );
+    if (meaningful.length > 0) return undefined;
+    return trimmedName || undefined;
+  }
+
+  const trimmedRest = rest.trim();
   if (!trimmedRest) return trimmedName || undefined;
   // Avoid a doubled binary when `rest` already begins with the tool name.
   const firstToken = trimmedRest.split(/\s+/)[0];
