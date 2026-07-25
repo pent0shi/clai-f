@@ -349,6 +349,11 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
           description:
             "Delegate this durable job to the Responder (fire-and-forget, auto-wake on completion). Default false: a normal background job you poll yourself.",
         },
+        parentTaskId: {
+          type: "string",
+          description:
+            "Plan task id that owns this delegation (e.g. \"t3\"). Required whenever more than one task could own it; the Responder child is created under exactly this task.",
+        },
       },
       required: ["command"],
       additionalProperties: false,
@@ -368,6 +373,11 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
           type: "boolean",
           description:
             "Delegate to the Responder (fire-and-forget, auto-wake on completion). Default false. Only useful for a job that exits on its own; leave off for long-lived servers/watchers.",
+        },
+        parentTaskId: {
+          type: "string",
+          description:
+            "Plan task id that owns this delegation (e.g. \"t3\"). Required whenever more than one task could own it; the Responder child is created under exactly this task.",
         },
       },
       required: ["command"],
@@ -448,6 +458,11 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         background: {
           type: "boolean",
           description: "Force durable execution; deep/full profiles are durable automatically",
+        },
+        parentTaskId: {
+          type: "string",
+          description:
+            "Plan task id that owns this delegation (e.g. \"t3\"). Required whenever more than one task could own it; the Responder child is created under exactly this task.",
         },
       },
       required: ["target"],
@@ -609,6 +624,11 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         background: {
           type: "boolean",
           description: "Force durable nmap execution; deep/full scans are durable automatically",
+        },
+        parentTaskId: {
+          type: "string",
+          description:
+            "Plan task id that owns this delegation (e.g. \"t3\"). Required whenever more than one task could own it; the Responder child is created under exactly this task.",
         },
       },
       required: ["target"],

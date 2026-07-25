@@ -8,7 +8,7 @@ import type { ChatMessage } from "../types.js";
 export const SYSTEM_TURN_MARKER = "[SYSTEM]";
 
 /**
- * LLM-002 — one shared ordered normalization contract for dialects with a
+ * One shared ordered normalization contract for dialects with a
  * single system slot.
  *
  * The first system message becomes the dialect's system field. Every later

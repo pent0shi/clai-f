@@ -102,7 +102,7 @@ function isTransientNetworkError(error: unknown): boolean {
 }
 
 function isRetriableError(error: unknown): boolean {
-  // LLM-003: never retry transparently once bytes reached the caller — the
+  // Never retry transparently once bytes reached the caller — the
   // second attempt would append to the same assistant message.
   if (streamAlreadyEmitted(error)) return false;
   const message = error instanceof Error ? error.message : String(error);
@@ -458,7 +458,7 @@ async function tryStreamOnce(
   onStatus?: (message: string) => void,
 ): Promise<CompletionResult> {
   const activeRequest = { ...request, provider: providerId, model };
-  // LLM-003: count what actually reached the caller so no layer above can
+  // Count what actually reached the caller so no layer above can
   // retry transparently into the same assistant message.
   let emittedBytes = 0;
   const emit = (token: string): void => {
@@ -789,7 +789,7 @@ export async function streamWithProvider(
       if (
         isKeyCircleStopError(error) ||
         shouldStopProviderFallback(error) ||
-        // LLM-003: partial output already reached the transcript; another
+        // Partial output already reached the transcript; another
         // provider would duplicate it.
         streamAlreadyEmitted(error)
       ) {

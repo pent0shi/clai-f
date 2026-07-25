@@ -30,7 +30,7 @@ export interface PersistencePort {
   loadPlan(sessionId: string): Promise<SessionPlan | undefined>;
   savePlan(plan: SessionPlan): Promise<void>;
   /**
-   * Transactional plan mutation (TASK-001). Optional so lightweight test
+   * Transactional plan mutation. Optional so lightweight test
    * doubles can keep implementing only `savePlan`.
    */
   mutatePlan?(

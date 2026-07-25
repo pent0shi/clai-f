@@ -38,7 +38,7 @@ export function toOllamaToolMessages(
           type: "function",
           function: {
             name: toWireName(tc.name),
-            // LLM-009: this body goes to the native /api/chat endpoint, whose
+            // This body goes to the native /api/chat endpoint, whose
             // ToolCallFunction.Arguments is a map. A JSON string either fails to
             // unmarshal or arrives as opaque text the model cannot read.
             arguments: tc.args ?? {},

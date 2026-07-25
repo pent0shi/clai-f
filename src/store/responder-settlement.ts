@@ -47,7 +47,7 @@ export async function settleResponderJob(
   const next = settlement(job);
   let outcome: Exclude<ResponderSettlementResult, "applied"> | undefined;
 
-  // TASK-001/TASK-010: settlement is an idempotent reducer applied under a
+  // Settlement is an idempotent reducer applied under a
   // version compare-and-set, so a concurrent foreground save can no longer
   // revert a settled child back to yellow.
   let result: Awaited<ReturnType<typeof mutatePlan>>;

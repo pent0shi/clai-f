@@ -96,7 +96,7 @@ function geminiThinkingConfig(
 }
 
 /**
- * LLM-007 — thinking tokens are billed against `maxOutputTokens` on Gemini 2.5,
+ * Thinking tokens are billed against `maxOutputTokens` on Gemini 2.5,
  * so a budget at or above the output cap guarantees a thought-only
  * `MAX_TOKENS` finish with no visible answer. Clamp the budget to at most half
  * the effective cap so a visible reserve always remains.
@@ -394,7 +394,7 @@ export const geminiProvider: LlmProvider = {
           }
         }
       } catch (frameError) {
-        // Only malformed JSON frames are ignorable (LLM-011).
+        // Only malformed JSON frames are ignorable.
         if (!(frameError instanceof SyntaxError)) throw frameError;
       }
     }

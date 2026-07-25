@@ -29,7 +29,7 @@ export interface JobLinkMetadata {
   taskId?: string | undefined;
   parentTaskId?: string | undefined;
   /**
-   * Stable delegation identity minted before launch (TASK-006). It is the
+   * Stable delegation identity minted before launch. It is the
    * reconciliation key between a job and its responder child task, so a fast
    * exit or a failed link cannot orphan the child.
    */
@@ -881,6 +881,7 @@ export class JobManager {
       ...(options?.name ? { name: options.name } : {}),
       ...(options?.taskId ? { taskId: options.taskId } : {}),
       ...(options?.parentTaskId ? { parentTaskId: options.parentTaskId } : {}),
+      ...(options?.delegationId ? { delegationId: options.delegationId } : {}),
       ...(options?.wakeOnCompletion !== undefined ? { wakeOnCompletion: options.wakeOnCompletion } : {}),
       ...(options?.responder !== undefined ? { responder: options.responder } : {}),
       ...(monitor !== undefined ? { monitor } : {}),

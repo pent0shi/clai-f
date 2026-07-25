@@ -93,7 +93,7 @@ export interface PlanTask {
   /** Responder-owned tasks advance from job lifecycle events, not task.update. */
   responderOwned?: boolean | undefined;
   /**
-   * Stable delegation identity created *before* the process launches (TASK-006),
+   * Stable delegation identity created *before* the process launches,
    * so a fast-exiting job can always be reconciled to its child task even if
    * linking or the plan save lost a race.
    */
@@ -198,7 +198,7 @@ async function loadDatabase(): Promise<DatabaseLike | undefined> {
         updated_at TEXT NOT NULL
       );
     `);
-    // TASK-001: a real version column so writes can compare-and-set. Legacy
+    // A real version column so writes can compare-and-set. Legacy
     // rows default to 1 and are corrected on the first successful mutation.
     try {
       cachedDb.exec("ALTER TABLE plans ADD COLUMN version INTEGER NOT NULL DEFAULT 1;");
@@ -378,7 +378,7 @@ export function patchPlanMeta(
 }
 
 /**
- * TASK-001 — every plan write is serialized in-process.
+ * Every plan write is serialized in-process.
  *
  * The JSONL backend rewrites the whole file (read → modify → write) and the
  * SQLite backend used an unconditional UPSERT, so two concurrent writers (a
@@ -942,7 +942,7 @@ export function activeForegroundTasks(plan: SessionPlan): PlanTask[] {
 }
 
 /**
- * TASK-002 — `count(foreground tasks in_progress) <= 1` is a domain invariant,
+ * `count(foreground tasks in_progress) <= 1` is a domain invariant,
  * not a prompt convention. Applied on every {@link mutatePlan} commit and on
  * load. The earliest dependency-valid active task is kept; later ones are
  * demoted to `pending` with a repair note (evidence is preserved).
@@ -976,7 +976,7 @@ export function enforcePlanInvariants(plan: SessionPlan): string[] {
 }
 
 /**
- * Apply a foreground-authored plan snapshot onto fresh state (TASK-001).
+ * Apply a foreground-authored plan snapshot onto fresh state.
  *
  * Whole-plan writes (plan.create, revisions, task.add reordering) are authored
  * against a loaded copy. Replacing the stored plan with that copy dropped
@@ -1028,7 +1028,7 @@ export function applyForegroundSnapshot(
 }
 
 /**
- * Apply a task transition. Rejects transitions the TASK-003 table forbids so no
+ * Apply a task transition. Rejects transitions the  table forbids so no
  * caller can rewind terminal work; use a plan revision to supersede a task.
  */
 export function markTask(

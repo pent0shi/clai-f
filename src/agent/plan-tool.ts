@@ -862,7 +862,7 @@ export async function handlePlanTool(
       session.planApproved.value = false;
     }
 
-    // TASK-001: a revision is a foreground snapshot; responder children keep
+    // A revision is a foreground snapshot; responder children keep
     // their process-authoritative state. A brand-new plan has nothing stored
     // yet, so fall back to a plain create.
     const revised = await mutatePlan(plan.sessionId, (draft) => {
@@ -1138,7 +1138,7 @@ export async function handlePlanTool(
         modelNote: `task.add failed: ${validation.reason}.`,
       };
     }
-    // TASK-001: apply the authored foreground layout onto fresh state so a
+    // Apply the authored foreground layout onto fresh state so a
     // concurrent responder settlement is preserved.
     await mutatePlan(plan.sessionId, (draft) => {
       applyForegroundSnapshot(draft, plan);
@@ -1392,7 +1392,7 @@ export async function handlePlanTool(
   const terminal = isPlanTerminal(plan);
   const successful = isPlanSuccessful(plan);
   if (terminal) plan.status = successful ? "completed" : "abandoned";
-  // TASK-001: persist the transition (not the whole snapshot) so a concurrent
+  // Persist the transition (not the whole snapshot) so a concurrent
   // responder settlement or evidence patch survives.
   const committedStates = new Map(
     plan.tasks.map((task) => [

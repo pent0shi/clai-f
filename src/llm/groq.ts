@@ -44,7 +44,7 @@ const CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour cache TTL
 /**
  * Smallest completion allowance that can still produce a visible answer or a
  * closed tool-call JSON once reasoning tokens are billed against the same
- * budget (LLM-004). The TPM guard below may never drop under this on a step
+ * Budget. The TPM guard below may never drop under this on a step
  * that carries tools or reasoning.
  */
 export const GROQ_VIABLE_COMPLETION_TOKENS = 8_192;

@@ -1,7 +1,7 @@
 import type { ProviderId } from "../types.js";
 
 /**
- * LLM-010 — one declarative sampling policy.
+ * One declarative sampling policy.
  *
  * Everything used to run at `temperature: 0.2` with a single hard-coded MiniMax
  * exception and no `top_p` plumbing at all. Reasoning families degrade badly

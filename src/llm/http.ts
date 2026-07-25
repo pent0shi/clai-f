@@ -270,7 +270,7 @@ export async function* readStreamLines(
   resetIdleTimer();
   const onCallerAbort = (): void => idleController.abort(options.signal?.reason);
   options.signal?.addEventListener("abort", onCallerAbort, { once: true });
-  // LLM-011: a caller abort must surface as an abort error, not as a clean
+  // A caller abort must surface as an abort error, not as a clean
   // end-of-stream — otherwise the partial text is returned as a successful
   // completion and enters history as the model's final answer.
   const callerAbortError = (): Error =>
@@ -526,7 +526,7 @@ export function buildReasoningPayload(
   switch (style) {
     case "openai": {
       if (!enabled) return {};
-      // LLM-005: `reasoning_effort` is the Chat Completions knob. The nested
+      // `reasoning_effort` is the Chat Completions knob. The nested
       // `reasoning` object belongs to the Responses API; strict gateways reject
       // unknown top-level fields with a hard 400.
       return { reasoning_effort: clampEffort(effort) };
@@ -757,7 +757,7 @@ export function buildChatBody(options: {
   // `minimaxai/minimax-m3` ID. Both need the larger default output budget.
   const isMinimaxM3 = /minimax-m3/i.test(options.model);
   const defaultMaxTokens = isMinimaxM3 ? 8_192 : reasoningOn ? 8_192 : 4_096;
-  // LLM-010: one declarative sampling policy; explicit caller value wins.
+  // One declarative sampling policy; explicit caller value wins.
   const sampling = resolveSampling({
     model: options.model,
     reasoningEnabled: reasoningOn,
@@ -809,7 +809,7 @@ export function buildChatBody(options: {
 
 export async function openAiCompatibleComplete(options: {
   provider: string;
-  /** Canonical provider id used for capability lookups (LLM-001). */
+  /** Canonical provider id used for capability lookups. */
   providerId: ProviderId;
   baseUrl: string;
   apiKey: string;
@@ -921,7 +921,7 @@ export async function openAiCompatibleComplete(options: {
 
 export async function openAiCompatibleStream(options: {
   provider: string;
-  /** Canonical provider id used for capability lookups (LLM-001). */
+  /** Canonical provider id used for capability lookups. */
   providerId: ProviderId;
   baseUrl: string;
   apiKey: string;
@@ -1218,7 +1218,7 @@ export async function openAiCompatibleStream(options: {
           }>;
         };
         try {
-          // LLM-011: only JSON.parse is allowed to fail silently here. The
+          // Only JSON.parse is allowed to fail silently here. The
           // delta handlers below (tool-arg size guard, UI callbacks) used to be
           // inside this try and had their errors swallowed as "keepalives".
           parsed = JSON.parse(payload) as typeof parsed;
@@ -1226,7 +1226,7 @@ export async function openAiCompatibleStream(options: {
           // Malformed keepalive / comment line.
           continue;
         }
-        // LLM-011: gateways report mid-stream failures as an error frame; that
+        // Gateways report mid-stream failures as an error frame; that
         // used to be dropped, so an upstream overload looked like a complete
         // (but truncated) answer.
         if (parsed.error) {
@@ -1331,7 +1331,7 @@ export async function openAiCompatibleStream(options: {
     }
     throw error;
   } finally {
-    // LLM-011: the success paths used to return without releasing the body, so
+    // The success paths used to return without releasing the body, so
     // the socket stayed locked until GC — dozens of leaked connections per
     // long agent turn.
     cleanup();

@@ -176,7 +176,7 @@ const warnedUnknownProviders = new Set<string>();
 /**
  * Capability lookups are keyed by canonical `ProviderId`. Passing a display
  * label (`"NVIDIA NIM"`) used to silently resolve to "no capability", which
- * disabled vision while the rest of the app believed it was on (LLM-001).
+ * Disabled vision while the rest of the app believed it was on.
  * Fail loudly in dev/test and warn once per bad key in production.
  */
 export function warnOnUnknownProviderId(site: string, provider: string): void {

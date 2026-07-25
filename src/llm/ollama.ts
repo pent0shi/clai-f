@@ -15,7 +15,7 @@ import { resolveSampling } from "./sampling.js";
 import type { TokenUsage } from "../types.js";
 
 /**
- * LLM-008 — Ollama's server default context is small (2048 on most builds) and
+ * Ollama's server default context is small (2048 on most builds) and
  * silently truncates the *front* of the prompt, which is exactly where the
  * constitution, tool contract, plan and scope live. Send an explicit,
  * model-aware `num_ctx`, bounded so a local host is not asked for more KV cache

@@ -42,7 +42,7 @@ export function appendAssistantWithTools(
   text: string,
   toolCalls: NativeToolCall[],
   /**
-   * Signed reasoning that must be replayed with this turn (LLM-006). Anthropic
+   * Signed reasoning that must be replayed with this turn. Anthropic
    * rejects a tool_use turn whose thinking block is missing once extended
    * thinking is on; other dialects ignore the field.
    */

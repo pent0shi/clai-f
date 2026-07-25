@@ -6,7 +6,7 @@ export type TaskState =
   | "failed"
   | "skipped";
 
-// TASK-003 — the set of task-state transitions an ordinary update may perform.
+// The set of task-state transitions an ordinary update may perform.
 // `done` and `skipped` are terminal: regressing them re-executes finished work
 // and re-blocks dependents. Reopening after a failure is an explicit retry.
 // A plan revision (task.add / plan.revise) supersedes a task instead of

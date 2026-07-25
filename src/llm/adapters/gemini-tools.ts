@@ -153,7 +153,7 @@ type GeminiPart =
  * Convert dialect-neutral history to Gemini contents with functionCall /
  * functionResponse parts. The first system message is owned by
  * `systemInstruction`; later system messages become marked user turns in place
- * (LLM-002).
+ *.
  */
 export function toGeminiToolContents(
   messages: ChatMessage[],

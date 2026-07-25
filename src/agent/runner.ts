@@ -156,6 +156,7 @@ import {
   mutatePlan,
   markTask,
   appendPlanTask,
+  type PlanTask,
   readyPlanTasks,
   isPlanTerminal,
   isPlanSuccessful,
@@ -229,6 +230,12 @@ import {
   handlePlanTool,
   resolvePlanTaskId,
 } from "./plan-tool.js";
+import {
+  readDeclaredParentTaskId,
+  resolveResponderParent,
+  isExplicitResponderDelegation,
+  delegationTaskTitle,
+} from "./responder-parent.js";
 import {
   readTaskUpdateArgs,
   distinctAdvancingTaskIds,
@@ -386,7 +393,17 @@ export function styleToolChatter(call: ToolCall, text: string): string {
 }
 
 
-export function shouldYieldForResponderBeforeReport(
+/**
+ * A foreground task waits for a responder child only when the plan
+ * Declares that dependency. Report titles carry no scheduling meaning: any
+ * Dependency-ready foreground work is executed while children keep running, and
+ * Their results arrive as addenda.
+ *
+ * A declared dependency blocks only while the child is genuinely live (running
+ * Job or an undelivered/unanalyzed receipt), so an orphaned child can never
+ * Stall the turn forever.
+ */
+export function shouldYieldForDeclaredResponderDependency(
   plan: SessionPlan | undefined,
   runningJobs: readonly BackgroundJob[],
   notifications: readonly ResponderNotification[],
@@ -398,25 +415,38 @@ export function shouldYieldForResponderBeforeReport(
       !task.responderOwned &&
       (task.state === "pending" || task.state === "in_progress"),
   );
-  if (
-    unfinished.length === 0 ||
-    !unfinished.every(
-      (task) =>
-        classifyTaskTitle(task.title, { planKind: plan.kind }) === "report",
-    )
-  ) {
-    return false;
-  }
-  return (
-    runningJobs.some((job) => job.responder) ||
-    notifications.some(
+  if (unfinished.length === 0) return false;
+
+  const childById = new Map(
+    plan.tasks.filter((task) => task.responderOwned).map((task) => [task.id, task]),
+  );
+  const isLive = (child: PlanTask): boolean => {
+    if (child.state === "done" || child.state === "skipped" || child.state === "failed") {
+      return false;
+    }
+    const running = runningJobs.some(
+      (job) =>
+        job.responder &&
+        (job.taskId === child.id || (!!child.jobId && job.id === child.jobId)),
+    );
+    if (running) return true;
+    return notifications.some(
       (notification) =>
-        (!currentNotificationId || notification.id !== currentNotificationId) &&
         notification.responder &&
         !notification.archivedAt &&
         !notification.readAt &&
-        !notification.analyzedAt,
-    )
+        !notification.analyzedAt &&
+        (!currentNotificationId || notification.id !== currentNotificationId) &&
+        (notification.taskId === child.id ||
+          (!!child.jobId && notification.jobId === child.jobId)),
+    );
+  };
+
+  return unfinished.every((task) =>
+    (task.dependencies ?? []).some((dependency) => {
+      const child = childById.get(dependency);
+      return !!child && isLive(child);
+    }),
   );
 }
 export interface AgentRunOptions {
@@ -1335,7 +1365,7 @@ export async function runAgentTurn(
       if (isPlanTerminal(working)) {
         working.status = isPlanSuccessful(working) ? "completed" : "abandoned";
       }
-      // TASK-001: replay the same reconciliation as a reducer so a concurrent
+      // Replay the same reconciliation as a reducer so a concurrent
       // responder settlement is preserved instead of overwritten.
       const reconciledNotes = new Map(
         reconciledTaskIds.map((id) => [
@@ -1377,7 +1407,7 @@ export async function runAgentTurn(
 
     async function persistProjectRootOnPlan(root: string): Promise<void> {
       const pm = detectPackageManager(root);
-      // TASK-001: metadata patches go through the transactional boundary so a
+      // Metadata patches go through the transactional boundary so a
       // concurrent task transition or responder settlement is not clobbered.
       await mutatePlan(session.sessionId, (draft) => {
         patchPlanMeta(draft, {
@@ -1387,7 +1417,7 @@ export async function runAgentTurn(
       }).catch(() => undefined);
     }
 
-    /** Persist task evidence without rewriting the whole plan (TASK-001). */
+    /** Persist task evidence without rewriting the whole plan. */
     async function persistTaskEvidence(
       taskId: string,
       evidence: TaskEvidence,
@@ -1626,6 +1656,7 @@ export async function runAgentTurn(
       let call = normalizeToolCall(rawCall);
 
       let dispatchedTaskId: string | undefined;
+      let delegation: { id: string; taskId?: string } | undefined;
       let engagementLease: PolicyLease | undefined;
       let engagementGraph: EngagementGraph | undefined;
       let engagementRecord: EngagementActionRecord | undefined;
@@ -2117,7 +2148,7 @@ export async function runAgentTurn(
                 ) {
                   livePlanForGate.status = "in_progress";
                 }
-                // TASK-001/TASK-002: opening a task is a transition applied by
+                // Opening a task is a transition applied by
                 // the reducer, which also enforces the single-active invariant.
                 await mutatePlan(session.sessionId, (draft) => {
                   const target = draft.tasks.find(
@@ -2433,6 +2464,59 @@ export async function runAgentTurn(
         );
         dispatchedTaskId = candidate?.id;
       }
+      // An explicitly declared responder parent wins over inference.
+      const declaredParent = readDeclaredParentTaskId(call);
+      if (declaredParent) {
+        const resolvedParent = resolveResponderParent({
+          plan: planAtDispatch,
+          declared: declaredParent,
+          activeForegroundTaskIds: dispatchedTaskId ? [dispatchedTaskId] : [],
+        });
+        if (!resolvedParent.ok) {
+          const reason = `${call.name} failed: ${resolvedParent.reason}`;
+          const result = { ok: false, output: reason, exitCode: 1 };
+          emitToolResult(toolEventId, result, reason);
+          return { ok: false, call, result, contextOutput: reason };
+        }
+        dispatchedTaskId = resolvedParent.taskId ?? dispatchedTaskId;
+      }
+      // For an explicit delegation, create the child subtask before the
+      // Process starts and launch the job already bound to it. The job therefore
+      // Never carries the foreground parent in `taskId`, and settlement has a
+      // Durable row to advance even if this turn dies right after spawn.
+      if (isExplicitResponderDelegation(call) && planAtDispatch) {
+        delegation = { id: `dg-${randomUUID().slice(0, 8)}` };
+        const created = await mutatePlan(session.sessionId, (draft) => {
+          const parentExists =
+            !!dispatchedTaskId &&
+            draft.tasks.some((task) => task.id === dispatchedTaskId);
+          const child = appendPlanTask(draft, {
+            title: delegationTaskTitle(call),
+            state: "in_progress",
+            note: `delegation=${delegation!.id} awaiting launch`,
+            dependencies: [],
+            resourceLocks: [],
+            ...(parentExists ? { parentTaskId: dispatchedTaskId } : {}),
+            responderOwned: true,
+            delegationId: delegation!.id,
+          });
+          delegation!.taskId = child.id;
+          return true;
+        }).catch(() => undefined);
+        if (!created?.ok || !delegation.taskId) {
+          delegation = undefined;
+          writeNotice(
+            "warn",
+            "Responder delegation record could not be persisted — the job will be linked after launch",
+            chalk.yellow(
+              "  ⚠ responder delegation record not persisted; linking after launch\n",
+            ),
+          );
+        } else if (created.plan) {
+          pendingSessionStatePlan = created.plan;
+          writePlanUpdate(created.plan, renderPlanForTerminal(created.plan) + "\n");
+        }
+      }
       if (
         dispatchedTaskId &&
         (!taskWorkLedger || taskWorkLedger.taskId !== dispatchedTaskId)
@@ -2562,7 +2646,9 @@ export async function runAgentTurn(
           confirmed: true,
           userPrompt: prompt,
           sessionId: session.sessionId,
-          ...(dispatchedTaskId ? { taskId: dispatchedTaskId } : {}),
+          ...(delegation?.taskId ? { taskId: delegation.taskId } : {}),
+          ...(delegation ? { delegationId: delegation.id } : {}),
+          ...(dispatchedTaskId ? { parentTaskId: dispatchedTaskId } : {}),
           wakeOnCompletion: true,
           monitor: {
             toolName: call.name,
@@ -2834,6 +2920,32 @@ export async function runAgentTurn(
         }
       }
 
+      if (delegation?.taskId && !result.backgroundJob) {
+        // The delegation never became a durable job: settle its child instead of
+        // Leaving a permanently yellow subtask behind.
+        const delegationId = delegation.id;
+        const settledState = result.ok ? "skipped" : "failed";
+        const settlement = await mutatePlan(session.sessionId, (draft) => {
+          const child = draft.tasks.find(
+            (task) => task.delegationId === delegationId,
+          );
+          if (!child) return false;
+          child.state = settledState;
+          child.note = result.ok
+            ? `delegation=${delegationId} ran in the foreground; no durable job was created`
+            : `delegation=${delegationId} failed to launch`;
+          return true;
+        }).catch(() => undefined);
+        if (settlement?.ok && settlement.plan) {
+          pendingSessionStatePlan = settlement.plan;
+          writePlanUpdate(
+            settlement.plan,
+            renderPlanForTerminal(settlement.plan) + "\n",
+          );
+        }
+        delegation = undefined;
+      }
+
       if (result.backgroundJob) {
         const durableJob = jobManager.getJob(result.backgroundJob.id);
         // Responder linkage is opt-in: only jobs launched with responder:true
@@ -2843,7 +2955,7 @@ export async function runAgentTurn(
         const livePlan = await loadPlan(session.sessionId).catch(
           () => undefined,
         );
-        let linkedTaskId = dispatchedTaskId;
+        let linkedTaskId = delegation?.taskId;
         let linkedParentTaskId: string | undefined;
         let responderTaskId: string | undefined;
         let responderChildId: string | undefined;
@@ -2868,7 +2980,7 @@ export async function runAgentTurn(
             `job=${durableJob.id} pid=${durableJob.pid ?? "?"} status=${durableJob.status} ` +
             `artifact=${durableJob.stdoutArtifact}`;
           const responderTitle = `Responder · ${durableJob.name ?? durableJob.commandDisplay.slice(0, 96)}`;
-          // TASK-001/TASK-006: upsert the child by delegation/job identity
+          // Upsert the child by delegation/job identity
           // inside the transactional boundary. A concurrent settlement that
           // already turned the child green is therefore never reverted, and the
           // child is never written as the foreground parent.
@@ -3675,7 +3787,7 @@ export async function runAgentTurn(
               allowModelFallback,
               messages,
 
-              // LLM-010: sampling is provider/model policy (llm/sampling.ts).
+              // Sampling is provider/model policy (llm/sampling.ts).
               // Sending a fixed 0.2 here overrode it for every model.
 
               maxTokens: stepMaxTokens,
@@ -3877,7 +3989,7 @@ export async function runAgentTurn(
             }
             recordRecoveryAttempt(recoveryState, failureKind);
 
-            // LLM-003: the router refuses transparent retries after emission,
+            // The router refuses transparent retries after emission,
             // but the recovery ladder may still re-run the step. Say so, since
             // the visible answer restarts from scratch.
             if (streamAlreadyEmitted(streamError)) {
@@ -4708,7 +4820,7 @@ export async function runAgentTurn(
                 !task.responderOwned &&
                 (task.state === "pending" || task.state === "in_progress"),
             );
-            const deferReport = shouldYieldForResponderBeforeReport(
+            const deferReport = shouldYieldForDeclaredResponderDependency(
               livePlan,
               jobManager.getRunningJobs(session.sessionId),
               jobManager.getPendingNotifications(session.sessionId),
@@ -5243,7 +5355,7 @@ export async function runAgentTurn(
           }
           const openIds = openingTaskIds(intents);
           if (openIds.length > 1) {
-            // TASK-002: a multi-open is never confirmable; the store keeps at
+            // A multi-open is never confirmable; the store keeps at
             // most one active foreground task.
             session.pendingTaskBatch.value = undefined;
             const openDescriptors: BatchTaskDescriptor[] = openIds.map((taskId) => ({

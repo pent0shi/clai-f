@@ -260,7 +260,7 @@ export const anthropicProvider: LlmProvider = {
             stop_reason?: string;
           };
         };
-        // LLM-011: Anthropic reports mid-stream overloads as an `error` event.
+        // Anthropic reports mid-stream overloads as an `error` event.
         // It used to be dropped, so a truncated answer looked complete.
         if (parsed.type === "error") {
           throw new ProviderError(
@@ -322,7 +322,7 @@ export const anthropicProvider: LlmProvider = {
         }
       } catch (frameError) {
         // Only a malformed JSON frame is ignorable; real errors (provider error
-        // frames, tool-argument size guard) must propagate (LLM-011).
+        // Frames, tool-argument size guard) must propagate.
         if (!(frameError instanceof SyntaxError)) throw frameError;
       }
     }

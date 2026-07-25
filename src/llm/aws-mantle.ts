@@ -308,7 +308,7 @@ export const mantleProvider: LlmProvider = {
             stop_reason?: string;
           };
         };
-        // LLM-011: surface mid-stream provider error frames.
+        // Surface mid-stream provider error frames.
         if (parsed.type === "error") {
           throw new ProviderError(
             `AWS Mantle stream error: ${parsed.error?.message ?? parsed.error?.type ?? "unknown"}`,
@@ -367,7 +367,7 @@ export const mantleProvider: LlmProvider = {
           }
         }
       } catch (frameError) {
-        // Only malformed JSON frames are ignorable (LLM-011).
+        // Only malformed JSON frames are ignorable.
         if (!(frameError instanceof SyntaxError)) throw frameError;
       }
     }

@@ -11,6 +11,8 @@ export interface ToolRunOptions {
   sessionId?: string | undefined;
   taskId?: string | undefined;
   parentTaskId?: string | undefined;
+  /** Stable delegation identity created before launch; links job to plan child. */
+  delegationId?: string | undefined;
   wakeOnCompletion?: boolean | undefined;
   monitor?: JobMonitorMetadata | undefined;
   authorizeNetworkHop?: ((url: string, resolvedAddresses: string[]) => Promise<{ allowed: boolean; reason: string }> | { allowed: boolean; reason: string }) | undefined;

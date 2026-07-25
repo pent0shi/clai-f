@@ -126,7 +126,7 @@ export async function handleDraftPlanDecision(opts: {
     }
     // accept
     plan.status = "approved";
-    // TASK-001: status-only transition on fresh state.
+    // Status-only transition on fresh state.
     await mutatePlan(plan.sessionId, (draft) => {
       if (draft.status === "approved") return false;
       draft.status = "approved";

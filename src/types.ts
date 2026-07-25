@@ -61,7 +61,7 @@ export interface ToolCallStreamDelta {
   argumentsBytes?: number | undefined;
 }
 
-/** Provider-signed reasoning that must be replayed verbatim (LLM-006). */
+/** Provider-signed reasoning that must be replayed verbatim. */
 export interface ReasoningBlock {
   text: string;
   /** Anthropic signature; without it a thinking block cannot be replayed. */
@@ -90,7 +90,7 @@ export interface ChatMessage {
   /**
    * Signed reasoning block for providers that require the model's own thinking
    * to be replayed verbatim on the assistant turn that carries tool_use
-   * (Anthropic extended thinking, LLM-006). Additive: adapters that do not
+   * (Anthropic extended thinking, ). Additive: adapters that do not
    * understand it ignore it.
    */
   reasoningBlock?: ReasoningBlock | undefined;
@@ -188,7 +188,7 @@ export interface CompletionResult {
   rawAssistantMessage?: unknown | undefined;
   /** Exact usage when the provider reported it; omit when unknown. */
   usage?: TokenUsage | undefined;
-  /** Signed reasoning block to replay on the next request (LLM-006). */
+  /** Signed reasoning block to replay on the next request. */
   reasoningBlock?: ReasoningBlock | undefined;
 }
 

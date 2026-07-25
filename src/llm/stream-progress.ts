@@ -1,5 +1,5 @@
 /**
- * LLM-003 — stream progress tagging.
+ * Stream progress tagging.
  *
  * A retry is only transparent if nothing has been emitted yet. Once tokens have
  * reached the caller's `onToken` sink (which the agent runner feeds into a

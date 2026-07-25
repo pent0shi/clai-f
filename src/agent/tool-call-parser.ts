@@ -297,7 +297,7 @@ const ID_TOOL_CALL_RE =
 /**
  * Boundaries that end one id-tagged block. Argument JSON must be found before
  * the first of these, so a block whose own JSON is missing or truncated can
- * never adopt the arguments of a LATER block (SEC-006): a `fs.delete` opener
+ * Never adopt the arguments of a LATER block: a `fs.delete` opener
  * must not pair with the next call's `{"path":...}`.
  */
 const ID_BLOCK_BOUNDARY_RES: RegExp[] = [

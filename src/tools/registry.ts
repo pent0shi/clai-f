@@ -144,6 +144,7 @@ function responderJobOptions(options?: ToolRunOptions): StartJobOptions {
     ...(options?.sessionId ? { ownerSessionId: options.sessionId } : {}),
     ...(options?.taskId ? { taskId: options.taskId } : {}),
     ...(options?.parentTaskId ? { parentTaskId: options.parentTaskId } : {}),
+    ...(options?.delegationId ? { delegationId: options.delegationId } : {}),
     ...(options?.wakeOnCompletion !== undefined ? { wakeOnCompletion: options.wakeOnCompletion } : {}),
     ...(options?.monitor !== undefined ? { monitor: options.monitor } : {}),
     ...(responderLeaseId ? { responderLeaseId } : {}),
@@ -1678,6 +1679,7 @@ async function runToolBatch(
               ...(options?.sessionId ? { sessionId: options.sessionId } : {}),
               ...(options?.taskId ? { taskId: options.taskId } : {}),
               ...(options?.parentTaskId ? { parentTaskId: options.parentTaskId } : {}),
+              ...(options?.delegationId ? { delegationId: options.delegationId } : {}),
               ...(options?.wakeOnCompletion !== undefined
                 ? { wakeOnCompletion: options.wakeOnCompletion }
                 : {}),

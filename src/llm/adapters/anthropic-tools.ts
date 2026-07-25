@@ -47,7 +47,7 @@ type AnthropicContentBlock =
 /**
  * Convert dialect-neutral history to Anthropic Messages API messages.
  * The first system message is owned by the top-level `system` field; later
- * system messages become marked user turns in place (LLM-002). Consecutive
+ * System messages become marked user turns in place. Consecutive
  * tool results collapse into one user turn.
  */
 export function toAnthropicToolMessages(
@@ -85,7 +85,7 @@ export function toAnthropicToolMessages(
 
     if (message.role === "assistant" && message.toolCalls?.length) {
       const blocks: AnthropicContentBlock[] = [];
-      // LLM-006: Anthropic requires the signed thinking block to be the FIRST
+      // Anthropic requires the signed thinking block to be the FIRST
       // block of an assistant turn that carries tool_use while thinking is
       // enabled; without it the follow-up request is rejected and the model
       // loses its own chain of thought between tool calls.
@@ -209,7 +209,7 @@ export function parseAnthropicToolUseBlocks(
 export interface AnthropicToolStreamState {
   text: string;
   thinking: string;
-  /** Anthropic `signature_delta` for the thinking block (LLM-006). */
+  /** Anthropic `signature_delta` for the thinking block. */
   thinkingSignature: string;
   /** block index → partial tool_use */
   blocks: Map<
@@ -333,7 +333,7 @@ export function handleAnthropicStreamEvent(
       state.thinking += event.delta.thinking;
       result.thinkingDelta = event.delta.thinking;
     }
-    // LLM-006: the signature arrives as its own delta and must be kept.
+    // The signature arrives as its own delta and must be kept.
     if (event.delta.type === "signature_delta" && event.delta.signature) {
       state.thinkingSignature += event.delta.signature;
     }
