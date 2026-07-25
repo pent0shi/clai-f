@@ -59,24 +59,24 @@ export class JobController implements Disposable {
     return this.jobs.claimNextResponderNotification(sessionId, leaseId);
   }
 
-  markDeliveryStarted(notificationId: string): boolean {
-    return this.jobs.markDeliveryStarted(notificationId);
+  markDeliveryStarted(notificationId: string, sessionId?: string): boolean {
+    return this.jobs.markDeliveryStarted(notificationId, sessionId);
   }
 
-  markDelivered(notificationId: string): boolean {
-    return this.jobs.markDelivered(notificationId);
+  markDelivered(notificationId: string, sessionId?: string): boolean {
+    return this.jobs.markDelivered(notificationId, sessionId);
   }
 
   markRead(notificationId: string, sessionId: string): boolean {
     return this.jobs.markRead(notificationId, sessionId);
   }
 
-  markAnalyzed(notificationId: string): boolean {
-    return this.jobs.markAnalyzed(notificationId);
+  markAnalyzed(notificationId: string, sessionId?: string): boolean {
+    return this.jobs.markAnalyzed(notificationId, sessionId);
   }
 
-  acknowledge(notificationId: string): boolean {
-    return this.jobs.acknowledge(notificationId);
+  acknowledge(notificationId: string, sessionId?: string): boolean {
+    return this.jobs.acknowledge(notificationId, sessionId);
   }
 
   subscribe(listener: JobManagerListener): () => void {

@@ -1,4 +1,9 @@
-import { loadPlan } from "../store/plan.js";
+import {
+  foregroundRemaining,
+  loadPlan,
+  planProgress,
+  responderOpenTasks,
+} from "../store/plan.js";
 import { jobManager } from "../tools/jobs.js";
 import type { SessionPolicy } from "./session-policy.js";
 import type { ChatMessage } from "../types.js";
@@ -40,10 +45,9 @@ export async function buildRichStopSummary(
         `  ${icon} [${task.id}] (${task.state}) ${task.title}${task.note ? ` — ${task.note}` : ""}`,
       );
     }
-    const inProgress = plan.tasks.find((t) => t.state === "in_progress");
-    const next = plan.tasks.find(
-      (t) => t.state === "pending" || t.state === "in_progress",
-    );
+    const remaining = foregroundRemaining(plan);
+    const inProgress = remaining.find((task) => task.state === "in_progress");
+    const next = remaining[0];
     if (inProgress) {
       parts.push(
         `\nResume open task first: ${inProgress.id} — "${inProgress.title}" (do not skip to later tasks).`,
@@ -51,13 +55,20 @@ export async function buildRichStopSummary(
     } else if (next) {
       parts.push(`\nNext task to resume: ${next.id} — "${next.title}"`);
     }
-    const doneCount = plan.tasks.filter((t) => t.state === "done").length;
-    parts.push(`\nProgress: ${doneCount}/${plan.tasks.length} tasks done.`);
+    const progress = planProgress(plan);
+    parts.push(`\nProgress: ${progress.done}/${progress.total} tasks done.`);
+    const openChildren = responderOpenTasks(plan);
+    if (openChildren.length > 0) {
+      parts.push(
+        `\nResponder subtasks still open (they advance on their own): ` +
+          openChildren.map((task) => `[${task.id}] ${task.title}`).join(", "),
+      );
+    }
   }
 
   // Prefer session-scoped durable jobs only (never ephemeral tool-track rows).
-  const running = jobManager.getRunningJobs();
-  const recent = jobManager.getRecentJobs(8);
+  const running = jobManager.getRunningJobs(session.sessionId);
+  const recent = jobManager.getRecentJobs(8, session.sessionId);
   if (running.length > 0 || recent.length > 0) {
     parts.push("\n## Background Jobs");
     for (const job of running.slice(0, 8)) {

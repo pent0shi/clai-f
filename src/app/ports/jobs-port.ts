@@ -34,11 +34,11 @@ export interface JobsPort {
     leaseId: string,
   ): ResponderNotification | undefined;
   releaseResponderNotificationClaim?(notificationId: string): void;
-  markDeliveryStarted(notificationId: string): boolean;
-  markDelivered(notificationId: string): boolean;
+  markDeliveryStarted(notificationId: string, sessionId?: string): boolean;
+  markDelivered(notificationId: string, sessionId?: string): boolean;
   markRead(notificationId: string, sessionId: string): boolean;
-  markAnalyzed(notificationId: string): boolean;
-  acknowledge(notificationId: string): boolean;
+  markAnalyzed(notificationId: string, sessionId?: string): boolean;
+  acknowledge(notificationId: string, sessionId?: string): boolean;
   subscribe(listener: JobManagerListener): () => void;
   linkJob(jobId: string, metadata: JobLinkMetadata): BackgroundJob | undefined;
   cancelAll(sessionId: string): Promise<ToolResult>;

@@ -8,7 +8,7 @@ import type {
   SessionPlan,
   TaskState,
 } from "../../store/plan.js";
-import { planProgress } from "../../store/plan.js";
+import { foregroundActiveTask, planProgress } from "../../store/plan.js";
 
 export interface PlanProgressView {
   readonly done: number;
@@ -156,10 +156,24 @@ export function taskLabel(task: PlanTask): string {
   return `${TASK_GLYPH[task.state]} ${task.id}  ${task.title}`;
 }
 
+/**
+ * The row the pane highlights and scrolls to. Responder children are concurrent
+ * background work, so they never take the active plate away from the foreground
+ * task the model is actually on.
+ */
 export function activeTaskId(plan: SessionPlan): string | undefined {
-  return plan.tasks.find(
-    (t) => t.state === "pending" || t.state === "in_progress",
-  )?.id;
+  return foregroundActiveTask(plan)?.id;
+}
+
+/** Responder children read as background work, not as a second active task. */
+export function taskRowColor(task: PlanTask): PlanColorToken {
+  if (task.responderOwned && task.state === "in_progress") return "cyan";
+  return taskStateColor(task.state);
+}
+
+/** Short chip that explains why a row is not foreground work. */
+export function taskOwnerChip(task: PlanTask): string | undefined {
+  return task.responderOwned ? "RESPONDER" : undefined;
 }
 
 /** Soft-wrap without ellipsis — full text, never truncated. */

@@ -20,9 +20,9 @@ export function settlePersistedResponderResults(input: {
     ) {
       continue;
     }
-    if (!notification.analyzedAt && !input.jobs.markAnalyzed(notification.id)) {
+    if (!notification.analyzedAt && !input.jobs.markAnalyzed(notification.id, input.sessionId)) {
       continue;
     }
-    input.jobs.acknowledge(notification.id);
+    input.jobs.acknowledge(notification.id, input.sessionId);
   }
 }

@@ -20,13 +20,16 @@ export function createCurrentJobsPort(manager: JobManager = jobManager): JobsPor
       manager.claimNextResponderNotification(sessionId, leaseId),
     releaseResponderNotificationClaim: (notificationId) =>
       manager.releaseResponderNotificationClaim(notificationId),
-    markDeliveryStarted: (notificationId) =>
-      manager.markDeliveryStarted(notificationId),
-    markDelivered: (notificationId) => manager.markDelivered(notificationId),
+    markDeliveryStarted: (notificationId, sessionId) =>
+      manager.markDeliveryStarted(notificationId, sessionId),
+    markDelivered: (notificationId, sessionId) =>
+      manager.markDelivered(notificationId, sessionId),
     markRead: (notificationId, sessionId) =>
       manager.markRead(notificationId, sessionId),
-    markAnalyzed: (notificationId) => manager.markAnalyzed(notificationId),
-    acknowledge: (notificationId) => manager.acknowledge(notificationId),
+    markAnalyzed: (notificationId, sessionId) =>
+      manager.markAnalyzed(notificationId, sessionId),
+    acknowledge: (notificationId, sessionId) =>
+      manager.acknowledge(notificationId, sessionId),
     subscribe: (listener) => manager.subscribe(listener),
     linkJob: (jobId, metadata) => manager.linkJob(jobId, metadata),
     cancelAll: (sessionId) => manager.cancelAll(sessionId),

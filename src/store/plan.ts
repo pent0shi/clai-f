@@ -249,42 +249,57 @@ export function tasksFromTitles(titles: string[]): PlanTask[] {
 }
 
 /**
- * Heal dependency edges so the checklist order is the authority.
+ * Heal dependency edges without inventing scheduling.
  *
- * After id remaps (merge/rewrite), auto-generated chains often point at the
- * wrong ids (e.g. t2 depends on t9). Drop self-deps and any dependency that
- * appears later in the list (forward edges). If nothing valid remains, chain
- * to the previous task in list order.
+ * Only genuinely broken edges are removed: self-references, ids that no longer
+ * exist, and edges that would close a cycle. Valid forward references are kept
+ * so an authored DAG keeps its parallelism. `dependencies: []` is an explicit
+ * statement of independence and is never replaced; only a legacy row with no
+ * dependency field at all falls back to the previous foreground task, and a
+ * responder child never becomes a blocker.
  *
  * Returns true when any task's dependencies changed.
  */
 export function normalizeTaskDependencies(tasks: PlanTask[]): boolean {
   let changed = false;
-  for (let i = 0; i < tasks.length; i++) {
-    const task = tasks[i]!;
-    const earlierTasks = tasks.slice(0, i);
-    const earlier = new Set(earlierTasks.map((candidate) => candidate.id));
-    const cleaned = [
-      ...new Set(
-        (task.dependencies ?? []).filter(
-          (dep) => dep !== task.id && earlier.has(dep),
-        ),
-      ),
-    ];
-    const previousManual = [...earlierTasks]
-      .reverse()
-      .find((candidate) => !candidate.responderOwned);
-    const next = task.responderOwned
-      ? cleaned
-      : cleaned.length > 0
-        ? cleaned
-        : previousManual
-          ? [previousManual.id]
-          : [];
-    const prev = task.dependencies ?? [];
+  const known = new Set(tasks.map((task) => task.id));
+  const byId = new Map(tasks.map((task) => [task.id, task]));
+
+  const wouldCycle = (from: string, to: string): boolean => {
+    const seen = new Set<string>();
+    const walk = (id: string): boolean => {
+      if (id === from) return true;
+      if (seen.has(id)) return false;
+      seen.add(id);
+      return (byId.get(id)?.dependencies ?? []).some(walk);
+    };
+    return walk(to);
+  };
+
+  for (const [index, task] of tasks.entries()) {
+    const declared = task.dependencies;
+    const cleaned: string[] = [];
+    for (const dependency of declared ?? []) {
+      if (dependency === task.id || !known.has(dependency)) continue;
+      if (cleaned.includes(dependency)) continue;
+      if (wouldCycle(task.id, dependency)) continue;
+      cleaned.push(dependency);
+    }
+    let next = cleaned;
+    if (declared === undefined && !task.responderOwned && cleaned.length === 0) {
+      const previousForeground = tasks
+        .slice(0, index)
+        .reverse()
+        .find((candidate) => !candidate.responderOwned);
+      if (previousForeground && !wouldCycle(task.id, previousForeground.id)) {
+        next = [previousForeground.id];
+      }
+    }
+    const previous = declared ?? [];
     if (
-      prev.length !== next.length ||
-      prev.some((id, idx) => id !== next[idx])
+      declared === undefined ||
+      previous.length !== next.length ||
+      previous.some((id, position) => id !== next[position])
     ) {
       task.dependencies = next;
       changed = true;
@@ -667,6 +682,27 @@ async function readAllJsonl(): Promise<SessionPlan[]> {
 }
 
 /** Upgrade legacy persisted plans without changing task ids or states. */
+/**
+ * Fill in dependencies for legacy rows that never stored the field. The previous
+ * foreground task is the default; a responder child is display-linked to its
+ * parent and must never become a blocker.
+ */
+function normalizeLegacyDependencies(tasks: readonly PlanTask[]): PlanTask[] {
+  return tasks.map((task, index) => {
+    const previousForeground = tasks
+      .slice(0, index)
+      .reverse()
+      .find((candidate) => !candidate.responderOwned);
+    const legacyDefault =
+      task.responderOwned || !previousForeground ? [] : [previousForeground.id];
+    return {
+      ...task,
+      dependencies: [...(task.dependencies ?? legacyDefault)],
+      resourceLocks: [...(task.resourceLocks ?? [])],
+    };
+  });
+}
+
 function normalizePersistedPlan(plan: SessionPlan): SessionPlan {
   return {
     ...plan,
@@ -675,13 +711,7 @@ function normalizePersistedPlan(plan: SessionPlan): SessionPlan {
       typeof plan.version === "number" && plan.version >= 1
         ? plan.version
         : 1,
-    tasks: plan.tasks.map((task, index) => ({
-      ...task,
-      dependencies: [
-        ...(task.dependencies ?? (index > 0 ? [plan.tasks[index - 1]!.id] : [])),
-      ],
-      resourceLocks: [...(task.resourceLocks ?? [])],
-    })),
+    tasks: normalizeLegacyDependencies(plan.tasks),
   };
 }
 
@@ -953,7 +983,7 @@ export function activeForegroundTasks(plan: SessionPlan): PlanTask[] {
  * children may run concurrently and are ignored here.
  */
 export function enforcePlanInvariants(plan: SessionPlan): string[] {
-  const repairs: string[] = [];
+  const repairs: string[] = [...repairOrphanParents(plan)];
   const active = activeForegroundTasks(plan);
   if (active.length <= 1) return repairs;
 
@@ -973,6 +1003,26 @@ export function enforcePlanInvariants(plan: SessionPlan): string[] {
       ? `${task.note} (reopened later: only one foreground task may be active)`
       : "Demoted to pending: only one foreground task may be active at a time.";
     repairs.push(`demoted ${task.id} to pending (single-active invariant)`);
+  }
+  return repairs;
+}
+
+/**
+ * Never leave a child pointing at a task that no longer exists. A revision that
+ * removes a parent with live children keeps the ownership audit in the note and
+ * detaches the display link instead of silently orphaning the row.
+ */
+function repairOrphanParents(plan: SessionPlan): string[] {
+  const repairs: string[] = [];
+  const known = new Set(plan.tasks.map((task) => task.id));
+  for (const task of plan.tasks) {
+    if (!task.parentTaskId || known.has(task.parentTaskId)) continue;
+    const detached = task.parentTaskId;
+    delete task.parentTaskId;
+    task.note = task.note
+      ? `${task.note} (detached: parent ${detached} was removed)`
+      : `Detached responder work: parent ${detached} was removed by a revision.`;
+    repairs.push(`detached ${task.id} from removed parent ${detached}`);
   }
   return repairs;
 }
@@ -1063,8 +1113,33 @@ export function markNextTask(plan: SessionPlan, state: TaskState): PlanTask | un
   return task;
 }
 
-function foregroundTasks(plan: SessionPlan): PlanTask[] {
+/** Tasks the model owns. Responder children advance from process lifecycle. */
+export function foregroundTasks(plan: SessionPlan): PlanTask[] {
   return plan.tasks.filter((task) => !task.responderOwned);
+}
+
+/** Foreground work that is neither settled nor skipped, in plan order. */
+export function foregroundRemaining(plan: SessionPlan): PlanTask[] {
+  return foregroundTasks(plan).filter(
+    (task) => task.state === "pending" || task.state === "in_progress",
+  );
+}
+
+/** The single active foreground task, or the next one to resume. */
+export function foregroundActiveTask(plan: SessionPlan): PlanTask | undefined {
+  const remaining = foregroundRemaining(plan);
+  return (
+    remaining.find((task) => task.state === "in_progress") ?? remaining[0]
+  );
+}
+
+/** Responder children that are still running or awaiting analysis. */
+export function responderOpenTasks(plan: SessionPlan): PlanTask[] {
+  return plan.tasks.filter(
+    (task) =>
+      task.responderOwned &&
+      (task.state === "pending" || task.state === "in_progress"),
+  );
 }
 
 export function planProgress(plan: SessionPlan): { done: number; total: number } {

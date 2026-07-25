@@ -134,6 +134,9 @@ export interface ResponderNotification {
   readAt?: string | undefined;
   analyzedAt?: string | undefined;
   acknowledgedAt?: string | undefined;
+  /** User discarded this receipt (cancel/new session); never model analysis. */
+  discardedAt?: string | undefined;
+  discardReason?: "session-cancelled" | undefined;
   /** Monotonic revision of the authoritative result this receipt carries. */
   resultRevision?: number | undefined;
   /** Content hash of the authoritative result, used to detect a correction. */
@@ -214,6 +217,7 @@ const ARCHIVED_UNSETTLED_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const MAX_ARCHIVED_UNSETTLED_NOTIFICATIONS = 40;
 const MAX_SUPERSEDED_REVISIONS = 5;
 const SETTLEMENT_MAX_BACKOFF_MS = 30_000;
+const LIVENESS_WATCH_INTERVAL_MS = 2_000;
 const SETTLEMENT_DEAD_LETTER_MS = 10 * 60_000;
 /** Max lines shell.jobs returns to the model (running first, then recent). */
 const LIST_JOBS_MAX_LINES = 40;
@@ -438,6 +442,7 @@ export class JobManager {
   private responderLeases = new Map<string, string>();
   private settlementTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private pendingSettlements = new Map<string, PendingSettlement>();
+  private livenessWatchTimer: ReturnType<typeof setInterval> | undefined;
   private finalizations = new Map<string, Promise<boolean>>();
   private listeners = new Set<JobManagerListener>();
   /**
@@ -894,6 +899,60 @@ export class JobManager {
     );
   }
 
+  /**
+   * One coalesced, unref'd watcher that reconciles restored live jobs without a
+   * UI read. Without it a headless session can leave a finished responder job
+   * "running" forever, because liveness was only refreshed by list/get calls.
+   */
+  private scheduleLivenessWatch(): void {
+    if (this.livenessWatchTimer) return;
+    const restored = [...this.jobs.values()].filter(
+      (job) => this.isDurable(job) && this.isLive(job) && !this.processes.has(job.id),
+    );
+    if (restored.length === 0) return;
+    const timer = setInterval(() => {
+      const pending = [...this.jobs.values()].filter(
+        (job) => this.isDurable(job) && this.isLive(job) && !this.processes.has(job.id),
+      );
+      for (const job of pending) this.refreshJobLiveness(job);
+      const remaining = [...this.jobs.values()].some(
+        (job) => this.isDurable(job) && this.isLive(job) && !this.processes.has(job.id),
+      );
+      if (remaining) return;
+      clearInterval(timer);
+      this.livenessWatchTimer = undefined;
+    }, LIVENESS_WATCH_INTERVAL_MS);
+    timer.unref?.();
+    this.livenessWatchTimer = timer;
+  }
+
+  /** Ownership guard: a receipt may only be mutated by its owning session. */
+  private ownsNotification(
+    notification: ResponderNotification | undefined,
+    sessionId: string | undefined,
+  ): notification is ResponderNotification {
+    if (!notification) return false;
+    return sessionId === undefined || notification.ownerSessionId === sessionId;
+  }
+
+  /** Receipt for a launch that was deduplicated by its delegation key. */
+  private startJobReceipt(job: BackgroundJob, reason: string): ToolResult {
+    return {
+      ok: true,
+      output:
+        `Reusing background job id=${job.id} (${reason}) pid=${job.pid ?? "?"} status=${job.status}\n` +
+        `Command: ${job.commandDisplay}\nArtifact: ${job.stdoutArtifact}\n` +
+        "The duplicate launch was not started; poll this id instead.",
+      outputPath: job.stdoutArtifact,
+      backgroundJob: {
+        id: job.id,
+        status: job.status,
+        artifactPath: job.stdoutArtifact,
+        nextOffset: 0,
+      },
+    };
+  }
+
   /** Terminal results whose plan child could not be settled yet. */
   getPendingSettlements(): PendingSettlement[] {
     return [...this.pendingSettlements.values()];
@@ -943,6 +1002,16 @@ export class JobManager {
       if (Number.isFinite(expiry) && expiry <= Date.now()) {
         return { ok: false, output: `Engagement authorization for ${options.authorization.target} has expired.`, exitCode: 1 };
       }
+    }
+    if (options?.delegationId) {
+      // A retried tool call must not spawn a second scanner: the delegation key
+      // identifies the work, so the existing job is returned unchanged.
+      const existing = [...this.jobs.values()].find(
+        (candidate) =>
+          candidate.delegationId === options.delegationId &&
+          candidate.ownerSessionId === (options.ownerSessionId ?? "unknown"),
+      );
+      if (existing) return this.startJobReceipt(existing, "existing delegation");
     }
     const id = randomUUID().slice(0, 8);
     const cwd = options?.cwd ?? safeCwd();
@@ -1390,6 +1459,7 @@ export class JobManager {
     return [...this.notifications.values()]
       .filter((notification) =>
         !notification.acknowledgedAt &&
+        !notification.discardedAt &&
         (!sessionId || notification.ownerSessionId === sessionId),
       )
       .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
@@ -1412,6 +1482,7 @@ export class JobManager {
         notification.ownerSessionId === sessionId &&
         !notification.acknowledgedAt &&
         !notification.archivedAt &&
+        !notification.discardedAt &&
         notification.responderLeaseId !== leaseId
       ) {
         notification.responderLeaseId = leaseId;
@@ -1424,6 +1495,7 @@ export class JobManager {
           candidate.ownerSessionId === sessionId &&
           candidate.responderLeaseId === leaseId &&
           !candidate.archivedAt &&
+          !candidate.discardedAt &&
           !candidate.deliveredAt &&
           !candidate.readAt &&
           !candidate.analyzedAt &&
@@ -1444,9 +1516,9 @@ export class JobManager {
    * Record that a delivery attempt started. This is deliberately weaker than
    * `markDelivered`: an aborted or failed analysis turn must remain deliverable.
    */
-  markDeliveryStarted(notificationId: string): boolean {
+  markDeliveryStarted(notificationId: string, sessionId?: string): boolean {
     const notification = this.notifications.get(notificationId);
-    if (!notification) return false;
+    if (!this.ownsNotification(notification, sessionId)) return false;
     if (notification.deliveryStartedAt) return true;
     notification.deliveryStartedAt = new Date().toISOString();
     if (!this.persistSync()) {
@@ -1461,9 +1533,9 @@ export class JobManager {
     return true;
   }
 
-  markDelivered(notificationId: string): boolean {
+  markDelivered(notificationId: string, sessionId?: string): boolean {
     const notification = this.notifications.get(notificationId);
-    if (!notification) return false;
+    if (!this.ownsNotification(notification, sessionId)) return false;
     if (!notification.deliveredAt) {
       notification.deliveredAt = new Date().toISOString();
       notification.deliveryStartedAt ??= notification.deliveredAt;
@@ -1506,9 +1578,12 @@ export class JobManager {
     return true;
   }
 
-  markAnalyzed(notificationId: string): boolean {
+  markAnalyzed(notificationId: string, sessionId?: string): boolean {
     const notification = this.notifications.get(notificationId);
-    if (!notification?.deliveredAt && !notification?.deliveryStartedAt) {
+    if (!notification || !this.ownsNotification(notification, sessionId)) {
+      return false;
+    }
+    if (!notification.deliveredAt && !notification.deliveryStartedAt) {
       return false;
     }
     this.claimedNotifications.delete(notificationId);
@@ -1524,9 +1599,12 @@ export class JobManager {
     return true;
   }
 
-  acknowledge(notificationId: string): boolean {
+  acknowledge(notificationId: string, sessionId?: string): boolean {
     const notification = this.notifications.get(notificationId);
-    if (!notification?.analyzedAt) return false;
+    if (!notification || !this.ownsNotification(notification, sessionId)) {
+      return false;
+    }
+    if (!notification.analyzedAt) return false;
     this.claimedNotifications.delete(notificationId);
     if (!notification.acknowledgedAt) {
       notification.acknowledgedAt = new Date().toISOString();
@@ -1861,15 +1939,15 @@ export class JobManager {
         acknowledgedAt: notification.acknowledgedAt,
       });
       notification.wakeOnCompletion = false;
-      notification.deliveredAt ??= acknowledgedAt;
-      notification.acknowledgedAt = acknowledgedAt;
+      notification.discardedAt = acknowledgedAt;
+      notification.discardReason = "session-cancelled";
     }
     const acknowledgementsPersisted = this.persistSync();
     if (!acknowledgementsPersisted) {
       for (const snapshot of notificationSnapshots) {
         snapshot.notification.wakeOnCompletion = snapshot.wakeOnCompletion;
-        snapshot.notification.deliveredAt = snapshot.deliveredAt;
-        snapshot.notification.acknowledgedAt = snapshot.acknowledgedAt;
+        snapshot.notification.discardedAt = undefined;
+        snapshot.notification.discardReason = undefined;
       }
     } else {
       for (const snapshot of notificationSnapshots) {
@@ -1955,6 +2033,7 @@ export class JobManager {
       const job = this.jobs.get(notification.jobId);
       if (
         !job ||
+        notification.discardedAt ||
         (notification.acknowledgedAt && job.status !== "lost")
       ) {
         this.notifications.delete(id);
@@ -2055,6 +2134,7 @@ export class JobManager {
         const job = this.jobs.get(notification.jobId);
         if (!job?.responder) this.notifications.delete(id);
       }
+      this.scheduleLivenessWatch();
       this.pruneTerminalJobs();
       this.persistSync();
     } catch { /* Corrupt registries are ignored, never trusted as running. */ }

@@ -158,6 +158,8 @@ import {
   appendPlanTask,
   type PlanTask,
   readyPlanTasks,
+  foregroundRemaining,
+  responderOpenTasks,
   isPlanTerminal,
   isPlanSuccessful,
   type SessionPlan,
@@ -3770,7 +3772,7 @@ export async function runAgentTurn(
           try {
           if (
             responderDelivery &&
-            !jobManager.markDeliveryStarted(responderDelivery.id)
+            !jobManager.markDeliveryStarted(responderDelivery.id, session.sessionId)
           ) {
             jobManager.releaseResponderNotificationClaim(
               responderDelivery.id,
@@ -4034,7 +4036,7 @@ export async function runAgentTurn(
           // The result text is now part of this turn, so consumption is durable.
           // A stream that aborted or threw above never reaches this point and the
           // receipt stays deliverable.
-          if (!jobManager.markDelivered(responderDelivery.id)) {
+          if (!jobManager.markDelivered(responderDelivery.id, session.sessionId)) {
             jobManager.releaseResponderNotificationClaim(responderDelivery.id);
           }
         }
@@ -4859,16 +4861,28 @@ export async function runAgentTurn(
             const livePlan = await loadPlan(session.sessionId).catch(
               () => undefined,
             );
-            const unfinished = livePlan?.tasks.filter(
-              (t) => t.state === "pending" || t.state === "in_progress",
-            ) ?? [];
-            const failedTasks = livePlan?.tasks.filter(
-              (t) => t.state === "failed",
-            ) ?? [];
+            // Foreground work decides the turn outcome. Responder children run
+            // concurrently by design and are reported separately.
+            const unfinished = livePlan ? foregroundRemaining(livePlan) : [];
+            const failedTasks =
+              livePlan?.tasks.filter(
+                (task) => !task.responderOwned && task.state === "failed",
+              ) ?? [];
             remainingCriteria.push(
               ...unfinished.map((task) => `[${task.id}] ${task.title}`),
               ...failedTasks.map((task) => `[${task.id}] retry failed task: ${task.title}`),
             );
+            const openResponderChildren = livePlan
+              ? responderOpenTasks(livePlan)
+              : [];
+            if (openResponderChildren.length > 0) {
+              remainingCriteria.push(
+                ...openResponderChildren.map(
+                  (task) =>
+                    `[${task.id}] responder result awaiting analysis: ${task.title}`,
+                ),
+              );
+            }
             if (failedTasks.length > 0) outcomeStatus = "failed";
             else if (unfinished.length > 0) outcomeStatus = "partial";
           }

@@ -20,7 +20,8 @@ import {
   progressBar,
   progressView,
   TASK_GLYPH,
-  taskStateColor,
+  taskRowColor,
+  taskOwnerChip,
   wrapPlanText,
   type PlanColorToken,
 } from "../../rendering/plan-view.js";
@@ -361,7 +362,7 @@ function TaskRow(props: {
 }): ReactNode {
   const { task, theme, width, active, index } = props;
   const state = task.state as TaskState;
-  const stateColor = tokenFg(theme, taskStateColor(state));
+  const stateColor = tokenFg(theme, taskRowColor(task));
   const titleColor =
     state === "pending" || state === "skipped"
       ? theme.foreground
@@ -370,12 +371,15 @@ function TaskRow(props: {
   // Stripe every other row; active/in_progress get a stronger plate.
   // Distinctions are background only — no row borders.
   const bg =
-    active || state === "in_progress"
+    active || (state === "in_progress" && !task.responderOwned)
       ? theme.rowA
       : index % 2 === 0
         ? theme.rowB
         : theme.statusBackground;
-  const title = `${task.parentTaskId ? "↳ " : ""}${cleanTaskTitle(task)}`;
+  const ownerChip = taskOwnerChip(task);
+  const title =
+    `${task.parentTaskId ? "↳ " : ""}` +
+    `${ownerChip ? `[${ownerChip}] ` : ""}${cleanTaskTitle(task)}`;
   // Budget leaves room for rail (1) + padding + glyph.
   const titleBudget = Math.max(8, width - 5);
   const titleLines = wrapPlanText(title, titleBudget);

@@ -16,7 +16,7 @@ describe("normalizeTaskDependencies", () => {
     await clearAllPlans();
   });
 
-  it("drops forward edges like t2 → t9 and rechains by list order", () => {
+  it("keeps acyclic forward edges and drops only broken ones", () => {
     const plan = createPlan({
       sessionId: "deps-forward",
       goal: "blog",
@@ -57,16 +57,39 @@ describe("normalizeTaskDependencies", () => {
     plan.tasks[8]!.dependencies = ["t6"];
     plan.tasks[9]!.dependencies = ["t7"];
 
+    // List position carries no scheduling meaning: an acyclic edge to a later
+    // row is a legitimate DAG edge and is preserved.
+    expect(normalizeTaskDependencies(plan.tasks)).toBe(false);
+    expect(plan.tasks[2]!.dependencies).toEqual(["t9"]);
+
+    // Self, unknown and cycle-closing edges are the only ones removed.
+    plan.tasks[2]!.dependencies = ["t9", "t2", "missing"];
+    plan.tasks[9]!.dependencies = ["t7"];
     expect(normalizeTaskDependencies(plan.tasks)).toBe(true);
-    // t2 no longer waits on t9
-    expect(plan.tasks[2]!.dependencies).toEqual(["t10"]);
-    expect(plan.tasks[2]!.dependencies).not.toContain("t9");
-    // After t1+t10 done, t2 is ready
+    expect(plan.tasks[2]!.dependencies).toEqual(["t9"]);
+
+    plan.tasks[1]!.dependencies = ["t1", "t2"];
+    expect(normalizeTaskDependencies(plan.tasks)).toBe(true);
+    expect(plan.tasks[1]!.dependencies).toEqual(["t1"]);
+
     plan.tasks[0]!.state = "done";
     plan.tasks[1]!.state = "done";
-    const ready = readyPlanTasks(plan).map((t) => t.id);
-    expect(ready).toContain("t2");
-    expect(ready).not.toContain("t9");
+    expect(readyPlanTasks(plan).map((task) => task.id)).not.toContain("t2");
+  });
+
+  it("keeps an explicitly empty dependency list and defaults only legacy rows", () => {
+    const plan = createPlan({
+      sessionId: "deps-explicit",
+      goal: "app",
+      detail: "d",
+      kind: "coding",
+      taskTitles: ["one", "two", "three"],
+    });
+    plan.tasks[1]!.dependencies = [];
+    plan.tasks[2]!.dependencies = [];
+    expect(normalizeTaskDependencies(plan.tasks)).toBe(false);
+    expect(plan.tasks[1]!.dependencies).toEqual([]);
+    expect(plan.tasks[2]!.dependencies).toEqual([]);
   });
 
   it("preserves authored dependencies while opening early with a warning", async () => {

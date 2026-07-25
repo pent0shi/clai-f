@@ -15,7 +15,7 @@ import {
   extractCompactionSummaryBody,
   PLAN_IMPLEMENT_COMPACT_MIN_TOKENS,
 } from "../../agent/plan-implement-compact.js";
-import type { SessionPlan } from "../../store/plan.js";
+import { isPlanSuccessful, type SessionPlan } from "../../store/plan.js";
 import type { AppServices } from "../bootstrap/composition-root.js";
 import { serializeTranscriptForCompaction } from "../state/transcript-compaction.js";
 import { notify, notifyWarn } from "../notify.js";
@@ -188,7 +188,7 @@ async function compactResearchForImplement(
 export async function implementPlan(services: AppServices): Promise<void> {
   const plan = services.plan.current();
   if (!plan) return;
-  if (plan.tasks.length > 0 && plan.tasks.every((t) => t.state === "done")) return;
+  if (isPlanSuccessful(plan)) return;
 
   // Pane click wins: mark handled, close chat confirm so Y/N can't re-queue.
   planDecisionHandled = true;

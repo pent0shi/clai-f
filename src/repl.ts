@@ -82,7 +82,12 @@ import {
   openViewportPager,
   toggleViewport,
 } from "./ui/output-pane.js";
-import { loadPlan, mutatePlan, deletePlan } from "./store/plan.js";
+import {
+  loadPlan,
+  mutatePlan,
+  deletePlan,
+  isPlanSuccessful,
+} from "./store/plan.js";
 import { renderPlanDocument, renderPlanChecklist } from "./ui/plan-pane.js";
 import { safeCwd, cwdIsBroken, recoverCwd } from "./os/cwd.js";
 import {
@@ -1867,7 +1872,7 @@ export async function startRepl(options: ReplOptions = {}): Promise<void> {
           );
           continue;
         }
-        if (plan.tasks.every((t) => t.state === "done")) {
+        if (isPlanSuccessful(plan)) {
           console.log(chalk.dim("  this plan is already complete ✓"));
           continue;
         }

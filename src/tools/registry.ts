@@ -821,6 +821,8 @@ export const toolRegistry: Record<string, ToolHandler> = {
                   profile: estimate.profile,
                   estimatedSeconds: estimate.estimatedSeconds,
                   ...responderJobOptions(options),
+                  responder: true,
+                  wakeOnCompletion: true,
                   ...(options?.engagementAuthorization ? { authorization: options.engagementAuthorization } : {}),
                 })
               : prepared.result;

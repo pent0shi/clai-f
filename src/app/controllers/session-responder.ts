@@ -186,7 +186,7 @@ export class SessionResponder {
       result = await this.deps.runTurn(
         deliveryPrompt(notification, preview, foreground),
         () => {
-          if (!this.deps.jobs.markDeliveryStarted(notification.id)) {
+          if (!this.deps.jobs.markDeliveryStarted(notification.id, sessionId)) {
             throw new Error(
               `failed to persist responder delivery attempt ${notification.id}`,
             );
@@ -216,7 +216,7 @@ export class SessionResponder {
       this.deps.notifyState();
       return;
     }
-    if (!this.deps.jobs.markDelivered(notification.id)) {
+    if (!this.deps.jobs.markDelivered(notification.id, sessionId)) {
       this.deps.jobs.releaseResponderNotificationClaim?.(notification.id);
       this.deps.notifyState();
       return;
