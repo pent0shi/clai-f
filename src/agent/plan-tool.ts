@@ -17,6 +17,7 @@ import {
   type SessionPlan,
   type TaskState,
 } from "../store/plan.js";
+import { evaluateTaskTransition } from "../store/task-transitions.js";
 import { renderPlanChecklist } from "../ui/plan-pane.js";
 import type { LoopGuard } from "./loop-guard.js";
 import type { SessionPolicy } from "./session-policy.js";
@@ -1219,6 +1220,25 @@ export async function handlePlanTool(
       };
     }
     if (target?.state !== "in_progress") {
+      const otherActive = plan.tasks.find(
+        (task) =>
+          task.id !== taskId &&
+          task.state === "in_progress" &&
+          !task.responderOwned,
+      );
+      if (otherActive) {
+        return {
+          handled: true,
+          ok: false,
+          display: chalk.red(
+            `  ✗ task.update: [${otherActive.id}] is still in progress — only one foreground task may be active\n`,
+          ),
+          modelNote:
+            `task.update failed: [${otherActive.id}] "${otherActive.title}" is still in_progress. ` +
+            `Close it first with task.update {taskId:"${otherActive.id}", state:"done"} (or "failed"/"skipped" with a reason), then open [${taskId}]. ` +
+            `Exactly one foreground task may be active at a time; Responder-owned subtasks are exempt.`,
+        };
+      }
       const incompleteDependencies = (target?.dependencies ?? []).filter((dependency) => {
         const dependencyTask = plan.tasks.find((task) => task.id === dependency);
         return !dependencyTask || (dependencyTask.state !== "done" && dependencyTask.state !== "skipped");
@@ -1322,6 +1342,28 @@ export async function handlePlanTool(
               : ""),
         };
       }
+    }
+  }
+  const transitionTarget = plan.tasks.find((task) => task.id === taskId);
+  if (transitionTarget) {
+    const verdict = evaluateTaskTransition(
+      transitionTarget.state,
+      stateRaw as TaskState,
+    );
+    if (!verdict.allowed) {
+      const nextReady = readyPlanTasks(plan)[0];
+      return {
+        handled: true,
+        ok: false,
+        display: chalk.red(
+          `  ✗ task.update: [${taskId}] ${transitionTarget.state} → ${stateRaw} is not a valid transition\n`,
+        ),
+        modelNote:
+          `task.update failed: [${taskId}] ${verdict.reason}. ` +
+          (nextReady
+            ? `Continue with ${nextReady.id} ("${nextReady.title}").`
+            : "All ready work is finished — write the final summary if needed."),
+      };
     }
   }
   const ok = markTask(plan, taskId, stateRaw as TaskState, note);

@@ -153,6 +153,45 @@ export function buildDependencyReminder(input: DependencyReminderInput): string 
   );
 }
 
+/** Distinct task ids a message tries to open (`in_progress`) at once. */
+export function openingTaskIds(
+  intents: readonly TaskUpdateIntent[],
+): string[] {
+  const ids = new Set<string>();
+  for (const intent of intents) {
+    if (intent.state === "in_progress") ids.add(intent.taskId);
+  }
+  return [...ids];
+}
+
+/**
+ * Model-facing rejection for opening several tasks in one message. Unlike the
+ * batch-completion hold this is not confirmable: `count(active foreground
+ * tasks) <= 1` is a persistence invariant, so a confirmed multi-open would only
+ * be demoted again on commit.
+ */
+export function buildMultiOpenRejection(
+  descriptors: readonly BatchTaskDescriptor[],
+): string {
+  const shown = descriptors.slice(0, MAX_LISTED_TASKS);
+  const extra = descriptors.length - shown.length;
+  const list = shown.map(formatTaskLine).join("\n");
+  const overflow = extra > 0 ? `\n  …and ${extra} more` : "";
+  const first = descriptors[0];
+  return (
+    `REJECTED — one message tries to start several tasks at once:\n` +
+    `${list}${overflow}\n\n` +
+    "Nothing was changed. Exactly one foreground task may be in_progress at a time; this is enforced by the task store, not a convention, so re-issuing these calls will not apply them. " +
+    (first ? `Open only [${first.taskId}] now, finish and verify it, mark it done, then open the next one. ` : "") +
+    "Responder-owned background subtasks are exempt and advance on their own."
+  );
+}
+
+/** Short, identifiable toast for a rejected multi-open. */
+export function multiOpenToast(count: number): string {
+  return `${count} tasks opened at once · rejected, one active task only`;
+}
+
 /** Short, identifiable toast for a batched multi-task update. */
 export function multiUpdateToast(count: number): string {
   return `${count} task updates batched · verify & sync one by one`;

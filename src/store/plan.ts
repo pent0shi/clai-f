@@ -13,6 +13,7 @@ import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { getConfig } from "./config.js";
 import { getPlanDir } from "./paths.js";
+import { evaluateTaskTransition } from "./task-transitions.js";
 import {
   applyPlanOperation,
   validatePlanDag,
@@ -47,6 +48,7 @@ const dbFile = join(planDir, "history.db");
 const sqliteModuleName = "better-sqlite3";
 
 export type TaskState = "pending" | "in_progress" | "done" | "failed" | "skipped";
+
 export type PlanStatus = "draft" | "approved" | "in_progress" | "completed" | "abandoned";
 
 /** Durable, task-scoped facts from successful work. These survive compaction and resume. */
@@ -387,8 +389,21 @@ export function patchPlanMeta(
  */
 let planWriteQueue: Promise<unknown> = Promise.resolve();
 
+let planWriteDepth = 0;
+
 function enqueuePlanWrite<T>(task: () => Promise<T>): Promise<T> {
-  const run = planWriteQueue.then(task, task);
+  // Re-entrancy: a queued mutation may load a plan that heals itself through
+  // savePlan. Waiting on the queue from inside the queue would deadlock.
+  if (planWriteDepth > 0) return task();
+  const tracked = async (): Promise<T> => {
+    planWriteDepth += 1;
+    try {
+      return await task();
+    } finally {
+      planWriteDepth -= 1;
+    }
+  };
+  const run = planWriteQueue.then(tracked, tracked);
   // Keep the chain alive regardless of individual failures.
   planWriteQueue = run.then(
     () => undefined,
@@ -399,9 +414,11 @@ function enqueuePlanWrite<T>(task: () => Promise<T>): Promise<T> {
 
 const jsonlLockDir = `${jsonlFile}.lock`;
 const JSONL_LOCK_STALE_MS = 10_000;
+let jsonlLockDepth = 0;
 
 /** Cross-process advisory lock for the JSONL fallback (atomic mkdir). */
 async function withJsonlLock<T>(task: () => Promise<T>): Promise<T> {
+  if (jsonlLockDepth > 0) return task();
   const deadline = Date.now() + 5_000;
   try {
     await mkdir(dirname(jsonlFile), { recursive: true });
@@ -429,8 +446,10 @@ async function withJsonlLock<T>(task: () => Promise<T>): Promise<T> {
     }
   }
   try {
+    jsonlLockDepth += 1;
     return await task();
   } finally {
+    jsonlLockDepth -= 1;
     await rm(jsonlLockDir, { recursive: true, force: true }).catch(
       () => undefined,
     );
@@ -719,7 +738,8 @@ export async function loadPlan(sessionId: string): Promise<SessionPlan | undefin
     );
     const normalized = normalizePersistedPlan(plan);
     const { plan: healed, healed: dirty } = healBareIdTasks(normalized);
-    if (dirty || needsNormalization) {
+    const repairs = enforcePlanInvariants(healed);
+    if (dirty || needsNormalization || repairs.length > 0) {
       // Persist upgrades so resumed SQLite and JSONL plans share dependency semantics.
       await savePlan(healed);
     }
@@ -732,7 +752,8 @@ export async function loadPlan(sessionId: string): Promise<SessionPlan | undefin
   );
   const normalized = normalizePersistedPlan(found);
   const { plan: healed, healed: dirty } = healBareIdTasks(normalized);
-  if (dirty || needsNormalization) await savePlan(healed);
+  const repairs = enforcePlanInvariants(healed);
+  if (dirty || needsNormalization || repairs.length > 0) await savePlan(healed);
   return healed;
 }
 
@@ -1006,6 +1027,10 @@ export function applyForegroundSnapshot(
   if (snapshot.meta) draft.meta = { ...(draft.meta ?? {}), ...snapshot.meta };
 }
 
+/**
+ * Apply a task transition. Rejects transitions the TASK-003 table forbids so no
+ * caller can rewind terminal work; use a plan revision to supersede a task.
+ */
 export function markTask(
   plan: SessionPlan,
   taskId: string,
@@ -1014,6 +1039,7 @@ export function markTask(
 ): boolean {
   const task = plan.tasks.find((t) => t.id === taskId);
   if (!task) return false;
+  if (!evaluateTaskTransition(task.state, state).allowed) return false;
   task.state = state;
   if (note !== undefined) task.note = note;
   plan.version = (plan.version ?? 1) + 1;

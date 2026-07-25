@@ -235,7 +235,10 @@ import {
   isSimultaneousTaskAdvance,
   batchUpdateSignature,
   buildMultiUpdateReminder,
+  buildMultiOpenRejection,
   multiUpdateToast,
+  multiOpenToast,
+  openingTaskIds,
   type TaskUpdateIntent,
   type BatchTaskDescriptor,
 } from "./task-sync.js";
@@ -5238,7 +5241,27 @@ export async function runAgentTurn(
               : parsed.taskId;
             intents.push({ call: b.call, taskId: resolvedId, state: parsed.state });
           }
-          if (isSimultaneousTaskAdvance(intents)) {
+          const openIds = openingTaskIds(intents);
+          if (openIds.length > 1) {
+            // TASK-002: a multi-open is never confirmable; the store keeps at
+            // most one active foreground task.
+            session.pendingTaskBatch.value = undefined;
+            const openDescriptors: BatchTaskDescriptor[] = openIds.map((taskId) => ({
+              taskId,
+              title:
+                livePlanForBatch?.tasks.find((t) => t.id === taskId)?.title ?? "",
+              targetState: "in_progress",
+            }));
+            batchReminderNote = buildMultiOpenRejection(openDescriptors);
+            for (const intent of intents) {
+              if (intent.state === "in_progress") batchRemindCalls.add(intent.call);
+            }
+            writeNotice(
+              "warn",
+              multiOpenToast(openIds.length),
+              chalk.yellow(`  ⚠ ${multiOpenToast(openIds.length)}\n`),
+            );
+          } else if (isSimultaneousTaskAdvance(intents)) {
             const signature = batchUpdateSignature(intents);
             if (session.pendingTaskBatch.value === signature) {
               session.pendingTaskBatch.value = undefined;

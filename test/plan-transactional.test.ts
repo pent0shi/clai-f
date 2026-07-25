@@ -185,3 +185,25 @@ describe("applyForegroundSnapshot", () => {
     expect(stored.tasks.some((t) => t.responderOwned)).toBe(true);
   });
 });
+
+
+describe("load-time single-active repair (TASK-002)", () => {
+  it("repairs a persisted plan that has two active foreground tasks", async () => {
+    const { savePlan, loadPlan } = await store();
+    const seeded = await seed("s8");
+    const second = seeded.tasks.find((t) => t.title === "report")!.id;
+    seeded.tasks.find((t) => t.id === second)!.state = "in_progress";
+    await savePlan(seeded);
+
+    const loaded = (await loadPlan("s8"))!;
+    const active = loaded.tasks.filter(
+      (t) => !t.responderOwned && t.state === "in_progress",
+    );
+    expect(active).toHaveLength(1);
+    expect(active[0]!.id).toBe(seeded.tasks[0]!.id);
+    expect(loaded.tasks.find((t) => t.id === second)!.state).toBe("pending");
+
+    const reloaded = (await loadPlan("s8"))!;
+    expect(reloaded.tasks.find((t) => t.id === second)!.state).toBe("pending");
+  });
+});
