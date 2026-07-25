@@ -153,12 +153,14 @@ import { LoopGuard } from "./loop-guard.js";
 import {
   loadPlan,
   savePlan,
+  mutatePlan,
   markTask,
   appendPlanTask,
   readyPlanTasks,
   isPlanTerminal,
   isPlanSuccessful,
   type SessionPlan,
+  type TaskEvidence,
 } from "../store/plan.js";
 import type { AgentEvent } from "./events.js";
 import { stat } from "node:fs/promises";
@@ -1293,7 +1295,7 @@ export async function runAgentTurn(
 
 
     const reconcileOpenTaskBeforeFinalizing = async (): Promise<SessionPlan | undefined> => {
-      const plan = await loadPlan(session.sessionId).catch(() => undefined);
+      let plan = await loadPlan(session.sessionId).catch(() => undefined);
       const open = plan?.tasks.find(
         (task) => task.state === "in_progress" && !task.responderOwned,
       );
@@ -1302,34 +1304,62 @@ export async function runAgentTurn(
       if (!gate.ok) return plan;
 
       const reconciledTaskIds = [open.id];
-      markTask(plan, open.id, "done", "Completion reconciled from verified task evidence.");
+      const working = plan;
+      markTask(working, open.id, "done", "Completion reconciled from verified task evidence.");
 
       while (true) {
-        const observation = readyPlanTasks(plan).find(
+        const observation = readyPlanTasks(working).find(
           (task) =>
             isRuntimeObservationTask(task.title) ||
-            (plan.kind === "pentest" && isRemoteObservationTask(task.title)),
+            (working.kind === "pentest" && isRemoteObservationTask(task.title)),
         );
         if (!observation) break;
-        const observationGate = completionGateForTask(plan, observation.id);
+        const observationGate = completionGateForTask(working, observation.id);
         if (!observationGate.ok) break;
         markTask(
-          plan,
+          working,
           observation.id,
           "done",
-          plan.kind === "pentest"
+          working.kind === "pentest"
             ? "Satisfied by verified remote evidence from the preceding task."
             : "Satisfied by the verified runtime evidence from the preceding task.",
         );
         reconciledTaskIds.push(observation.id);
       }
-      if (plan.status === "draft" || plan.status === "approved") {
-        plan.status = "in_progress";
+      if (working.status === "draft" || working.status === "approved") {
+        working.status = "in_progress";
       }
-      if (isPlanTerminal(plan)) {
-        plan.status = isPlanSuccessful(plan) ? "completed" : "abandoned";
+      if (isPlanTerminal(working)) {
+        working.status = isPlanSuccessful(working) ? "completed" : "abandoned";
       }
-      await savePlan(plan).catch(() => undefined);
+      // TASK-001: replay the same reconciliation as a reducer so a concurrent
+      // responder settlement is preserved instead of overwritten.
+      const reconciledNotes = new Map(
+        reconciledTaskIds.map((id) => [
+          id,
+          working.tasks.find((task) => task.id === id)?.note,
+        ]),
+      );
+      const reconcileResult = await mutatePlan(session.sessionId, (draft) => {
+        let changed = false;
+        for (const [id, note] of reconciledNotes) {
+          const task = draft.tasks.find((candidate) => candidate.id === id);
+          if (!task || task.state === "done") continue;
+          task.state = "done";
+          if (note !== undefined) task.note = note;
+          changed = true;
+        }
+        if (draft.status === "draft" || draft.status === "approved") {
+          draft.status = "in_progress";
+          changed = true;
+        }
+        if (isPlanTerminal(draft)) {
+          draft.status = isPlanSuccessful(draft) ? "completed" : "abandoned";
+          changed = true;
+        }
+        return changed;
+      }).catch(() => undefined);
+      if (reconcileResult?.ok && reconcileResult.plan) plan = reconcileResult.plan;
       writePlanUpdate(plan, renderPlanForTerminal(plan) + "\n");
       writeNotice(
         "info",
@@ -1343,14 +1373,27 @@ export async function runAgentTurn(
     };
 
     async function persistProjectRootOnPlan(root: string): Promise<void> {
-      const live = await loadPlan(session.sessionId).catch(() => undefined);
-      if (!live) return;
       const pm = detectPackageManager(root);
-      patchPlanMeta(live, {
-        projectRoot: root,
-        ...(pm ? { packageManager: pm } : {}),
-      });
-      await savePlan(live).catch(() => undefined);
+      // TASK-001: metadata patches go through the transactional boundary so a
+      // concurrent task transition or responder settlement is not clobbered.
+      await mutatePlan(session.sessionId, (draft) => {
+        patchPlanMeta(draft, {
+          projectRoot: root,
+          ...(pm ? { packageManager: pm } : {}),
+        });
+      }).catch(() => undefined);
+    }
+
+    /** Persist task evidence without rewriting the whole plan (TASK-001). */
+    async function persistTaskEvidence(
+      taskId: string,
+      evidence: TaskEvidence,
+    ): Promise<void> {
+      await mutatePlan(session.sessionId, (draft) => {
+        const task = draft.tasks.find((candidate) => candidate.id === taskId);
+        if (!task) return false;
+        task.evidence = evidence;
+      }).catch(() => undefined);
     }
 
     refreshSessionState = (plan?: SessionPlan | null | undefined): void => {
@@ -1876,7 +1919,7 @@ export async function runAgentTurn(
               taskWorkLedger = led;
               if (planResult.plan && led && led.successWorkCount > 0 && persisted) {
                 persisted.evidence = taskEvidenceFromLedger(led);
-                await savePlan(planResult.plan).catch(() => undefined);
+                await persistTaskEvidence(persisted.id, persisted.evidence);
               }
             } else if (stateRaw === "done" && resolved) {
               // Persist absorbed evidence before clearing the live ledger.
@@ -1884,7 +1927,7 @@ export async function runAgentTurn(
                 const t = planResult.plan.tasks.find((x) => x.id === resolved);
                 if (t) {
                   t.evidence = taskEvidenceFromLedger(taskWorkLedger);
-                  await savePlan(planResult.plan).catch(() => undefined);
+                  await persistTaskEvidence(t.id, t.evidence);
                 }
               }
               taskWorkLedger = null;
@@ -2071,7 +2114,19 @@ export async function runAgentTurn(
                 ) {
                   livePlanForGate.status = "in_progress";
                 }
-                await savePlan(livePlanForGate).catch(() => undefined);
+                // TASK-001/TASK-002: opening a task is a transition applied by
+                // the reducer, which also enforces the single-active invariant.
+                await mutatePlan(session.sessionId, (draft) => {
+                  const target = draft.tasks.find(
+                    (candidate) => candidate.id === nextPending.id,
+                  );
+                  if (!target || target.state === "in_progress") return false;
+                  target.state = "in_progress";
+                  if (draft.status === "draft" || draft.status === "approved") {
+                    draft.status = "in_progress";
+                  }
+                  return true;
+                }).catch(() => undefined);
                 // Preserve evidence already credited to this task (e.g. pentest
                 // recon that ran before the task was formally opened).
                 if (
@@ -2788,6 +2843,7 @@ export async function runAgentTurn(
         let linkedTaskId = dispatchedTaskId;
         let linkedParentTaskId: string | undefined;
         let responderTaskId: string | undefined;
+        let responderChildId: string | undefined;
         if (durableJob && livePlan) {
           const existing = livePlan.tasks.find(
             (task) => task.jobId === durableJob.id,
@@ -2808,35 +2864,58 @@ export async function runAgentTurn(
           const note =
             `job=${durableJob.id} pid=${durableJob.pid ?? "?"} status=${durableJob.status} ` +
             `artifact=${durableJob.stdoutArtifact}`;
-          const responderTask = existing ?? appendPlanTask(livePlan, {
-            title: `Responder · ${durableJob.name ?? durableJob.commandDisplay.slice(0, 96)}`,
-            state: terminalState,
-            note,
-            dependencies: [],
-            resourceLocks: [],
-            parentTaskId,
-            jobId: durableJob.id,
-            processId: durableJob.pid,
-            responderOwned: true,
-          });
-          responderTask.state = terminalState;
-          responderTask.note = note;
-          responderTask.jobId = durableJob.id;
-          responderTask.processId = durableJob.pid;
-          responderTask.responderOwned = true;
-          if (parentTaskId) responderTask.parentTaskId = parentTaskId;
-          if (isPlanTerminal(livePlan)) {
-            livePlan.status = isPlanSuccessful(livePlan)
-              ? "completed"
-              : "abandoned";
-          } else if (livePlan.status !== "draft") {
-            livePlan.status = "in_progress";
-          }
-          let responderPlanSaved = false;
-          try {
-            await savePlan(livePlan);
-            responderPlanSaved = true;
-          } catch {
+          const responderTitle = `Responder · ${durableJob.name ?? durableJob.commandDisplay.slice(0, 96)}`;
+          // TASK-001/TASK-006: upsert the child by delegation/job identity
+          // inside the transactional boundary. A concurrent settlement that
+          // already turned the child green is therefore never reverted, and the
+          // child is never written as the foreground parent.
+          const upsert = await mutatePlan(session.sessionId, (draft) => {
+            const target =
+              (durableJob.delegationId
+                ? draft.tasks.find(
+                    (task) => task.delegationId === durableJob.delegationId,
+                  )
+                : undefined) ??
+              draft.tasks.find((task) => task.jobId === durableJob.id);
+            const child =
+              target ??
+              appendPlanTask(draft, {
+                title: responderTitle,
+                state: terminalState,
+                note,
+                dependencies: [],
+                resourceLocks: [],
+                parentTaskId,
+                jobId: durableJob.id,
+                processId: durableJob.pid,
+                responderOwned: true,
+                ...(durableJob.delegationId
+                  ? { delegationId: durableJob.delegationId }
+                  : {}),
+              });
+            // Never regress a child that process settlement already finished.
+            const settledTerminal =
+              child.state === "done" || child.state === "failed";
+            if (!settledTerminal) {
+              child.state = terminalState;
+              child.note = note;
+            }
+            child.jobId = durableJob.id;
+            child.processId = durableJob.pid;
+            child.responderOwned = true;
+            if (durableJob.delegationId) {
+              child.delegationId = durableJob.delegationId;
+            }
+            if (parentTaskId) child.parentTaskId = parentTaskId;
+            if (isPlanTerminal(draft)) {
+              draft.status = isPlanSuccessful(draft) ? "completed" : "abandoned";
+            } else if (draft.status !== "draft") {
+              draft.status = "in_progress";
+            }
+            responderChildId = child.id;
+            return true;
+          }).catch(() => undefined);
+          if (!upsert?.ok || !responderChildId) {
             writeNotice(
               "warn",
               `Responder job ${durableJob.id} started, but its plan subtask could not be persisted`,
@@ -2844,13 +2923,13 @@ export async function runAgentTurn(
                 `  ⚠ job ${durableJob.id} is running, but task linkage persistence failed\n`,
               ),
             );
-          }
-          if (responderPlanSaved) {
-            linkedTaskId = responderTask.id;
+          } else {
+            linkedTaskId = responderChildId;
             linkedParentTaskId = parentTaskId;
-            responderTaskId = responderTask.id;
-            pendingSessionStatePlan = livePlan;
-            writePlanUpdate(livePlan, renderPlanForTerminal(livePlan) + "\n");
+            responderTaskId = responderChildId;
+            pendingSessionStatePlan = upsert.plan ?? livePlan;
+            const rendered = upsert.plan ?? livePlan;
+            writePlanUpdate(rendered, renderPlanForTerminal(rendered) + "\n");
           }
         }
         if (durableJob) {
@@ -3139,7 +3218,7 @@ export async function runAgentTurn(
                 ) {
                   taskWorkLedger = absorbed;
                 }
-                await savePlan(liveAfter).catch(() => undefined);
+                await persistTaskEvidence(task.id, task.evidence);
               }
             }
           }
@@ -3148,7 +3227,7 @@ export async function runAgentTurn(
           const task = liveAfter.tasks.find((candidate) => candidate.id === creditId);
           if (task) {
             task.evidence = taskEvidenceFromLedger(taskWorkLedger);
-            await savePlan(liveAfter).catch(() => undefined);
+            await persistTaskEvidence(task.id, task.evidence);
           }
         }
         // Do NOT refreshSessionState here. executeSingleTool often finishes

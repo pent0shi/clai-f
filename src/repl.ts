@@ -82,7 +82,7 @@ import {
   openViewportPager,
   toggleViewport,
 } from "./ui/output-pane.js";
-import { loadPlan, savePlan, deletePlan } from "./store/plan.js";
+import { loadPlan, mutatePlan, deletePlan } from "./store/plan.js";
 import { renderPlanDocument, renderPlanChecklist } from "./ui/plan-pane.js";
 import { safeCwd, cwdIsBroken, recoverCwd } from "./os/cwd.js";
 import {
@@ -1872,7 +1872,11 @@ export async function startRepl(options: ReplOptions = {}): Promise<void> {
           continue;
         }
         plan.status = "approved";
-        await savePlan(plan).catch(() => undefined);
+        await mutatePlan(plan.sessionId, (draft) => {
+          if (draft.status === "approved") return false;
+          draft.status = "approved";
+          return true;
+        }).catch(() => undefined);
         state.session.planApproved.value = true;
         console.log(
           chalk.cyan("  ✦ plan approved — clai will now execute it\n"),

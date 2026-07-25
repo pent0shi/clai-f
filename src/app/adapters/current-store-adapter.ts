@@ -1,5 +1,5 @@
 import { saveSession, upsertSession } from "../../store/history.js";
-import { deletePlan, loadPlan, savePlan } from "../../store/plan.js";
+import { deletePlan, loadPlan, mutatePlan, savePlan } from "../../store/plan.js";
 import type { PersistencePort } from "../ports/persistence-port.js";
 import type { TranscriptItem } from "../../tui/state.js";
 
@@ -35,6 +35,7 @@ export function createCurrentPersistencePort(): PersistencePort {
     },
     loadPlan: (sessionId) => loadPlan(sessionId),
     savePlan: (plan) => savePlan(plan),
+    mutatePlan: (sessionId, reducer) => mutatePlan(sessionId, reducer),
     deletePlan: (sessionId) => deletePlan(sessionId),
   };
 }

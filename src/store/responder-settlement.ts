@@ -1,8 +1,7 @@
 import {
   isPlanSuccessful,
   isPlanTerminal,
-  loadPlan,
-  savePlan,
+  mutatePlan,
   type SessionPlan,
 } from "./plan.js";
 import type { BackgroundJob } from "../tools/jobs.js";
@@ -45,42 +44,50 @@ export async function settleResponderJob(
     return "noop";
   }
 
-  let plan: SessionPlan | undefined;
-  try {
-    plan = await loadPlan(job.ownerSessionId);
-  } catch {
-    return "retry";
-  }
-  if (!plan) return "missing";
-
-  const task = plan.tasks.find(
-    (candidate) =>
-      candidate.responderOwned &&
-      (candidate.jobId === job.id || candidate.id === job.taskId),
-  );
-  if (!task) return "missing";
-
   const next = settlement(job);
-  if (
-    task.state === next.state &&
-    task.note === next.note &&
-    task.jobId === job.id
-  ) {
-    return "noop";
-  }
+  let outcome: Exclude<ResponderSettlementResult, "applied"> | undefined;
 
-  task.state = next.state;
-  task.note = next.note;
-  task.jobId = job.id;
-  task.processId = job.pid;
-  task.responderOwned = true;
-  plan.version = (plan.version ?? 1) + 1;
-  plan.updatedAt = new Date().toISOString();
-  updatePlanStatus(plan);
+  // TASK-001/TASK-010: settlement is an idempotent reducer applied under a
+  // version compare-and-set, so a concurrent foreground save can no longer
+  // revert a settled child back to yellow.
+  let result: Awaited<ReturnType<typeof mutatePlan>>;
   try {
-    await savePlan(plan);
+    result = await mutatePlan(job.ownerSessionId, (draft) => {
+      outcome = undefined;
+      const task = draft.tasks.find(
+        (candidate) =>
+          candidate.responderOwned &&
+          (candidate.jobId === job.id ||
+            candidate.id === job.taskId ||
+            (job.delegationId !== undefined &&
+              candidate.delegationId === job.delegationId)),
+      );
+      if (!task) {
+        outcome = "missing";
+        return false;
+      }
+      if (
+        task.state === next.state &&
+        task.note === next.note &&
+        task.jobId === job.id
+      ) {
+        outcome = "noop";
+        return false;
+      }
+      task.state = next.state;
+      task.note = next.note;
+      task.jobId = job.id;
+      task.processId = job.pid;
+      task.responderOwned = true;
+      updatePlanStatus(draft);
+      return true;
+    });
   } catch {
     return "retry";
   }
-  return "applied";
+
+  if (result.ok) return "applied";
+  if (outcome) return outcome;
+  if (result.reason === "missing-plan") return "missing";
+  return "retry";
 }

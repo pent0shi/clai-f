@@ -85,6 +85,23 @@ export class PlanController implements Disposable {
   async approve(): Promise<SessionPlan | undefined> {
     if (!this.plan) return undefined;
     this.loadGeneration += 1;
+    // TASK-001: approval is a status transition, not a whole-plan replacement —
+    // saving the loaded copy could revert a concurrent task/child update.
+    if (this.persistence.mutatePlan) {
+      const result = await this.persistence.mutatePlan(
+        this.plan.sessionId,
+        (draft) => {
+          if (draft.status === "approved") return false;
+          draft.status = "approved";
+          return true;
+        },
+      );
+      const next: SessionPlan =
+        result.plan ?? { ...this.plan, status: "approved" };
+      this.plan = next;
+      this.notify();
+      return next;
+    }
     const next: SessionPlan = { ...this.plan, status: "approved" };
     this.plan = next;
     await this.persistence.savePlan(next);

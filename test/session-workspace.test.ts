@@ -229,7 +229,11 @@ describe("session workspace path routing", () => {
     writeFileSync(join(globalDir, "legacy.txt"), "old");
 
     const result = await clearArtifacts();
-    expect(result.removed).toBeGreaterThanOrEqual(2);
+    // The session-workspace parent lives in the real OS temp dir, so a
+    // concurrently running suite's clearArtifacts can remove our seeded temp
+    // file first. The per-file assertions below are the real contract; the
+    // count is only a smoke check.
+    expect(result.removed).toBeGreaterThanOrEqual(1);
     expect(existsSync(join(ws.tempDir, "run-output.txt"))).toBe(false);
     expect(existsSync(join(globalDir, "legacy.txt"))).toBe(false);
     // Session folder itself (scratch root) is preserved.

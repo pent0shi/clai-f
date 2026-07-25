@@ -3,6 +3,8 @@ import {
   createPlan,
   loadPlan,
   savePlan,
+  mutatePlan,
+  applyForegroundSnapshot,
   markTask,
   isBareTaskIdTitle,
   isPlanTerminal,
@@ -859,7 +861,19 @@ export async function handlePlanTool(
       session.planApproved.value = false;
     }
 
-    await savePlan(plan).catch(() => undefined);
+    // TASK-001: a revision is a foreground snapshot; responder children keep
+    // their process-authoritative state. A brand-new plan has nothing stored
+    // yet, so fall back to a plain create.
+    const revised = await mutatePlan(plan.sessionId, (draft) => {
+      applyForegroundSnapshot(draft, plan);
+      return true;
+    }).catch(() => undefined);
+    if (!revised?.ok) {
+      await savePlan(plan).catch(() => undefined);
+    } else if (revised.plan) {
+      plan.tasks = revised.plan.tasks;
+      plan.version = revised.plan.version;
+    }
 
     const checklist = renderPlanForTerminal(plan);
     const display = additiveOnly
@@ -987,7 +1001,10 @@ export async function handlePlanTool(
       stepId: taskId,
       index,
     });
-    await savePlan(updated).catch(() => undefined);
+    await mutatePlan(plan.sessionId, (draft) => {
+      applyForegroundSnapshot(draft, updated);
+      return true;
+    }).catch(() => undefined);
     return {
       handled: true,
       ok: true,
@@ -1120,7 +1137,12 @@ export async function handlePlanTool(
         modelNote: `task.add failed: ${validation.reason}.`,
       };
     }
-    await savePlan(plan).catch(() => undefined);
+    // TASK-001: apply the authored foreground layout onto fresh state so a
+    // concurrent responder settlement is preserved.
+    await mutatePlan(plan.sessionId, (draft) => {
+      applyForegroundSnapshot(draft, plan);
+      return true;
+    }).catch(() => undefined);
     return {
       handled: true,
       ok: true,
@@ -1328,7 +1350,26 @@ export async function handlePlanTool(
   const terminal = isPlanTerminal(plan);
   const successful = isPlanSuccessful(plan);
   if (terminal) plan.status = successful ? "completed" : "abandoned";
-  await savePlan(plan).catch(() => undefined);
+  // TASK-001: persist the transition (not the whole snapshot) so a concurrent
+  // responder settlement or evidence patch survives.
+  const committedStates = new Map(
+    plan.tasks.map((task) => [
+      task.id,
+      { state: task.state, note: task.note },
+    ]),
+  );
+  await mutatePlan(plan.sessionId, (draft) => {
+    for (const task of draft.tasks) {
+      const desired = committedStates.get(task.id);
+      if (!desired) continue;
+      // Responder children are owned by process settlement, never by task.update.
+      if (task.responderOwned) continue;
+      task.state = desired.state;
+      if (desired.note !== undefined) task.note = desired.note;
+    }
+    draft.status = plan.status;
+    return true;
+  }).catch(() => undefined);
   const checklist = renderPlanForTerminal(plan);
   const nextPending = readyPlanTasks(plan)[0];
   let modelNote: string;

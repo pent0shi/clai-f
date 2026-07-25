@@ -1,7 +1,7 @@
 import { input, select } from "@inquirer/prompts";
 import chalk from "chalk";
 import type { SessionPlan } from "../store/plan.js";
-import { deletePlan, savePlan } from "../store/plan.js";
+import { deletePlan, mutatePlan } from "../store/plan.js";
 import { renderPlanDocument } from "../ui/plan-pane.js";
 import { openPager } from "../ui/output-pane.js";
 import { restoreInteractiveStdin } from "./confirm-port.js";
@@ -126,8 +126,12 @@ export async function handleDraftPlanDecision(opts: {
     }
     // accept
     plan.status = "approved";
-    plan.version = (plan.version ?? 1) + 1;
-    await savePlan(plan).catch(() => undefined);
+    // TASK-001: status-only transition on fresh state.
+    await mutatePlan(plan.sessionId, (draft) => {
+      if (draft.status === "approved") return false;
+      draft.status = "approved";
+      return true;
+    }).catch(() => undefined);
     opts.planApproved.value = true;
     opts.setModeAgent();
     console.log(

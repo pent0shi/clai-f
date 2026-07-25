@@ -28,6 +28,12 @@ export type JobMonitorMetadata = Record<string, unknown>;
 export interface JobLinkMetadata {
   taskId?: string | undefined;
   parentTaskId?: string | undefined;
+  /**
+   * Stable delegation identity minted before launch (TASK-006). It is the
+   * reconciliation key between a job and its responder child task, so a fast
+   * exit or a failed link cannot orphan the child.
+   */
+  delegationId?: string | undefined;
   wakeOnCompletion?: boolean | undefined;
   monitor?: JobMonitorMetadata | undefined;
   /** Runtime listening lease that authorized this responder delegation. */
