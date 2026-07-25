@@ -1,5 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { openAiCompatibleStream, readStreamLines } from "../src/llm/http.js";
+import {
+  createSseFrameAssembler,
+  openAiCompatibleStream,
+  readStreamLines,
+} from "../src/llm/http.js";
 
 /** LLM-011: abort surfaces as an error, readers are released, error frames throw. */
 
@@ -111,5 +115,40 @@ describe("readStreamLines caller abort", () => {
         }
       })(),
     ).rejects.toThrow();
+  });
+});
+
+
+describe("multi-line SSE frames", () => {
+  it("reassembles a payload split across several data: lines", async () => {
+    stubFetch(
+      sseResponse([
+        'data: {"choices":[{"delta":\n',
+        'data: {"content":"split"}}]}\n\n',
+        "data: [DONE]\n\n",
+      ]),
+    );
+    const tokens: string[] = [];
+    const result = await openAiCompatibleStream({
+      ...baseOptions,
+      onToken: (token) => tokens.push(token),
+    });
+    expect(result.text).toBe("split");
+    expect(tokens.join("")).toBe("split");
+  });
+
+  it("drops an unterminated fragment instead of corrupting the next frame", () => {
+    const frames = createSseFrameAssembler();
+    expect(frames.pushLine('data: {"choices":[{"delta":')).toBeUndefined();
+    // Blank line terminates the malformed event.
+    expect(frames.pushLine("")).toBeUndefined();
+    expect(frames.pushLine('data: {"ok":true}')).toBe('{"ok":true}');
+  });
+
+  it("passes single-line frames straight through", () => {
+    const frames = createSseFrameAssembler();
+    expect(frames.pushLine('data: {"a":1}')).toBe('{"a":1}');
+    expect(frames.pushLine("data: [DONE]")).toBe("[DONE]");
+    expect(frames.pushLine(": keepalive comment")).toBeUndefined();
   });
 });

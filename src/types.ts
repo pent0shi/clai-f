@@ -61,6 +61,13 @@ export interface ToolCallStreamDelta {
   argumentsBytes?: number | undefined;
 }
 
+/** Provider-signed reasoning that must be replayed verbatim (LLM-006). */
+export interface ReasoningBlock {
+  text: string;
+  /** Anthropic signature; without it a thinking block cannot be replayed. */
+  signature?: string | undefined;
+}
+
 export interface ChatMessage {
   role: "system" | "user" | "assistant" | "tool";
   content: string;
@@ -80,6 +87,13 @@ export interface ChatMessage {
   name?: string | undefined;
   /** For role "tool": whether the tool succeeded (Anthropic is_error). */
   ok?: boolean | undefined;
+  /**
+   * Signed reasoning block for providers that require the model's own thinking
+   * to be replayed verbatim on the assistant turn that carries tool_use
+   * (Anthropic extended thinking, LLM-006). Additive: adapters that do not
+   * understand it ignore it.
+   */
+  reasoningBlock?: ReasoningBlock | undefined;
   /**
    * Model-only recovery / governor nudge. Kept in API history so the agent
    * continues correctly, but never rendered as a YOU bubble or WARN notice
@@ -158,6 +172,10 @@ export interface TokenUsage {
   readonly totalTokens: number;
   /** true when values came from the provider API. */
   readonly exact: boolean;
+  /** Prompt tokens served from provider cache, when reported. */
+  readonly cachedPromptTokens?: number | undefined;
+  /** Reasoning tokens inside the completion, when reported. */
+  readonly reasoningTokens?: number | undefined;
 }
 
 export interface CompletionResult {
@@ -170,6 +188,8 @@ export interface CompletionResult {
   rawAssistantMessage?: unknown | undefined;
   /** Exact usage when the provider reported it; omit when unknown. */
   usage?: TokenUsage | undefined;
+  /** Signed reasoning block to replay on the next request (LLM-006). */
+  reasoningBlock?: ReasoningBlock | undefined;
 }
 
 export interface ProviderStatus {

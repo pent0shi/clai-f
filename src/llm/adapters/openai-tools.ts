@@ -100,7 +100,14 @@ export function openAiToolBodyFields(options: {
   return {
     tools: toOpenAiTools(options.tools),
     tool_choice: mapToolChoiceToOpenAi(options.toolChoice),
-    parallel_tool_calls: options.parallelToolCalls ?? true,
+    // Only send the field when it changes behavior. Several OpenAI-compatible
+    // gateways (self-hosted NIM chat templates, DashScope compatible mode)
+    // reject unknown top-level fields with a 400 that used to be misread as
+    // "tools not supported", permanently downgrading the model to the legacy
+    // fenced protocol. Parallel calls are the upstream default anyway.
+    ...(options.parallelToolCalls === false
+      ? { parallel_tool_calls: false }
+      : {}),
   };
 }
 

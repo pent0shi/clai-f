@@ -10,8 +10,42 @@ import {
   toOllamaToolMessages,
   toOllamaTools,
 } from "./adapters/ollama-tools.js";
-import { parseOllamaUsage } from "./token-usage.js";
+import { modelContextWindow, parseOllamaUsage } from "./token-usage.js";
+import { resolveSampling } from "./sampling.js";
 import type { TokenUsage } from "../types.js";
+
+/**
+ * LLM-008 — Ollama's server default context is small (2048 on most builds) and
+ * silently truncates the *front* of the prompt, which is exactly where the
+ * constitution, tool contract, plan and scope live. Send an explicit,
+ * model-aware `num_ctx`, bounded so a local host is not asked for more KV cache
+ * than it can hold, plus the output budget the caller actually requested.
+ */
+const OLLAMA_MAX_NUM_CTX = 32_768;
+const OLLAMA_DEFAULT_NUM_PREDICT = 4_096;
+const OLLAMA_KEEP_ALIVE = "5m";
+
+export function ollamaOptions(
+  model: string,
+  request: {
+    temperature?: number | undefined;
+    maxTokens?: number | undefined;
+    reasoningEnabled?: boolean | undefined;
+  },
+): Record<string, unknown> {
+  const sampling = resolveSampling({
+    provider: "ollama",
+    model,
+    reasoningEnabled: request.reasoningEnabled,
+    requestedTemperature: request.temperature,
+  });
+  return {
+    temperature: sampling.temperature,
+    ...(sampling.topP !== undefined ? { top_p: sampling.topP } : {}),
+    num_ctx: Math.min(modelContextWindow(model, "ollama"), OLLAMA_MAX_NUM_CTX),
+    num_predict: request.maxTokens ?? OLLAMA_DEFAULT_NUM_PREDICT,
+  };
+}
 
 function base(auth: ProviderAuth): string {
   return (auth.baseUrl ?? auth.apiKey ?? "http://localhost:11434").replace(
@@ -39,7 +73,11 @@ export const ollamaProvider: LlmProvider = {
       model,
       messages: toOllamaToolMessages(request.messages),
       stream: false,
-      options: { temperature: request.temperature ?? 0.2 },
+      options: ollamaOptions(model, {
+        ...request,
+        reasoningEnabled: Boolean(request.thinking?.enabled),
+      }),
+      keep_alive: OLLAMA_KEEP_ALIVE,
     };
     if (request.tools?.length) {
       body.tools = toOllamaTools(request.tools);
@@ -92,7 +130,11 @@ export const ollamaProvider: LlmProvider = {
       model,
       messages: toOllamaToolMessages(request.messages),
       stream: true,
-      options: { temperature: request.temperature ?? 0.2 },
+      options: ollamaOptions(model, {
+        ...request,
+        reasoningEnabled: Boolean(request.thinking?.enabled),
+      }),
+      keep_alive: OLLAMA_KEEP_ALIVE,
     };
     if (request.tools?.length) {
       body.tools = toOllamaTools(request.tools);
@@ -120,6 +162,7 @@ export const ollamaProvider: LlmProvider = {
       if (!trimmed) continue;
       try {
         const parsed = JSON.parse(trimmed) as {
+          error?: string;
           message?: {
             content?: string;
             tool_calls?: Array<{
@@ -134,13 +177,22 @@ export const ollamaProvider: LlmProvider = {
           prompt_eval_count?: number;
           eval_count?: number;
         };
+        // A missing model or load failure arrives as an NDJSON error line; it
+        // used to be ignored and returned as a blank success.
+        if (typeof parsed.error === "string" && parsed.error.trim()) {
+          throw new Error(`Ollama: ${parsed.error}`);
+        }
         const token = parsed.message?.content;
         if (token) {
           full += token;
           onToken(token);
         }
         if (parsed.message?.tool_calls?.length) {
-          toolCalls = parseOllamaToolCalls(parsed.message.tool_calls);
+          // Merge: multi-chunk emission used to drop every earlier call.
+          toolCalls = [
+            ...toolCalls,
+            ...parseOllamaToolCalls(parsed.message.tool_calls),
+          ];
         }
         if (parsed.done) {
           streamUsage =
@@ -157,9 +209,13 @@ export const ollamaProvider: LlmProvider = {
             ...(streamUsage ? { usage: streamUsage } : {}),
           };
         }
-      } catch {
-        // Ignore malformed lines.
+      } catch (frameError) {
+        // Only malformed JSON lines are ignorable.
+        if (!(frameError instanceof SyntaxError)) throw frameError;
       }
+    }
+    if (!full.trim() && toolCalls.length === 0) {
+      throw new Error("Ollama returned no completion text");
     }
     return {
       text: full,

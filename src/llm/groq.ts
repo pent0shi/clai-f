@@ -41,9 +41,27 @@ let cachedModels: string[] | null = null;
 let lastFetchTime = 0;
 const CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour cache TTL
 
+/**
+ * Smallest completion allowance that can still produce a visible answer or a
+ * closed tool-call JSON once reasoning tokens are billed against the same
+ * budget (LLM-004). The TPM guard below may never drop under this on a step
+ * that carries tools or reasoning.
+ */
+export const GROQ_VIABLE_COMPLETION_TOKENS = 8_192;
+
+/**
+ * Groq bills reasoning against the completion allowance, and the shipped
+ * per-model TPM guard (1024/2048) used to be applied with a hard `Math.min`
+ * against the caller's budget — so a tool step that asked for 24 576 tokens got
+ * 1024 and finished with `length` before the tool JSON closed.
+ *
+ * The guard is kept as the *default* for plain chat, but a step that attaches
+ * tools or enables reasoning is never clamped below a viable floor.
+ */
 export function groqMaxTokens(
   model: string,
   requested: number | undefined,
+  options?: { toolsAttached?: boolean; reasoningEnabled?: boolean },
 ): number | undefined {
   const m = model.toLowerCase();
   const cap = /openai\/gpt-oss-120b/.test(m)
@@ -52,7 +70,13 @@ export function groqMaxTokens(
       ? 2_048
       : undefined;
   if (!cap) return requested;
-  return Math.min(requested ?? cap, cap);
+  const needsViableFloor = Boolean(
+    options?.toolsAttached || options?.reasoningEnabled,
+  );
+  const effectiveCap = needsViableFloor
+    ? Math.max(cap, GROQ_VIABLE_COMPLETION_TOKENS)
+    : cap;
+  return Math.min(requested ?? effectiveCap, effectiveCap);
 }
 
 export const groqProvider: LlmProvider = {
@@ -107,7 +131,10 @@ export const groqProvider: LlmProvider = {
       apiKey: auth.apiKey,
       model,
       messages: request.messages,
-      maxTokens: groqMaxTokens(model, request.maxTokens),
+      maxTokens: groqMaxTokens(model, request.maxTokens, {
+        toolsAttached: Boolean(request.tools?.length),
+        reasoningEnabled: Boolean(request.thinking?.enabled),
+      }),
       temperature: request.temperature,
       signal: request.signal,
       reasoning: request.thinking,
@@ -132,7 +159,10 @@ export const groqProvider: LlmProvider = {
       apiKey: auth.apiKey,
       model,
       messages: request.messages,
-      maxTokens: groqMaxTokens(model, request.maxTokens),
+      maxTokens: groqMaxTokens(model, request.maxTokens, {
+        toolsAttached: Boolean(request.tools?.length),
+        reasoningEnabled: Boolean(request.thinking?.enabled),
+      }),
       temperature: request.temperature,
       signal: request.signal,
       onToken,

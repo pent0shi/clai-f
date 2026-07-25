@@ -7,7 +7,12 @@ import type {
   ToolChoice,
   ToolDefinition,
 } from "../types.js";
-import { modelSupportsVision, isReasoningUnsupported } from "./capabilities.js";
+import {
+  modelSupportsVision,
+  modelSupportsThinking,
+  isReasoningUnsupported,
+} from "./capabilities.js";
+import { resolveSampling } from "./sampling.js";
 import {
   accumulateOpenAiToolCallDelta,
   finalizeOpenAiToolCalls,
@@ -381,6 +386,58 @@ export function toCompletionResult(
   };
 }
 
+/**
+ * Reassembles SSE `data:` frames.
+ *
+ * Per the SSE spec a single event's payload may be split across several `data:`
+ * lines that the client must concatenate before parsing; each fragment was
+ * previously parsed on its own, failed `JSON.parse`, and was dropped as a
+ * malformed keepalive — losing content without a trace.
+ *
+ * A payload is released as soon as it is syntactically complete, so
+ * single-line frames behave exactly as before. A blank line (frame terminator)
+ * discards an incomplete remainder, and a runaway fragment is dropped rather
+ * than corrupting later frames.
+ */
+export function createSseFrameAssembler(options?: {
+  maxBufferedBytes?: number;
+}): {
+  /** Returns a complete payload, or undefined while still buffering. */
+  pushLine: (line: string) => string | undefined;
+} {
+  const maxBufferedBytes = options?.maxBufferedBytes ?? 1_000_000;
+  let buffered = "";
+  const complete = (payload: string): boolean => {
+    if (payload === "[DONE]") return true;
+    try {
+      JSON.parse(payload);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  return {
+    pushLine(line: string): string | undefined {
+      const trimmed = line.trim();
+      if (trimmed === "") {
+        // End of event: an incomplete remainder was malformed.
+        buffered = "";
+        return undefined;
+      }
+      if (!trimmed.startsWith("data:")) return undefined;
+      const chunk = trimmed.slice(5).trim();
+      buffered = buffered ? `${buffered}\n${chunk}` : chunk;
+      if (complete(buffered)) {
+        const payload = buffered;
+        buffered = "";
+        return payload;
+      }
+      if (buffered.length > maxBufferedBytes) buffered = "";
+      return undefined;
+    },
+  };
+}
+
 export function toOpenAiMessages(
   messages: ChatMessage[],
   supportsVision = true,
@@ -469,8 +526,10 @@ export function buildReasoningPayload(
   switch (style) {
     case "openai": {
       if (!enabled) return {};
-      const clamped = clampEffort(effort);
-      return { reasoning_effort: clamped, reasoning: { effort: clamped } };
+      // LLM-005: `reasoning_effort` is the Chat Completions knob. The nested
+      // `reasoning` object belongs to the Responses API; strict gateways reject
+      // unknown top-level fields with a hard 400.
+      return { reasoning_effort: clampEffort(effort) };
     }
     case "agentrouter": {
       // AgentRouter proxies three families, each with a *different* reasoning
@@ -628,7 +687,9 @@ export function isReasoningUnsupportedError(error: unknown): boolean {
   const hay = `${message}\n${body}`.toLowerCase();
 
   const mentionsReasoningKnob =
-    /chat_template_kwargs|enable_thinking|clear_thinking|reasoning_effort|reasoning_budget|reasoning_content|\bthinking\b/.test(
+    // `\breasoning\b` catches bodies like "Unrecognized request argument
+    // supplied: reasoning" so a bare reasoning-field rejection also degrades.
+    /chat_template_kwargs|enable_thinking|clear_thinking|reasoning_effort|reasoning_budget|reasoning_content|\breasoning\b|\bthinking\b/.test(
       hay,
     );
   if (!mentionsReasoningKnob) return false;
@@ -658,6 +719,12 @@ export function isOpenAiReasoningModel(model: string): boolean {
 
 export function buildChatBody(options: {
   model: string;
+  /**
+   * Canonical provider id. When given, the capability table is consulted so the
+   * wire payload and the UI cannot disagree about whether the model has a
+   * reasoning knob at all.
+   */
+  providerId?: ProviderId | undefined;
   messages: ChatMessage[];
   maxTokens?: number | undefined;
   temperature?: number | undefined;
@@ -672,20 +739,30 @@ export function buildChatBody(options: {
   // Skip reasoning knobs entirely for models observed to reject them this
   // session (see isReasoningUnsupportedError). This is how thinking degrades
   // gracefully: the request still runs, just without the unsupported option.
-  const reasoning = isReasoningUnsupported(options.model)
-    ? {}
-    : buildReasoningPayload(
-        options.reasoning,
-        options.reasoningStyle ?? "none",
-        options.model,
-      );
+  const capabilityDeniesThinking =
+    options.providerId !== undefined &&
+    Boolean(options.reasoning?.enabled) &&
+    !modelSupportsThinking(options.providerId, options.model);
+  const reasoning =
+    isReasoningUnsupported(options.model) || capabilityDeniesThinking
+      ? {}
+      : buildReasoningPayload(
+          options.reasoning,
+          options.reasoningStyle ?? "none",
+          options.model,
+        );
   
   const reasoningOn = Boolean(options.reasoning?.enabled);
   // Kimchi exposes this model as `minimax-m3`; NVIDIA uses the longer
-  // `minimaxai/minimax-m3` ID. Both require the same sampling settings.
+  // `minimaxai/minimax-m3` ID. Both need the larger default output budget.
   const isMinimaxM3 = /minimax-m3/i.test(options.model);
   const defaultMaxTokens = isMinimaxM3 ? 8_192 : reasoningOn ? 8_192 : 4_096;
-  const defaultTemperature = isMinimaxM3 ? 1.0 : 0.2;
+  // LLM-010: one declarative sampling policy; explicit caller value wins.
+  const sampling = resolveSampling({
+    model: options.model,
+    reasoningEnabled: reasoningOn,
+    requestedTemperature: options.temperature,
+  });
   const reasoningModel = isOpenAiReasoningModel(options.model);
   // Claude extended thinking via AgentRouter maps reasoning_effort to an
   // Anthropic `thinking.budget_tokens`, and the gateway (Bedrock) rejects the
@@ -711,9 +788,7 @@ export function buildChatBody(options: {
     // gpt-5.x / o1 / o3 / o4 only accept the default temperature (1) and
     // reject any explicit value — omit the field entirely rather than send
     // our 0.2 default and get a 400.
-    ...(reasoningModel
-      ? {}
-      : { temperature: options.temperature ?? defaultTemperature }),
+    ...(reasoningModel ? {} : { temperature: sampling.temperature }),
     ...reasoning,
     ...openAiToolBodyFields({
       tools: options.tools,
@@ -721,8 +796,8 @@ export function buildChatBody(options: {
       parallelToolCalls: options.parallelToolCalls,
     }),
   };
-  if (isMinimaxM3) {
-    body.top_p = 0.95;
+  if (!reasoningModel && sampling.topP !== undefined) {
+    body.top_p = sampling.topP;
   }
   // OpenAI + many OpenAI-compatible gateways attach usage on the final SSE
   // chunk when this is set (non-stream responses always include usage).
@@ -753,6 +828,7 @@ export async function openAiCompatibleComplete(options: {
   const supportsVision = modelSupportsVision(options.providerId, options.model);
   const requestBody = buildChatBody({
     model: options.model,
+    providerId: options.providerId,
     messages: options.messages,
     maxTokens: options.maxTokens,
     temperature: options.temperature,
@@ -912,6 +988,7 @@ export async function openAiCompatibleStream(options: {
   const supportsVision = modelSupportsVision(options.providerId, options.model);
   const requestBody = buildChatBody({
     model: options.model,
+    providerId: options.providerId,
     messages: options.messages,
     maxTokens: options.maxTokens,
     temperature: options.temperature,
@@ -1070,6 +1147,7 @@ export async function openAiCompatibleStream(options: {
   idleController.signal.addEventListener("abort", cancelReaderOnAbort, {
     once: true,
   });
+  const sseFrames = createSseFrameAssembler();
 
   try {
     while (true) {
@@ -1087,9 +1165,8 @@ export async function openAiCompatibleStream(options: {
       const lines = buffer.split("\n");
       buffer = lines.pop() ?? "";
       for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed.startsWith("data:")) continue;
-        const payload = trimmed.slice(5).trim();
+        const payload = sseFrames.pushLine(line);
+        if (payload === undefined) continue;
         if (payload === "[DONE]") {
           exitReasoning();
           cleanup();

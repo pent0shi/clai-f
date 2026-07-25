@@ -12,7 +12,7 @@ describe("ollama tools adapter", () => {
     expect(tools[0]!.function.name).toBe("fs_write");
   });
 
-  it("serializes assistant tool arguments as JSON string (P2-5)", () => {
+  it("sends assistant tool arguments as an object on the native endpoint (LLM-009)", () => {
     const msgs = toOllamaToolMessages([
       {
         role: "assistant",
@@ -23,11 +23,7 @@ describe("ollama tools adapter", () => {
       },
     ]);
     const tc = (msgs[0]!.tool_calls as Array<{ function: { arguments: unknown } }>)[0]!;
-    expect(typeof tc.function.arguments).toBe("string");
-    expect(JSON.parse(tc.function.arguments as string)).toEqual({
-      path: "a.ts",
-      content: "x",
-    });
+    expect(tc.function.arguments).toEqual({ path: "a.ts", content: "x" });
   });
 
   it("parses object arguments", () => {

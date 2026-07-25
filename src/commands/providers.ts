@@ -117,6 +117,23 @@ export async function setProviderKey(
     );
   }
 
+  // Validate against the provider BEFORE persisting: a dead key used to stay in
+  // the rotation circle and cost an extra failed request plus a switch toast on
+  // every later turn.
+  if (!options.skipPing) {
+    try {
+      await pingProvider(provider, secret);
+    } catch (error) {
+      process.exitCode = 4;
+      console.warn(
+        chalk.yellow(
+          `Not saved: ping failed: ${error instanceof Error ? error.message : String(error)}. Re-run with --skip-ping to store it anyway.`,
+        ),
+      );
+      return;
+    }
+  }
+
   if (provider === "ollama") {
     updateConfig({ ollamaHost: secret });
     setDefaultProvider(provider);
@@ -129,20 +146,6 @@ export async function setProviderKey(
           `Warning: OS keychain unavailable; stored in ${getFallbackKeysPath()} with restricted permissions.`,
         ),
       );
-    }
-  }
-
-  if (!options.skipPing) {
-    try {
-      await pingProvider(provider, secret);
-    } catch (error) {
-      process.exitCode = 4;
-      console.warn(
-        chalk.yellow(
-          `Saved, but ping failed: ${error instanceof Error ? error.message : String(error)}`,
-        ),
-      );
-      return;
     }
   }
 

@@ -26,6 +26,7 @@ export function toAnthropicTools(defs: ToolDefinition[]): Array<{
 
 type AnthropicContentBlock =
   | { type: "text"; text: string }
+  | { type: "thinking"; thinking: string; signature: string }
   | {
       type: "image";
       source: { type: "base64"; media_type: string; data: string };
@@ -84,6 +85,18 @@ export function toAnthropicToolMessages(
 
     if (message.role === "assistant" && message.toolCalls?.length) {
       const blocks: AnthropicContentBlock[] = [];
+      // LLM-006: Anthropic requires the signed thinking block to be the FIRST
+      // block of an assistant turn that carries tool_use while thinking is
+      // enabled; without it the follow-up request is rejected and the model
+      // loses its own chain of thought between tool calls.
+      const reasoning = message.reasoningBlock;
+      if (reasoning?.signature && reasoning.text) {
+        blocks.push({
+          type: "thinking",
+          thinking: reasoning.text,
+          signature: reasoning.signature,
+        });
+      }
       if (message.content.trim()) {
         blocks.push({ type: "text", text: message.content });
       }
@@ -145,21 +158,29 @@ export function parseAnthropicToolUseBlocks(
         type: string;
         text?: string;
         thinking?: string;
+        signature?: string;
         id?: string;
         name?: string;
         input?: unknown;
       }>
     | undefined,
-): { text: string; thinkingText: string; toolCalls: NativeToolCall[] } {
+): {
+  text: string;
+  thinkingText: string;
+  toolCalls: NativeToolCall[];
+  thinkingSignature?: string;
+} {
   let text = "";
   let thinkingText = "";
+  let thinkingSignature: string | undefined;
   const toolCalls: NativeToolCall[] = [];
   if (!content) return { text, thinkingText, toolCalls };
 
   for (const part of content) {
     if (part.type === "text" && part.text) text += part.text;
-    if (part.type === "thinking" && part.thinking) {
-      thinkingText += part.thinking;
+    if (part.type === "thinking") {
+      if (part.thinking) thinkingText += part.thinking;
+      if (part.signature) thinkingSignature = part.signature;
     }
     if (part.type === "tool_use") {
       const wire = part.name ?? "";
@@ -181,12 +202,15 @@ export function parseAnthropicToolUseBlocks(
     text: text.trim(),
     thinkingText: thinkingText.trim(),
     toolCalls,
+    ...(thinkingSignature ? { thinkingSignature } : {}),
   };
 }
 
 export interface AnthropicToolStreamState {
   text: string;
   thinking: string;
+  /** Anthropic `signature_delta` for the thinking block (LLM-006). */
+  thinkingSignature: string;
   /** block index → partial tool_use */
   blocks: Map<
     number,
@@ -201,7 +225,7 @@ export interface AnthropicToolStreamState {
 }
 
 export function createAnthropicToolStreamState(): AnthropicToolStreamState {
-  return { text: "", thinking: "", blocks: new Map() };
+  return { text: "", thinking: "", thinkingSignature: "", blocks: new Map() };
 }
 
 export function handleAnthropicStreamEvent(
@@ -215,12 +239,14 @@ export function handleAnthropicStreamEvent(
       name?: string;
       text?: string;
       thinking?: string;
+      signature?: string;
     };
     delta?: {
       type?: string;
       text?: string;
       thinking?: string;
       partial_json?: string;
+      signature?: string;
     };
   },
 ): {
@@ -285,6 +311,8 @@ export function handleAnthropicStreamEvent(
         json: "",
         text: "",
       });
+      if (cb.thinking) state.thinking += cb.thinking;
+      if (cb.signature) state.thinkingSignature = cb.signature;
     }
   }
 
@@ -304,6 +332,10 @@ export function handleAnthropicStreamEvent(
       block.text += event.delta.thinking;
       state.thinking += event.delta.thinking;
       result.thinkingDelta = event.delta.thinking;
+    }
+    // LLM-006: the signature arrives as its own delta and must be kept.
+    if (event.delta.type === "signature_delta" && event.delta.signature) {
+      state.thinkingSignature += event.delta.signature;
     }
     if (
       event.delta.type === "input_json_delta" &&
@@ -338,7 +370,12 @@ export function handleAnthropicStreamEvent(
 
 export function finalizeAnthropicToolStream(
   state: AnthropicToolStreamState,
-): { text: string; thinkingText: string; toolCalls: NativeToolCall[] } {
+): {
+  text: string;
+  thinkingText: string;
+  toolCalls: NativeToolCall[];
+  thinkingSignature?: string;
+} {
   const toolCalls: NativeToolCall[] = [];
   const indices = [...state.blocks.keys()].sort((a, b) => a - b);
   for (const index of indices) {
@@ -357,5 +394,8 @@ export function finalizeAnthropicToolStream(
     text: state.text.trim(),
     thinkingText: state.thinking.trim(),
     toolCalls,
+    ...(state.thinkingSignature
+      ? { thinkingSignature: state.thinkingSignature }
+      : {}),
   };
 }

@@ -10,7 +10,7 @@ import {
   type LlmProvider,
   type ProviderAuth,
 } from "./provider.js";
-import { ProviderError, readJson, readStreamLines } from "./http.js";
+import { ProviderError, readJson, readStreamLines, createSseFrameAssembler } from "./http.js";
 import {
   geminiToolBodyFields,
   parseGeminiFunctionCalls,
@@ -19,6 +19,7 @@ import {
 import { fromWireName } from "./tool-protocol.js";
 import { parseGeminiUsage } from "./token-usage.js";
 import { firstSystemPrompt } from "./system-messages.js";
+import { resolveSampling } from "./sampling.js";
 
 type GeminiPart =
   | { text: string }
@@ -94,19 +95,82 @@ function geminiThinkingConfig(
   }
 }
 
+/**
+ * LLM-007 — thinking tokens are billed against `maxOutputTokens` on Gemini 2.5,
+ * so a budget at or above the output cap guarantees a thought-only
+ * `MAX_TOKENS` finish with no visible answer. Clamp the budget to at most half
+ * the effective cap so a visible reserve always remains.
+ */
+/**
+ * Gemini's default thresholds are `BLOCK_MEDIUM_AND_ABOVE`, which blocks a
+ * meaningful share of legitimate sysadmin/pentest turns (exploit discussion,
+ * credential handling, payload text). Blocked turns surfaced only as a generic
+ * empty completion. Ask for the least restrictive thresholds the account allows
+ * and name the cause when a block happens anyway.
+ */
+const GEMINI_SAFETY_SETTINGS = [
+  "HARM_CATEGORY_HARASSMENT",
+  "HARM_CATEGORY_HATE_SPEECH",
+  "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+  "HARM_CATEGORY_DANGEROUS_CONTENT",
+].map((category) => ({ category, threshold: "BLOCK_ONLY_HIGH" }));
+
+const GEMINI_BLOCKING_FINISH_REASONS = new Set([
+  "SAFETY",
+  "RECITATION",
+  "BLOCKLIST",
+  "PROHIBITED_CONTENT",
+  "SPII",
+]);
+
+/** Throws a named error for a finish reason that means "content was blocked". */
+export function assertGeminiFinishReasonAllowed(
+  finishReason: string | undefined,
+): void {
+  if (!finishReason) return;
+  if (!GEMINI_BLOCKING_FINISH_REASONS.has(finishReason.toUpperCase())) return;
+  throw new ProviderError(
+    `Gemini blocked the response (finishReason=${finishReason}). Try another provider with /provider, or rephrase the request.`,
+  );
+}
+
+export function clampGeminiThinkingBudget(
+  thinkingConfig: Record<string, unknown> | undefined,
+  maxOutputTokens: number,
+): Record<string, unknown> | undefined {
+  if (!thinkingConfig) return thinkingConfig;
+  const budget = thinkingConfig.thinkingBudget;
+  if (typeof budget !== "number" || budget <= 0) return thinkingConfig;
+  const allowed = Math.max(1, Math.floor(maxOutputTokens / 2));
+  if (budget <= allowed) return thinkingConfig;
+  return { ...thinkingConfig, thinkingBudget: allowed };
+}
+
 export function geminiBody(request: CompletionRequest): string {
   const model = request.model ?? defaultModels.gemini;
-  const thinkingConfig = geminiThinkingConfig(request.thinking, model);
   const defaultMaxTokens = request.thinking?.enabled ? 8_192 : 4_096;
+  const maxOutputTokens = request.maxTokens ?? defaultMaxTokens;
+  const thinkingConfig = clampGeminiThinkingBudget(
+    geminiThinkingConfig(request.thinking, model),
+    maxOutputTokens,
+  );
+  const sampling = resolveSampling({
+    provider: "gemini",
+    model,
+    reasoningEnabled: Boolean(request.thinking?.enabled),
+    requestedTemperature: request.temperature,
+  });
   const body: Record<string, unknown> = {
     contents: geminiContents(request.messages),
     generationConfig: {
-      temperature: request.temperature ?? 0.2,
-      maxOutputTokens: request.maxTokens ?? defaultMaxTokens,
+      temperature: sampling.temperature,
+      ...(sampling.topP !== undefined ? { topP: sampling.topP } : {}),
+      maxOutputTokens,
       ...(thinkingConfig !== undefined
         ? { thinkingConfig }
         : {}),
     },
+    safetySettings: GEMINI_SAFETY_SETTINGS,
     ...geminiToolBodyFields({
       tools: request.tools,
       toolChoice: request.toolChoice,
@@ -196,6 +260,7 @@ export const geminiProvider: LlmProvider = {
       .trim();
     const parsed = parseGeminiFunctionCalls(parts);
     if (!parsed.text && parsed.toolCalls.length === 0) {
+      assertGeminiFinishReasonAllowed(data.candidates?.[0]?.finishReason);
       throw new ProviderError("Gemini completed without a visible answer.");
     }
     const final = thought
@@ -266,12 +331,12 @@ export const geminiProvider: LlmProvider = {
       onToken("</think>");
     };
 
+    const sseFrames = createSseFrameAssembler();
     for await (const line of readStreamLines(response, {
       signal: request.signal,
     })) {
-      const trimmed = line.trim();
-      if (!trimmed.startsWith("data:")) continue;
-      const payload = trimmed.slice(5).trim();
+      const payload = sseFrames.pushLine(line);
+      if (payload === undefined) continue;
       if (payload === "[DONE]") break;
       try {
         const parsed = JSON.parse(payload) as {
@@ -328,13 +393,15 @@ export const geminiProvider: LlmProvider = {
             onToken(part.text);
           }
         }
-      } catch {
-        // Ignore malformed keepalive lines.
+      } catch (frameError) {
+        // Only malformed JSON frames are ignorable (LLM-011).
+        if (!(frameError instanceof SyntaxError)) throw frameError;
       }
     }
     exitThought();
     const toolParsed = parseGeminiFunctionCalls(collectedParts);
     if (!visible.trim() && toolParsed.toolCalls.length === 0) {
+      assertGeminiFinishReasonAllowed(finishReason);
       throw new ProviderError("Gemini completed without a visible answer.");
     }
     return {

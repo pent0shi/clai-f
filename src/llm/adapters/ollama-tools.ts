@@ -23,7 +23,10 @@ export function toOllamaToolMessages(
         role: "tool",
         content: message.content,
         ...(message.toolCallId ? { tool_call_id: message.toolCallId } : {}),
-        ...(message.name ? { name: toWireName(message.name) } : {}),
+        // Newer Ollama builds read `tool_name`; older ones read `name`.
+        ...(message.name
+          ? { name: toWireName(message.name), tool_name: toWireName(message.name) }
+          : {}),
       };
     }
     if (message.role === "assistant" && message.toolCalls?.length) {
@@ -35,8 +38,10 @@ export function toOllamaToolMessages(
           type: "function",
           function: {
             name: toWireName(tc.name),
-            // OpenAI-compat hosts (and many Ollama proxies) expect a JSON string.
-            arguments: JSON.stringify(tc.args ?? {}),
+            // LLM-009: this body goes to the native /api/chat endpoint, whose
+            // ToolCallFunction.Arguments is a map. A JSON string either fails to
+            // unmarshal or arrives as opaque text the model cannot read.
+            arguments: tc.args ?? {},
           },
         })),
       };

@@ -152,3 +152,65 @@ describe("router retries without reasoning when a knob is rejected", () => {
     expect(statuses.join("")).toMatch(/rejected reasoning options/i);
   });
 });
+
+
+describe("LLM-005 — Chat Completions reasoning dialect", () => {
+  it("sends only reasoning_effort for the openai style", () => {
+    const body = JSON.parse(
+      buildChatBody({
+        model: "gpt-5.1",
+        messages: userMessages,
+        stream: false,
+        reasoning: { enabled: true, effort: "high" },
+        reasoningStyle: "openai",
+      }),
+    ) as Record<string, unknown>;
+    expect(body.reasoning_effort).toBe("high");
+    // The nested Responses-API object is what strict gateways 400 on.
+    expect(body).not.toHaveProperty("reasoning");
+  });
+
+  it("degrades on a bare `reasoning` field rejection", () => {
+    expect(
+      isReasoningUnsupportedError(
+        new ProviderError(
+          "OpenAI (model=gpt-5.1): request failed",
+          400,
+          "Unrecognized request argument supplied: reasoning",
+        ),
+      ),
+    ).toBe(true);
+  });
+});
+
+
+describe("capability table and wire payload agree", () => {
+  it("omits reasoning knobs when the capability table says the model has none", () => {
+    // Mantle lists only Claude models as reasoning-capable.
+    const body = JSON.parse(
+      buildChatBody({
+        model: "openai.gpt-oss-120b",
+        providerId: "aws-mantle",
+        messages: userMessages,
+        stream: false,
+        reasoning: { enabled: true, effort: "high" },
+        reasoningStyle: "openai",
+      }),
+    ) as Record<string, unknown>;
+    expect(body).not.toHaveProperty("reasoning_effort");
+  });
+
+  it("still sends them for a capable model", () => {
+    const body = JSON.parse(
+      buildChatBody({
+        model: "gpt-5.1",
+        providerId: "openai",
+        messages: userMessages,
+        stream: false,
+        reasoning: { enabled: true, effort: "high" },
+        reasoningStyle: "openai",
+      }),
+    ) as Record<string, unknown>;
+    expect(body.reasoning_effort).toBe("high");
+  });
+});

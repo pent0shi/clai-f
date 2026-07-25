@@ -71,6 +71,7 @@ describe("token-usage parsers", () => {
       completionTokens: 120,
       totalTokens: 50_136,
       exact: true,
+      cachedPromptTokens: 48_000,
     });
     expect(
       parseAnthropicUsage({ cache_read_input_tokens: 30_000, output_tokens: 5 }),
@@ -142,5 +143,56 @@ describe("token-usage format + context window", () => {
     expect(b.contextTokens).toBe(2500);
     expect(b.sessionPromptTokens).toBe(3500);
     expect(b.sessionCompletionTokens).toBe(150);
+  });
+});
+
+
+describe("OpenAI usage detail (cache / reasoning)", () => {
+  it("keeps cached prompt and reasoning token detail", () => {
+    expect(
+      parseOpenAiUsage({
+        prompt_tokens: 1_000,
+        completion_tokens: 500,
+        total_tokens: 1_500,
+        prompt_tokens_details: { cached_tokens: 800 },
+        completion_tokens_details: { reasoning_tokens: 420 },
+      }),
+    ).toEqual({
+      promptTokens: 1_000,
+      completionTokens: 500,
+      totalTokens: 1_500,
+      exact: true,
+      cachedPromptTokens: 800,
+      reasoningTokens: 420,
+    });
+  });
+
+  it("omits the detail fields when the gateway does not report them", () => {
+    expect(
+      parseOpenAiUsage({ prompt_tokens: 10, completion_tokens: 2 }),
+    ).toEqual({
+      promptTokens: 10,
+      completionTokens: 2,
+      totalTokens: 12,
+      exact: true,
+    });
+  });
+});
+
+
+describe("modelContextWindow sizing", () => {
+  it("sizes current defaults correctly", () => {
+    expect(modelContextWindow("gemini-3.5-flash")).toBe(1_048_576);
+    expect(modelContextWindow("kimi-k2.6")).toBe(256_000);
+    expect(modelContextWindow("z-ai/glm-5.2")).toBe(200_000);
+    expect(modelContextWindow("gpt-4")).toBe(8_192);
+    expect(modelContextWindow("gpt-4-32k")).toBe(32_768);
+    expect(modelContextWindow("gpt-4o")).toBe(128_000);
+  });
+
+  it("honors provider-specific served windows", () => {
+    expect(modelContextWindow("qwen/qwen3-32b")).toBe(128_000);
+    expect(modelContextWindow("qwen/qwen3-32b", "groq")).toBe(5_500);
+    expect(modelContextWindow("openai/gpt-oss-20b", "groq")).toBe(7_500);
   });
 });

@@ -144,6 +144,31 @@ export function syntheticToolCallId(index: number): string {
 }
 
 
+const TOOLS_PARAMETER_NAMES = new Set([
+  "tools",
+  "tool",
+  "tool_choice",
+  "toolchoice",
+  "functions",
+  "function_call",
+  "functioncall",
+]);
+
+/** Parameter name a gateway blamed, when it says so explicitly. */
+function offendingParameterName(hay: string): string | undefined {
+  const patterns = [
+    /unrecognized (?:request )?(?:argument|parameter|field)(?:s)? supplied:?\s*['"`]?([a-z0-9_.]+)/,
+    /unknown (?:request )?(?:argument|parameter|field):?\s*['"`]?([a-z0-9_.]+)/,
+    /unexpected keyword argument ['"`]?([a-z0-9_.]+)/,
+    /extra inputs are not permitted[^a-z0-9_]*['"`]?([a-z0-9_.]+)/,
+  ];
+  for (const pattern of patterns) {
+    const match = pattern.exec(hay);
+    if (match?.[1]) return match[1];
+  }
+  return undefined;
+}
+
 export function isToolsUnsupportedError(error: unknown): boolean {
   const status =
     error && typeof error === "object" && "status" in error
@@ -155,6 +180,12 @@ export function isToolsUnsupportedError(error: unknown): boolean {
       : "";
   const message = error instanceof Error ? error.message : String(error);
   const hay = `${message}\n${body}`.toLowerCase();
+
+  // When the gateway names the offending parameter, only a tools parameter may
+  // downgrade the protocol. Rejecting e.g. `parallel_tool_calls` or `reasoning`
+  // says nothing about native tool support.
+  const offending = offendingParameterName(hay);
+  if (offending && !TOOLS_PARAMETER_NAMES.has(offending)) return false;
 
   // Explicit capability rejections (any HTTP status).
   if (

@@ -236,6 +236,58 @@ function summarizeProviderError(error: unknown): string {
 interface ProviderFailure {
   provider: ProviderId;
   message: string;
+  /** Original error so structured status/retry-after survive aggregation. */
+  error?: unknown;
+}
+
+/**
+ * Aggregate failure that keeps the most actionable `status` /
+ * `retryAfterSeconds` instead of forcing every consumer to regex the message
+ * (Phase 2.2). `classifyStreamFailure` already prefers `errorStatus(error)`.
+ */
+export class AggregateProviderError extends ProviderError {
+  constructor(
+    message: string,
+    readonly failures: ReadonlyArray<{ provider: ProviderId; message: string }>,
+    status?: number | undefined,
+    retryAfterSeconds?: number | undefined,
+  ) {
+    super(message, status, undefined, retryAfterSeconds);
+    this.name = "AggregateProviderError";
+  }
+}
+
+/** 413 (context) > 429 (rate limit) > 5xx > any other status. */
+function mostActionableFailure(
+  failures: ProviderFailure[],
+): ProviderError | undefined {
+  const candidates = failures
+    .map((failure) => failure.error)
+    .filter(
+      (error): error is ProviderError =>
+        error instanceof ProviderError && typeof error.status === "number",
+    );
+  if (candidates.length === 0) return undefined;
+  const rank = (status: number): number =>
+    status === 413 ? 0 : status === 429 ? 1 : status >= 500 ? 2 : 3;
+  return candidates.reduce((best, current) =>
+    rank(current.status!) < rank(best.status!) ? current : best,
+  );
+}
+
+function aggregateProviderError(
+  message: string,
+  failures: ProviderFailure[],
+  emittedBytes = 0,
+): AggregateProviderError {
+  const actionable = mostActionableFailure(failures);
+  const aggregate = new AggregateProviderError(
+    message,
+    failures.map(({ provider, message: text }) => ({ provider, message: text })),
+    actionable?.status,
+    actionable?.retryAfterSeconds,
+  );
+  return markStreamEmittedBytes(aggregate, emittedBytes);
 }
 
 function escapeTableCell(value: string): string {
@@ -635,10 +687,7 @@ export async function completeWithProvider(
     request.signal?.throwIfAborted();
     const provider = providers[providerId];
     const multi = await getProviderKeys(providerId);
-    const hasAuth =
-      providerId === "ollama"
-        ? multi.keys.length > 0
-        : multi.keys.length > 0;
+    const hasAuth = multi.keys.length > 0;
     if (!hasAuth) {
       failures.push({ provider: providerId, message: "no API key configured" });
       continue;
@@ -663,18 +712,21 @@ export async function completeWithProvider(
       failures.push({
         provider: providerId,
         message: summarizeProviderError(error),
+        error,
       });
       if (isKeyCircleStopError(error) || shouldStopProviderFallback(error)) {
-        throw new Error(
+        throw aggregateProviderError(
           `No provider could complete the request.${formatFailures(failures)}`,
+          failures,
         );
       }
       // Continue to next provider in chain when fallback is enabled (e.g. 413).
     }
   }
 
-  throw new Error(
+  throw aggregateProviderError(
     `No provider could complete the request.${formatFailures(failures)}`,
+    failures,
   );
 }
 
@@ -732,6 +784,7 @@ export async function streamWithProvider(
       failures.push({
         provider: providerId,
         message: summarizeProviderError(error),
+        error,
       });
       if (
         isKeyCircleStopError(error) ||
@@ -740,10 +793,9 @@ export async function streamWithProvider(
         // provider would duplicate it.
         streamAlreadyEmitted(error)
       ) {
-        throw markStreamEmittedBytes(
-          new Error(
-            `No provider could stream the request.${formatFailures(failures)}`,
-          ),
+        throw aggregateProviderError(
+          `No provider could stream the request.${formatFailures(failures)}`,
+          failures,
           streamEmittedBytes(error),
         );
       }
@@ -751,8 +803,9 @@ export async function streamWithProvider(
     }
   }
 
-  throw new Error(
+  throw aggregateProviderError(
     `No provider could stream the request.${formatFailures(failures)}`,
+    failures,
   );
 }
 

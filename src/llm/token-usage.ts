@@ -43,6 +43,8 @@ export function normalizeTokenUsage(input: {
   completionTokens?: number | undefined;
   totalTokens?: number | undefined;
   exact?: boolean | undefined;
+  cachedPromptTokens?: number | undefined;
+  reasoningTokens?: number | undefined;
 }): TokenUsage | undefined {
   const prompt = nonNegInt(input.promptTokens);
   const completion = nonNegInt(input.completionTokens);
@@ -53,11 +55,15 @@ export function normalizeTokenUsage(input: {
   const p = prompt ?? 0;
   const c = completion ?? 0;
   if (total === undefined) total = p + c;
+  const cached = nonNegInt(input.cachedPromptTokens);
+  const reasoning = nonNegInt(input.reasoningTokens);
   return {
     promptTokens: p,
     completionTokens: c,
     totalTokens: total,
     exact: input.exact !== false,
+    ...(cached !== undefined ? { cachedPromptTokens: cached } : {}),
+    ...(reasoning !== undefined ? { reasoningTokens: reasoning } : {}),
   };
 }
 
@@ -88,6 +94,16 @@ export function parseOpenAiUsage(raw: unknown): TokenUsage | undefined {
     totalTokens:
       (u.total_tokens as number | undefined) ??
       (u.totalTokens as number | undefined),
+    // OpenAI, Groq, OpenRouter and DeepSeek-style gateways report cache and
+    // reasoning detail here; it used to be dropped entirely.
+    cachedPromptTokens: nonNegInt(
+      (u.prompt_tokens_details as Record<string, unknown> | undefined)
+        ?.cached_tokens,
+    ),
+    reasoningTokens: nonNegInt(
+      (u.completion_tokens_details as Record<string, unknown> | undefined)
+        ?.reasoning_tokens,
+    ),
     exact: true,
   });
 }
@@ -104,6 +120,7 @@ export function parseAnthropicUsage(raw: unknown): TokenUsage | undefined {
   return normalizeTokenUsage({
     promptTokens: prompt > 0 ? prompt : undefined,
     completionTokens: u.output_tokens as number | undefined,
+    ...(cacheRead > 0 ? { cachedPromptTokens: cacheRead } : {}),
     exact: true,
   });
 }
@@ -170,11 +187,17 @@ const CONTEXT_WINDOW_RULES: ReadonlyArray<{
   { pattern: /gpt-4\.1/i, tokens: 1_047_576 },
   { pattern: /gpt-4o/i, tokens: 128_000 },
   { pattern: /gpt-4-turbo/i, tokens: 128_000 },
+  // Plain gpt-4 is 8k (32k for the -32k variant); the generic 128k rule below
+  // used to over-size it, so no warning arrived before a hard context error.
+  { pattern: /gpt-4-32k/i, tokens: 32_768 },
+  { pattern: /^gpt-4(?:-\d{4})?$/i, tokens: 8_192 },
   { pattern: /gpt-4/i, tokens: 128_000 },
   { pattern: /o3/i, tokens: 200_000 },
   { pattern: /o4/i, tokens: 200_000 },
   { pattern: /o1/i, tokens: 200_000 },
-  // Google
+  // Google — keep explicit rules ahead of the generic /gemini/i fallback, which
+  // used to catch the shipped gemini-3.x default at an order of magnitude low.
+  { pattern: /gemini-3/i, tokens: 1_048_576 },
   { pattern: /gemini-2\.5/i, tokens: 1_048_576 },
   { pattern: /gemini-2\.0/i, tokens: 1_048_576 },
   { pattern: /gemini-1\.5/i, tokens: 1_048_576 },
@@ -189,8 +212,10 @@ const CONTEXT_WINDOW_RULES: ReadonlyArray<{
   { pattern: /qwen3/i, tokens: 128_000 },
   { pattern: /qwen2\.5/i, tokens: 128_000 },
   { pattern: /qwen/i, tokens: 128_000 },
+  { pattern: /kimi-k2/i, tokens: 256_000 },
   { pattern: /kimi/i, tokens: 128_000 },
-  { pattern: /glm-?5/i, tokens: 128_000 },
+  { pattern: /glm-?5/i, tokens: 200_000 },
+  { pattern: /glm-?4\.[56]/i, tokens: 200_000 },
   { pattern: /glm-?4/i, tokens: 128_000 },
   { pattern: /minimax/i, tokens: 128_000 },
   { pattern: /mimo/i, tokens: 128_000 },
@@ -200,11 +225,33 @@ const CONTEXT_WINDOW_RULES: ReadonlyArray<{
 
 const DEFAULT_CONTEXT_WINDOW = 128_000;
 
+/**
+ * Provider-specific served windows that are smaller than the model's nominal
+ * one. The `provider` argument used to be accepted and discarded, so `%` of
+ * context was wrong wherever a gateway serves a truncated window.
+ */
+const PROVIDER_CONTEXT_OVERRIDES: Partial<
+  Record<ProviderId, ReadonlyArray<{ pattern: RegExp; tokens: number }>>
+> = {
+  // Groq serves these two on a low TPM tier; the usable prompt is far below the
+  // model's nominal window (mirrors `groqInputTokenBudget`).
+  groq: [
+    { pattern: /qwen\/qwen3-32b/i, tokens: 5_500 },
+    { pattern: /openai\/gpt-oss-20b/i, tokens: 7_500 },
+  ],
+};
+
 export function modelContextWindow(
   model: string | undefined,
-  _provider?: ProviderId | undefined,
+  provider?: ProviderId | undefined,
 ): number {
   if (!model) return DEFAULT_CONTEXT_WINDOW;
+  const overrides = provider ? PROVIDER_CONTEXT_OVERRIDES[provider] : undefined;
+  if (overrides) {
+    for (const rule of overrides) {
+      if (rule.pattern.test(model)) return rule.tokens;
+    }
+  }
   for (const rule of CONTEXT_WINDOW_RULES) {
     if (rule.pattern.test(model)) return rule.tokens;
   }

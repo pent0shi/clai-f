@@ -1,6 +1,9 @@
 import { describe, it, expect } from "vitest";
 import { buildAnthropicBody } from "../src/llm/anthropic.js";
-import { geminiBody } from "../src/llm/gemini.js";
+import {
+  assertGeminiFinishReasonAllowed,
+  geminiBody,
+} from "../src/llm/gemini.js";
 import {
   SYSTEM_TURN_MARKER,
   normalizeSystemMessages,
@@ -90,5 +93,85 @@ describe("provider wire bodies deliver every system message", () => {
     for (const content of laterSystems) {
       expect(JSON.stringify(parsed.contents)).toContain(content);
     }
+  });
+});
+
+
+describe("LLM-007 — Gemini thinking budget leaves a visible reserve", () => {
+  const efforts = ["low", "medium", "high", "xhigh"] as const;
+
+  for (const effort of efforts) {
+    it(`clamps thinkingBudget under maxOutputTokens for effort=${effort}`, () => {
+      const body = JSON.parse(
+        geminiBody({
+          model: "gemini-2.5-pro",
+          messages: [{ role: "user", content: "hi" }],
+          thinking: { enabled: true, effort },
+        }),
+      ) as {
+        generationConfig: {
+          maxOutputTokens: number;
+          thinkingConfig?: { thinkingBudget?: number };
+        };
+      };
+      const { maxOutputTokens, thinkingConfig } = body.generationConfig;
+      expect(thinkingConfig?.thinkingBudget).toBeGreaterThan(0);
+      expect(thinkingConfig!.thinkingBudget!).toBeLessThanOrEqual(
+        Math.floor(maxOutputTokens / 2),
+      );
+    });
+  }
+
+  it("respects a small caller budget (compaction helper)", () => {
+    const body = JSON.parse(
+      geminiBody({
+        model: "gemini-2.5-pro",
+        messages: [{ role: "user", content: "hi" }],
+        maxTokens: 2_048,
+        thinking: { enabled: true, effort: "high" },
+      }),
+    ) as {
+      generationConfig: {
+        maxOutputTokens: number;
+        thinkingConfig?: { thinkingBudget?: number };
+      };
+    };
+    expect(body.generationConfig.maxOutputTokens).toBe(2_048);
+    expect(body.generationConfig.thinkingConfig?.thinkingBudget).toBe(1_024);
+  });
+
+  it("leaves an explicit zero budget alone", () => {
+    const body = JSON.parse(
+      geminiBody({
+        model: "gemini-2.5-flash",
+        messages: [{ role: "user", content: "hi" }],
+        thinking: { enabled: false },
+      }),
+    ) as {
+      generationConfig: { thinkingConfig?: { thinkingBudget?: number } };
+    };
+    expect(body.generationConfig.thinkingConfig?.thinkingBudget).toBe(0);
+  });
+});
+
+
+describe("Gemini safety settings and blocking finish reasons", () => {
+  it("sends the least restrictive thresholds for all four categories", () => {
+    const body = JSON.parse(
+      geminiBody({ model: "gemini-2.5-pro", messages: [{ role: "user", content: "hi" }] }),
+    ) as { safetySettings: Array<{ category: string; threshold: string }> };
+    expect(body.safetySettings).toHaveLength(4);
+    expect(
+      body.safetySettings.every((s) => s.threshold === "BLOCK_ONLY_HIGH"),
+    ).toBe(true);
+  });
+
+  it("names a blocked response instead of reporting an empty completion", () => {
+    expect(() => assertGeminiFinishReasonAllowed("SAFETY")).toThrow(/blocked/i);
+    expect(() => assertGeminiFinishReasonAllowed("PROHIBITED_CONTENT")).toThrow(
+      /finishReason=PROHIBITED_CONTENT/,
+    );
+    expect(() => assertGeminiFinishReasonAllowed("STOP")).not.toThrow();
+    expect(() => assertGeminiFinishReasonAllowed(undefined)).not.toThrow();
   });
 });

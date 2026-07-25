@@ -8,7 +8,12 @@ import {
   type LlmProvider,
   type ProviderAuth,
 } from "./provider.js";
-import { ProviderError, readJson, readStreamLines } from "./http.js";
+import {
+  ProviderError,
+  createSseFrameAssembler,
+  readJson,
+  readStreamLines,
+} from "./http.js";
 import {
   anthropicToolBodyFields,
   createAnthropicToolStreamState,
@@ -19,6 +24,7 @@ import {
 } from "./adapters/anthropic-tools.js";
 import { parseAnthropicUsage } from "./token-usage.js";
 import { firstSystemPrompt } from "./system-messages.js";
+import { resolveSampling } from "./sampling.js";
 import type { TokenUsage } from "../types.js";
 
 const baseUrl = "https://api.anthropic.com/v1";
@@ -63,6 +69,16 @@ function anthropicThinkingField(
   return { type: "enabled", budget_tokens: budget };
 }
 
+/** Output cap that always clears the requested thinking budget. */
+export function anthropicMaxTokens(
+  requested: number | undefined,
+  thinking: Record<string, unknown> | undefined,
+): number {
+  const budget =
+    typeof thinking?.budget_tokens === "number" ? thinking.budget_tokens : 0;
+  return Math.max(requested ?? 8_192, budget + 1_024);
+}
+
 export function buildAnthropicBody(request: CompletionRequest, stream: boolean): string {
   const model = request.model ?? defaultModels.anthropic;
   const system = firstSystemPrompt(request.messages);
@@ -72,14 +88,25 @@ export function buildAnthropicBody(request: CompletionRequest, stream: boolean):
     model,
     system,
     messages,
-    max_tokens: request.maxTokens ?? 1_024,
+    // A 1024 default sits below `anthropicThinkingBudget` (up to 8192), which
+    // Anthropic rejects outright, and is far below every Claude output cap.
+    max_tokens: anthropicMaxTokens(request.maxTokens, thinking),
     // Anthropic requires temperature to stay at its default (1) whenever
     // thinking is enabled — sending our 0.2 default returns HTTP 400
     // ("temperature may only be set to 1 when thinking is enabled").
     // Omit the field in that case rather than pin it to 1 explicitly, since
     // some non-thinking-capable models on the same body path (e.g. Haiku
     // 3.5) still support a real temperature.
-    ...(thinking ? {} : { temperature: request.temperature ?? 0.2 }),
+    ...(thinking
+      ? {}
+      : {
+          temperature: resolveSampling({
+            provider: "anthropic",
+            model,
+            reasoningEnabled: Boolean(request.thinking?.enabled),
+            requestedTemperature: request.temperature,
+          }).temperature,
+        }),
     ...(stream ? { stream: true } : {}),
     ...(thinking ? { thinking } : {}),
     ...anthropicToolBodyFields({
@@ -137,6 +164,10 @@ export const anthropicProvider: LlmProvider = {
     if (!parsed.text && parsed.toolCalls.length === 0) {
       throw new Error("Anthropic returned no completion text");
     }
+    const reasoningBlock =
+      parsed.thinkingSignature && parsed.thinkingText
+        ? { text: parsed.thinkingText, signature: parsed.thinkingSignature }
+        : undefined;
     const final = parsed.thinkingText
       ? `<think>${parsed.thinkingText}</think>${parsed.text}`
       : parsed.text;
@@ -146,6 +177,7 @@ export const anthropicProvider: LlmProvider = {
       provider: "anthropic",
       model,
       ...(parsed.toolCalls.length ? { toolCalls: parsed.toolCalls } : {}),
+      ...(reasoningBlock ? { reasoningBlock } : {}),
       ...(data.stop_reason
         ? {
             finishReason:
@@ -199,12 +231,12 @@ export const anthropicProvider: LlmProvider = {
       onToken("</think>");
     };
 
+    const sseFrames = createSseFrameAssembler();
     for await (const line of readStreamLines(response, {
       signal: request.signal,
     })) {
-      const trimmed = line.trim();
-      if (!trimmed.startsWith("data:")) continue;
-      const payload = trimmed.slice(5).trim();
+      const payload = sseFrames.pushLine(line);
+      if (payload === undefined) continue;
       if (payload === "[DONE]") break;
       try {
         const parsed = JSON.parse(payload) as {
@@ -305,6 +337,14 @@ export const anthropicProvider: LlmProvider = {
       model,
       ...(finalized.toolCalls.length
         ? { toolCalls: finalized.toolCalls }
+        : {}),
+      ...(finalized.thinkingSignature && finalized.thinkingText
+        ? {
+            reasoningBlock: {
+              text: finalized.thinkingText,
+              signature: finalized.thinkingSignature,
+            },
+          }
         : {}),
       ...(stopReason
         ? {

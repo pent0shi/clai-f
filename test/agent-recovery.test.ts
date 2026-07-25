@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { runAgent } from "../src/modes/agent.js";
 import { geminiBody } from "../src/llm/gemini.js";
+import { samplingDefaults } from "../src/llm/sampling.js";
 import { estimateTokens } from "../src/agent/context-manager.js";
 import { getConfig, updateConfig } from "../src/store/config.js";
 import type { CompletionRequest } from "../src/types.js";
@@ -173,7 +174,7 @@ describe("agent recovery request shaping", () => {
     expect(estimateTokens(system?.content ?? "")).toBeLessThan(2_000);
   });
 
-  it("uses MiniMax M3's recommended agent temperature for Kimchi's short ID", async () => {
+  it("leaves sampling to the provider policy instead of pinning 0.2 (LLM-010)", async () => {
     let request: CompletionRequest | undefined;
     stream.mockImplementation((nextRequest: CompletionRequest, onToken: (token: string) => void) => {
       request = nextRequest;
@@ -187,6 +188,11 @@ describe("agent recovery request shaping", () => {
       maxSteps: 1,
     });
 
-    expect(request?.temperature).toBe(1);
+    // The runner no longer overrides sampling; llm/sampling.ts resolves it per
+    // model inside the provider (MiniMax M3 → 1.0, top_p 0.95).
+    expect(request?.temperature).toBeUndefined();
+    expect(
+      samplingDefaults({ provider: "kimchi", model: "minimax-m3" }),
+    ).toEqual({ temperature: 1.0, topP: 0.95 });
   });
 });

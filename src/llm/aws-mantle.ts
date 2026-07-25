@@ -16,6 +16,7 @@ import {
   readJson,
   readStreamLines,
   ProviderError,
+  createSseFrameAssembler,
 } from "./http.js";
 import {
   anthropicToolBodyFields,
@@ -26,6 +27,7 @@ import {
   toAnthropicToolMessages,
 } from "./adapters/anthropic-tools.js";
 import { firstSystemPrompt } from "./system-messages.js";
+import { anthropicMaxTokens } from "./anthropic.js";
 import { parseAnthropicUsage } from "./token-usage.js";
 import type { TokenUsage } from "../types.js";
 
@@ -147,7 +149,7 @@ export const mantleProvider: LlmProvider = {
         model,
         system,
         messages,
-        max_tokens: request.maxTokens ?? 1_024,
+        max_tokens: anthropicMaxTokens(request.maxTokens, thinking),
         // See anthropic.ts: temperature must stay default when thinking is on.
         ...(thinking ? {} : { temperature: request.temperature ?? 0.2 }),
         ...anthropicToolBodyFields({
@@ -174,6 +176,10 @@ export const mantleProvider: LlmProvider = {
     if (!parsed.text && parsed.toolCalls.length === 0) {
       throw new Error("Mantle returned no completion text");
     }
+    const reasoningBlock =
+      parsed.thinkingSignature && parsed.thinkingText
+        ? { text: parsed.thinkingText, signature: parsed.thinkingSignature }
+        : undefined;
     const final = parsed.thinkingText
       ? `<thinking>${parsed.thinkingText}</thinking>${parsed.text}`
       : parsed.text;
@@ -183,6 +189,7 @@ export const mantleProvider: LlmProvider = {
       model,
       ...(usage ? { usage } : {}),
       ...(parsed.toolCalls.length ? { toolCalls: parsed.toolCalls } : {}),
+      ...(reasoningBlock ? { reasoningBlock } : {}),
       ...(data.stop_reason
         ? {
             finishReason:
@@ -237,7 +244,7 @@ export const mantleProvider: LlmProvider = {
         model,
         system,
         messages,
-        max_tokens: request.maxTokens ?? 1_024,
+        max_tokens: anthropicMaxTokens(request.maxTokens, thinking),
         ...(thinking ? {} : { temperature: request.temperature ?? 0.2 }),
         ...anthropicToolBodyFields({
           tools: request.tools,
@@ -272,12 +279,12 @@ export const mantleProvider: LlmProvider = {
       onToken("</thinking>");
     };
 
+    const sseFrames = createSseFrameAssembler();
     for await (const line of readStreamLines(response, {
       signal: request.signal,
     })) {
-      const trimmed = line.trim();
-      if (!trimmed.startsWith("data:")) continue;
-      const payload = trimmed.slice(5).trim();
+      const payload = sseFrames.pushLine(line);
+      if (payload === undefined) continue;
       if (payload === "[DONE]") break;
       try {
         const parsed = JSON.parse(payload) as {
@@ -375,6 +382,14 @@ export const mantleProvider: LlmProvider = {
       model,
       ...(streamUsage ? { usage: streamUsage } : {}),
       ...(finalized.toolCalls.length ? { toolCalls: finalized.toolCalls } : {}),
+      ...(finalized.thinkingSignature && finalized.thinkingText
+        ? {
+            reasoningBlock: {
+              text: finalized.thinkingText,
+              signature: finalized.thinkingSignature,
+            },
+          }
+        : {}),
       ...(stopReason
         ? {
             finishReason:

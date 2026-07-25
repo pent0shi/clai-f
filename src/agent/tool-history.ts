@@ -1,4 +1,4 @@
-import type { ChatMessage, NativeToolCall } from "../types.js";
+import type { ChatMessage, NativeToolCall, ReasoningBlock } from "../types.js";
 import { syntheticToolCallId } from "../llm/tool-protocol.js";
 import { slimToolArgs } from "./message-slim.js";
 import { isSessionStateMessage } from "./session-state.js";
@@ -41,6 +41,12 @@ export function appendAssistantWithTools(
   messages: ChatMessage[],
   text: string,
   toolCalls: NativeToolCall[],
+  /**
+   * Signed reasoning that must be replayed with this turn (LLM-006). Anthropic
+   * rejects a tool_use turn whose thinking block is missing once extended
+   * thinking is on; other dialects ignore the field.
+   */
+  reasoningBlock?: ReasoningBlock | undefined,
 ): void {
   messages.push({
     role: "assistant",
@@ -48,6 +54,7 @@ export function appendAssistantWithTools(
     ...(toolCalls.length
       ? { toolCalls: slimNativeToolCallsForHistory(toolCalls) }
       : {}),
+    ...(reasoningBlock?.signature ? { reasoningBlock } : {}),
   });
 }
 

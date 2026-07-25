@@ -3593,7 +3593,8 @@ export async function runAgentTurn(
               allowModelFallback,
               messages,
 
-              temperature: /minimax-m3/i.test(model) ? 1.0 : 0.2,
+              // LLM-010: sampling is provider/model policy (llm/sampling.ts).
+              // Sending a fixed 0.2 here overrode it for every model.
 
               maxTokens: stepMaxTokens,
               signal: options.signal,
@@ -4011,6 +4012,7 @@ export async function runAgentTurn(
                       messages,
                       assistantText.visible,
                       nativeToolCalls,
+                      completion.reasoningBlock,
                     );
                     for (const tc of nativeToolCalls) {
                       appendToolResult(
@@ -4864,6 +4866,7 @@ export async function runAgentTurn(
             messages,
             beforeTool ?? "",
             historyNativeCalls,
+            completion.reasoningBlock,
           );
         } else {
           const standardizedContent =

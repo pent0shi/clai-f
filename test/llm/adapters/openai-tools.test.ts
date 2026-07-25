@@ -9,6 +9,7 @@ import { toOpenAiMessages } from "../../../src/llm/http.js";
 import {
   accumulateOpenAiToolCallDelta,
   finalizeOpenAiToolCalls,
+  isToolsUnsupportedError,
 } from "../../../src/llm/tool-protocol.js";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -84,7 +85,18 @@ describe("openai tools adapter", () => {
     });
     expect(body.tools).toHaveLength(1);
     expect(body.tool_choice).toBe("auto");
-    expect(body.parallel_tool_calls).toBe(true);
+    // Parallel calls are the upstream default; the field is only sent when it
+    // changes behavior, so a strict gateway cannot 400 on it.
+    expect(body).not.toHaveProperty("parallel_tool_calls");
+  });
+
+  it("sends parallel_tool_calls only when explicitly disabled", () => {
+    const body = openAiToolBodyFields({
+      tools: getToolDefinitions({ names: ["fs.read"] }),
+      toolChoice: "auto",
+      parallelToolCalls: false,
+    });
+    expect(body.parallel_tool_calls).toBe(false);
   });
 
   it("stream fixture reassembly for large content", () => {
@@ -117,5 +129,35 @@ describe("openai tools adapter", () => {
     expect(calls[0]!.name).toBe("fs.write");
     expect(String(calls[0]!.args.content)).toContain("export const VALUE");
     expect(String(calls[0]!.args.content).length).toBeGreaterThan(1000);
+  });
+});
+
+
+describe("isToolsUnsupportedError parameter attribution", () => {
+  it("does not downgrade the protocol when a non-tool field is rejected", () => {
+    expect(
+      isToolsUnsupportedError({
+        status: 400,
+        message: "request failed",
+        body: "Unrecognized request argument supplied: parallel_tool_calls",
+      }),
+    ).toBe(false);
+    expect(
+      isToolsUnsupportedError({
+        status: 400,
+        message: "request failed",
+        body: "Unrecognized request argument supplied: reasoning",
+      }),
+    ).toBe(false);
+  });
+
+  it("still downgrades when tools itself is the offending parameter", () => {
+    expect(
+      isToolsUnsupportedError({
+        status: 400,
+        message: "request failed",
+        body: "Unrecognized request argument supplied: tools",
+      }),
+    ).toBe(true);
   });
 });
