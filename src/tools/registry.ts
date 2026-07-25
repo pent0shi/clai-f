@@ -48,7 +48,7 @@ import { toolCheckHandler } from "./capabilities.js";
 import { wordlistFind } from "./wordlists.js";
 import { jobManager, type StartJobOptions } from "./jobs.js";
 import {
-  looksLikeLongFiniteCommand,
+  longFiniteCommandCost,
   looksLongRunning,
 } from "./command-intent.js";
 import { packageBinaryName } from "./package-binary.js";
@@ -222,22 +222,35 @@ function optionalResponseMode(
 export const toolRegistry: Record<string, ToolHandler> = {
   async "shell.exec"(args, options) {
     const command = requireString(args, "command");
-    // Persistent processes and potentially expensive finite scanners/searches
-    // run as durable jobs. This avoids false 40s termination while preserving
-    // status/output across turns and process restarts.
+    // Persistent processes and genuinely expensive finite scanners/searches run
+    // as durable jobs. `background` gives the caller an explicit escape hatch:
+    //   never  — always foreground, timeoutMs honored
+    //   always — always a durable job
+    //   auto   — persistent commands and cost-signalled finite commands go
+    //            background; everything else stays foreground (default)
     const requestedTimeoutMs = optionalNumber(args, "timeoutMs");
     const responderRequested = optionalBoolean(args, "responder") ?? false;
-    // Known-long scanners (ffuf/nmap/gobuster/feroxbuster/nuclei/sqlmap/find…)
-    // and responder-delegated commands run durably. timeoutMs applies only
-    // when a finite command remains in the foreground.
-    const finiteBackgroundJob = looksLikeLongFiniteCommand(command);
-    // These finite scanners exit on their own after a while and emit large
-    // output — exactly what the Responder is for. Auto-delegate them so the
-    // agent fires-and-continues instead of blocking or polling. Persistent
-    // servers (looksLongRunning) are deliberately NOT responder jobs: they
-    // never "complete", so the agent probes them and leaves them running.
-    const responder = responderRequested || finiteBackgroundJob;
-    if (looksLongRunning(command) || finiteBackgroundJob || responderRequested) {
+    const backgroundRaw = optionalString(args, "background");
+    const backgroundMode: "auto" | "never" | "always" =
+      backgroundRaw === "never" || backgroundRaw === "always"
+        ? backgroundRaw
+        : "auto";
+    // A finite command is auto-backgrounded only when parsed argv shows a real
+    // cost signal (broad port spec, wordlist, filesystem-wide find, …) — never
+    // from the bare binary name.
+    const costReason = longFiniteCommandCost(command).reason;
+    const persistent = looksLongRunning(command);
+    const wantsBackground =
+      backgroundMode === "always"
+        ? true
+        : backgroundMode === "never"
+          ? false
+          : persistent || Boolean(costReason) || responderRequested;
+    // Persistent servers are deliberately NOT responder jobs: they never
+    // "complete", so the agent probes them and leaves them running.
+    const responder =
+      wantsBackground && !persistent && (responderRequested || Boolean(costReason) || backgroundMode === "always");
+    if (wantsBackground) {
       const elevated = await prepareElevatedBackgroundCommand(command, {
         signal: options?.signal,
         onOutput: options?.onOutput,
@@ -254,6 +267,15 @@ export const toolRegistry: Record<string, ToolHandler> = {
         },
       );
       if (job.ok) {
+        const autoBackgrounded = backgroundMode === "auto";
+        const timeoutNote =
+          autoBackgrounded && requestedTimeoutMs !== undefined
+            ? `\n\nNote: timeoutMs=${requestedTimeoutMs} does not apply — this command was auto-backgrounded${costReason ? ` (${costReason})` : ""}. Pass background:"never" to run it in the foreground with your timeout.`
+            : "";
+        const costNote =
+          autoBackgrounded && costReason
+            ? `\n\nAuto-backgrounded because: ${costReason}. Pass background:"never" to force foreground.`
+            : "";
         return {
           ...job,
           output:
@@ -263,7 +285,9 @@ export const toolRegistry: Record<string, ToolHandler> = {
                 "Do NOT poll, shell.tail, shell.jobs, sleep, or fs.read it to watch progress — the Responder tracks the process and delivers the completed result into your context automatically between turns. " +
                 "Mark your launch step done and move to the next task now. " +
                 "When the result arrives, read ONLY the key lines you need (matched status codes / hits / findings) with a filtered shell.tail byte-window or a grep of the artifact — never a full read of a noisy scanner log, and make sure the command you ran preserves those key fields (e.g. keep status codes, not just the wordlist name)."
-              : "This persistent command was started in the BACKGROUND. It is not proof of readiness — inspect shell.tail, run a readiness probe, use shell.jobs for status, and shell.stop when appropriate."),
+              : "This persistent command was started in the BACKGROUND. It is not proof of readiness — inspect shell.tail, run a readiness probe, use shell.jobs for status, and shell.stop when appropriate.") +
+            costNote +
+            timeoutNote,
         };
       }
       return job;
@@ -349,6 +373,14 @@ export const toolRegistry: Record<string, ToolHandler> = {
       {
         confirmed: options?.confirmed,
         maxMatches: optionalNumber(args, "maxMatches"),
+        maxPerFile: optionalNumber(args, "maxPerFile"),
+        glob: optionalString(args, "glob"),
+        caseInsensitive: optionalBoolean(args, "caseInsensitive"),
+        fixedString: optionalBoolean(args, "fixedString"),
+        context: optionalNumber(args, "context"),
+        filesOnly: optionalBoolean(args, "filesOnly"),
+        hidden: optionalBoolean(args, "hidden"),
+        timeoutMs: optionalNumber(args, "timeoutMs"),
       },
     );
   },
@@ -744,7 +776,7 @@ export const toolRegistry: Record<string, ToolHandler> = {
     const artifactDir = getArtifactDir();
     let artifactPath: string | undefined;
     try {
-      await mkdir(artifactDir, { recursive: true });
+      await mkdir(artifactDir, { recursive: true, mode: 0o700 });
       const safeHost = host.value.replace(/[^a-z0-9_.-]+/gi, "-");
       artifactPath = join(
         artifactDir,
@@ -853,7 +885,7 @@ export const toolRegistry: Record<string, ToolHandler> = {
     if (artifactPath) {
       const body = transcript.join("\n\n");
       try {
-        await writeFile(artifactPath, body, "utf8");
+        await writeFile(artifactPath, body, { encoding: "utf8", mode: 0o600 });
       } catch {
         artifactPath = undefined;
       }
@@ -912,18 +944,21 @@ export const toolRegistry: Record<string, ToolHandler> = {
   async "net.context"() {
     return getNetworkContext();
   },
-  async "net.pingSweep"(args) {
+  async "net.pingSweep"(args, options) {
     const target = requireString(args, "target");
-    return pingSweep({
-      target,
-      method: optionalString(args, "method") as
-        | "auto"
-        | "nmap"
-        | "arp"
-        | "native"
-        | undefined,
-      timeoutMs: optionalNumber(args, "timeoutMs"),
-    });
+    return pingSweep(
+      {
+        target,
+        method: optionalString(args, "method") as
+          | "auto"
+          | "nmap"
+          | "arp"
+          | "native"
+          | undefined,
+        timeoutMs: optionalNumber(args, "timeoutMs"),
+      },
+      { signal: options?.signal },
+    );
   },
   async "tool.check"(args) {
     return toolCheckHandler(args);
@@ -1800,7 +1835,7 @@ async function runToolBatch(
         name: spec.name,
         status: "fail",
         ok: false,
-        output: `Not run — tool.batch timed out after ${BATCH_HARD_TIMEOUT_MS / 1000}s.`,
+        output: `Not run — tool.batch timed out after ${Math.round(batchTimeoutMs / 1000)}s.`,
         exitCode: 124,
       };
       continue;
@@ -1829,7 +1864,7 @@ async function runToolBatch(
   let output = sections.join("\n\n");
   if (hardTimedOut && !allOk) {
     output =
-      `[batch] timed out after ${BATCH_HARD_TIMEOUT_MS / 1000}s — partial results below\n\n` +
+      `[batch] timed out after ${Math.round(batchTimeoutMs / 1000)}s — partial results below\n\n` +
       output;
   } else if (policyCancelCount > 0) {
     const n = finalOutcomes.filter((o) => o.status === "cancelled").length;
@@ -1839,12 +1874,15 @@ async function runToolBatch(
         output;
     }
   }
-  // Soft-success for the agent turn: one failed whois/dns must NOT cancel
-  // sibling top-level tools (http.fetch, net.scan, …). Partial failures stay
-  // visible in the sectioned body and non-zero exitCode for the model.
-  const softOk = !parentAborted && !hardTimedOut;
+  // `ok` is the signal the runner, loop-guard, and task-evidence layers use, so
+  // it reports the truth: a batch whose children failed is NOT a success. The
+  // original intent (a failed child must not cancel sibling top-level tools) is
+  // preserved by `partial`, which tells the runner this was a partial result
+  // rather than an aborted or hard-failed call.
+  const anyOk = finalOutcomes.some((outcome) => outcome.ok);
   return {
-    ok: softOk ? true : allOk,
+    ok: allOk,
+    partial: !allOk && anyOk && !parentAborted && !hardTimedOut,
     output,
     exitCode: allOk ? 0 : hardTimedOut ? 124 : parentAborted ? 130 : 1,
   };

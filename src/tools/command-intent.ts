@@ -198,11 +198,16 @@ export function looksLongRunning(command: string): boolean {
  * session-state reminders keep the job visible, and shell.tail can harvest
  * output incrementally without re-running the command.
  */
-const LONG_FINITE_JOB_PATTERNS: readonly RegExp[] = [
+const LONG_FINITE_JOB_BINARIES: readonly RegExp[] = [
   /^(?:\S*\/)?(?:nmap|masscan)\b/i,
   /^(?:\S*\/)?(?:ffuf|feroxbuster|gobuster|dirsearch|wfuzz|nikto|nuclei|sqlmap)\b/i,
   /^(?:\S*\/)?find\s+/i,
 ];
+
+/** True when the segment names one of the potentially expensive binaries. */
+function namesFiniteJobBinary(executable: string): boolean {
+  return LONG_FINITE_JOB_BINARIES.some((pattern) => pattern.test(executable));
+}
 
 const ENV_OPTIONS_WITH_VALUE = new Set(["-u", "--unset", "-C", "--chdir", "-S", "--split-string"]);
 const SUDO_OPTIONS_WITH_VALUE = new Set(["-C", "--close-from", "-D", "--chdir", "-g", "--group", "-h", "--host", "-p", "--prompt", "-R", "--chroot", "-T", "--command-timeout", "-u", "--user"]);
@@ -255,8 +260,131 @@ function unwrapFiniteCommand(segment: string): string {
 }
 
 export function looksLikeLongFiniteCommand(command: string): boolean {
-  return commandSegments(command).some((segment) => {
+  return Boolean(longFiniteCommandCost(command).reason);
+}
+
+/**
+ * Cost signals that make a finite command worth running as a durable job.
+ * The binary name alone is NOT enough: `nmap -p22 host`, `sqlmap --version`,
+ * and `find . -name '*.ts'` all finish in seconds and their output is needed in
+ * the same turn, while `nmap -p- 10.0.0.0/24`, `ffuf -w big.txt`, and
+ * `find / -name id_rsa` genuinely take minutes. Decisions are made from parsed
+ * argv (flags, port specs, target shape), never from prompt wording.
+ */
+export function longFiniteCommandCost(command: string): {
+  reason: string | undefined;
+} {
+  for (const segment of commandSegments(command)) {
     const executable = unwrapFiniteCommand(segment);
-    return LONG_FINITE_JOB_PATTERNS.some((pattern) => pattern.test(executable));
-  });
+    const tokens = executable.trim().split(/\s+/).filter(Boolean);
+    if (tokens.length === 0) continue;
+    const base = baseCommand(tokens[0]).toLowerCase();
+    if (!namesFiniteJobBinary(executable)) continue;
+    const args = tokens.slice(1);
+    if (args.some((token) => /^(?:--version|-V|--help|-h|-hh)$/i.test(token))) {
+      continue;
+    }
+    if (base === "nmap" || base === "masscan") {
+      const reason = nmapCostReason(args);
+      if (reason) return { reason };
+      continue;
+    }
+    if (
+      base === "ffuf" ||
+      base === "feroxbuster" ||
+      base === "gobuster" ||
+      base === "dirsearch" ||
+      base === "wfuzz" ||
+      base === "nikto" ||
+      base === "nuclei" ||
+      base === "sqlmap"
+    ) {
+      const reason = webScannerCostReason(base, args);
+      if (reason) return { reason };
+      continue;
+    }
+    if (base === "find") {
+      const reason = findCostReason(args);
+      if (reason) return { reason };
+      continue;
+    }
+  }
+  return { reason: undefined };
+}
+
+function portSpecIsBroad(spec: string): boolean {
+  if (spec === "-" || spec.includes("-")) return true;
+  const parts = spec.split(",").filter(Boolean);
+  return parts.length > 32;
+}
+
+function nmapCostReason(args: string[]): string | undefined {
+  let sawPortLimit = false;
+  for (let i = 0; i < args.length; i += 1) {
+    const token = args[i]!;
+    if (/^-(?:A|sV|sC|sU|sO)$/.test(token)) return `${token} scan is expensive`;
+    if (token === "--script" || token.startsWith("--script=")) {
+      return "NSE scripts are expensive";
+    }
+    if (token === "-p" || token === "--ports") {
+      const spec = args[i + 1] ?? "";
+      if (portSpecIsBroad(spec)) return `broad port spec ${spec}`;
+      sawPortLimit = true;
+      continue;
+    }
+    if (token.startsWith("-p")) {
+      const spec = token.slice(2);
+      if (spec === "" || portSpecIsBroad(spec)) return "broad port spec";
+      sawPortLimit = true;
+      continue;
+    }
+    if (token === "--top-ports") {
+      const n = Number(args[i + 1]);
+      if (!Number.isFinite(n) || n >= 100) return "top-ports sweep";
+      sawPortLimit = true;
+      continue;
+    }
+    // A CIDR or address-range target scans many hosts.
+    if (!token.startsWith("-") && (token.includes("/") || /\d-\d/.test(token))) {
+      return `multi-host target ${token}`;
+    }
+  }
+  // With no port limiter at all, nmap scans its default 1000 ports.
+  if (!sawPortLimit) return "default 1000-port scan";
+  return undefined;
+}
+
+function webScannerCostReason(base: string, args: string[]): string | undefined {
+  for (let i = 0; i < args.length; i += 1) {
+    const token = args[i]!;
+    if (/^(?:-w|--wordlist|--wordlists)$/i.test(token) || token.startsWith("-w=")) {
+      return "wordlist-driven fuzzing";
+    }
+    if (/^(?:-u|--url|-r|--request)$/i.test(token) && base === "sqlmap") {
+      return "sqlmap against a live target";
+    }
+    if (/FUZZ/.test(token)) return "fuzz placeholder";
+  }
+  if (base === "nikto" || base === "nuclei" || base === "dirsearch") {
+    // These have no cheap mode once a target is supplied.
+    return args.some((token) => !token.startsWith("-"))
+      ? `${base} against a target`
+      : undefined;
+  }
+  return undefined;
+}
+
+const EXPENSIVE_FIND_ROOTS = /^(?:\/|~\/?|\/Users\/?$|\/home\/?$|\/var\b|\/usr\b|\/opt\b|\/etc\b|[A-Za-z]:[\\/])/;
+
+function findCostReason(args: string[]): string | undefined {
+  for (const token of args) {
+    if (/^-(?:exec|execdir|ok|okdir)$/.test(token)) {
+      return "find -exec runs a command per match";
+    }
+  }
+  const start = args.find((token) => !token.startsWith("-"));
+  if (start && EXPENSIVE_FIND_ROOTS.test(start)) {
+    return `filesystem-wide search from ${start}`;
+  }
+  return undefined;
 }

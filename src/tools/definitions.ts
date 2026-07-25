@@ -5,17 +5,43 @@ import {
   toWireName,
 } from "../llm/tool-protocol.js";
 
+/**
+ * Tools whose handler actually honors `timeoutMs`. The property used to be
+ * injected into every schema, which cost ~45 tokens per tool on every request
+ * and told the model it could bound operations (fs.read, pdf.read, plan.*) that
+ * silently ignored it.
+ */
+const TIMED_TOOLS = new Set([
+  "shell.exec",
+  "http.fetch",
+  "web.fetch",
+  "web.search",
+  "net.scan",
+  "net.pingSweep",
+  "pentest.recon",
+  "pentest.webDiscover",
+  "pentest.apiEnumerate",
+  "pentest.authCompare",
+  "pentest.scanStatus",
+  "pkg.install",
+  "tool.batch",
+  "tool.check",
+  "image.ocr",
+  "pdf.read",
+  "dns.lookup",
+  "whois.lookup",
+  "fs.search",
+]);
+
 function def(
   name: string,
   description: string,
   parameters: ToolDefinition["parameters"],
   flags: Partial<Pick<ToolDefinition, "readOnly" | "mutates" | "askMode">> = {},
 ): ToolDefinition {
-  // shell.start launches a durable process with no generic execution deadline.
-  const timedParameters: ToolDefinition["parameters"] =
-    name === "shell.start"
-      ? parameters
-      : {
+  const timedParameters: ToolDefinition["parameters"] = !TIMED_TOOLS.has(name)
+    ? parameters
+    : {
           ...parameters,
           properties: {
             ...(parameters.properties ?? {}),
@@ -195,6 +221,34 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
           type: "integer",
           description: "Max hit lines (default 50)",
         },
+        maxPerFile: {
+          type: "integer",
+          description: "Max hits per file (default 20)",
+        },
+        glob: {
+          type: "string",
+          description:
+            "Restrict to matching paths, ripgrep -g syntax (e.g. \"*.ts\", \"src/**/*.tsx\").",
+        },
+        caseInsensitive: { type: "boolean" },
+        fixedString: {
+          type: "boolean",
+          description: "Treat pattern as a literal string instead of a regex.",
+        },
+        context: {
+          type: "integer",
+          minimum: 0,
+          maximum: 10,
+          description: "Lines of context around each hit.",
+        },
+        filesOnly: {
+          type: "boolean",
+          description: "Return matching file paths only.",
+        },
+        hidden: {
+          type: "boolean",
+          description: "Include hidden files and directories.",
+        },
       },
       required: ["pattern"],
       additionalProperties: false,
@@ -277,13 +331,19 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   ),
   def(
     "shell.exec",
-    "Run a finite shell command and wait for completion. Default timeoutMs is 40000; choose a larger timeout for builds/installs/scaffolds. Known long installs get a safe automatic budget when omitted. Potentially long nmap/ffuf/find-style commands are automatically launched as durable background jobs; when a backgroundJob receipt is returned, poll shell.tail using nextOffset and shell.jobs until terminal status instead of launching a duplicate. Pass cwd instead of cd; use shell.start for persistent servers/watchers/listeners. Set responder:true ONLY for a long, self-completing scan (ffuf/nmap/gobuster and similar) you want to fire-and-forget: the Responder then tracks it, wakes you with the result, and you must NOT poll it. Leave responder off (default) for everything else and poll normally.",
+    "Run a finite shell command and wait for completion. Default timeoutMs is 40000; choose a larger timeout for builds/installs/scaffolds. Known long installs get a safe automatic budget when omitted. Expensive scans/searches (broad port specs, wordlist fuzzing, filesystem-wide find) are automatically launched as durable background jobs; when a backgroundJob receipt is returned, poll shell.tail using nextOffset and shell.jobs until terminal status instead of launching a duplicate. Pass background:\"never\" when you need the output in this turn, or background:\"always\" to force a durable job. Pass cwd instead of cd; use shell.start for persistent servers/watchers/listeners. Set responder:true ONLY for a long, self-completing scan (ffuf/nmap/gobuster and similar) you want to fire-and-forget: the Responder then tracks it, wakes you with the result, and you must NOT poll it. Leave responder off (default) for everything else and poll normally.",
     {
       type: "object",
       properties: {
         command: { type: "string" },
         cwd: { type: "string" },
         timeoutMs: { type: "integer" },
+        background: {
+          type: "string",
+          enum: ["auto", "never", "always"],
+          description:
+            "auto (default): background only persistent commands and commands whose arguments show real cost. never: always run in the foreground and honor timeoutMs. always: always run as a durable job.",
+        },
         responder: {
           type: "boolean",
           description:
@@ -842,8 +902,16 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
       type: "object",
       properties: {
         path: { type: "string" },
-        lang: { type: "string" },
-        maxBytes: { type: "integer" },
+        lang: {
+          type: "string",
+          description: "tesseract language code (default eng).",
+        },
+        psm: {
+          type: "integer",
+          minimum: 0,
+          maximum: 13,
+          description: "tesseract page-segmentation mode (default 6).",
+        },
       },
       required: ["path"],
       additionalProperties: false,
@@ -857,8 +925,29 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
       type: "object",
       properties: {
         path: { type: "string" },
-        maxPages: { type: "integer" },
-        maxBytes: { type: "integer" },
+        maxPages: {
+          type: "integer",
+          minimum: 1,
+          maximum: 500,
+          description:
+            "Maximum pages to OCR when the PDF is scanned. OCR costs up to 120s per page, so bound this for long scans.",
+        },
+        lang: {
+          type: "string",
+          description: "tesseract language code for OCR pages (default eng).",
+        },
+        dpi: {
+          type: "integer",
+          minimum: 72,
+          maximum: 600,
+          description: "Render resolution for OCR pages (default 200).",
+        },
+        psm: {
+          type: "integer",
+          minimum: 0,
+          maximum: 13,
+          description: "tesseract page-segmentation mode (default 6).",
+        },
       },
       required: ["path"],
       additionalProperties: false,

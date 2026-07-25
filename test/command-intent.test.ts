@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   looksLikeLongFiniteCommand,
+  longFiniteCommandCost,
   looksLongRunning,
 } from "../src/tools/command-intent.js";
 
@@ -98,5 +99,38 @@ describe("command-intent — durable finite jobs", () => {
     expect(looksLikeLongFiniteCommand("sudo find / -name '*.pem'")).toBe(true);
     expect(looksLikeLongFiniteCommand("npm install")).toBe(false);
     expect(looksLikeLongFiniteCommand("echo find me")).toBe(false);
+  });
+});
+
+
+describe("TOOL-002 auto-background requires a real cost signal", () => {
+  it("keeps cheap scanner/search invocations in the foreground", () => {
+    for (const command of [
+      "nmap -p22 --top-ports 1 10.0.0.5",
+      "nmap -p 22,80,443 10.0.0.5",
+      "nmap --version",
+      "sqlmap --version",
+      "find . -name '*.ts'",
+      "find src -name '*.tsx'",
+      "gobuster --help",
+    ]) {
+      expect(longFiniteCommandCost(command).reason).toBeUndefined();
+    }
+  });
+
+  it("backgrounds only genuinely expensive invocations", () => {
+    for (const command of [
+      "nmap -p- 10.0.0.5",
+      "nmap -sV example.com",
+      "nmap --script default 10.0.0.5",
+      "nmap -p22 10.0.0.0/24",
+      "ffuf -u https://x/FUZZ -w words.txt",
+      "gobuster dir -u https://x -w big.txt",
+      "find / -name '*.pem'",
+      "find . -exec grep TODO {} ;",
+      "sqlmap -u https://x/?id=1",
+    ]) {
+      expect(longFiniteCommandCost(command).reason).toBeTruthy();
+    }
   });
 });

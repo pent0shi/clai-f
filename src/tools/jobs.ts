@@ -845,7 +845,7 @@ export class JobManager {
         exitCode: 127,
       };
     }
-    await mkdir(this.jobsDir, { recursive: true });
+    await mkdir(this.jobsDir, { recursive: true, mode: 0o700 });
     const prefix = `${new Date().toISOString().replace(/[:.]/g, "-")}-${id}`;
     const stdoutArtifact = join(this.jobsDir, `${prefix}.stdout.log`);
     const stderrArtifact = join(this.jobsDir, `${prefix}.stderr.log`);
@@ -1915,7 +1915,7 @@ export class JobManager {
 
   private persistSync(): boolean {
     try {
-      mkdirSync(this.jobsDir, { recursive: true });
+      mkdirSync(this.jobsDir, { recursive: true, mode: 0o700 });
       const temp = `${this.registryPath}.${process.pid}.${randomUUID()}.tmp`;
       writeFileSync(temp, `${JSON.stringify(this.registry(), null, 2)}\n`, { mode: 0o600 });
       renameSync(temp, this.registryPath);

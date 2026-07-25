@@ -93,7 +93,7 @@ export async function imageOcr(
   return spawnArgv({
     command: "tesseract",
     argv: [path, "stdout", "-l", lang, "--psm", String(psm)],
-    timeoutMs: 60_000,
+    timeoutMs: optionalNumber(args, "timeoutMs") ?? 60_000,
     signal: options.signal,
     onOutput: options.onOutput,
     maxModelBytes: 32_000,

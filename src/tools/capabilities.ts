@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import { findExecutable } from "../os/command.js";
 import type { ToolResult } from "../types.js";
 
@@ -75,29 +75,53 @@ async function findCommand(name: string): Promise<string | undefined> {
   return found && !isProjectLocalNodeBin(found) ? found : undefined;
 }
 
-function getVersion(name: string, resolvedPath?: string): string | undefined {
+/**
+ * Version probes are cached per process: binaries rarely appear or change
+ * mid-session, and `tool.check` (the tool models call first) previously ran up
+ * to 20 blocking `execFileSync` probes of 5s each — a visible TUI freeze.
+ */
+const versionCache = new Map<string, string | undefined>();
+
+async function getVersion(
+  name: string,
+  resolvedPath?: string,
+): Promise<string | undefined> {
   const spec = VERSION_COMMANDS[name];
   if (!spec) return undefined;
-  try {
+  const cacheKey = `${name}\u0000${resolvedPath ?? ""}`;
+  if (versionCache.has(cacheKey)) return versionCache.get(cacheKey);
+  const version = await new Promise<string | undefined>((resolve) => {
     // Prefer the absolute path we already resolved so empty/stripped PATH
     // cannot break version probes.
     const argv0 = resolvedPath ?? spec[0]!;
-    const result = execFileSync(argv0, spec.slice(1), {
-      timeout: 5_000,
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-      env: { ...process.env, PATH: process.env.PATH ?? "" },
-    });
-    // Take the first non-empty line containing a version-like pattern
-    const lines = result.split("\n").filter(Boolean);
-    for (const line of lines) {
-      const ver = /(\d+\.\d+[.\w-]*)/.exec(line);
-      if (ver?.[1]) return ver[1];
-    }
-    return lines[0]?.trim().slice(0, 60);
-  } catch {
-    return undefined;
-  }
+    execFile(
+      argv0,
+      spec.slice(1),
+      {
+        timeout: 5_000,
+        encoding: "utf8",
+        env: { ...process.env, PATH: process.env.PATH ?? "" },
+      },
+      (error, stdout, stderr) => {
+        if (error && !stdout && !stderr) {
+          resolve(undefined);
+          return;
+        }
+        const result = String(stdout || stderr);
+        const lines = result.split("\n").filter(Boolean);
+        for (const line of lines) {
+          const ver = /(\d+\.\d+[.\w-]*)/.exec(line);
+          if (ver?.[1]) {
+            resolve(ver[1]);
+            return;
+          }
+        }
+        resolve(lines[0]?.trim().slice(0, 60));
+      },
+    );
+  });
+  versionCache.set(cacheKey, version);
+  return version;
 }
 
 export async function checkTool(name: string): Promise<ToolAvailability> {
@@ -109,7 +133,7 @@ export async function checkTool(name: string): Promise<ToolAvailability> {
       installHint: INSTALL_HINTS[name],
     };
   }
-  const version = getVersion(name, path);
+  const version = await getVersion(name, path);
   return {
     name,
     available: true,

@@ -221,6 +221,12 @@ export interface ToolResult {
   outputPath?: string | undefined;
   backgroundJob?: BackgroundJobReceipt | undefined;
   truncated?: boolean | undefined;
+  /**
+   * Set by aggregate tools (tool.batch) when some children succeeded and some
+   * failed. `ok` stays false so no layer records a partial run as success,
+   * while callers can distinguish partial results from a full failure/abort.
+   */
+  partial?: boolean | undefined;
   stats?: ToolStats | undefined;
   /**
    * Structured before/after diffs for file mutation tools (fs.edit / write / …).

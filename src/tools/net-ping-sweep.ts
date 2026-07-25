@@ -28,11 +28,22 @@ function commandAvailable(command: string): boolean {
   return Boolean(findExecutableSync(command));
 }
 
+/** Cap on accumulated child output so a /16 sweep cannot buffer tens of MB. */
+const MAX_SWEEP_OUTPUT_BYTES = 1024 * 1024;
+
 function runCommand(
   command: string,
   argv: string[],
   timeoutMs: number,
-): Promise<{ ok: boolean; stdout: string; stderr: string; exitCode: number | null }> {
+  signal?: AbortSignal | undefined,
+): Promise<{
+  ok: boolean;
+  stdout: string;
+  stderr: string;
+  exitCode: number | null;
+  aborted: boolean;
+  truncated: boolean;
+}> {
   return new Promise((resolve) => {
     const child = spawn(command, argv, {
       shell: false,
@@ -41,29 +52,60 @@ function runCommand(
     let stdout = "";
     let stderr = "";
     let killed = false;
+    let aborted = false;
+    let truncated = false;
+
+    const append = (current: string, chunk: Buffer): string => {
+      if (current.length >= MAX_SWEEP_OUTPUT_BYTES) {
+        truncated = true;
+        return current;
+      }
+      const room = MAX_SWEEP_OUTPUT_BYTES - current.length;
+      const text = chunk.toString();
+      if (text.length > room) {
+        truncated = true;
+        return current + text.slice(0, room);
+      }
+      return current + text;
+    };
 
     const timeout = setTimeout(() => {
       killed = true;
       child.kill("SIGTERM");
     }, timeoutMs);
 
+    const onAbort = (): void => {
+      aborted = true;
+      killed = true;
+      child.kill("SIGTERM");
+    };
+    if (signal) {
+      if (signal.aborted) onAbort();
+      else signal.addEventListener("abort", onAbort, { once: true });
+    }
+
+    const finish = (result: {
+      ok: boolean;
+      exitCode: number | null;
+    }): void => {
+      clearTimeout(timeout);
+      signal?.removeEventListener("abort", onAbort);
+      resolve({ ...result, stdout, stderr, aborted, truncated });
+    };
+
     child.stdout?.on("data", (chunk: Buffer) => {
-      stdout += chunk.toString();
+      stdout = append(stdout, chunk);
     });
     child.stderr?.on("data", (chunk: Buffer) => {
-      stderr += chunk.toString();
+      stderr = append(stderr, chunk);
     });
     child.on("error", () => {
-      clearTimeout(timeout);
-      resolve({ ok: false, stdout, stderr, exitCode: 1 });
+      finish({ ok: false, exitCode: 1 });
     });
     child.on("close", (code) => {
-      clearTimeout(timeout);
-      resolve({
+      finish({
         ok: !killed && code === 0,
-        stdout,
-        stderr,
-        exitCode: killed ? 124 : code,
+        exitCode: aborted ? 130 : killed ? 124 : code,
       });
     });
   });
@@ -174,10 +216,20 @@ function formatDevices(devices: ActiveDevice[]): string {
   return lines.join("\n");
 }
 
-export async function pingSweep(args: PingSweepArgs): Promise<ToolResult> {
+export async function pingSweep(
+  args: PingSweepArgs,
+  options: { signal?: AbortSignal | undefined } = {},
+): Promise<ToolResult> {
   const target = args.target.trim();
   const timeoutMs = args.timeoutMs ?? 120_000;
   const method = args.method ?? "auto";
+  const signal = options.signal;
+  const abortedResult = (): ToolResult => ({
+    ok: false,
+    output: "net.pingSweep aborted.",
+    exitCode: 130,
+  });
+  if (signal?.aborted) return abortedResult();
 
   if (!isPrivateCidr(target)) {
     return {
@@ -191,7 +243,8 @@ export async function pingSweep(args: PingSweepArgs): Promise<ToolResult> {
   // methods when nmap returns 0 hosts (common without root — no ARP probe).
   if (method === "nmap" || (method === "auto" && commandAvailable("nmap"))) {
     // Prefer non-interactive cached sudo when available so nmap can ARP-scan.
-    let result = await runCommand("nmap", ["-sn", target], timeoutMs);
+    let result = await runCommand("nmap", ["-sn", target], timeoutMs, signal);
+    if (result.aborted) return abortedResult();
     let devices = parseNmapPingSweep(result.stdout + "\n" + result.stderr);
     if (devices.length === 0 && platform() !== "win32" && commandAvailable("sudo")) {
       // -n: only works if sudo timestamp is already valid (no password prompt).
@@ -199,6 +252,7 @@ export async function pingSweep(args: PingSweepArgs): Promise<ToolResult> {
         "sudo",
         ["-n", "nmap", "-sn", target],
         timeoutMs,
+        signal,
       );
       const elevatedDevices = parseNmapPingSweep(
         elevated.stdout + "\n" + elevated.stderr,
@@ -243,7 +297,8 @@ export async function pingSweep(args: PingSweepArgs): Promise<ToolResult> {
   if (method === "arp" || method === "auto") {
     // Try arp-scan first (gives richer data; often needs root)
     if (commandAvailable("arp-scan")) {
-      let result = await runCommand("arp-scan", ["--localnet"], timeoutMs);
+      let result = await runCommand("arp-scan", ["--localnet"], timeoutMs, signal);
+      if (result.aborted) return abortedResult();
       let devices = parseArpScanOutput(result.stdout);
       if (
         devices.length === 0 &&
@@ -254,6 +309,7 @@ export async function pingSweep(args: PingSweepArgs): Promise<ToolResult> {
           "sudo",
           ["-n", "arp-scan", "--localnet"],
           timeoutMs,
+          signal,
         );
         const elevatedDevices = parseArpScanOutput(elevated.stdout);
         if (elevatedDevices.length > 0) {
@@ -279,7 +335,8 @@ export async function pingSweep(args: PingSweepArgs): Promise<ToolResult> {
 
     // Linux: try ip neigh
     if (platform() === "linux" && commandAvailable("ip")) {
-      const result = await runCommand("ip", ["neigh", "show"], timeoutMs);
+      const result = await runCommand("ip", ["neigh", "show"], timeoutMs, signal);
+      if (result.aborted) return abortedResult();
       const devices = parseIpNeigh(result.stdout);
       if (devices.length > 0 || method === "arp") {
         return {
@@ -292,7 +349,8 @@ export async function pingSweep(args: PingSweepArgs): Promise<ToolResult> {
     }
 
     // Fallback: arp -a (available everywhere)
-    const result = await runCommand("arp", ["-a"], timeoutMs);
+    const result = await runCommand("arp", ["-a"], timeoutMs, signal);
+    if (result.aborted) return abortedResult();
     const devices = parseArpTable(result.stdout);
     return {
       ok: true,

@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { createWriteStream, existsSync, type WriteStream } from "node:fs";
+import { StringDecoder } from "node:string_decoder";
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { ToolResult, ToolStats } from "../types.js";
@@ -273,23 +274,87 @@ async function openArtifact(
     const dir = override
       ? join(override, "..")
       : getArtifactDir();
-    await mkdir(dir, { recursive: true });
+    await mkdir(dir, { recursive: true, mode: 0o700 });
     const path =
       override ??
       join(
         dir,
         `${new Date().toISOString().replace(/[:.]/g, "-")}-${safeArtifactName(command)}.txt`,
       );
-    const stream = createWriteStream(path, { flags: "w" });
+    // Command transcripts routinely contain tokens, target data, and env
+    // dumps — never leave them world-readable on a multi-user box.
+    const stream = createWriteStream(path, { flags: "w", mode: 0o600 });
     return { path, stream };
   } catch {
     return undefined;
   }
 }
 
+/**
+ * Streaming UTF-8 decoder with byte accounting and a binary sniff.
+ *
+ * `chunk.toString()` per chunk splits multi-byte characters at buffer
+ * boundaries (mojibake in nmap banners, i18n build logs, unicode filenames),
+ * and `text.length` counts UTF-16 code units, so every byte cap was wrong for
+ * non-ASCII output. Binary output is detected once and reported so the model
+ * gets a marker instead of lossy text.
+ * Exported only for tests.
+ */
+export class OutputDecoder {
+  private readonly decoder = new StringDecoder("utf8");
+  private sniffed = 0;
+  private nonPrintable = 0;
+  private binaryDetected = false;
+
+  decode(chunk: Buffer): { text: string; bytes: number } {
+    this.sniff(chunk);
+    return { text: this.decoder.write(chunk), bytes: chunk.byteLength };
+  }
+
+  end(): string {
+    return this.decoder.end();
+  }
+
+  get isBinary(): boolean {
+    return this.binaryDetected;
+  }
+
+  private sniff(chunk: Buffer): void {
+    if (this.binaryDetected || this.sniffed >= 2_048) return;
+    const sample = chunk.subarray(0, 2_048 - this.sniffed);
+    for (const byte of sample) {
+      if (byte === 0) {
+        this.binaryDetected = true;
+        return;
+      }
+      if (byte < 9 || (byte > 13 && byte < 32)) this.nonPrintable += 1;
+    }
+    this.sniffed += sample.byteLength;
+    if (this.sniffed >= 256 && this.nonPrintable / this.sniffed > 0.3) {
+      this.binaryDetected = true;
+    }
+  }
+}
+
+/**
+ * Model-facing replacement for binary command output. Reporting the size and
+ * the artifact path is useful evidence; feeding decoded binary to the model is
+ * not, and it wrecks byte accounting downstream.
+ */
+function binarySuppressionNotice(
+  bytes: number,
+  artifactPath: string | undefined,
+): string {
+  return (
+    `[binary output suppressed: ${bytes.toLocaleString()} bytes]` +
+    (artifactPath
+      ? `\nFull bytes were captured to ${artifactPath}. Use a text-producing command (xxd/strings/file) if you need to inspect them.`
+      : "\nUse a text-producing command (xxd/strings/file) if you need to inspect the bytes.")
+  );
+}
+
 /** A small ring buffer of recent output lines used as the "tail" summary.
- *  Exported only for tests. */
-export class RingBuffer {
+ *  Exported only for tests. */export class RingBuffer {
   private chunks: string[] = [];
   private bytes = 0;
 
@@ -399,6 +464,7 @@ async function shellExecAttempt(args: ShellExecArgs): Promise<ShellExecAttemptRe
   let head = "";
   const tail = new RingBuffer(halfModel);
   let bytesRead = 0;
+  const decoder = new OutputDecoder();
   let bytesDropped = 0;
   let linesRead = 0;
   let captureLimitHit = false;
@@ -444,8 +510,9 @@ async function shellExecAttempt(args: ShellExecArgs): Promise<ShellExecAttemptRe
     };
 
     const append = (chunk: Buffer, stream: "stdout" | "stderr"): void => {
-      const text = chunk.toString();
-      bytesRead += text.length;
+      const decoded = decoder.decode(chunk);
+      const text = decoded.text;
+      bytesRead += decoded.bytes;
       linesRead += text.split("\n").length - 1;
       // Stream raw bytes to the artifact file (cheap; no concat).
       if (artifact && !captureLimitHit) {
@@ -558,7 +625,11 @@ async function shellExecAttempt(args: ShellExecArgs): Promise<ShellExecAttemptRe
       }
 
       // Always redact before exposing the bounded text to callers.
-      const output = redactSecrets(combined);
+      // Binary output (a stray `cat /bin/ls`, a downloaded tarball) is
+      // replaced with a hash + marker instead of lossy mojibake.
+      const output = decoder.isBinary
+        ? binarySuppressionNotice(bytesRead, artifact?.path)
+        : redactSecrets(combined);
 
       // Redact the on-disk artifact too so `/output last` and any later
       // reader (model, user, audit) sees the same scrubbed bytes.
@@ -696,11 +767,12 @@ export async function spawnArgv(args: SpawnArgvArgs): Promise<ToolResult> {
   let head = "";
   const tail = new RingBuffer(halfModel);
   let bytesRead = 0;
+  const decoder = new OutputDecoder();
   let bytesDropped = 0;
   let linesRead = 0;
   let captureLimitHit = false;
 
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve) => {
     const detached = process.platform !== "win32";
     // For spawnArgv we know the exact program; build an `argv0`-style
     // command preview that {@link looksInteractiveStdin} can inspect so
@@ -736,8 +808,9 @@ export async function spawnArgv(args: SpawnArgvArgs): Promise<ToolResult> {
     };
 
     const append = (chunk: Buffer, stream: "stdout" | "stderr"): void => {
-      const text = chunk.toString();
-      bytesRead += text.length;
+      const decoded = decoder.decode(chunk);
+      const text = decoded.text;
+      bytesRead += decoded.bytes;
       linesRead += text.split("\n").length - 1;
       if (artifact && !captureLimitHit) {
         if (bytesRead <= maxCaptureBytes) {
@@ -795,7 +868,18 @@ export async function spawnArgv(args: SpawnArgvArgs): Promise<ToolResult> {
       if (aborted || args.signal?.aborted) {
         resolve({ ok: false, output: "Command aborted.", exitCode: 130 });
       } else {
-        reject(error);
+        // Resolve a structured result instead of rejecting: every caller
+        // (pkg.install, pentest.recon, pdf/image OCR) should see an actionable
+        // "binary not found" ToolResult rather than a raw spawn ENOENT throw.
+        const err = error as NodeJS.ErrnoException;
+        const notFound = err.code === "ENOENT";
+        resolve({
+          ok: false,
+          exitCode: 127,
+          output: notFound
+            ? `${args.command} was not found on PATH. Install it (pkg.install ${args.command}) or use a built-in tool instead.`
+            : `Failed to launch ${args.command}: ${err.code ?? err.message}`,
+        });
       }
     });
     child.on("close", (code) => {

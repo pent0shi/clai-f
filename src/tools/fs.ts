@@ -1,5 +1,5 @@
 import { createReadStream, lstatSync, readlinkSync, realpathSync } from "node:fs";
-import { open, readdir, readFile, writeFile, unlink, rm, rename, mkdir, stat } from "node:fs/promises";
+import { open, readdir, readFile, writeFile, appendFile, unlink, rm, rename, mkdir, stat, chmod } from "node:fs/promises";
 import { join, dirname, basename, relative, resolve } from "node:path";
 import { createHash } from "node:crypto";
 import { createInterface } from "node:readline";
@@ -18,6 +18,58 @@ import {
   formatUnifiedPreview,
   type FileChange,
 } from "./file-diff.js";
+
+/**
+ * Atomically replace a file's contents while preserving its permissions.
+ *
+ * - The temp name is unique per process/attempt, so two concurrent edits of the
+ *   same target can never share a staging file and clobber each other.
+ * - The original mode is re-applied to the replacement, so an executable script
+ *   stays 0755 and a private key/config stays 0600 after an edit.
+ * - Data is flushed (fsync) before the rename, and the temp file is removed on
+ *   any failure so a crash cannot leave a stray `.clai-*` file behind.
+ */
+let atomicWriteCounter = 0;
+
+export async function writeFileAtomic(
+  resolved: string,
+  contents: string,
+): Promise<void> {
+  const priorMode = await stat(resolved)
+    .then((st) => st.mode & 0o7777)
+    .catch(() => undefined);
+  atomicWriteCounter += 1;
+  const unique = `${process.pid}-${Date.now().toString(36)}-${atomicWriteCounter}-${Math.random()
+    .toString(36)
+    .slice(2, 8)}`;
+  const tempPath = join(
+    dirname(resolved),
+    `.${basename(resolved)}.clai-${unique}.tmp`,
+  );
+  let handle: Awaited<ReturnType<typeof open>> | undefined;
+  try {
+    handle = await open(tempPath, "wx", priorMode ?? 0o644);
+    await handle.writeFile(contents, "utf8");
+    await handle.sync();
+    await handle.close();
+    handle = undefined;
+    if (priorMode !== undefined) {
+      await chmod(tempPath, priorMode);
+    }
+    await rename(tempPath, resolved);
+  } catch (error) {
+    if (handle) await handle.close().catch(() => undefined);
+    await unlink(tempPath).catch(() => undefined);
+    throw error;
+  }
+}
+
+/**
+ * Threshold above which whole-file mutation is refused or replaced by an
+ * in-place strategy. Reading and rewriting a very large file holds 2x its size
+ * in heap in a process that also carries transcript state.
+ */
+const LARGE_MUTATION_BYTES = 8 * 1024 * 1024;
 
 /** Compact integrity footer so the model trusts a write without re-reading. */
 function describeWrite(path: string, content: string, verb: string): string {
@@ -770,14 +822,7 @@ export async function fsReplaceLines(
   if (replacement.at(-1) === "") replacement.pop();
   lines.splice(startLine - 1, endLine - startLine + 1, ...replacement);
   const next = lines.join(newline) + (hadFinalNewline ? newline : "");
-  const temp = join(dirname(resolved), `.${basename(resolved)}.clai-${process.pid}-${Date.now()}.tmp`);
-  try {
-    await writeFile(temp, next, "utf8");
-    await rename(temp, resolved);
-  } catch (error) {
-    await unlink(temp).catch(() => undefined);
-    throw error;
-  }
+  await writeFileAtomic(resolved, next);
   // X10: receipt with line count + hash so the model notices size changes.
   const verb =
     content === ""
@@ -955,6 +1000,21 @@ export async function fsSearch(
     confirmed?: boolean | undefined;
     /** Max matching lines to return (default 50, hard cap 200). */
     maxMatches?: number | undefined;
+    /** Max hits per file (default 20). */
+    maxPerFile?: number | undefined;
+    /** Glob filter passed to ripgrep -g (e.g. "*.ts"). */
+    glob?: string | undefined;
+    /** Case-insensitive search (-i). */
+    caseInsensitive?: boolean | undefined;
+    /** Treat the pattern as a literal string (-F). */
+    fixedString?: boolean | undefined;
+    /** Lines of context around each hit (-C). */
+    context?: number | undefined;
+    /** Report matching file names only (-l). */
+    filesOnly?: boolean | undefined;
+    /** Include hidden files/directories (--hidden). */
+    hidden?: boolean | undefined;
+    timeoutMs?: number | undefined;
   } = {},
 ): Promise<ToolResult> {
   const resolved = resolvePath(path);
@@ -962,6 +1022,18 @@ export async function fsSearch(
   const maxMatches = Math.min(
     200,
     Math.max(1, Math.floor(options.maxMatches ?? 50)),
+  );
+  const maxPerFile = Math.min(
+    200,
+    Math.max(1, Math.floor(options.maxPerFile ?? 20)),
+  );
+  const context = Math.min(
+    10,
+    Math.max(0, Math.floor(options.context ?? 0)),
+  );
+  const timeoutMs = Math.min(
+    120_000,
+    Math.max(1_000, Math.floor(options.timeoutMs ?? 15_000)),
   );
   if (!pattern.trim()) {
     return {
@@ -974,31 +1046,33 @@ export async function fsSearch(
   // Prefer content hits (path:line:text) so the model can jump to fs.read
   // with offset around interesting lines — not just file names.
   try {
-    const result = await execa(
-      "rg",
-      [
-        "--line-number",
-        "--no-heading",
-        "--color",
-        "never",
-        // Cap hits per file so one noisy log cannot fill the budget alone.
-        "--max-count",
-        "20",
-        "--max-filesize",
-        "1M",
-        "--max-columns",
-        "300",
-        "--max-columns-preview",
-        // Global-ish budget via head_limit on our side after the fact.
-        pattern,
-        resolved,
-      ],
-      {
-        reject: false,
-        all: true,
-        timeout: 15_000,
-      },
-    );
+    const rgArgs = [
+      "--line-number",
+      "--no-heading",
+      "--color",
+      "never",
+      // Cap hits per file so one noisy log cannot fill the budget alone.
+      "--max-count",
+      String(maxPerFile),
+      "--max-filesize",
+      "1M",
+      "--max-columns",
+      "300",
+      "--max-columns-preview",
+    ];
+    if (options.caseInsensitive) rgArgs.push("-i");
+    if (options.fixedString) rgArgs.push("-F");
+    if (options.hidden) rgArgs.push("--hidden");
+    if (options.filesOnly) rgArgs.push("-l");
+    if (context > 0) rgArgs.push("-C", String(context));
+    if (options.glob) rgArgs.push("-g", options.glob);
+    // `--` keeps a pattern that starts with `-` from being parsed as a flag.
+    rgArgs.push("--", pattern, resolved);
+    const result = await execa("rg", rgArgs, {
+      reject: false,
+      all: true,
+      timeout: timeoutMs,
+    });
     // rg exit 1 = no matches (still ok for the model); 2 = error
     if (result.exitCode === 0 || result.exitCode === 1) {
       const body = (result.all ?? "").trim();
@@ -1029,15 +1103,18 @@ export async function fsSearch(
   }
 
   try {
-    const result = await execa(
-      "grep",
-      ["-R", "-n", "-I", "-m", String(maxMatches), "--", pattern, resolved],
-      {
-        reject: false,
-        all: true,
-        timeout: 15_000,
-      },
-    );
+    const grepArgs = ["-R", "-n", "-I", "-m", String(maxPerFile)];
+    if (options.caseInsensitive) grepArgs.push("-i");
+    if (options.fixedString) grepArgs.push("-F");
+    if (options.filesOnly) grepArgs.push("-l");
+    if (context > 0) grepArgs.push("-C", String(context));
+    if (options.glob) grepArgs.push(`--include=${options.glob}`);
+    grepArgs.push("--", pattern, resolved);
+    const result = await execa("grep", grepArgs, {
+      reject: false,
+      all: true,
+      timeout: timeoutMs,
+    });
     const body = (result.all ?? "").trim();
     if (!body || result.exitCode === 1) {
       return {
@@ -1083,6 +1160,16 @@ export async function fsEdit(
   options: { confirmed?: boolean | undefined } = {},
 ): Promise<ToolResult> {
   const resolved = ensureWriteAllowed(path, options.confirmed);
+  const priorStat = await stat(resolved).catch(() => undefined);
+  if (priorStat?.isFile() && priorStat.size > LARGE_MUTATION_BYTES) {
+    return {
+      ok: false,
+      output:
+        `fs.edit refuses ${resolved}: ${priorStat.size.toLocaleString()} bytes exceeds the ${Math.round(LARGE_MUTATION_BYTES / (1024 * 1024))}MB whole-file edit limit. ` +
+        `Use fs.replaceLines for a bounded line range, or a streaming tool (sed -i / awk) via shell.exec.`,
+      exitCode: 1,
+    };
+  }
   const content = await readFile(resolved, "utf8");
   const expected = expectedReplacements ?? 1;
 
@@ -1113,16 +1200,8 @@ export async function fsEdit(
 
   const updated = content.replaceAll(oldText, newText);
 
-  // Atomic write: write to temp file in same directory, then rename
-  const tempPath = join(dirname(resolved), `.${basename(resolved)}.clai-tmp`);
-  try {
-    await writeFile(tempPath, updated, "utf8");
-    await rename(tempPath, resolved);
-  } catch (error) {
-    // Cleanup temp file on failure
-    try { await unlink(tempPath); } catch { /* ignore */ }
-    throw error;
-  }
+  // Atomic, mode-preserving, race-safe replacement.
+  await writeFileAtomic(resolved, updated);
 
   const change = buildFileChange({
     path: resolved,
@@ -1217,6 +1296,38 @@ export async function fsAppend(
   }
 
   let original = "";
+  // Large-file guard: reading + rewriting a 500 MB log to append a few lines
+  // holds 2x the file in heap. Above the threshold, append in place with
+  // `appendFile` and say the diff was skipped for size.
+  const priorStat = await stat(resolved).catch(() => undefined);
+  if (
+    priorStat?.isFile() &&
+    priorStat.size > LARGE_MUTATION_BYTES &&
+    position === "end"
+  ) {
+    const priorBytesLarge = priorStat.size;
+    if (
+      typeof options.expectedPriorBytes === "number" &&
+      options.expectedPriorBytes !== priorBytesLarge
+    ) {
+      return {
+        ok: false,
+        output:
+          `fs.append integrity check failed for ${resolved}: expected prior bytes=${options.expectedPriorBytes}, actual=${priorBytesLarge}. ` +
+          `Do NOT append again until you reconcile (read the last ~20 lines or re-write).`,
+        exitCode: 1,
+      };
+    }
+    await appendFile(resolved, content, "utf8");
+    const afterStat = await stat(resolved).catch(() => undefined);
+    return {
+      ok: true,
+      output:
+        describeWrite(resolved, content, "Appended (end) to") +
+        `\n  prior_bytes=${priorBytesLarge} after_bytes=${afterStat?.size ?? priorBytesLarge + Buffer.byteLength(content, "utf8")}` +
+        `\n  note: file exceeds ${Math.round(LARGE_MUTATION_BYTES / (1024 * 1024))}MB — appended in place and skipped the diff/receipt hash of the whole file.`,
+    };
+  }
   try {
     original = await readFile(resolved, "utf8");
   } catch (error: any) {
@@ -1271,15 +1382,8 @@ export async function fsAppend(
     next = original + content;
   }
 
-  // Atomic write: write to temp file in same directory, then rename
-  const tempPath = join(dirname(resolved), `.${basename(resolved)}.clai-tmp`);
-  try {
-    await writeFile(tempPath, next, "utf8");
-    await rename(tempPath, resolved);
-  } catch (error) {
-    try { await unlink(tempPath); } catch { /* ignore */ }
-    throw error;
-  }
+  // Atomic, mode-preserving, race-safe replacement.
+  await writeFileAtomic(resolved, next);
 
   const st = await stat(resolved).catch(() => undefined);
   const change = buildFileChange({

@@ -95,6 +95,40 @@ export async function pdfRead(
     };
   }
 
+  const psmRaw = optionalNumber(args, "psm") ?? 6;
+  const psm = Math.floor(psmRaw);
+  if (!Number.isFinite(psmRaw) || psm < 0 || psm > 13) {
+    return {
+      ok: false,
+      output: "pdf.read: psm must be an integer from 0 to 13",
+      exitCode: 1,
+    };
+  }
+
+  const maxPagesRaw = optionalNumber(args, "maxPages");  let maxPages: number | undefined;
+  if (maxPagesRaw !== undefined) {
+    maxPages = Math.floor(maxPagesRaw);
+    if (!Number.isFinite(maxPagesRaw) || maxPages < 1 || maxPages > 500) {
+      return {
+        ok: false,
+        output: "pdf.read: maxPages must be an integer from 1 to 500",
+        exitCode: 1,
+      };
+    }
+  }
+
+  // The per-call budget bounds the whole operation, including OCR of every
+  // rendered page, so the model can actually cap a scanned-PDF read.
+  const totalTimeoutMs = optionalNumber(args, "timeoutMs");
+  const deadline =
+    totalTimeoutMs !== undefined ? Date.now() + totalTimeoutMs : undefined;
+  const remainingMs = (fallback: number): number => {
+    if (deadline === undefined) return fallback;
+    return Math.max(1_000, Math.min(fallback, deadline - Date.now()));
+  };
+  const outOfTime = (): boolean =>
+    deadline !== undefined && Date.now() >= deadline;
+
   const path = resolve(expandHome(rawPath));
   try {
     const info = await stat(path);
@@ -119,7 +153,7 @@ export async function pdfRead(
     const direct = await spawnArgv({
       command: "pdftotext",
       argv: ["-layout", path, "-"],
-      timeoutMs: 120_000,
+      timeoutMs: remainingMs(120_000),
       signal: options.signal,
       onOutput: options.onOutput,
       noArtifact: true,
@@ -168,7 +202,7 @@ export async function pdfRead(
     const render = await spawnArgv({
       command: "pdftoppm",
       argv: ["-png", "-r", String(dpi), path, prefix],
-      timeoutMs: 300_000,
+      timeoutMs: remainingMs(300_000),
       signal: options.signal,
       onOutput: options.onOutput,
       noArtifact: true,
@@ -181,10 +215,10 @@ export async function pdfRead(
       };
     }
 
-    const entries = (await readdir(workDir))
+    const allEntries = (await readdir(workDir))
       .filter((name) => name.toLowerCase().endsWith(".png"))
       .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
-    if (entries.length === 0) {
+    if (allEntries.length === 0) {
       return {
         ok: false,
         output:
@@ -192,11 +226,22 @@ export async function pdfRead(
         exitCode: 1,
       };
     }
+    // maxPages is advertised in the schema and must actually bound the work:
+    // OCR costs up to 120s per page, so a 100-page scan is hours otherwise.
+    const entries =
+      maxPages !== undefined ? allEntries.slice(0, maxPages) : allEntries;
+    const skippedPages = allEntries.length - entries.length;
 
     const pageTexts: string[] = [];
     for (let i = 0; i < entries.length; i += 1) {
       if (options.signal?.aborted) {
         return { ok: false, output: "pdf.read aborted.", exitCode: 130 };
+      }
+      if (outOfTime()) {
+        pageTexts.push(
+          `----- page ${i + 1} -----\n(skipped: timeoutMs budget exhausted after ${i} page(s); raise timeoutMs or lower maxPages)`,
+        );
+        break;
       }
       const imagePath = join(workDir, entries[i]!);
       options.onOutput?.(
@@ -205,8 +250,8 @@ export async function pdfRead(
       );
       const ocr = await spawnArgv({
         command: "tesseract",
-        argv: [imagePath, "stdout", "-l", lang, "--psm", "6"],
-        timeoutMs: 120_000,
+        argv: [imagePath, "stdout", "-l", lang, "--psm", String(psm)],
+        timeoutMs: remainingMs(120_000),
         signal: options.signal,
         noArtifact: true,
         maxModelBytes: 200_000,
@@ -229,7 +274,12 @@ export async function pdfRead(
     }
     return {
       ok: true,
-      output: `[scanned PDF — text recovered via OCR of ${entries.length} page(s)]\n\n${combined}`,
+      output:
+        `[scanned PDF — text recovered via OCR of ${entries.length} page(s)` +
+        (skippedPages > 0
+          ? `; ${skippedPages} further page(s) skipped by maxPages=${maxPages}`
+          : "") +
+        `]\n\n${combined}`,
     };
   } finally {
     await rm(workDir, { recursive: true, force: true }).catch(() => undefined);

@@ -246,7 +246,10 @@ describe("phase 12 — tool.batch", () => {
         ],
       },
     });
-    expect(result.ok).toBe(true);
+    // TOOL-003: a batch with a failed child is not reported as a success;
+    // `partial` distinguishes "some children failed" from an aborted batch.
+    expect(result.ok).toBe(false);
+    expect(result.partial).toBe(true);
     expect(result.exitCode).toBe(1);
     expect(result.output).toMatch(/#1 fs\.read \[fail/);
     expect(result.output).toMatch(/#2 sysinfo \[ok/);
@@ -268,7 +271,7 @@ describe("phase 12 — tool.batch", () => {
         ],
       },
     });
-    expect(result.ok).toBe(true);
+    expect(result.ok).toBe(false);
     expect(result.exitCode).toBe(1);
     expect(result.output).toMatch(/on_fail cancelled/);
     expect(result.output).toMatch(/#1 fs\.read \[fail/);
@@ -313,7 +316,8 @@ describe("phase 12 — tool.batch", () => {
         ],
       },
     });
-    expect(result.ok).toBe(true);
+    expect(result.ok).toBe(false);
+    expect(result.partial).toBe(true);
     expect(result.output).toMatch(/#1 shell\.exec \[fail/);
     expect(result.output).toMatch(/#2 sysinfo \[ok/);
     expect(result.output).toMatch(/#3 sysinfo \[cancelled/);
