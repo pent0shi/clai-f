@@ -313,7 +313,30 @@ describe("transcript reducer (V2-050)", () => {
     ]);
   });
 
-  it("reorders late thinking-delta before the pending assistant row", () => {
+  it("hoists a late thinking-delta above an assistant row that has painted nothing", () => {
+    const seq = buildSequencer();
+    const turnId = asTurnId("turn-1");
+    let state = EMPTY_TRANSCRIPT_STATE;
+    // Fence-only delta holds an empty placeholder row — nothing is on screen yet.
+    state = applyAppEvent(
+      state,
+      seq.build("assistant-delta", { text: "```tool\n" }, turnId),
+    );
+    state = applyAppEvent(
+      state,
+      seq.build(
+        "thinking-delta",
+        { text: "The user wants me to continue; I should provide a final summary." },
+        turnId,
+      ),
+    );
+    expect(transcriptItems(state).map((item) => item.kind)).toEqual([
+      "thinking",
+      "assistant",
+    ]);
+  });
+
+  it("never moves a late thinking-delta above already-painted assistant text", () => {
     const seq = buildSequencer();
     const turnId = asTurnId("turn-1");
     let state = EMPTY_TRANSCRIPT_STATE;
@@ -329,10 +352,10 @@ describe("transcript reducer (V2-050)", () => {
         turnId,
       ),
     );
-    // Thinking is moved before the assistant even though its delta arrived later.
+    // Painted prose stays put: the reasoning arrived later and reads later.
     expect(transcriptItems(state).map((item) => item.kind)).toEqual([
-      "thinking",
       "assistant",
+      "thinking",
     ]);
     state = applyAppEvent(
       state,
@@ -357,10 +380,48 @@ describe("transcript reducer (V2-050)", () => {
       ),
     );
     const items = transcriptItems(state);
-    expect(items.map((i) => i.kind)).toEqual(["thinking", "assistant"]);
-    expect((items[1] as AssistantItem).text).toMatch(/Risk: LOW/);
-    expect((items[0] as ThinkingItem).content).toMatch(/final summary/);
-    expect((items[0] as ThinkingItem).streaming).toBe(false);
+    expect(items.map((i) => i.kind)).toEqual(["assistant", "thinking"]);
+    expect((items[0] as AssistantItem).text).toMatch(/Risk: LOW/);
+    expect((items[1] as ThinkingItem).content).toMatch(/final summary/);
+    expect((items[1] as ThinkingItem).streaming).toBe(false);
+  });
+
+  it("opens a new assistant row below the tool card for post-tool prose", () => {
+    const seq = buildSequencer();
+    const turnId = asTurnId("turn-1");
+    let state = EMPTY_TRANSCRIPT_STATE;
+    // Pre-tool prose is still streaming when the tool call arrives.
+    state = applyAppEvent(
+      state,
+      seq.build("assistant-delta", { text: "I'll inspect the config." }, turnId),
+    );
+    state = applyAppEvent(
+      state,
+      seq.build(
+        "tool-call",
+        { toolCallId: asToolCallId("c1"), name: "fs.read", argsDisplay: "config.json" },
+        turnId,
+      ),
+    );
+    expect(state.pendingAssistantId).toBeUndefined();
+    state = applyAppEvent(
+      state,
+      seq.build(
+        "tool-result",
+        { toolCallId: asToolCallId("c1"), ok: true, summary: "read" },
+        turnId,
+      ),
+    );
+    state = applyAppEvent(
+      state,
+      seq.build("assistant-delta", { text: "The setting is enabled." }, turnId),
+    );
+
+    const items = transcriptItems(state);
+    expect(items.map((item) => item.kind)).toEqual(["assistant", "tool", "assistant"]);
+    expect((items[0] as AssistantItem).text).toBe("I'll inspect the config.");
+    expect((items[0] as AssistantItem).streaming).toBe(false);
+    expect((items[2] as AssistantItem).text).toBe("The setting is enabled.");
   });
 
   it("keeps streaming thinking after the previous response (multi-step deltas)", () => {

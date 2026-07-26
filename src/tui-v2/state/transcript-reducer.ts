@@ -61,6 +61,19 @@ function discardPendingToolFenceStream(state: TranscriptState): TranscriptState 
   }));
 }
 
+/**
+ * True when the open assistant row has no visible text yet, so inserting an
+ * item before it cannot move anything the user has already seen.
+ */
+function isEmptyAssistantPlaceholder(
+  state: TranscriptState,
+  assistantId: string,
+): boolean {
+  const item = state.byId.get(assistantId);
+  if (!item || item.kind !== "assistant") return true;
+  return item.text.trim().length === 0;
+}
+
 function withSequence(state: TranscriptState, sequence: number): TranscriptState {
   return { ...state, lastSequence: sequence };
 }
@@ -113,12 +126,12 @@ function appendDelta(
     content: text,
     streaming: true,
   };
-  // Some models (e.g. Kimi K2-thinking) send reasoning_content tokens
-  // *after* content tokens.  When a pending assistant row already exists,
-  // slot the new thinking block before it so the transcript reads
-  // thinking → response, matching the user's expectation.
+  // Some models (e.g. Kimi K2-thinking) send reasoning_content tokens *after*
+  // content tokens. Hoisting is only safe while the assistant row is still an
+  // empty placeholder: moving thinking above prose the user has already read
+  // makes painted rows jump and falsifies chronology.
   let next: TranscriptState = { ...appendItem(state, item), [pendingKey]: id } as TranscriptState;
-  if (state.pendingAssistantId) {
+  if (state.pendingAssistantId && isEmptyAssistantPlaceholder(state, state.pendingAssistantId)) {
     next = moveItemBefore(next, id, state.pendingAssistantId);
   }
   return next;
@@ -152,9 +165,13 @@ function finalizeMessage(
         ? { ...base, kind: "assistant", text, streaming: false }
         : { ...base, kind: "thinking", content: text, streaming: false };
     next = appendItem(next, item);
-    // Thinking must precede its associated response even when created
-    // after assistant deltas have already started streaming.
-    if (kind === "thinking" && next.pendingAssistantId) {
+    // Same rule as streaming deltas: only hoist above an assistant row that has
+    // not painted any text yet.
+    if (
+      kind === "thinking" &&
+      next.pendingAssistantId &&
+      isEmptyAssistantPlaceholder(next, next.pendingAssistantId)
+    ) {
       next = moveItemBefore(next, id, next.pendingAssistantId);
     }
   }
@@ -195,6 +212,20 @@ function closePending(state: TranscriptState): TranscriptState {
     next = { ...next, pendingThinkingId: undefined };
   }
   return next;
+}
+
+/**
+ * Close the open assistant row without removing it. Empty/fence-only rows are
+ * already dropped by `discardPendingToolFenceStream`, so anything still open
+ * here carries real prose that must stay where it was painted.
+ */
+function closePendingAssistant(state: TranscriptState): TranscriptState {
+  if (!state.pendingAssistantId) return state;
+  const next = updateItem(state, state.pendingAssistantId, (item) => ({
+    ...(item as AssistantItem),
+    streaming: false,
+  }));
+  return { ...next, pendingAssistantId: undefined };
 }
 
 /** Close open thinking so tool cards never sit under a still-streaming block. */
@@ -273,7 +304,12 @@ export function applyAppEvent(state: TranscriptState, event: AnyAppEvent): Trans
       // raw fence text. Then append the tool row (thinking → response → tools).
       // Status starts as "queued" until tool-started — so dns/http don't look
       // "running" while stuck behind a long pentest.recon/nmap.
-      const cleaned = discardPendingToolFenceStream(closePendingThinking(withSeq));
+      // A tool call closes the assistant row as well: prose emitted after the
+      // tool must open a new row *below* the card instead of being appended to
+      // the row that was painted above it.
+      const cleaned = closePendingAssistant(
+        discardPendingToolFenceStream(closePendingThinking(withSeq)),
+      );
       const item: ToolItem = {
         // Occurrence id stays unique even if the agent reuses tool-1 next turn.
         id: `tool-${event.id}`,
