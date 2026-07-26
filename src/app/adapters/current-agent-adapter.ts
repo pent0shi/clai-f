@@ -20,6 +20,7 @@ export function createCurrentAgentPort(): AgentPort {
         session: handlers.session,
         mode: request.mode,
         displayPrompt: request.displayPrompt,
+        previousTurn: request.previousTurn,
       });
     },
   };

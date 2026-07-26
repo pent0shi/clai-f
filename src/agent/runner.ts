@@ -145,7 +145,11 @@ import {
 } from "./task-analyzer.js";
 import { computeMaxIterations, computeStepBudget } from "./step-budget.js";
 import { isScratchOnlyWrite } from "./scratch-write.js";
-import { buildDurableEnvelope, WorkLedger } from "./durable-envelope.js";
+import {
+  buildDurableEnvelope,
+  WorkLedger,
+  type EnvelopeJobState,
+} from "./durable-envelope.js";
 import {
   COMPACTION_SYSTEM_PROMPT,
 } from "./compaction-summary.js";
@@ -301,7 +305,10 @@ import {
   upsertSessionStateMessage,
   type SessionStateSnapshot,
 } from "./session-state.js";
-import { buildContinueOrientation } from "./continue-orient.js";
+import {
+  buildContinueOrientation,
+  type PreviousTurnSignal,
+} from "./continue-orient.js";
 import { detectPackageManager } from "./workspace-orient.js";
 import {
   budgetRemaining,
@@ -496,6 +503,8 @@ export interface AgentRunOptions {
    * chat; model still receives `prompt`. Omit to show `prompt`.
    */
   displayPrompt?: string | null | undefined;
+  /** How the previous turn ended, so recovery is decided from state. */
+  previousTurn?: PreviousTurnSignal | undefined;
 }
 
 /**
@@ -940,6 +949,7 @@ export async function runAgentTurn(
         recentJobs: jobManager.getRecentJobs(12, session.sessionId),
         informationalQuery,
         idleOrSocial: idleOrSocialPrompt,
+        ...(options.previousTurn ? { previousTurn: options.previousTurn } : {}),
       });
       if (continueBrief) {
         systemSections.push(continueBrief);
@@ -3519,6 +3529,21 @@ export async function runAgentTurn(
       const unread = jobManager
         .getPendingNotifications(session.sessionId)
         .map((notification) => notification.id);
+      const toEnvelopeJob = (job: BackgroundJob): EnvelopeJobState => ({
+        id: job.id,
+        status: job.status,
+        command: job.commandDisplay || job.command,
+        ...(job.taskId ? { taskId: job.taskId } : {}),
+        ...(job.stdoutArtifact ? { artifact: job.stdoutArtifact } : {}),
+      });
+      const liveJobs = jobManager
+        .getRunningJobs(session.sessionId)
+        .map(toEnvelopeJob);
+      const liveIds = new Set(liveJobs.map((job) => job.id));
+      const finishedJobs = jobManager
+        .getRecentJobs(12, session.sessionId)
+        .filter((job) => !liveIds.has(job.id))
+        .map(toEnvelopeJob);
       return buildDurableEnvelope({
         ...(plan ? { plan } : {}),
         outcome: outcomeState,
@@ -3528,6 +3553,8 @@ export async function runAgentTurn(
           ? { packageManager: plan?.meta?.packageManager ?? detectPackageManager(root) }
           : {}),
         responder: { unread, consumed: [...new Set(consumed)] },
+        ...(liveJobs.length > 0 ? { liveJobs } : {}),
+        ...(finishedJobs.length > 0 ? { finishedJobs } : {}),
       });
     }
 

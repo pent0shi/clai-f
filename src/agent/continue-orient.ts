@@ -52,6 +52,42 @@ export interface ContinueOrientInput {
   /** Skip for pure Q&A / social — never force re-attach on "what did you find?" */
   readonly informationalQuery?: boolean | undefined;
   readonly idleOrSocial?: boolean | undefined;
+  /** Structured outcome of the previous turn in this session, when known. */
+  readonly previousTurn?: PreviousTurnSignal | undefined;
+}
+
+export interface PreviousTurnSignal {
+  readonly status:
+    | "succeeded"
+    | "partial"
+    | "blocked"
+    | "failed"
+    | "aborted"
+    | "paused_budget"
+    | "error";
+  readonly reason?: string | undefined;
+}
+
+const UNFINISHED_PREVIOUS_STATUSES = new Set([
+  "partial",
+  "blocked",
+  "failed",
+  "aborted",
+  "paused_budget",
+  "error",
+]);
+
+/** True when the last turn provably did not finish its work. */
+export function previousTurnUnfinished(
+  signal: PreviousTurnSignal | undefined,
+): boolean {
+  return signal !== undefined && UNFINISHED_PREVIOUS_STATUSES.has(signal.status);
+}
+
+function startsNewDirection(prompt: string): boolean {
+  return /\b(?:new\s+(?:task|plan|feature)|start\s+over|from\s+scratch|ignore\s+(?:the\s+)?(?:plan|previous)|different\s+(?:target|project))\b/i.test(
+    prompt,
+  );
 }
 
 export interface RecentToolHint {
@@ -113,6 +149,13 @@ export function shouldInjectContinueOrientation(
 ): boolean {
   if (input.informationalQuery || input.idleOrSocial) return false;
   if (looksLikeContinueOrResumePrompt(input.prompt)) return true;
+  // A known-unfinished previous turn is proof, not a guess.
+  if (
+    previousTurnUnfinished(input.previousTurn) &&
+    !startsNewDirection(input.prompt)
+  ) {
+    return true;
+  }
 
   const hasHistory = (input.history?.length ?? 0) >= 2;
   if (!hasHistory) return false;
@@ -125,13 +168,7 @@ export function shouldInjectContinueOrientation(
   // while work is still open (not necessarily the word "continue").
   if ((openTask || liveJobs) && input.prompt.trim().length < 160) {
     // Avoid hijacking a brand-new concrete request mid-session.
-    if (
-      /\b(?:new\s+(?:task|plan|feature)|start\s+over|from\s+scratch|ignore\s+(?:the\s+)?(?:plan|previous)|different\s+(?:target|project))\b/i.test(
-        input.prompt,
-      )
-    ) {
-      return false;
-    }
+    if (startsNewDirection(input.prompt)) return false;
     // Short nudges with open work → re-attach
     if (
       /^(?:ok|okay|yes|y|go|do\s+it|keep\s+going|and\s+then|what\s+next|now\s+what)[.!]?$/i.test(
@@ -151,10 +188,14 @@ export function shouldInjectContinueOrientation(
 export function buildContinueOrientation(input: ContinueOrientInput): string {
   if (!shouldInjectContinueOrientation(input)) return "";
 
+  const previous = input.previousTurn;
   const lines: string[] = [
     CONTINUE_ORIENT_PREFIX,
-    "The prior turn may have been interrupted (provider error, timeout, user cancel, or a long job still running).",
+    previousTurnUnfinished(previous)
+      ? `The previous turn ended ${previous!.status}${previous!.reason ? ` (${oneLine(previous!.reason, 120)})` : ""}: its work is unfinished.`
+      : "The prior turn may have been interrupted (provider error, timeout, user cancel, or a long job still running).",
     "Re-attach to real work before advancing the plan. Do not mark tasks done or skip ahead without fresh evidence from tools this turn.",
+    "Do not repeat completed steps: check plan task states, background jobs and saved artifacts first, and reuse their results.",
   ];
 
   const plan = input.plan;

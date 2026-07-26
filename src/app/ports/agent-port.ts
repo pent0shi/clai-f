@@ -10,6 +10,7 @@ import type { SessionPolicy } from "../../agent/session-policy.js";
 import type { ConfirmationPort } from "./confirm-port.js";
 import type { SecretPort } from "./secret-port.js";
 import type { TurnOutcome } from "../../agent/turn-outcome.js";
+import type { PreviousTurnSignal } from "../../agent/continue-orient.js";
 
 export interface RunTurnRequest {
   readonly prompt: string;
@@ -26,7 +27,14 @@ export interface RunTurnRequest {
   readonly images?: readonly ChatImage[] | undefined;
   readonly autoConfirm?: boolean | undefined;
   readonly maxSteps?: number | undefined;
+  /**
+   * How the previous turn of this session ended. A structured signal beats
+   * guessing from prompt wording when deciding to re-attach to open work.
+   */
+  readonly previousTurn?: PreviousTurnSignal | undefined;
 }
+
+export type { PreviousTurnSignal } from "../../agent/continue-orient.js";
 
 export interface RunTurnHandlers {
   readonly onEvent: (event: AgentEvent) => void;

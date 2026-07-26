@@ -75,11 +75,23 @@ export interface ResponderEnvelopeState {
   readonly consumed: readonly string[];
 }
 
+export interface EnvelopeJobState {
+  readonly id: string;
+  readonly status: string;
+  readonly command: string;
+  readonly taskId?: string | undefined;
+  readonly artifact?: string | undefined;
+}
+
 export interface DurableEnvelopeInput {
   readonly plan?: SessionPlan | undefined;
   readonly outcome?: OutcomeEnvelope | undefined;
   readonly ledger?: WorkLedger | undefined;
   readonly responder?: ResponderEnvelopeState | undefined;
+  /** Background work still running when compaction happened. */
+  readonly liveJobs?: readonly EnvelopeJobState[] | undefined;
+  /** Terminal jobs whose output has not been harvested yet. */
+  readonly finishedJobs?: readonly EnvelopeJobState[] | undefined;
   readonly projectRoot?: string | undefined;
   readonly packageManager?: string | undefined;
   readonly scopeSummary?: string | undefined;
@@ -161,6 +173,35 @@ function outcomeLines(outcome: OutcomeEnvelope, lines: string[]): void {
   }
 }
 
+function renderJob(job: EnvelopeJobState): string {
+  const task = job.taskId ? ` task=${job.taskId}` : "";
+  const artifact = job.artifact ? ` artifact=${job.artifact}` : "";
+  return `[${job.id}] ${job.status}${task} — ${clip(job.command, 90)}${artifact}`;
+}
+
+// Background work is the state most often lost across compaction: without it
+// the model relaunches scans/builds that are already running or finished.
+function jobLines(input: DurableEnvelopeInput, lines: string[]): void {
+  const live = input.liveJobs ?? [];
+  const finished = input.finishedJobs ?? [];
+  if (live.length > 0) {
+    lines.push(
+      `Live background jobs (do not relaunch; use shell.tail): ${live
+        .slice(0, MAX_LIST_ENTRIES)
+        .map(renderJob)
+        .join("; ")}`,
+    );
+  }
+  if (finished.length > 0) {
+    lines.push(
+      `Finished background jobs (harvest output before redoing the work): ${finished
+        .slice(0, MAX_LIST_ENTRIES)
+        .map(renderJob)
+        .join("; ")}`,
+    );
+  }
+}
+
 // Render the envelope. Returns undefined when there is no canonical state worth
 // preserving, so compaction does not inject an empty block.
 export function buildDurableEnvelope(
@@ -185,6 +226,7 @@ export function buildDurableEnvelope(
       );
     }
   }
+  jobLines(input, lines);
   const ledger = input.ledger;
   if (ledger && ledger.size > 0) {
     const created = ledger.pathsByKind("created");

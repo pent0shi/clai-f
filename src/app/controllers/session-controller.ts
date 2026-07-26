@@ -28,6 +28,8 @@ import {
   type ContextUsageTarget,
 } from "./session-context-usage.js";
 import { createSessionPolicy, type SessionPolicy } from "../../agent/session-policy.js";
+import { previousTurnSignal } from "./turn-continuation.js";
+import { buildTurnRequest } from "./session-turn-request.js";
 import { resolveTurnInput } from "../../attachments/service.js";
 import { generateSessionTitle } from "../../agent/session-title.js";
 import { clearTextOnlyModels } from "../../llm/tool-protocol.js";
@@ -693,28 +695,22 @@ export class SessionController implements Disposable {
     const config = getConfig();
     const provider = this.provider ?? config.defaultProvider;
     const model = this.model ?? getProviderModel(provider);
-    const resolved = resolveTurnInput({
+    const built = buildTurnRequest({
       prompt,
       mode: this.mode,
       provider,
       model,
-    });
-    if (resolved.fallbackReason) this.notice("info", resolved.fallbackReason);
-    const request: RunTurnRequest = {
-      prompt: resolved.prompt,
-      mode: resolved.mode,
-      provider: resolved.provider,
-      model: resolved.model,
-      history:
-        opts?.materializeHistoryImages === false
-          ? this.history
-          : materializeHistoryImages(this.history),
-      attachments: resolved.attachments,
-      images: resolved.images,
+      history: this.history,
+      materializeImages: opts?.materializeHistoryImages !== false,
       ...(opts?.displayPrompt !== undefined
         ? { displayPrompt: opts.displayPrompt }
         : {}),
-    };
+      ...(previousTurnSignal(this.lastTurnResult)
+        ? { previousTurn: previousTurnSignal(this.lastTurnResult) }
+        : {}),
+    });
+    if (built.fallbackReason) this.notice("info", built.fallbackReason);
+    const request = built.request;
     const turnGeneration = this.lifecycleGeneration;
     const pending = this.turn.run(request, {
       confirm: this.deps.confirm,

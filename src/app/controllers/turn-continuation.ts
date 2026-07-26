@@ -1,4 +1,5 @@
 import type { TurnOutcomeStatus } from "../../agent/turn-outcome.js";
+import type { PreviousTurnSignal } from "../../agent/continue-orient.js";
 import type { TurnResult } from "./turn-controller.js";
 
 export interface ContinuationDecision {
@@ -36,4 +37,21 @@ export function queueContinuationDecision(
   if (!status || !PAUSING_OUTCOMES.has(status)) return { proceed: true };
   const detail = result.outcome?.reason ? ` — ${result.outcome.reason}` : "";
   return { proceed: false, reason: `the turn ended ${outcomeLabel(status)}${detail}` };
+}
+
+/** Structured previous-turn signal handed to the agent for recovery. */
+export function previousTurnSignal(
+  result: TurnResult | undefined,
+): PreviousTurnSignal | undefined {
+  if (!result) return undefined;
+  if (result.status === "aborted") return { status: "aborted" };
+  if (result.status === "error") {
+    return { status: "error", reason: result.error.message };
+  }
+  const outcome = result.outcome;
+  if (!outcome) return undefined;
+  return {
+    status: outcome.status,
+    ...(outcome.reason ? { reason: outcome.reason } : {}),
+  };
 }
