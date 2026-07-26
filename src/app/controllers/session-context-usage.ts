@@ -113,3 +113,32 @@ export function createContextProjector(
     return value;
   };
 }
+
+export interface PartialUsageSnapshot {
+  contextTokens: number;
+  contextLimit?: number | undefined;
+  lastCompletionTokens?: number | undefined;
+  sessionPromptTokens?: number | undefined;
+  sessionCompletionTokens?: number | undefined;
+  exact: boolean;
+}
+
+// Prefer the exact snapshot saved during the live turn; older sessions without
+// a usage payload fall back to an estimate at the call site.
+export function restoredUsageSnapshot(
+  target: ContextUsageTarget,
+  usage: PartialUsageSnapshot | ContextUsageSnapshot | undefined,
+): ContextUsageSnapshot | undefined {
+  if (!usage || usage.contextTokens <= 0) return undefined;
+  return {
+    contextTokens: usage.contextTokens,
+    contextLimit:
+      typeof usage.contextLimit === "number" && usage.contextLimit > 0
+        ? usage.contextLimit
+        : contextUsageLimit(target),
+    lastCompletionTokens: usage.lastCompletionTokens ?? 0,
+    sessionPromptTokens: usage.sessionPromptTokens ?? 0,
+    sessionCompletionTokens: usage.sessionCompletionTokens ?? 0,
+    exact: usage.exact === true,
+  };
+}

@@ -19,10 +19,11 @@ import {
 } from "../../llm/token-usage.js";
 import {
   compactedUsageSnapshot,
-  contextUsageLimit,
   recordUsageSnapshot,
   resolveContextUsageSnapshot,
+  restoredUsageSnapshot,
   createContextProjector,
+  type PartialUsageSnapshot,
   type ContextProjection,
   type ContextUsageTarget,
 } from "./session-context-usage.js";
@@ -159,6 +160,8 @@ export class SessionController implements Disposable {
   private static readonly AUTOSAVE_MIN_MS = 15_000;
   /** Last known context / session token totals for the status strip. */
   private contextUsage: ContextUsageSnapshot | undefined;
+  /** Bumped by reset/history load/dispose so late callbacks can be ignored. */
+  private lifecycleGeneration = 0;
   private readonly projectContext = createContextProjector((snapshot) =>
     formatContextChip(snapshot, { compact: false }),
   );
@@ -341,17 +344,7 @@ export class SessionController implements Disposable {
        * Restored from history so the footer matches the live session count.
        * Accepts partial snapshots (contextLimit optional).
        */
-      contextUsage?:
-        | ContextUsageSnapshot
-        | {
-            contextTokens: number;
-            contextLimit?: number | undefined;
-            lastCompletionTokens?: number | undefined;
-            sessionPromptTokens?: number | undefined;
-            sessionCompletionTokens?: number | undefined;
-            exact: boolean;
-          }
-        | undefined;
+      contextUsage?: ContextUsageSnapshot | PartialUsageSnapshot | undefined;
       /** Loaded durable revision; resume advances to a fresh writer generation. */
       persistenceRevision?: number | undefined;
       /** Per-session scratch/output folder (restored with history). */
@@ -359,8 +352,7 @@ export class SessionController implements Disposable {
       workspaceCode?: string | undefined;
     } = {},
   ): void {
-    if (this.turn.running) this.turn.abort();
-    this.responder?.invalidateWake();
+    this.beginLifecycleGeneration();
     // Deep-copy then heal broken assistant/tool pairs from aborted turns so
     // /history resume + "continue" never dies on invalid native tool protocol.
     const healed: ChatMessage[] = messages.map((m) => ({ ...m }));
@@ -375,22 +367,9 @@ export class SessionController implements Disposable {
     this.titleInFlight = false;
     // Prefer the exact snapshot saved during the live turn; only estimate when
     // older sessions have no usage payload (would otherwise drop 39k → ~11k).
-    if (
-      options.contextUsage &&
-      options.contextUsage.contextTokens > 0
-    ) {
-      const cu = options.contextUsage;
-      this.contextUsage = {
-        contextTokens: cu.contextTokens,
-        contextLimit:
-          typeof cu.contextLimit === "number" && cu.contextLimit > 0
-            ? cu.contextLimit
-            : contextUsageLimit({ provider: this.provider, model: this.model }),
-        lastCompletionTokens: cu.lastCompletionTokens ?? 0,
-        sessionPromptTokens: cu.sessionPromptTokens ?? 0,
-        sessionCompletionTokens: cu.sessionCompletionTokens ?? 0,
-        exact: cu.exact === true,
-      };
+    const restored = restoredUsageSnapshot(this.usageTarget, options.contextUsage);
+    if (restored) {
+      this.contextUsage = restored;
     } else {
       this.contextUsage = undefined;
       this.refreshEstimatedContext();
@@ -433,8 +412,7 @@ export class SessionController implements Disposable {
    * history row.
    */
   reset(options: { mintNewId?: boolean } = {}): void {
-    if (this.turn.running) this.turn.abort();
-    this.responder?.invalidateWake();
+    this.beginLifecycleGeneration();
     this.history = [];
     this.prompts.clear();
     this.sessionTitle = undefined;
@@ -487,6 +465,7 @@ export class SessionController implements Disposable {
     const historySnapshot = [...this.history];
 
     this.compactingFlag = true;
+    const compactGeneration = this.lifecycleGeneration;
     const compactAc = new AbortController();
     this.compactAbort = compactAc;
     if (signal?.aborted) compactAc.abort();
@@ -505,6 +484,10 @@ export class SessionController implements Disposable {
         { budgetTokens: 0, keepRecent, purpose: options.purpose },
         sessionTranscript,
       );
+      // A reset/load/dispose while the summary was in flight rebound this
+      // controller to another session; committing here would leak session A's
+      // compacted history into session B.
+      if (compactGeneration !== this.lifecycleGeneration) return result;
       this.history = result.messages;
       if (result.summarized) this.noteContextCompacted(result.afterTokens);
       this.notifyState();
@@ -531,8 +514,10 @@ export class SessionController implements Disposable {
       }
       return result;
     } finally {
-      this.compactingFlag = false;
-      this.compactAbort = undefined;
+      if (compactGeneration === this.lifecycleGeneration) {
+        this.compactingFlag = false;
+        this.compactAbort = undefined;
+      }
       this.notifyState();
       // Becoming idle after compaction is an idle transition just like a turn
       // ending: a responder completion that arrived while compactingFlag was
@@ -729,11 +714,15 @@ export class SessionController implements Disposable {
         ? { displayPrompt: opts.displayPrompt }
         : {}),
     };
+    const turnGeneration = this.lifecycleGeneration;
     const pending = this.turn.run(request, {
       confirm: this.deps.confirm,
       requestSecret: this.deps.requestSecret,
       session: this.policy,
       onMessages: (messages) => {
+        // A reset/history load/dispose after this turn started owns the
+        // session now; late callbacks must not resurrect its history.
+        if (turnGeneration !== this.lifecycleGeneration) return;
         this.history = pathBackedMessages(messages);
         this.notifyState();
         // Periodic durable snapshot so Esc/kill mid-run does not wipe tools.
@@ -745,15 +734,17 @@ export class SessionController implements Disposable {
     const result = await pending;
     this.notifyState();
     this.responder?.scheduleWake();
+    const sameGeneration = turnGeneration === this.lifecycleGeneration;
     try {
       if (
-        result.status === "completed" ||
-        result.status === "aborted" ||
-        result.status === "error"
+        sameGeneration &&
+        (result.status === "completed" ||
+          result.status === "aborted" ||
+          result.status === "error")
       ) {
         await this.persistNow();
       }
-      if (result.status === "completed") {
+      if (sameGeneration && result.status === "completed") {
         void this.maybeRefreshTitle();
       }
       for (const listener of this.turnEndListeners) listener(result);
@@ -782,8 +773,22 @@ export class SessionController implements Disposable {
       });
   }
 
-  dispose(): void {
+  /**
+   * Abort and fence the previous lifecycle: a running turn, an in-flight
+   * compaction and a pending title all belong to the generation being replaced.
+   */
+  private beginLifecycleGeneration(): void {
+    this.lifecycleGeneration += 1;
+    if (this.turn.running) this.turn.abort();
+    this.compactAbort?.abort();
+    this.compactAbort = undefined;
+    this.compactingFlag = false;
+    this.titleInFlight = false;
     this.responder?.invalidateWake();
+  }
+
+  dispose(): void {
+    this.beginLifecycleGeneration();
     this.turnEndListeners.clear();
     this.stateListeners.clear();
     this.disposables.dispose();
