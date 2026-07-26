@@ -1,6 +1,6 @@
 import Conf from "conf";
 import { dirname } from "node:path";
-import { readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import type { Mode, ProviderId, ReasoningPreference } from "../types.js";
 import type { ExaSearchType, SearchProviderId } from "../tools/web/types.js";
 import { DEFAULT_EXA_SEARCH_TYPE } from "../tools/web/types.js";
@@ -150,7 +150,44 @@ const store = (() => {
   }
 })();
 
+let cachedConfig: { key: string; value: ClaiConfig } | undefined;
+
+/** Cheap identity of the on-disk config so external edits invalidate the cache. */
+function configFileKey(): string | undefined {
+  try {
+    const info = statSync(store.path);
+    return `${info.mtimeMs}:${info.size}`;
+  } catch {
+    return undefined;
+  }
+}
+
+function invalidateConfigCache(): void {
+  cachedConfig = undefined;
+}
+
+/** Fresh mutable view over the cached snapshot; callers may edit their copy. */
+function cloneConfig(config: ClaiConfig): ClaiConfig {
+  return {
+    ...config,
+    providerModels: { ...config.providerModels },
+    allowAlwaysTools: [...config.allowAlwaysTools],
+    sandboxRoots: [...config.sandboxRoots],
+    thinking: { ...config.thinking },
+  };
+}
+
 export function getConfig(): ClaiConfig {
+  const key = configFileKey();
+  if (key !== undefined && cachedConfig?.key === key) {
+    return cloneConfig(cachedConfig.value);
+  }
+  const resolved = readConfigFromStore();
+  if (key !== undefined) cachedConfig = { key, value: resolved };
+  return cloneConfig(resolved);
+}
+
+function readConfigFromStore(): ClaiConfig {
   const current = store.store;
   const providerModels: Partial<Record<ProviderId, string>> = {};
   for (const [provider, model] of Object.entries(current.providerModels ?? {}) as Array<
@@ -176,6 +213,7 @@ export function updateConfig(patch: Partial<ClaiConfig>): ClaiConfig {
   } catch (err: any) {
     handlePermissionError(err);
   }
+  invalidateConfigCache();
   return getConfig();
 }
 

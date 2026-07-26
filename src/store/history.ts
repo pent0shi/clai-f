@@ -32,12 +32,14 @@ import { fixOwner, fixOwnerSync, handlePermissionError, safeExists } from "../os
 import { getHistoryDir } from "./paths.js";
 import { getActiveSessionWorkspace } from "./session-workspace.js";
 import {
+  appendIndexedHistoryRecord,
   findHistoryRecordStreaming,
   historySummary,
   readIndexedHistoryRecord,
   readValidatedHistoryIndex,
   rebuildHistoryIndex,
   writeIndexedJsonl,
+  type HistoryIndexEntry,
   type HistorySummary,
 } from "./history-index.js";
 
@@ -477,34 +479,43 @@ let jsonlWriteChain: Promise<void> = Promise.resolve();
 /** Shared one-time orphan/archive recovery; writes await it, UI listings may not. */
 let recoveryPromise: Promise<void> | undefined;
 
-function mutateJsonl(
-  update: (records: HistoryRecord[]) => HistoryRecord[],
-): Promise<void> {
+/** Queue a locked JSONL section; the chain survives individual failures. */
+function queueJsonlWrite<T>(
+  operation: () => Promise<T>,
+  fallback: () => T,
+): Promise<T> {
   invalidateSessionListCache();
   const run = jsonlWriteChain.then(async () => {
     try {
       await ensureHistoryRecovered();
       const releaseLock = await acquireJsonlWriteLock();
       try {
-        const current = await readJsonlRecordsFrom(jsonlFilePath());
-        const next = update(current);
-        await writeJsonlAtomic(next);
+        return await operation();
+      } finally {
+        await releaseLock();
         // A list may have been loaded after the pre-write invalidation but
         // before the atomic rename completed. Never leave that snapshot cached.
         invalidateSessionListCache();
-      } finally {
-        await releaseLock();
       }
     } catch (err: any) {
       handlePermissionError(err);
+      return fallback();
     }
   });
-  // Keep the chain alive even if this task rejects, so later writes still run.
   jsonlWriteChain = run.then(
     () => undefined,
     () => undefined,
   );
   return run;
+}
+
+function mutateJsonl(
+  update: (records: HistoryRecord[]) => HistoryRecord[],
+): Promise<void> {
+  return queueJsonlWrite(async () => {
+    const current = await readJsonlRecordsFrom(jsonlFilePath());
+    await writeJsonlAtomic(update(current), current.length);
+  }, () => undefined);
 }
 
 function updatedAtMs(record: HistoryRecord): number {
@@ -615,6 +626,16 @@ async function readJsonlRecordsFrom(path: string): Promise<HistoryRecord[]> {
     if (err && err.code === "EACCES") handlePermissionError(err);
     return [];
   }
+}
+
+/** Session count without parsing the whole file when the index is valid. */
+async function countJsonlSessions(): Promise<number> {
+  const entries = await readValidatedHistoryIndex(
+    jsonlFilePath(),
+    jsonlIndexFilePath(),
+  );
+  if (entries) return entries.length;
+  return (await readJsonlRecordsFrom(jsonlFilePath())).length;
 }
 
 async function appendRecordsToFile(
@@ -779,7 +800,10 @@ async function ensureHistoryRecovered(): Promise<void> {
  * Apply retention (archive pruned sessions) and write the active file
  * atomically. Never hard-deletes pruned chats — they go to history-archive.jsonl.
  */
-async function writeJsonlAtomic(records: HistoryRecord[]): Promise<void> {
+async function writeJsonlAtomic(
+  records: HistoryRecord[],
+  knownExistingCount?: number,
+): Promise<void> {
   invalidateSessionListCache();
   await mkdir(historyDirPath(), { recursive: true });
   await fixOwner(historyDirPath());
@@ -794,8 +818,9 @@ async function writeJsonlAtomic(records: HistoryRecord[]): Promise<void> {
 
   // If we would shrink (or replace) the on-disk set, snapshot first.
   if (await safeExists(jsonlFilePath())) {
-    const existing = await readJsonlRecordsFrom(jsonlFilePath());
-    if (kept.length < existing.length || pruned.length > 0) {
+    const existingCount =
+      knownExistingCount ?? (await countJsonlSessions());
+    if (kept.length < existingCount || pruned.length > 0) {
       await backupActiveHistory();
     }
   }
@@ -1028,23 +1053,93 @@ async function enforceSqliteRetention(db: DatabaseLike): Promise<void> {
   );
 }
 
-async function upsertJsonl(record: HistoryRecord): Promise<HistoryRecord> {
-  let canonical = record;
-  await mutateJsonl((records) => {
-    const idx = records.findIndex((item) => item.id === record.id);
-    if (idx >= 0) {
-      const current = records[idx];
-      if (current && compareHistoryFreshness(record, current) > 0) {
-        records[idx] = record;
-      } else if (current) {
-        canonical = current;
-      }
-    } else {
-      records.push(record);
+/** Below this size a full rewrite is cheap enough to skip compaction. */
+const HISTORY_COMPACT_MIN_BYTES = 1_000_000;
+/** Compact once dead (superseded) lines dominate the active file. */
+const HISTORY_COMPACT_LIVE_RATIO = 0.6;
+
+function summaryFreshness(summary: HistorySummary): HistoryRecord {
+  return {
+    id: summary.id,
+    writerGeneration: summary.writerGeneration,
+    revision: summary.revision,
+    createdAt: summary.createdAt,
+    updatedAt: summary.updatedAt,
+    cwd: summary.cwd,
+    messages: [],
+  };
+}
+
+function shouldCompactHistory(result: {
+  entries: readonly HistoryIndexEntry[];
+  fileSize: number;
+  liveBytes: number;
+}): boolean {
+  const limit = getConfig().historyRetentionLimit;
+  if (limit > 0 && result.entries.length > limit) return true;
+  if (result.fileSize < HISTORY_COMPACT_MIN_BYTES) return false;
+  return result.liveBytes / result.fileSize < HISTORY_COMPACT_LIVE_RATIO;
+}
+
+async function compactJsonlUnderLock(): Promise<void> {
+  const records = await readJsonlRecordsFrom(jsonlFilePath());
+  await writeJsonlAtomic(records, records.length);
+}
+
+async function upsertJsonlUnderLock(
+  record: HistoryRecord,
+): Promise<HistoryRecord> {
+  await mkdir(historyDirPath(), { recursive: true });
+  await fixOwner(historyDirPath());
+
+  const entries = await readValidatedHistoryIndex(
+    jsonlFilePath(),
+    jsonlIndexFilePath(),
+  );
+  if (!entries) {
+    const current = await readJsonlRecordsFrom(jsonlFilePath());
+    const index = current.findIndex((item) => item.id === record.id);
+    const existing = index >= 0 ? current[index] : undefined;
+    if (existing && compareHistoryFreshness(record, existing) <= 0) {
+      return existing;
     }
-    return records;
-  });
-  return canonical;
+    if (index >= 0) current[index] = record;
+    else current.push(record);
+    await writeJsonlAtomic(current, current.length);
+    return record;
+  }
+
+  const existingEntry = entries.find((entry) => entry.id === record.id);
+  if (
+    existingEntry &&
+    compareHistoryFreshness(record, summaryFreshness(existingEntry.summary)) <= 0
+  ) {
+    const stored = await readIndexedHistoryRecord<HistoryRecord>(
+      jsonlFilePath(),
+      existingEntry,
+    );
+    if (stored) return stored;
+  }
+
+  const result = await appendIndexedHistoryRecord(
+    jsonlFilePath(),
+    jsonlIndexFilePath(),
+    entries,
+    record,
+  );
+  await Promise.all([
+    fixOwner(jsonlFilePath()).catch(() => undefined),
+    fixOwner(jsonlIndexFilePath()).catch(() => undefined),
+  ]);
+  if (shouldCompactHistory(result)) await compactJsonlUnderLock();
+  return record;
+}
+
+async function upsertJsonl(record: HistoryRecord): Promise<HistoryRecord> {
+  return queueJsonlWrite(
+    () => upsertJsonlUnderLock(record),
+    () => record,
+  );
 }
 
 export async function saveToolCall(

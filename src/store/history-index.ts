@@ -70,6 +70,70 @@ export function historySummary(record: HistoryRecordShape): HistorySummary {
   };
 }
 
+async function writeHistoryIndexFile(
+  jsonlPath: string,
+  indexPath: string,
+  entries: readonly HistoryIndexEntry[],
+): Promise<void> {
+  const source = await stat(jsonlPath);
+  const index: HistoryIndexFile = {
+    schemaVersion: 1,
+    source: { size: source.size, mtimeMs: source.mtimeMs },
+    entries: [...entries],
+  };
+  const temp = `${indexPath}.${process.pid}.${randomUUID()}.tmp`;
+  await writeFile(temp, `${JSON.stringify(index)}\n`, { mode: 0o600 });
+  await rename(temp, indexPath);
+}
+
+export interface HistoryAppendResult {
+  entries: HistoryIndexEntry[];
+  fileSize: number;
+  liveBytes: number;
+}
+
+export function historyIndexLiveBytes(
+  entries: readonly HistoryIndexEntry[],
+): number {
+  return entries.reduce((total, entry) => total + entry.length, 0);
+}
+
+/**
+ * Append one record and refresh the (small) index instead of rewriting every
+ * session. Older lines for the same id stay on disk until compaction; the
+ * index keeps only the newest offset per id, matching rebuild semantics.
+ */
+export async function appendIndexedHistoryRecord<T extends HistoryRecordShape>(
+  jsonlPath: string,
+  indexPath: string,
+  entries: readonly HistoryIndexEntry[],
+  record: T,
+): Promise<HistoryAppendResult> {
+  const line = Buffer.from(`${JSON.stringify(record)}\n`, "utf8");
+  const handle = await open(jsonlPath, "a", 0o600);
+  let offset = 0;
+  try {
+    offset = (await handle.stat()).size;
+    await handle.write(line, 0, line.length, offset);
+    await handle.sync().catch(() => undefined);
+  } finally {
+    await handle.close();
+  }
+  const next = entries.filter((entry) => entry.id !== record.id);
+  next.push({
+    id: record.id,
+    offset,
+    length: line.length,
+    summary: historySummary(record),
+  });
+  await writeHistoryIndexFile(jsonlPath, indexPath, next);
+  return {
+    entries: next,
+    fileSize: offset + line.length,
+    liveBytes: historyIndexLiveBytes(next),
+  };
+}
+
 export async function writeIndexedJsonl(
   jsonlPath: string,
   indexPath: string,
@@ -92,17 +156,9 @@ export async function writeIndexedJsonl(
 
   const token = `${process.pid}.${randomUUID()}`;
   const jsonlTemp = `${jsonlPath}.${token}.tmp`;
-  const indexTemp = `${indexPath}.${token}.tmp`;
   await writeFile(jsonlTemp, Buffer.concat(lines), { mode: 0o600 });
   await rename(jsonlTemp, jsonlPath);
-  const source = await stat(jsonlPath);
-  const index: HistoryIndexFile = {
-    schemaVersion: 1,
-    source: { size: source.size, mtimeMs: source.mtimeMs },
-    entries,
-  };
-  await writeFile(indexTemp, `${JSON.stringify(index)}\n`, { mode: 0o600 });
-  await rename(indexTemp, indexPath);
+  await writeHistoryIndexFile(jsonlPath, indexPath, entries);
 }
 
 export async function readValidatedHistoryIndex(
@@ -242,15 +298,7 @@ export async function rebuildHistoryIndex<T extends HistoryRecordShape>(
   });
   const entries = [...byId.values()];
   try {
-    const source = await stat(jsonlPath);
-    const index: HistoryIndexFile = {
-      schemaVersion: 1,
-      source: { size: source.size, mtimeMs: source.mtimeMs },
-      entries,
-    };
-    const temp = `${indexPath}.${process.pid}.${randomUUID()}.tmp`;
-    await writeFile(temp, `${JSON.stringify(index)}\n`, { mode: 0o600 });
-    await rename(temp, indexPath);
+    await writeHistoryIndexFile(jsonlPath, indexPath, entries);
   } catch {
     // Listing remains usable from the in-memory streaming result.
   }
