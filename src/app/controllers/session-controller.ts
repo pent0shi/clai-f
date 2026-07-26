@@ -22,6 +22,8 @@ import {
   contextUsageLimit,
   recordUsageSnapshot,
   resolveContextUsageSnapshot,
+  createContextProjector,
+  type ContextProjection,
   type ContextUsageTarget,
 } from "./session-context-usage.js";
 import { createSessionPolicy, type SessionPolicy } from "../../agent/session-policy.js";
@@ -157,6 +159,9 @@ export class SessionController implements Disposable {
   private static readonly AUTOSAVE_MIN_MS = 15_000;
   /** Last known context / session token totals for the status strip. */
   private contextUsage: ContextUsageSnapshot | undefined;
+  private readonly projectContext = createContextProjector((snapshot) =>
+    formatContextChip(snapshot, { compact: false }),
+  );
 
   constructor(private readonly deps: SessionControllerDeps) {
     this.sessionIdValue = asSessionId(deps.sessionId ?? mintSessionId());
@@ -226,7 +231,7 @@ export class SessionController implements Disposable {
   }
 
   getState(): SessionState {
-    const contextUsage = this.resolveContextUsage();
+    const { contextUsage, contextChip } = this.contextUsageProjection();
     return {
       sessionId: this.sessionIdValue,
       mode: this.mode,
@@ -246,10 +251,12 @@ export class SessionController implements Disposable {
       },
       title: this.sessionTitle,
       contextUsage,
-      contextChip: contextUsage
-        ? formatContextChip(contextUsage, { compact: false })
-        : undefined,
+      contextChip,
     };
+  }
+
+  private contextUsageProjection(): ContextProjection {
+    return this.projectContext(this.usageTarget, this.history, this.contextUsage);
   }
 
   private get usageTarget(): ContextUsageTarget {

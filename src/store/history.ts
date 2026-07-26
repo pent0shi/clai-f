@@ -26,6 +26,7 @@ import {
 } from "../attachments/image-content.js";
 import type { TranscriptItem } from "../tui/state.js";
 import { redactSecrets } from "../llm/provider.js";
+import { redactSecretsCached } from "./redaction-cache.js";
 import { getConfig } from "./config.js";
 import { safeCwd } from "../os/cwd.js";
 import { fixOwner, fixOwnerSync, handlePermissionError, safeExists } from "../os/permissions.js";
@@ -277,7 +278,7 @@ function scrubMessages(messages: ChatMessage[]): ChatMessage[] {
     );
     return {
       ...rest,
-      content: redactSecrets(message.content),
+      content: redactSecretsCached(message.content),
       ...(persistedImages?.length ? { images: persistedImages } : {}),
     };
   });
@@ -325,42 +326,66 @@ export function materializeHistoryImages(
   });
 }
 
+/**
+ * Settled transcript items are immutable, so their scrubbed projection can be
+ * reused across autosaves instead of re-redacting the whole transcript.
+ */
+const scrubbedItems = new WeakMap<TranscriptItem, TranscriptItem>();
+
+function isSettledItem(item: TranscriptItem): boolean {
+  if (item.done !== true) return false;
+  if (item.kind === "assistant") return item.streaming !== true;
+  if (item.kind === "tool") return item.status !== "running";
+  return true;
+}
+
 function scrubTranscript(items?: TranscriptItem[] | undefined): TranscriptItem[] | undefined {
   if (!items) return undefined;
   // Drop UI chrome notices — they must never bloat saved history item counts.
   const durable = items.filter((item) => item.kind !== "notice");
   return durable.map((item) => {
-    switch (item.kind) {
-      case "user":
-        return { ...item, text: redactSecrets(item.text), done: true };
-      case "assistant":
-        return { ...item, text: redactSecrets(item.text), streaming: false, done: true };
-      case "thinking":
-        return { ...item, content: redactSecrets(item.content), done: true };
-      case "tool":
-        return {
-          ...item,
-          argsDisplay: redactSecrets(item.argsDisplay),
-          output: redactSecrets(item.output),
-          summary: item.summary ? redactSecrets(item.summary) : item.summary,
-          status: item.status === "running" ? "ok" : item.status,
-          done: true,
-        };
-      case "plan":
-        return { ...item, done: true };
-      case "compacted":
-        return {
-          ...item,
-          summary: redactSecrets(item.summary),
-          originalItems: scrubTranscript(item.originalItems) ?? [],
-          done: true,
-        };
-      default: {
-        // notice already filtered; keep exhaustiveness for future kinds
-        return item;
-      }
+    const reusable = isSettledItem(item);
+    if (reusable) {
+      const cached = scrubbedItems.get(item);
+      if (cached) return cached;
     }
+    const scrubbed = scrubTranscriptItem(item);
+    if (reusable) scrubbedItems.set(item, scrubbed);
+    return scrubbed;
   });
+}
+
+function scrubTranscriptItem(item: TranscriptItem): TranscriptItem {
+  switch (item.kind) {
+    case "user":
+      return { ...item, text: redactSecretsCached(item.text), done: true };
+    case "assistant":
+      return { ...item, text: redactSecretsCached(item.text), streaming: false, done: true };
+    case "thinking":
+      return { ...item, content: redactSecretsCached(item.content), done: true };
+    case "tool":
+      return {
+        ...item,
+        argsDisplay: redactSecretsCached(item.argsDisplay),
+        output: redactSecretsCached(item.output),
+        summary: item.summary ? redactSecretsCached(item.summary) : item.summary,
+        status: item.status === "running" ? "ok" : item.status,
+        done: true,
+      };
+    case "plan":
+      return { ...item, done: true };
+    case "compacted":
+      return {
+        ...item,
+        summary: redactSecretsCached(item.summary),
+        originalItems: scrubTranscript(item.originalItems) ?? [],
+        done: true,
+      };
+    default: {
+      // notice already filtered; keep exhaustiveness for future kinds
+      return item;
+    }
+  }
 }
 
 const JSONL_LOCK_STALE_MS = 60_000;

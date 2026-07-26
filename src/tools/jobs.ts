@@ -10,6 +10,7 @@ import { redactSecrets } from "../llm/provider.js";
 import { safeCwd } from "../os/cwd.js";
 import { getJobsDir } from "../store/paths.js";
 import { resolveShell } from "./shell.js";
+import { terminateProcessTree } from "../os/process-tree.js";
 
 export type JobStatus = "starting" | "running" | "exited" | "failed" | "stopping" | "killed" | "lost";
 export type JobTerminalStatus = Exclude<JobStatus, "starting" | "running" | "stopping">;
@@ -223,6 +224,8 @@ const SETTLEMENT_DEAD_LETTER_MS = 10 * 60_000;
 const LIST_JOBS_MAX_LINES = 40;
 /** Coalesce window for chatty stdout/stderr progress persistence + UI events. */
 const PROGRESS_FLUSH_MS = 250;
+/** Durable registry cadence for running-job progress (UI updates stay at 250ms). */
+const DURABLE_PROGRESS_FLUSH_MS = 5_000;
 /**
  * A live job with no in-process ChildProcess handle (resumed session, or a
  * handle that was released) is only declared "lost" after failing the liveness
@@ -1343,12 +1346,18 @@ export class JobManager {
       this.writers.set(id, { stdout, stderr });
       this.scheduleAuthorizationExpiry(job);
       let lastProgressFlush = 0;
+      let lastDurableFlush = Date.now();
       let progressDirty = false;
       let progressTimer: ReturnType<typeof setTimeout> | undefined;
+      // UI freshness is cheap; rewriting the whole registry is not. Terminal
+      // transitions always persist authoritatively below.
       const flushProgress = (): void => {
         progressDirty = false;
         lastProgressFlush = Date.now();
-        this.persistSync();
+        if (lastProgressFlush - lastDurableFlush >= DURABLE_PROGRESS_FLUSH_MS) {
+          lastDurableFlush = lastProgressFlush;
+          this.persistSync();
+        }
         this.emit({ type: "job", jobId: id });
       };
       // Coalesce high-frequency stdout/stderr chunks: a chatty job (scanner,
@@ -1960,12 +1969,12 @@ export class JobManager {
       } else if (!(processGroupId && processGroupVerified && allowVerifiedGroup)) {
         return "identity-mismatch";
       }
-      try {
-        processGroupId ? process.kill(-processGroupId, signal) : process.kill(pid, signal);
-        return "sent";
-      } catch {
-        return targetAlive() ? "failed" : "gone";
-      }
+      const outcome = terminateProcessTree(pid, {
+        signal,
+        processGroupId,
+      });
+      if (outcome === "failed") return targetAlive() ? "failed" : "gone";
+      return outcome;
     };
     const restoreRunning = (): void => {
       job.status = "running";

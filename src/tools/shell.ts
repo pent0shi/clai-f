@@ -8,6 +8,7 @@ import { redactSecrets } from "../llm/provider.js";
 import { safeCwd } from "../os/cwd.js";
 import { getArtifactDir } from "../store/paths.js";
 import { augmentedPathEnv } from "../os/command.js";
+import { terminateProcessTree } from "../os/process-tree.js";
 
 export interface ShellExecArgs {
   command: string;
@@ -548,15 +549,21 @@ async function shellExecAttempt(args: ShellExecArgs): Promise<ShellExecAttemptRe
 
     const killChild = (signal: NodeJS.Signals): void => {
       if (!child.pid) return;
-      try {
-        // `detached` was disabled when we inherited stdin so the child
-        // shares our process group — kill it directly. Otherwise use the
-        // negative-PID form to take down the whole shell + descendants.
-        if (detached && !usingInteractiveStdin) process.kill(-child.pid, signal);
-        else child.kill(signal);
-      } catch {
-        // Process may have already exited.
+      // `detached` was disabled when we inherited stdin so the child shares our
+      // process group — signal it directly. Otherwise take down the whole tree.
+      const useGroup = detached && !usingInteractiveStdin;
+      if (!useGroup && process.platform !== "win32") {
+        try {
+          child.kill(signal);
+        } catch {
+          // Process may have already exited.
+        }
+        return;
       }
+      terminateProcessTree(child.pid, {
+        signal,
+        ...(useGroup ? { processGroupId: child.pid } : {}),
+      });
     };
 
     const terminate = (reason: "abort" | "timeout" | "cap"): void => {
@@ -838,12 +845,19 @@ export async function spawnArgv(args: SpawnArgvArgs): Promise<ToolResult> {
 
     const killChild = (signal: NodeJS.Signals): void => {
       if (!child.pid) return;
-      try {
-        if (detached && !usingInteractiveStdin) process.kill(-child.pid, signal);
-        else child.kill(signal);
-      } catch {
-        // already exited
+      const useGroup = detached && !usingInteractiveStdin;
+      if (!useGroup && process.platform !== "win32") {
+        try {
+          child.kill(signal);
+        } catch {
+          // already exited
+        }
+        return;
       }
+      terminateProcessTree(child.pid, {
+        signal,
+        ...(useGroup ? { processGroupId: child.pid } : {}),
+      });
     };
 
     const terminate = (reason: "abort" | "timeout" | "cap"): void => {

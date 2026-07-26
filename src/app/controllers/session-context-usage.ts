@@ -73,3 +73,43 @@ export function compactedUsageSnapshot(
     exact: false,
   };
 }
+
+export interface ContextProjection {
+  contextUsage: ContextUsageSnapshot | undefined;
+  contextChip: string | undefined;
+}
+
+// The estimate walks the whole transcript, so the projection is memoized
+// against the inputs that can change it instead of recomputed per render.
+export function createContextProjector(
+  formatChip: (snapshot: ContextUsageSnapshot) => string,
+): (
+  target: ContextUsageTarget,
+  history: readonly ChatMessage[],
+  current: ContextUsageSnapshot | undefined,
+) => ContextProjection {
+  let cache: { key: string; value: ContextProjection } | undefined;
+  return (target, history, current) => {
+    const first = history[0];
+    const last = history[history.length - 1];
+    const key = [
+      target.provider ?? "",
+      target.model ?? "",
+      history.length,
+      first?.content.length ?? 0,
+      last?.content.length ?? 0,
+      current?.contextTokens ?? -1,
+      current?.contextLimit ?? -1,
+      current?.lastCompletionTokens ?? -1,
+      current?.exact ? 1 : 0,
+    ].join("|");
+    if (cache?.key === key) return cache.value;
+    const contextUsage = resolveContextUsageSnapshot(target, history, current);
+    const value: ContextProjection = {
+      contextUsage,
+      contextChip: contextUsage ? formatChip(contextUsage) : undefined,
+    };
+    cache = { key, value };
+    return value;
+  };
+}
