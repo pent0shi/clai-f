@@ -19,6 +19,11 @@ import {
   isToolFenceOnlyText,
   stripToolCallSurfaces,
 } from "../rendering/strip-tool-surfaces.js";
+import {
+  EMPTY_STRIP_STREAM,
+  pushStripChunk,
+  type StripStream,
+} from "../rendering/incremental-strip.js";
 import { appendItem, moveItemBefore, removeItem, updateItem } from "./transcript-struct.js";
 
 function updateToolItem(
@@ -48,7 +53,7 @@ function discardPendingToolFenceStream(state: TranscriptState): TranscriptState 
   const stripped = stripToolCallSurfaces(pending.text).trim();
   if (!stripped) {
     return {
-      ...removeItem(state, state.pendingAssistantId),
+      ...clearStripStream(removeItem(state, state.pendingAssistantId), state.pendingAssistantId),
       pendingAssistantId: undefined,
     };
   }
@@ -74,6 +79,23 @@ function isEmptyAssistantPlaceholder(
   return item.text.trim().length === 0;
 }
 
+function withStripStream(
+  state: TranscriptState,
+  id: string,
+  stream: StripStream,
+): TranscriptState {
+  const streams = new Map(state.assistantStripStreams);
+  streams.set(id, stream);
+  return { ...state, assistantStripStreams: streams };
+}
+
+function clearStripStream(state: TranscriptState, id: string | undefined): TranscriptState {
+  if (!id || !state.assistantStripStreams.has(id)) return state;
+  const streams = new Map(state.assistantStripStreams);
+  streams.delete(id);
+  return { ...state, assistantStripStreams: streams };
+}
+
 function withSequence(state: TranscriptState, sequence: number): TranscriptState {
   return { ...state, lastSequence: sequence };
 }
@@ -87,19 +109,21 @@ function appendDelta(
   const pendingKey = kind === "assistant" ? "pendingAssistantId" : "pendingThinkingId";
   const pendingId = state[pendingKey];
   if (pendingId) {
-    return updateItem(state, pendingId, (item) => {
-      if (kind === "assistant") {
-        // Strip tool fences from the cumulative stream so raw JSON never paints.
-        const nextText = stripToolCallSurfaces(
-          (item as AssistantItem).text + text,
-        );
-        return { ...(item as AssistantItem), text: nextText };
-      }
-      return {
-        ...(item as ThinkingItem),
-        content: (item as ThinkingItem).content + text,
-      };
-    });
+    if (kind === "assistant") {
+      const pushed = pushStripChunk(
+        state.assistantStripStreams.get(pendingId) ?? EMPTY_STRIP_STREAM,
+        text,
+      );
+      const next = updateItem(state, pendingId, (item) => ({
+        ...(item as AssistantItem),
+        text: pushed.text,
+      }));
+      return withStripStream(next, pendingId, pushed.stream);
+    }
+    return updateItem(state, pendingId, (item) => ({
+      ...(item as ThinkingItem),
+      content: (item as ThinkingItem).content + text,
+    }));
   }
   const id = `${kind}-${event.id}`;
   const base = {
@@ -109,16 +133,17 @@ function appendDelta(
     timestamp: event.timestamp,
   };
   if (kind === "assistant") {
-    const nextText = stripToolCallSurfaces(text);
+    const pushed = pushStripChunk(EMPTY_STRIP_STREAM, text);
     // Fence-only start of a stream: hold an empty pending row so later prose
     // can still attach; tool-call events will discard empty fences.
     const item: TranscriptItem = {
       ...base,
       kind: "assistant",
-      text: nextText,
+      text: pushed.text,
       streaming: true,
     };
-    return { ...appendItem(state, item), [pendingKey]: id } as TranscriptState;
+    const opened = { ...appendItem(state, item), [pendingKey]: id } as TranscriptState;
+    return withStripStream(opened, id, pushed.stream);
   }
   const item: TranscriptItem = {
     ...base,
@@ -175,7 +200,10 @@ function finalizeMessage(
       next = moveItemBefore(next, id, next.pendingAssistantId);
     }
   }
-  return { ...next, [pendingKey]: undefined };
+  return {
+    ...(kind === "assistant" ? clearStripStream(next, pendingId) : next),
+    [pendingKey]: undefined,
+  };
 }
 
 function pushNotice(
@@ -202,6 +230,7 @@ function closePending(state: TranscriptState): TranscriptState {
       ...(item as AssistantItem),
       streaming: false,
     }));
+    next = clearStripStream(next, next.pendingAssistantId);
     next = { ...next, pendingAssistantId: undefined };
   }
   if (next.pendingThinkingId) {
@@ -221,10 +250,13 @@ function closePending(state: TranscriptState): TranscriptState {
  */
 function closePendingAssistant(state: TranscriptState): TranscriptState {
   if (!state.pendingAssistantId) return state;
-  const next = updateItem(state, state.pendingAssistantId, (item) => ({
-    ...(item as AssistantItem),
-    streaming: false,
-  }));
+  const next = clearStripStream(
+    updateItem(state, state.pendingAssistantId, (item) => ({
+      ...(item as AssistantItem),
+      streaming: false,
+    })),
+    state.pendingAssistantId,
+  );
   return { ...next, pendingAssistantId: undefined };
 }
 
@@ -276,7 +308,10 @@ export function applyAppEvent(state: TranscriptState, event: AnyAppEvent): Trans
       if (!text || isToolFenceOnlyText(event.payload.text)) {
         if (withSeq.pendingAssistantId) {
           return {
-            ...removeItem(withSeq, withSeq.pendingAssistantId),
+            ...clearStripStream(
+              removeItem(withSeq, withSeq.pendingAssistantId),
+              withSeq.pendingAssistantId,
+            ),
             pendingAssistantId: undefined,
           };
         }

@@ -17,6 +17,7 @@ import { TextAttributes, type MouseEvent } from "@opentui/core";
 import type { ThinkingItem } from "../../state/transcript-types.js";
 import type { Theme } from "../../rendering/theme.js";
 import { SELECTABLE_LINE_STYLE } from "./selectable-line.js";
+import { liveThinkingTail } from "../../rendering/thinking-tail.js";
 
 export function ThinkingBlock(props: {
   item: ThinkingItem;
@@ -64,7 +65,7 @@ export function ThinkingBlock(props: {
               width: "100%",
             }}
           >
-            {item.content}
+            {item.streaming ? liveThinkingTail(item.content) : item.content}
           </text>
         </box>
       ) : null}

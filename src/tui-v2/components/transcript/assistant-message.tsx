@@ -10,12 +10,16 @@
  * tables stay inside the column when the plan/task pane is open.
  */
 
-import { useMemo, type ReactNode } from "react";
+import { useMemo, useRef, type ReactNode } from "react";
 import { TextAttributes } from "@opentui/core";
 import { useTerminalDimensions } from "@opentui/react";
 import type { AssistantItem } from "../../state/transcript-types.js";
 import type { Theme } from "../../rendering/theme.js";
-import { renderMarkdownLines } from "../../rendering/render-markdown-lines.js";
+import {
+  EMPTY_MARKDOWN_STREAM_CACHE,
+  renderStreamingMarkdown,
+  type MarkdownStreamCache,
+} from "../../rendering/streaming-markdown.js";
 import { SELECTABLE_LINE_STYLE } from "./selectable-line.js";
 
 export function AssistantMessage(props: {
@@ -33,17 +37,21 @@ export function AssistantMessage(props: {
     contentWidth != null ? contentWidth : Math.max(40, termWidth - 8),
   );
 
-  const lines = useMemo(
-    () =>
-      item.text
-        ? renderMarkdownLines(item.text, {
-            width: wrapWidth,
-            defaultFg: theme.response,
-            stripOuterIndent: true,
-          })
-        : [],
-    [item.text, wrapWidth, theme.response],
-  );
+  const cacheRef = useRef<MarkdownStreamCache>(EMPTY_MARKDOWN_STREAM_CACHE);
+  const lines = useMemo(() => {
+    const rendered = renderStreamingMarkdown({
+      text: item.text,
+      streaming: item.streaming,
+      options: {
+        width: wrapWidth,
+        defaultFg: theme.response,
+        stripOuterIndent: true,
+      },
+      cache: cacheRef.current,
+    });
+    cacheRef.current = rendered.cache;
+    return rendered.lines;
+  }, [item.text, item.streaming, wrapWidth, theme.response]);
 
   // Hide fence-only / empty streaming rows so raw tool JSON never flashes as
   // a hollow "◆ Response …" before tool cards land.

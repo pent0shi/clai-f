@@ -9,6 +9,7 @@
 
 import type { ToolCallId, TurnId } from "../../app/events/app-event.js";
 import type { FileChange } from "../../tools/file-diff.js";
+import type { StripStream } from "../rendering/incremental-strip.js";
 
 interface ItemBase {
   readonly id: string;
@@ -94,6 +95,8 @@ export interface TranscriptState {
   readonly itemOverrides: ReadonlyMap<string, boolean>;
   /** Per-tool-card file-diff expand override (key = tool item id). */
   readonly fileDiffOverrides: ReadonlyMap<string, boolean>;
+  /** Incremental strip state for the open assistant stream (bounded tail). */
+  readonly assistantStripStreams: ReadonlyMap<string, StripStream>;
 }
 
 export const EMPTY_TRANSCRIPT_STATE: TranscriptState = {
@@ -108,6 +111,7 @@ export const EMPTY_TRANSCRIPT_STATE: TranscriptState = {
   expandFileDiffsGlobal: true,
   itemOverrides: new Map(),
   fileDiffOverrides: new Map(),
+  assistantStripStreams: new Map(),
 };
 
 /** CHAT-005/006/007: a per-item override always wins over the global toggle. */
