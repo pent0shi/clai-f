@@ -41,7 +41,12 @@ import {
   getSession,
 } from "./store/history.js";
 import { beginSessionWorkspace } from "./store/session-workspace.js";
-import { assertProvider, defaultModels, getProviderInfoText } from "./llm/provider.js";
+import {
+  assertProvider,
+  defaultModels,
+  getProviderInfoText,
+  redactSecrets,
+} from "./llm/provider.js";
 import { getProvider, providerAuth } from "./llm/router.js";
 import { clearTextOnlyModels } from "./llm/tool-protocol.js";
 import { providerIds } from "./types.js";
@@ -104,6 +109,7 @@ import {
 } from "./agent/plan-decision.js";
 import {
   readPromptLine,
+  PROMPT_EXIT_INTENT,
   stripAnsi,
   isPrintableSequence,
   type KeypressKey,
@@ -1588,9 +1594,12 @@ async function handleSlash(
       process.stdout.write(chalk.dim("  Goodbye!\n"));
       return false;
     case "/clean": {
-      // Clear terminal, reset chat state, redraw banner — like a fresh start
+      // A fresh session, not just a cleared screen: new identity, policy,
+      // plan approval, allowances and scratch workspace.
       state.messages.length = 0;
       state.resumedMessageCount = 0;
+      state.historyId = undefined;
+      resetClassicSessionContext(state);
       clearViewports();
       clearThinking();
       // Clear the entire screen and move cursor to top
@@ -1647,20 +1656,20 @@ export async function startRepl(options: ReplOptions = {}): Promise<void> {
 
   emitKeypressEvents(input);
 
-  const handleUnhandledRejection = (reason: unknown): void => {
-    if (isAbortLikeError(reason)) return; // expected during ESC/abort
-    const message = reason instanceof Error ? reason.message : String(reason);
+  // Only expected abort noise is tolerated. Anything else leaves the process
+  // with unknown invariants, so it shuts down through the same boundary.
+  const handleFatal = (kind: "rejection" | "exception", cause: unknown): void => {
+    if (isAbortLikeError(cause)) return;
+    const message = cause instanceof Error ? cause.message : String(cause);
     process.stderr.write(
-      chalk.dim(`\n  ⚠ background error suppressed: ${message}\n`),
+      chalk.red(`\n  ✖ fatal ${kind}: ${redactSecrets(message)}\n`),
     );
+    void shutdown(1);
   };
-  const handleUncaughtException = (error: unknown): void => {
-    if (isAbortLikeError(error)) return;
-    const message = error instanceof Error ? error.message : String(error);
-    process.stderr.write(
-      chalk.dim(`\n  ⚠ uncaught error suppressed: ${message}\n`),
-    );
-  };
+  const handleUnhandledRejection = (reason: unknown): void =>
+    handleFatal("rejection", reason);
+  const handleUncaughtException = (error: unknown): void =>
+    handleFatal("exception", error);
   process.on("unhandledRejection", handleUnhandledRejection);
   process.on("uncaughtException", handleUncaughtException);
 
@@ -1787,6 +1796,34 @@ export async function startRepl(options: ReplOptions = {}): Promise<void> {
     // SIGINFO is macOS/BSD-specific; other platforms can still use /think.
   }
   let lastSigintAt = 0;
+  let shuttingDown = false;
+
+  /** One shutdown boundary for normal quit, signals and fatal errors. */
+  const finalizeSession = async (): Promise<void> => {
+    isReadingPrompt = false;
+    input.off("keypress", handleKeypress);
+    process.off("SIGINT", handleSigint);
+    process.off("unhandledRejection", handleUnhandledRejection);
+    process.off("uncaughtException", handleUncaughtException);
+    if (siginfoRegistered) process.off(siginfo, handleThinkingShortcut);
+    if (state.messages.length > state.resumedMessageCount) {
+      // Honor `--no-history` and the persistent privateMode setting.
+      if (!options.noHistory && !getConfig().privateMode) {
+        await persistSession(state).catch(() => undefined);
+      }
+    }
+    if (input.isTTY) input.setRawMode(false);
+  };
+
+  const shutdown = async (code: number): Promise<void> => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    await finalizeSession();
+    // Force exit so lingering handles (timers, watchers, bg jobs) don't keep
+    // the process alive after the user chose to quit.
+    process.exitCode = code;
+    process.exit(code);
+  };
 
   const handleSigint = (): void => {
     if (currentAbortController) {
@@ -1801,7 +1838,8 @@ export async function startRepl(options: ReplOptions = {}): Promise<void> {
     const now = Date.now();
     if (now - lastSigintAt < 1_000) {
       console.log();
-      process.exit(0);
+      void shutdown(0);
+      return;
     }
     lastSigintAt = now;
     console.log(chalk.dim("\n  (press Ctrl+C again to exit)"));
@@ -1844,15 +1882,15 @@ export async function startRepl(options: ReplOptions = {}): Promise<void> {
   try {
     while (true) {
       isReadingPrompt = true;
-      const line = (
-        await readPromptLine({
-          history: promptHistory,
-          onThinkingShortcut: handleThinkingShortcut,
-          onOutputShortcut: handleOutputShortcut,
-          onPlanShortcut: handlePlanShortcut,
-        })
-      ).trim();
+      const rawLine = await readPromptLine({
+        history: promptHistory,
+        onThinkingShortcut: handleThinkingShortcut,
+        onOutputShortcut: handleOutputShortcut,
+        onPlanShortcut: handlePlanShortcut,
+      });
       isReadingPrompt = false;
+      if (rawLine === PROMPT_EXIT_INTENT) break;
+      const line = rawLine.trim();
       if (!line) continue;
 
       // /implement — approve the active plan and execute it
@@ -2176,24 +2214,6 @@ export async function startRepl(options: ReplOptions = {}): Promise<void> {
       }
     }
   } finally {
-    isReadingPrompt = false;
-    input.off("keypress", handleKeypress);
-    process.off("SIGINT", handleSigint);
-    process.off("unhandledRejection", handleUnhandledRejection);
-    process.off("uncaughtException", handleUncaughtException);
-    if (siginfoRegistered) process.off(siginfo, handleThinkingShortcut);
-    if (state.messages.length > state.resumedMessageCount) {
-      // Honor `--no-history` and the persistent privateMode setting.
-      // The session.allow set is already in-memory only; saveSession itself
-      // also bails early when privateMode is on, but checking here keeps
-      // intent obvious in the call site.
-      if (!options.noHistory && !getConfig().privateMode) {
-        await persistSession(state);
-      }
-    }
-    if (input.isTTY) input.setRawMode(false);
-    // Force exit so lingering handles (timers, watchers, bg jobs) don't
-    // keep the process alive after the user chose to quit.
-    process.exit(0);
+    await shutdown(0);
   }
 }

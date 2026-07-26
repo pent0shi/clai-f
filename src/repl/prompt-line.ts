@@ -208,6 +208,12 @@ function buildPromptRows(
   return rows;
 }
 
+/**
+ * Resolved instead of calling `process.exit` so the caller can run its normal
+ * shutdown boundary (final save, terminal restore, job coordination).
+ */
+export const PROMPT_EXIT_INTENT = "\u0000clai:exit";
+
 export async function readPromptLine(options: {
   history: string[];
   onThinkingShortcut: () => void;
@@ -481,7 +487,8 @@ export async function readPromptLine(options: {
         if (now - lastCtrlCAt < 1_000) {
           cleanup(true);
           output.write("\n");
-          process.exit(0);
+          resolve(PROMPT_EXIT_INTENT);
+          return;
         }
         lastCtrlCAt = now;
         output.write("\n");
