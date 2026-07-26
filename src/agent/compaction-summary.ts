@@ -136,6 +136,84 @@ export function buildCompactionUserPrompt(parts: CompactionPromptParts): string 
 /** Soft cap for transcript fed to the summarizer (chars). */
 export const COMPACTION_TRANSCRIPT_CHAR_BUDGET = 48_000;
 
+/** Chars per map-stage chunk when the transcript exceeds one summarizer call. */
+export const COMPACTION_CHUNK_CHAR_BUDGET = 40_000;
+
+/**
+ * Upper bound on map-stage summarizer calls. Chunks grow instead of being
+ * dropped, so a very long session costs more chars per call but never loses a
+ * region of history.
+ */
+export const MAX_COMPACTION_CHUNKS = 12;
+
+/**
+ * Split the transcript into ordered chunks that together contain every
+ * character of the input. Boundaries prefer blank lines so a message is not cut
+ * mid-record when that is avoidable.
+ */
+export function chunkTranscriptForCompaction(
+  transcript: string,
+  chunkChars = COMPACTION_CHUNK_CHAR_BUDGET,
+  maxChunks = MAX_COMPACTION_CHUNKS,
+): string[] {
+  const text = transcript.trim();
+  if (!text) return [];
+  const size = Math.max(chunkChars, Math.ceil(text.length / maxChunks));
+  if (text.length <= size) return [text];
+  const chunks: string[] = [];
+  let index = 0;
+  while (index < text.length) {
+    const hardEnd = Math.min(text.length, index + size);
+    let end = hardEnd;
+    if (hardEnd < text.length) {
+      const boundary = text.lastIndexOf("\n\n", hardEnd);
+      if (boundary > index + Math.floor(size * 0.5)) end = boundary;
+    }
+    chunks.push(text.slice(index, end));
+    index = end;
+  }
+  return chunks.map((chunk) => chunk.trim()).filter((chunk) => chunk.length > 0);
+}
+
+/** Map-stage prompt: summarize one ordered region of the session. */
+export function buildCompactionChunkPrompt(input: {
+  readonly chunk: string;
+  readonly index: number;
+  readonly total: number;
+  readonly purpose?: "default" | "plan-implement" | undefined;
+}): string {
+  const focus =
+    input.purpose === "plan-implement"
+      ? "Preserve targets, stack, confirmed findings, negative results, untested classes, artifact paths, commands and remaining work."
+      : "Preserve goals, decisions, file paths, commands and their results, task states, failures, running jobs and remaining work.";
+  return [
+    `Summarize region ${input.index + 1} of ${input.total} of one continuous session.`,
+    "This is a partial region: do not write an orientation line, do not speculate about regions you cannot see, and do not answer the user.",
+    focus,
+    "Dense bullets only. Never invent tool results, receipts, exit codes or transcript lines.",
+    "",
+    "SESSION MATERIAL (REGION):",
+    "",
+    input.chunk,
+  ].join("\n");
+}
+
+/** Reduce-stage prompt: merge ordered region memories into one memory. */
+export function buildCompactionReducePrompt(input: {
+  readonly partials: readonly string[];
+  readonly durableState?: string | undefined;
+  readonly purpose?: "default" | "plan-implement" | undefined;
+}): string {
+  const merged = input.partials
+    .map((part, index) => `REGION ${index + 1}:\n${part}`)
+    .join("\n\n");
+  return buildCompactionUserPrompt({
+    messageTranscript: merged,
+    ...(input.durableState ? { durableState: input.durableState } : {}),
+    ...(input.purpose ? { purpose: input.purpose } : {}),
+  });
+}
+
 /** Prefer head goals + tail recency when the transcript is huge. */
 export function trimTranscriptForCompaction(
   transcript: string,

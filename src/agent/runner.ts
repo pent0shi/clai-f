@@ -34,6 +34,7 @@ import {
   type ResponderNotification,
 } from "../tools/jobs.js";
 import {
+  isResponderResultLedgerMessage,
   responderContextMessage,
   upsertResponderContextMessage,
   upsertResponderResultLedger,
@@ -144,6 +145,7 @@ import {
 } from "./task-analyzer.js";
 import { computeMaxIterations, computeStepBudget } from "./step-budget.js";
 import { isScratchOnlyWrite } from "./scratch-write.js";
+import { buildDurableEnvelope, WorkLedger } from "./durable-envelope.js";
 import {
   COMPACTION_SYSTEM_PROMPT,
 } from "./compaction-summary.js";
@@ -236,6 +238,7 @@ import {
 import {
   renderPlanForTerminal,
   planContextMessage,
+  upsertPlanContextMessage,
   handlePlanTool,
   resolvePlanTaskId,
 } from "./plan-tool.js";
@@ -922,11 +925,9 @@ export async function runAgentTurn(
       return sections.join("\n\n");
     };
     const systemSections = [buildSystemContent(nativeToolsActive)];
-    if (activePlan) {
-      systemSections.push(
-        planContextMessage(activePlan, session.planApproved.value),
-      );
-    }
+    // The live plan is mutable state: it is injected once as a keyed request
+    // suffix (upsertPlanContextMessage) instead of being frozen into the stable
+    // system prefix, so the model never sees a stale and a fresh plan together.
 
     // Soft mid-work recovery (any domain): re-attach to jobs / open tasks /
     // last tools after interrupt or "continue" — not a hard gate.
@@ -1065,7 +1066,8 @@ export async function runAgentTurn(
       if (!has("plan")) {
         sections.push({
           kind: "plan",
-          content: "ACTIVE PLAN\nNo persisted plan is active for this turn.",
+          content:
+            "PLAN PROTOCOL\nThe live plan, when one exists, is appended to this request as a single ACTIVE PLAN message. Treat that message as the only authoritative plan state; never rely on plan details quoted in earlier turns.",
           mandatory: true,
         });
       }
@@ -1118,6 +1120,12 @@ export async function runAgentTurn(
       userMessage,
     ];
     liveMessages = messages;
+    if (activePlan) {
+      upsertPlanContextMessage(
+        messages,
+        planContextMessage(activePlan, session.planApproved.value),
+      );
+    }
     const responderWakeTurn = prompt.startsWith("Responder result arrived");
     const responderWakeNotificationId = responderWakeTurn
       ? /^notification=(.+)$/m.exec(prompt)?.[1]?.trim()
@@ -1492,6 +1500,14 @@ export async function runAgentTurn(
           : undefined,
       };
       snap.nextHint = inferNextHint(snap);
+      // One live plan copy, refreshed at the same protocol-safe points as
+      // SESSION STATE so advancing tasks are never contradicted by a stale copy.
+      if (p) {
+        upsertPlanContextMessage(
+          messages,
+          planContextMessage(p, session.planApproved.value),
+        );
+      }
       upsertSessionStateMessage(messages, buildSessionStateBlock(snap));
     };
     refreshSessionState(activePlan);
@@ -1535,6 +1551,8 @@ export async function runAgentTurn(
       continueExisting: continueExistingOutcome,
     });
     await saveOutcomeState(outcomeState);
+    /** Canonical mutation/artifact ledger feeding the durable compaction envelope. */
+    const workLedger = new WorkLedger();
     let governorState: GovernorState = createGovernorState();
     let governorPauseReason: string | undefined;
     let turnState: TurnStateSnapshot = createTurnState();
@@ -3153,6 +3171,8 @@ export async function runAgentTurn(
         await saveEngagement(engagementGraph);
       }
 
+      workLedger.recordToolCall(call, result.ok, savedOutputPath);
+
       const newEvidence = recordToolEvidence(outcomeState, {
         tool: call.name,
         callId: toolEventId,
@@ -3479,6 +3499,38 @@ export async function runAgentTurn(
       return buildContextBreakdown(contextMessages, nextTools).estimatedTotalTokens;
     };
 
+    /**
+     * Canonical state that must survive compaction verbatim. Built from the
+     * plan store, outcome contract, responder ledger and mutation ledger — never
+     * from the narrative summary.
+     */
+    async function buildTurnDurableEnvelope(): Promise<string | undefined> {
+      const plan =
+        (await loadPlan(session.sessionId).catch(() => undefined)) ?? undefined;
+      const root = getActiveProjectRoot() ?? plan?.meta?.projectRoot;
+      const consumed: string[] = [];
+      for (const message of messages) {
+        if (!isResponderResultLedgerMessage(message)) continue;
+        for (const line of message.content.split("\n")) {
+          const match = /notification=(\S+)/.exec(line);
+          if (match?.[1]) consumed.push(match[1]);
+        }
+      }
+      const unread = jobManager
+        .getPendingNotifications(session.sessionId)
+        .map((notification) => notification.id);
+      return buildDurableEnvelope({
+        ...(plan ? { plan } : {}),
+        outcome: outcomeState,
+        ledger: workLedger,
+        ...(root ? { projectRoot: root } : {}),
+        ...(root
+          ? { packageManager: plan?.meta?.packageManager ?? detectPackageManager(root) }
+          : {}),
+        responder: { unread, consumed: [...new Set(consumed)] },
+      });
+    }
+
     async function maybeAutoCompact(
       reason: string,
       force = false,
@@ -3499,10 +3551,15 @@ export async function runAgentTurn(
       });
       if (!force && compactionAttempts.isSuppressed(attemptKey)) return;
       try {
+        const durableEnvelope = await buildTurnDurableEnvelope();
         const result = await compactMessagesWithSummary(
           messages,
           summarizeForCompaction,
-          { budgetTokens: 0, keepRecent: AUTO_COMPACT_KEEP_RECENT },
+          {
+            budgetTokens: 0,
+            keepRecent: AUTO_COMPACT_KEEP_RECENT,
+            ...(durableEnvelope ? { durableEnvelope } : {}),
+          },
         );
         const summaryBody =
           result.messages.find((m) => isCompactionMemoryMessage(m))?.content ??
@@ -3551,10 +3608,10 @@ export async function runAgentTurn(
           () => undefined,
         );
         if (livePlan) {
-          messages.push({
-            role: "system",
-            content: planContextMessage(livePlan, session.planApproved.value),
-          });
+          upsertPlanContextMessage(
+            messages,
+            planContextMessage(livePlan, session.planApproved.value),
+          );
         }
         // Re-inject live SESSION STATE after compaction (older flags survive).
         refreshSessionState(livePlan);

@@ -6,10 +6,16 @@ import {
   hasOrphanToolMessages,
 } from "./tool-history.js";
 import {
+  buildCompactionChunkPrompt,
+  buildCompactionReducePrompt,
   buildCompactionUserPrompt,
+  chunkTranscriptForCompaction,
   looksLikeTranscriptReplay,
-  trimTranscriptForCompaction,
 } from "./compaction-summary.js";
+import {
+  DURABLE_ENVELOPE_PREFIX,
+  isDurableEnvelopeContent,
+} from "./durable-envelope.js";
 import {
   isResponderResultLedgerMessage,
   RESPONDER_RESULT_LEDGER_PREFIX,
@@ -97,6 +103,12 @@ export interface CompactOptions {
    * Does not change accept/reject heuristics.
    */
   purpose?: "default" | "plan-implement" | undefined;
+  /**
+   * Deterministic canonical state (files, evidence, criteria, plan, responder
+   * ledger) built by the caller from durable stores. It is fed to the summarizer
+   * as authoritative state and re-injected verbatim after compaction.
+   */
+  durableEnvelope?: string | undefined;
 }
 
 export interface CompactResult {
@@ -275,6 +287,7 @@ export async function compactMessagesWithSummary(
   }
 
   const isDurableSystem = (content: string): boolean =>
+    isDurableEnvelopeContent(content) ||
     content.startsWith("ACTIVE PLAN") ||
     content.startsWith("SESSION STATE") ||
     content.startsWith("ENGAGEMENT SCOPE") ||
@@ -317,6 +330,7 @@ export async function compactMessagesWithSummary(
       if (m.content.length > 4_000) {
         const chunks: string[] = [];
         for (const marker of [
+          DURABLE_ENVELOPE_PREFIX,
           "ACTIVE PLAN",
           "SESSION STATE / WORKING MEMORY",
           "ENGAGEMENT SCOPE",
@@ -333,15 +347,60 @@ export async function compactMessagesWithSummary(
     .filter(Boolean)
     .join("\n\n");
 
-  const rawCombined = buildCompactionUserPrompt({
-    visualTranscript: visual || undefined,
-    messageTranscript,
-    durableState: durableBits || undefined,
-    purpose: options.purpose,
-  });
-  const prompt = trimTranscriptForCompaction(rawCombined);
+  const durableState = [options.durableEnvelope?.trim(), durableBits]
+    .filter((part): part is string => Boolean(part))
+    .join("\n\n");
 
-  const rawSummary = redactSecrets((await summarize(prompt)).trim());
+  // Every region of history is mapped and then reduced. Head/tail omission is
+  // never used: state that exists only in the middle of a long session must
+  // survive compaction.
+  const combinedTranscript = [
+    visual ? `VISUAL TRANSCRIPT:\n\n${visual}` : "",
+    messageTranscript ? `OLDER MODEL TURNS:\n\n${messageTranscript}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n\n---\n\n");
+  const chunks = chunkTranscriptForCompaction(combinedTranscript);
+
+  let modelSummary: string;
+  if (chunks.length <= 1) {
+    modelSummary = await summarize(
+      buildCompactionUserPrompt({
+        visualTranscript: visual || undefined,
+        messageTranscript,
+        durableState: durableState || undefined,
+        purpose: options.purpose,
+      }),
+    );
+  } else {
+    const partials: string[] = [];
+    for (let index = 0; index < chunks.length; index += 1) {
+      const partial = await summarize(
+        buildCompactionChunkPrompt({
+          chunk: chunks[index]!,
+          index,
+          total: chunks.length,
+          purpose: options.purpose,
+        }),
+      );
+      const cleaned = stripThinking(partial ?? "").visible.trim();
+      if (cleaned) partials.push(cleaned);
+    }
+    if (partials.length === 0) {
+      throw new Error(
+        "compaction failed: no region summary was produced for a long session",
+      );
+    }
+    modelSummary = await summarize(
+      buildCompactionReducePrompt({
+        partials,
+        ...(durableState ? { durableState } : {}),
+        ...(options.purpose ? { purpose: options.purpose } : {}),
+      }),
+    );
+  }
+
+  const rawSummary = redactSecrets(modelSummary.trim());
   const summary = stripThinking(rawSummary).visible.trim();
   if (!summary) {
     throw new Error("compaction failed: model returned an empty summary");
@@ -372,6 +431,9 @@ export async function compactMessagesWithSummary(
     role: "system",
     content: `${memoryPrefix}\n\n${summary}`,
   };
+  const envelopeMsg: ChatMessage | undefined = options.durableEnvelope?.trim()
+    ? { role: "system", content: options.durableEnvelope.trim() }
+    : undefined;
 
   // Prefer ~16–20k: start with a generous lean tail, then progressively
   // soft-trim oversized dumps only while still over the soft upper band.
@@ -381,6 +443,7 @@ export async function compactMessagesWithSummary(
     memoryMsg,
     rawTail,
     TAIL_SOFT_TIERS[0]!,
+    envelopeMsg,
   );
   for (let i = 1; i < TAIL_SOFT_TIERS.length; i += 1) {
     if (estimateMessagesTokens(compacted) <= POST_COMPACT_SOFT_UPPER_BAND_TOKENS) {
@@ -391,6 +454,7 @@ export async function compactMessagesWithSummary(
       memoryMsg,
       rawTail,
       TAIL_SOFT_TIERS[i]!,
+      envelopeMsg,
     );
   }
 
@@ -417,8 +481,14 @@ function buildLeanCompact(
   memoryMsg: ChatMessage,
   rawTail: ChatMessage[],
   preferMax: TailPreferMax,
+  envelopeMsg?: ChatMessage | undefined,
 ): ChatMessage[] {
-  return [...head, memoryMsg, ...leanTailMessages(rawTail, preferMax)];
+  return [
+    ...head,
+    memoryMsg,
+    ...(envelopeMsg ? [envelopeMsg] : []),
+    ...leanTailMessages(rawTail, preferMax),
+  ];
 }
 
 /**
@@ -450,6 +520,7 @@ export function shouldApplyAutoCompact(input: {
 
 function isStaleDurableSystem(content: string): boolean {
   return (
+    isDurableEnvelopeContent(content) ||
     content.startsWith("ACTIVE PLAN") ||
     content.startsWith("SESSION STATE") ||
     content.startsWith("ENGAGEMENT SCOPE") ||
