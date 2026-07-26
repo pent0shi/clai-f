@@ -13,12 +13,17 @@ import {
 } from "../../agent/context-manager.js";
 import { repairToolProtocol } from "../../agent/tool-history.js";
 import {
-  applyUsageToSnapshot,
   formatContextChip,
-  modelContextWindow,
   snapshotFromEstimate,
   type ContextUsageSnapshot,
 } from "../../llm/token-usage.js";
+import {
+  compactedUsageSnapshot,
+  contextUsageLimit,
+  recordUsageSnapshot,
+  resolveContextUsageSnapshot,
+  type ContextUsageTarget,
+} from "./session-context-usage.js";
 import { createSessionPolicy, type SessionPolicy } from "../../agent/session-policy.js";
 import { resolveTurnInput } from "../../attachments/service.js";
 import { generateSessionTitle } from "../../agent/session-title.js";
@@ -247,51 +252,34 @@ export class SessionController implements Disposable {
     };
   }
 
-  /**
-   * Prefer last API prompt_tokens as context fill (exact); otherwise estimate
-   * from current history so the footer always has a number.
-   */
+  private get usageTarget(): ContextUsageTarget {
+    return { provider: this.provider, model: this.model };
+  }
+
   private resolveContextUsage(): ContextUsageSnapshot | undefined {
-    const limit = modelContextWindow(this.model, this.provider);
-    if (this.contextUsage?.exact && this.contextUsage.contextTokens > 0) {
-      return { ...this.contextUsage, contextLimit: limit };
-    }
-    if (this.history.length === 0 && !this.contextUsage) return undefined;
-    return snapshotFromEstimate(
+    return resolveContextUsageSnapshot(
+      this.usageTarget,
       this.history,
-      this.model,
-      this.provider,
       this.contextUsage,
     );
   }
 
   /** Record provider-reported usage (from agent token-usage events). */
   recordTokenUsage(usage: TokenUsage, model?: string): void {
-    const limit = modelContextWindow(model ?? this.model, this.provider);
-    this.contextUsage = applyUsageToSnapshot(this.contextUsage, usage, limit);
+    const target = { provider: this.provider, model: model ?? this.model };
+    this.contextUsage = recordUsageSnapshot(target, this.contextUsage, usage);
     if (model) this.model = model;
     this.notifyState();
   }
 
-  /**
-   * After /compact or auto-compact: history was replaced with a short memory
-   * + recent turns. Drop stale exact prompt_tokens so the footer shows the
-   * live context size until the next API usage report.
-   */
+  /** After /compact or auto-compact, report the post-compaction context size. */
   noteContextCompacted(afterTokens?: number): void {
-    const limit = modelContextWindow(this.model, this.provider);
-    const estimated =
-      typeof afterTokens === "number" && afterTokens > 0
-        ? afterTokens
-        : estimateMessagesTokens(this.history);
-    this.contextUsage = {
-      contextTokens: estimated,
-      contextLimit: limit,
-      lastCompletionTokens: 0,
-      sessionPromptTokens: this.contextUsage?.sessionPromptTokens ?? 0,
-      sessionCompletionTokens: this.contextUsage?.sessionCompletionTokens ?? 0,
-      exact: false,
-    };
+    this.contextUsage = compactedUsageSnapshot(
+      this.usageTarget,
+      this.contextUsage,
+      this.history,
+      afterTokens,
+    );
     this.notifyState();
   }
 
@@ -390,7 +378,7 @@ export class SessionController implements Disposable {
         contextLimit:
           typeof cu.contextLimit === "number" && cu.contextLimit > 0
             ? cu.contextLimit
-            : modelContextWindow(this.model, this.provider),
+            : contextUsageLimit({ provider: this.provider, model: this.model }),
         lastCompletionTokens: cu.lastCompletionTokens ?? 0,
         sessionPromptTokens: cu.sessionPromptTokens ?? 0,
         sessionCompletionTokens: cu.sessionCompletionTokens ?? 0,

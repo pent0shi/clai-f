@@ -10,14 +10,22 @@ import { createHash } from "node:crypto";
 import { getConfig, providerCategory } from "../store/config.js";
 import type { ProviderId } from "../types.js";
 import { AUTO_COMPACT_TOKEN_BUDGET } from "./context-manager.js";
+import {
+  DEFAULT_AUTO_COMPACT_REQUEST_TOKENS,
+  MIN_AUTO_COMPACT_REQUEST_TOKENS,
+  configuredRequestTokens,
+  resolveRequestBudget,
+} from "./request-budget.js";
 
 /** Hard auto-compact ceiling — never raise soft past this. */
 export const HARD_COMPACT_TOKEN_BUDGET = AUTO_COMPACT_TOKEN_BUDGET;
 
-/** E1 default: auto-compact trigger. Fires at ~72k estimated tokens (soft
- * path, on by default); the hard ceiling stays at HARD_COMPACT_TOKEN_BUDGET.
- * Lower further via config/env for earlier compaction. */
-export const DEFAULT_SOFT_COMPACT_TOKEN_BUDGET = 72_000;
+/**
+ * Auto-compaction trigger default, in total estimated request tokens. Owned by
+ * request-budget.ts so behaviour, UI and policy cannot diverge.
+ */
+export const DEFAULT_SOFT_COMPACT_TOKEN_BUDGET =
+  DEFAULT_AUTO_COMPACT_REQUEST_TOKENS;
 
 /** E2 default fs passthrough (was 400k). Full body always on disk when truncated. */
 export const DEFAULT_FS_PASSTHROUGH_CAP_CHARS = 64_000;
@@ -68,10 +76,11 @@ export function getReliabilityPolicy(): ReliabilityPolicy {
   const softEarly =
     boolEnv("CLAI_SOFT_EARLY_COMPACT") ?? cfg.softEarlyCompact ?? true;
   let softBudget =
-    intEnv("CLAI_SOFT_COMPACT_TOKENS") ??
-    cfg.softCompactTokenBudget ??
-    DEFAULT_SOFT_COMPACT_TOKEN_BUDGET;
-  softBudget = Math.max(20_000, Math.min(softBudget, HARD_COMPACT_TOKEN_BUDGET));
+    intEnv("CLAI_SOFT_COMPACT_TOKENS") ?? configuredRequestTokens().tokens;
+  softBudget = Math.max(
+    MIN_AUTO_COMPACT_REQUEST_TOKENS,
+    Math.min(softBudget, HARD_COMPACT_TOKEN_BUDGET),
+  );
 
   let fsCap =
     intEnv("CLAI_FS_PASSTHROUGH_CHARS") ??
@@ -105,14 +114,21 @@ export function getReliabilityPolicy(): ReliabilityPolicy {
 
 /**
  * E1: token threshold that triggers auto-compact.
- * Soft path fires earlier; hard budget is always the ceiling used when soft is off.
+ * Soft path fires earlier; hard budget is the ceiling used when soft is off.
+ * The result is additionally clamped to what the target model can serve.
  */
-export function autoCompactTriggerTokens(policy = getReliabilityPolicy()): number {
-  if (!policy.softEarlyCompact) return policy.hardCompactTokenBudget;
-  return Math.min(
-    policy.softCompactTokenBudget,
-    policy.hardCompactTokenBudget,
-  );
+export function autoCompactTriggerTokens(
+  policy = getReliabilityPolicy(),
+  target?: { provider?: ProviderId | undefined; model?: string | undefined },
+): number {
+  const configured = policy.softEarlyCompact
+    ? Math.min(policy.softCompactTokenBudget, policy.hardCompactTokenBudget)
+    : policy.hardCompactTokenBudget;
+  return resolveRequestBudget({
+    ...(target?.provider ? { provider: target.provider } : {}),
+    ...(target?.model ? { model: target.model } : {}),
+    overrideTokens: configured,
+  }).effectiveTrigger;
 }
 
 /**

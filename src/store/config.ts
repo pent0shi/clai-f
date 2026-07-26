@@ -1,5 +1,6 @@
 import Conf from "conf";
 import { dirname } from "node:path";
+import { readFileSync } from "node:fs";
 import type { Mode, ProviderId, ReasoningPreference } from "../types.js";
 import type { ExaSearchType, SearchProviderId } from "../tools/web/types.js";
 import { DEFAULT_EXA_SEARCH_TYPE } from "../tools/web/types.js";
@@ -55,8 +56,10 @@ export interface ClaiConfig {
 
   /** E1: auto-compact at softCompactTokenBudget before the hard 100k ceiling. */
   softEarlyCompact?: boolean;
-  /** E1: soft auto-compact trigger (tokens). Clamped to ≤ hard budget. */
+  /** @deprecated Legacy soft trigger; migrated to autoCompactRequestTokens. */
   softCompactTokenBudget?: number;
+  /** Total estimated request tokens that trigger auto-compaction. */
+  autoCompactRequestTokens?: number;
   /** E2: max chars of fs.read/list/search body kept in model context (full on disk). */
   fsPassthroughCapChars?: number;
   /** E3: lower maxTokens on tool steps vs legacy 32k fixed. */
@@ -121,7 +124,7 @@ const defaults: ClaiConfig = {
   permissions: "default",
   toolCalling: "auto",
   softEarlyCompact: true,
-  softCompactTokenBudget: 72_000,
+  autoCompactRequestTokens: 80_000,
   fsPassthroughCapChars: 64_000,
   adaptiveMaxTokens: true,
   freeTierContextGuard: true,
@@ -200,6 +203,23 @@ export function getProviderModel(provider: ProviderId): string {
   return configured
     ? sanitizeProviderModel(provider, configured)
     : defaultModels[provider];
+}
+
+/**
+ * True when the user (or a migration) actually persisted this key. Defaults are
+ * resolved by Conf, so a resolved value alone cannot prove intent — the raw file
+ * is the only honest source for migration decisions.
+ */
+export function hasExplicitConfigKey(key: keyof ClaiConfig): boolean {
+  try {
+    const raw = JSON.parse(readFileSync(store.path, "utf8")) as Record<
+      string,
+      unknown
+    >;
+    return Object.prototype.hasOwnProperty.call(raw, key);
+  } catch {
+    return false;
+  }
 }
 
 export function getConfigPath(): string {

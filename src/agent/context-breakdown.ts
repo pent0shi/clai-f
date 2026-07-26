@@ -5,6 +5,7 @@
  * Used for reliability ops and regression harnesses. Does not truncate context.
  */
 
+import { createHash } from "node:crypto";
 import type { ChatMessage, ToolDefinition } from "../types.js";
 import {
   estimateMessagesTokens,
@@ -199,4 +200,51 @@ export function contextBreakdownAuditPayload(
     otherSystemTokens: breakdown.systemParts.otherSystemTokens,
     toolDefinitionCount: breakdown.toolDefinitionCount,
   };
+}
+
+
+/**
+ * Name the block that dominates an irreducible request. When compaction cannot
+ * get under the trigger, the user needs to know what is actually large instead
+ * of watching the same attempt repeat.
+ */
+export function describeDominantContextBlock(
+  messages: readonly ChatMessage[],
+  tools?: readonly ToolDefinition[] | undefined,
+): string {
+  const breakdown = buildContextBreakdown(messages, tools);
+  const candidates: Array<{ label: string; tokens: number }> = [
+    { label: "tool schemas", tokens: breakdown.toolSchemaTokens },
+    { label: "tool results", tokens: breakdown.toolResultTokens },
+    { label: "assistant history", tokens: breakdown.assistantTokens },
+    { label: "user messages", tokens: breakdown.userTokens },
+    {
+      label: "system constitution",
+      tokens: breakdown.systemParts.constitutionTokens,
+    },
+    {
+      label: "compaction memory",
+      tokens: breakdown.systemParts.compactionMemoryTokens,
+    },
+    { label: "plan state", tokens: breakdown.systemParts.planTokens },
+    {
+      label: "session state",
+      tokens: breakdown.systemParts.sessionStateTokens,
+    },
+  ];
+  const dominant = candidates.reduce((largest, candidate) =>
+    candidate.tokens > largest.tokens ? candidate : largest,
+  );
+  return `${dominant.label} (~${dominant.tokens.toLocaleString()} tokens)`;
+}
+
+/** Stable hash of the attached tool schemas, for attempt identity. */
+export function toolSchemaHash(
+  tools: readonly ToolDefinition[] | undefined,
+): string {
+  if (!tools || tools.length === 0) return "none";
+  return createHash("sha256")
+    .update(tools.map((tool) => `${tool.name}:${estimateTokens(JSON.stringify(tool.parameters))}`).join("|"))
+    .digest("hex")
+    .slice(0, 16);
 }

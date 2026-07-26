@@ -33,7 +33,7 @@ vi.mock("../src/tools/definitions.js", async (importActual) => {
   const schemaHeavyTool: ToolDefinition = {
     name: "fs.read",
     wireName: "fs_read",
-    description: `Schema-heavy tool fixture: ${"x".repeat(400_000)}`,
+    description: `Schema-heavy tool fixture: ${"x".repeat(80_000)}`,
     parameters: {
       type: "object",
       properties: { path: { type: "string" } },
@@ -68,10 +68,10 @@ describe("auto-compaction native tool schemas", () => {
 
   it("compacts when attached native-tool schemas push the next request past the trigger", async () => {
     const history: ChatMessage[] = [{ role: "system", content: "history" }];
-    for (let i = 0; i < 12; i += 1) {
+    for (let i = 0; i < 11; i += 1) {
       history.push({
         role: i % 2 === 0 ? "user" : "assistant",
-        content: `${i}: ${"history ".repeat(500)}`,
+        content: `${i}: ${"history ".repeat(2_400)}`,
       });
     }
 

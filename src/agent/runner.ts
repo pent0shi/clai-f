@@ -114,6 +114,8 @@ import {
 import {
   buildContextBreakdown,
   contextBreakdownAuditPayload,
+  describeDominantContextBlock,
+  toolSchemaHash,
 } from "./context-breakdown.js";
 import {
   autoCompactTriggerTokens,
@@ -150,6 +152,11 @@ import {
   PLAN_REMINDER_TOAST,
 } from "./plan-mode-reminders.js";
 import { LoopGuard } from "./loop-guard.js";
+import {
+  CompactionAttemptLedger,
+  compactionAttemptKey,
+} from "./compaction-attempt.js";
+import { resolveRequestBudget } from "./request-budget.js";
 import {
   loadPlan,
   savePlan,
@@ -3426,6 +3433,7 @@ export async function runAgentTurn(
     // Align with /compact default: small recency + dense memory (not keepRecent=6 fat tails).
     const AUTO_COMPACT_KEEP_RECENT = 2;
     let lastCompactionMsgCount = 0;
+    const compactionAttempts = new CompactionAttemptLedger();
     /** E5: identical tool bodies within this turn → pointer instead of re-append. */
     const toolResultHashes = new Map<
       string,
@@ -3476,13 +3484,20 @@ export async function runAgentTurn(
       force = false,
     ): Promise<void> {
       const beforeTokens = estimateNextRequestTokens(messages);
-      // E1: auto-compact trigger (default 72k soft; hard ceiling 100k).
-      const compactTrigger = autoCompactTriggerTokens();
+      const budget = resolveRequestBudget({ provider, model });
+      const compactTrigger = budget.effectiveTrigger;
       if (!force && beforeTokens < compactTrigger) return;
+      // Structural eligibility only: there must be closed history to summarize.
       if (messages.length <= AUTO_COMPACT_KEEP_RECENT + 2) return;
-      // Avoid compaction loops: don't re-compact until enough new messages have
-      // accumulated since the last compaction.
-      if (messages.length <= lastCompactionMsgCount + 4) return;
+      const attemptKey = compactionAttemptKey({
+        messages,
+        provider,
+        model,
+        dialect: toolDialect,
+        triggerTokens: compactTrigger,
+        schemaHash: toolSchemaHash(selectToolDefs(nativeToolsActive, useCompactSystemPrompt)),
+      });
+      if (!force && compactionAttempts.isSuppressed(attemptKey)) return;
       try {
         const result = await compactMessagesWithSummary(
           messages,
@@ -3503,7 +3518,30 @@ export async function runAgentTurn(
         ) {
           return;
         }
+        // The accepted candidate must actually fit the trigger it was run for,
+        // otherwise the oversized request is sent anyway and corrective
+        // compaction is suppressed as "already compacted".
+        const candidateTokens = estimateNextRequestTokens(result.messages);
+        if (!force && candidateTokens >= compactTrigger) {
+          const dominant = describeDominantContextBlock(result.messages);
+          compactionAttempts.recordFailure(attemptKey);
+          await auditLog("agent.compact.overflow", {
+            reason,
+            candidateTokens,
+            trigger: compactTrigger,
+            dominant,
+          });
+          writeNotice(
+            "warn",
+            `context is still ~${candidateTokens.toLocaleString()} tokens after compaction (limit ~${compactTrigger.toLocaleString()}) — largest block: ${dominant}`,
+            chalk.yellow(
+              `  ⚠ context still ~${candidateTokens.toLocaleString()} tokens after compaction; largest block: ${dominant}\n`,
+            ),
+          );
+          return;
+        }
         messages.splice(0, messages.length, ...result.messages);
+        compactionAttempts.recordSuccess(attemptKey);
         loopGuard.resetReadOnly();
         // Token stats use the same complete request estimate as the trigger.
         const compactedTokens = estimateNextRequestTokens(messages);
@@ -3565,6 +3603,7 @@ export async function runAgentTurn(
         }
         // Summarization failed — DO NOT fall back to a mechanical dump. Keep the
         // current context and continue; we'll try again as it keeps growing.
+        compactionAttempts.recordFailure(attemptKey);
         await auditLog("agent.compact.failed", {
           reason: error instanceof Error ? error.message : String(error),
         });
