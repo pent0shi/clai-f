@@ -1,7 +1,7 @@
 import { spawn, execFileSync, type ChildProcess } from "node:child_process";
-import { createWriteStream, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync, type WriteStream } from "node:fs";
+import { createWriteStream, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync, type WriteStream } from "node:fs";
 import { mkdir, open, stat } from "node:fs/promises";
-import { basename, join } from "node:path";
+import { basename, join, sep } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { StringDecoder } from "node:string_decoder";
 import type { Readable } from "node:stream";
@@ -233,6 +233,9 @@ const PROGRESS_FLUSH_MS = 250;
  */
 const LIVENESS_LOST_GRACE_MS = 8_000;
 
+/** Minimum spacing between liveness probes for the same job. */
+const LIVENESS_PROBE_INTERVAL_MS = 1_000;
+
 /**
  * Number of trailing bytes in `buf` that form an incomplete multi-byte UTF-8
  * sequence (a lead byte whose continuation bytes were cut off by the read
@@ -265,22 +268,82 @@ function processAlive(pid: number | undefined): boolean {
   }
 }
 
-function processIdentity(pid: number | undefined): string | undefined {
-  if (!pid || process.platform === "win32") return undefined;
+/** Identity is invariant for a pid's lifetime, so it caches safely. */
+const PROCESS_IDENTITY_TTL_MS = 15_000;
+const PROCESS_IDENTITY_CACHE_MAX = 512;
+const processIdentityCache = new Map<
+  number,
+  { value: string | undefined; at: number }
+>();
+
+function readLinuxProcessStart(pid: number): string | undefined {
   try {
-    // Start time only: it is invariant for a pid's lifetime and changes on
-    // reuse, so it is a sufficient pid-reuse guard. The command line is
-    // deliberately excluded — `sh -c "cmd"` execs into `cmd`, mutating
-    // `ps command=` mid-run, which made a live job fail its OWN identity check
-    // (stop refused with "process identity no longer matches", liveness falsely
-    // marked lost, and double-Esc cancel unable to kill the process).
-    const value = execFileSync("ps", ["-p", String(pid), "-o", "lstart="], {
+    const raw = readFileSync(`/proc/${pid}/stat`, "utf8");
+    const commEnd = raw.lastIndexOf(")");
+    if (commEnd < 0) return undefined;
+    const fields = raw.slice(commEnd + 2).trim().split(/\s+/);
+    const startTime = fields[19];
+    return startTime && startTime.length > 0 ? startTime : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function readPsProcessStart(pid: number): string | undefined {
+  try {
+    // Start time only: the command line is deliberately excluded — `sh -c "cmd"`
+    // execs into `cmd`, mutating `ps command=` mid-run, which made a live job
+    // fail its OWN identity check.
+    return execFileSync("ps", ["-p", String(pid), "-o", "lstart="], {
       encoding: "utf8",
       timeout: 2_000,
       stdio: ["ignore", "pipe", "ignore"],
     }).trim();
-    return value ? createHash("sha256").update(value).digest("hex") : undefined;
-  } catch { return undefined; }
+  } catch {
+    return undefined;
+  }
+}
+
+function computeProcessIdentity(pid: number): string | undefined {
+  const raw =
+    process.platform === "linux"
+      ? readLinuxProcessStart(pid)
+      : readPsProcessStart(pid);
+  return raw ? createHash("sha256").update(raw).digest("hex") : undefined;
+}
+
+function pruneProcessIdentityCache(now: number): void {
+  if (processIdentityCache.size <= PROCESS_IDENTITY_CACHE_MAX) return;
+  for (const [pid, entry] of processIdentityCache) {
+    if (now - entry.at >= PROCESS_IDENTITY_TTL_MS) processIdentityCache.delete(pid);
+  }
+  if (processIdentityCache.size > PROCESS_IDENTITY_CACHE_MAX) {
+    processIdentityCache.clear();
+  }
+}
+
+function forgetProcessIdentity(pid: number | undefined): void {
+  if (pid) processIdentityCache.delete(pid);
+}
+
+function processIdentity(
+  pid: number | undefined,
+  options: { refresh?: boolean } = {},
+): string | undefined {
+  if (!pid || process.platform === "win32") return undefined;
+  const now = Date.now();
+  const cached = processIdentityCache.get(pid);
+  if (
+    cached &&
+    !options.refresh &&
+    now - cached.at < PROCESS_IDENTITY_TTL_MS
+  ) {
+    return cached.value;
+  }
+  const value = computeProcessIdentity(pid);
+  processIdentityCache.set(pid, { value, at: now });
+  pruneProcessIdentityCache(now);
+  return value;
 }
 
 /**
@@ -452,6 +515,7 @@ export class JobManager {
    * observed alive again or finalized.
    */
   private livenessMisses = new Map<string, number>();
+  private livenessCheckedAt = new Map<string, number>();
   private registryRetryTimer: ReturnType<typeof setTimeout> | undefined;
   private readonly registryPath: string;
   private readonly transientV2RegistryPath: string;
@@ -460,10 +524,71 @@ export class JobManager {
     this.registryPath = join(this.jobsDir, REGISTRY_FILE);
     this.transientV2RegistryPath = join(this.jobsDir, TRANSIENT_V2_REGISTRY_FILE);
     this.loadAndReconcile();
+    this.sweepOrphanArtifacts();
   }
 
   private isDurable(job: BackgroundJob): boolean {
     return job.kind !== "ephemeral";
+  }
+  private artifactPathsOf(job: BackgroundJob): string[] {
+    return [
+      job.artifactPath,
+      job.stdoutArtifact,
+      job.stderrArtifact,
+      ...(job.artifacts?.stdout.chunks ?? []),
+      ...(job.artifacts?.stderr.chunks ?? []),
+    ].filter((path): path is string => Boolean(path));
+  }
+  /** Delete a dropped job's artifact chunks, never one still referenced. */
+  private removeJobArtifacts(job: BackgroundJob): void {
+    const paths = this.artifactPathsOf(job).filter((path) =>
+      path.startsWith(`${this.jobsDir}${sep}`),
+    );
+    if (paths.length === 0) return;
+    const referenced = new Set<string>();
+    for (const other of this.jobs.values()) {
+      for (const path of this.artifactPathsOf(other)) referenced.add(path);
+    }
+    for (const path of new Set(paths)) {
+      if (referenced.has(path)) continue;
+      try {
+        rmSync(path, { force: true });
+      } catch {
+        // Artifact cleanup is best-effort; a locked file is retried on boot.
+      }
+    }
+  }
+  /** Drop a job row plus its per-job caches and artifacts. */
+  private forgetJob(id: string): void {
+    const job = this.jobs.get(id);
+    this.jobs.delete(id);
+    this.livenessMisses.delete(id);
+    this.livenessCheckedAt.delete(id);
+    if (!job) return;
+    forgetProcessIdentity(job.pid);
+    this.removeJobArtifacts(job);
+  }
+  /** Remove artifact files whose job row no longer exists. */
+  private sweepOrphanArtifacts(): void {
+    let names: string[];
+    try {
+      names = readdirSync(this.jobsDir);
+    } catch {
+      return;
+    }
+    const known = new Set(this.jobs.keys());
+    const now = Date.now();
+    for (const name of names) {
+      if (!/\.(stdout|stderr)\.log(\.\d+)?$/.test(name)) continue;
+      if ([...known].some((id) => name.includes(`-${id}.`))) continue;
+      const path = join(this.jobsDir, name);
+      try {
+        if (now - statSync(path).mtimeMs <= TERMINAL_JOB_MAX_AGE_MS) continue;
+        rmSync(path, { force: true });
+      } catch {
+        // Ignore unreadable/locked leftovers.
+      }
+    }
   }
 
   private isLive(job: BackgroundJob): boolean {
@@ -761,11 +886,27 @@ export class JobManager {
   }
 
   /** Reconcile a restored process that no longer has a ChildProcess close event. */
-  private refreshJobLiveness(job: BackgroundJob): void {
+  private refreshJobLiveness(
+    job: BackgroundJob,
+    options: { force?: boolean } = {},
+  ): void {
     if (!this.isLive(job) || this.processes.has(job.id)) {
       this.livenessMisses.delete(job.id);
+      this.livenessCheckedAt.delete(job.id);
       return;
     }
+    // Subscribers can ask for state many times per frame; one probe per job per
+    // interval is enough because the lost grace window is far longer.
+    const checkedAt = this.livenessCheckedAt.get(job.id);
+    const probeAt = Date.now();
+    if (
+      !options.force &&
+      checkedAt !== undefined &&
+      probeAt - checkedAt < LIVENESS_PROBE_INTERVAL_MS
+    ) {
+      return;
+    }
+    this.livenessCheckedAt.set(job.id, probeAt);
     // Primary signal is the pid itself. If the process is alive we keep the job
     // running and only ever declare "lost" on a PROVEN pid reuse (both the
     // stored and the current identity are present AND differ). An identity read
@@ -780,6 +921,8 @@ export class JobManager {
         this.livenessMisses.delete(job.id);
         return;
       }
+    } else {
+      forgetProcessIdentity(job.pid);
     }
     // The process looks gone (or is a proven pid reuse). Require the miss to
     // persist across a grace window before finalizing — a single transient
@@ -985,7 +1128,7 @@ export class JobManager {
     this.processes.delete(id);
     if (!this.isLive(job)) this.clearAuthorizationTimer(id);
     if (!this.isDurable(job) && !this.isLive(job)) {
-      this.jobs.delete(id);
+      this.forgetJob(id);
       this.emit({ type: "job", jobId: id });
       return;
     }
@@ -1089,7 +1232,7 @@ export class JobManager {
     try {
       await this.persist();
     } catch {
-      this.jobs.delete(id);
+      this.forgetJob(id);
       return {
         ok: false,
         output: "Background command launch error [PERSIST_FAILED]: could not persist the job registry; the command was not started.",
@@ -1195,7 +1338,7 @@ export class JobManager {
       job.processGroupId = detached ? child.pid : undefined;
       job.status = "running";
       job.heartbeatAt = new Date().toISOString();
-      job.processIdentity = processIdentity(child.pid);
+      job.processIdentity = processIdentity(child.pid, { refresh: true });
       this.processes.set(id, child);
       this.writers.set(id, { stdout, stderr });
       this.scheduleAuthorizationExpiry(job);
@@ -1778,7 +1921,7 @@ export class JobManager {
     };
     const identityMatches = (): boolean => {
       if (process.platform === "win32") return processAlive(pid);
-      const current = processIdentity(pid);
+      const current = processIdentity(pid, { refresh: true });
       return Boolean(current && job.processIdentity && current === job.processIdentity);
     };
     if (targetAlive() && (!processAlive(pid) || !identityMatches())) {
@@ -2043,7 +2186,7 @@ export class JobManager {
     for (const [id, job] of this.jobs) {
       if (!this.isDurable(job)) {
         // Safety: never keep ephemeral rows that are not live.
-        if (!this.isLive(job)) this.jobs.delete(id);
+        if (!this.isLive(job)) this.forgetJob(id);
         continue;
       }
       if (this.isLive(job)) continue;
@@ -2057,7 +2200,7 @@ export class JobManager {
       }
       const ended = job.endedAt ? Date.parse(job.endedAt) : Date.parse(job.startedAt);
       if (Number.isFinite(ended) && now - ended > TERMINAL_JOB_MAX_AGE_MS) {
-        this.jobs.delete(id);
+        this.forgetJob(id);
         continue;
       }
       durableTerminal.push(job);
@@ -2065,7 +2208,7 @@ export class JobManager {
     if (durableTerminal.length <= MAX_DURABLE_TERMINAL_JOBS) return;
     durableTerminal.sort((a, b) => b.startedAt.localeCompare(a.startedAt));
     for (const job of durableTerminal.slice(MAX_DURABLE_TERMINAL_JOBS)) {
-      this.jobs.delete(job.id);
+      this.forgetJob(job.id);
     }
   }
 
