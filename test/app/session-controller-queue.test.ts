@@ -2,11 +2,15 @@ import { describe, expect, it } from "vitest";
 import type { AgentPort, RunTurnHandlers, RunTurnRequest } from "../../src/app/ports/agent-port.js";
 import type { PersistencePort } from "../../src/app/ports/persistence-port.js";
 import { SessionController } from "../../src/app/controllers/session-controller.js";
+import { createTurnOutcome, type TurnOutcome } from "../../src/agent/turn-outcome.js";
+
+const succeeded = (answer = ""): TurnOutcome =>
+  createTurnOutcome({ status: "succeeded", answer, steps: 1, remainingCriteria: [] });
 
 class NoopAgentPort implements AgentPort {
-  async runTurn(_request: RunTurnRequest, handlers: RunTurnHandlers): Promise<string> {
+  async runTurn(_request: RunTurnRequest, handlers: RunTurnHandlers): Promise<TurnOutcome> {
     handlers.onMessages?.([]);
-    return "";
+    return succeeded();
   }
 }
 
@@ -120,7 +124,7 @@ describe("SessionController queued-draft management (INPUT-007)", () => {
         seen.push(req.prompt);
         if (req.prompt === "slow") await gate;
         handlers.onMessages?.([]);
-        return "";
+        return succeeded();
       },
     };
     const session = new SessionController({

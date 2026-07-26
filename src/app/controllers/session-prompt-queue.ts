@@ -1,4 +1,8 @@
 import type { TurnResult } from "./turn-controller.js";
+import {
+  queueContinuationDecision,
+  type ContinuationDecision,
+} from "./turn-continuation.js";
 
 export interface TurnDisplayOptions {
   displayPrompt?: string | null | undefined;
@@ -13,6 +17,13 @@ interface SessionPromptQueueDeps {
     prompt: string,
     options?: TurnDisplayOptions,
   ) => Promise<TurnResult>;
+  /** Structured result of the last settled turn, whoever started it. */
+  readonly lastTurnResult?: (() => TurnResult | undefined) | undefined;
+}
+
+function pausedQueueNotice(decision: ContinuationDecision): string {
+  const reason = decision.reason ?? "the turn did not succeed";
+  return `queued prompts paused because ${reason}. Send or edit them when ready.`;
 }
 
 export class SessionPromptQueue {
@@ -104,9 +115,15 @@ export class SessionPromptQueue {
       while (!this.deps.isRunning()) {
         let next: string | undefined;
         if (this.priorityPrompt !== undefined) {
+          // An explicit steer always runs, whatever the previous turn did.
           next = this.priorityPrompt;
           this.priorityPrompt = undefined;
         } else if (this.items.length > 0) {
+          const gate = this.continuationGate();
+          if (!gate.proceed) {
+            this.deps.notice(pausedQueueNotice(gate));
+            break;
+          }
           next = this.items.shift();
           this.deps.notifyState();
         } else {
@@ -118,6 +135,11 @@ export class SessionPromptQueue {
     } finally {
       this.continuing = false;
     }
+  }
+
+  private continuationGate(): ContinuationDecision {
+    const last = this.deps.lastTurnResult?.();
+    return last ? queueContinuationDecision(last) : { proceed: true };
   }
 
   async submit(
@@ -143,7 +165,11 @@ export class SessionPromptQueue {
       this.deps.notifyState();
       const result = await this.deps.runTurn(next);
       results.push(result);
-      if (result.status !== "completed") break;
+      const decision = queueContinuationDecision(result);
+      if (!decision.proceed) {
+        if (this.items.length > 0) this.deps.notice(pausedQueueNotice(decision));
+        break;
+      }
     }
     return results;
   }

@@ -6,6 +6,10 @@ import type {
 } from "../../src/app/ports/agent-port.js";
 import type { PersistencePort } from "../../src/app/ports/persistence-port.js";
 import { SessionController } from "../../src/app/controllers/session-controller.js";
+import { createTurnOutcome, type TurnOutcome } from "../../src/agent/turn-outcome.js";
+
+const succeeded = (): TurnOutcome =>
+  createTurnOutcome({ status: "succeeded", answer: "", steps: 1, remainingCriteria: [] });
 
 function fakePersistence(saved: string[][]): PersistencePort {
   return {
@@ -30,7 +34,7 @@ describe("session lifecycle generations (LIFE-004/005)", () => {
             { role: "user", content: "old prompt" },
             { role: "assistant", content: "old answer" },
           ]);
-        return "";
+        return succeeded();
       },
     };
     const saved: string[][] = [];
@@ -54,7 +58,7 @@ describe("session lifecycle generations (LIFE-004/005)", () => {
   it("does not commit a compaction that finishes after a history load", async () => {
     const agent: AgentPort = {
       async runTurn() {
-        return "";
+        return succeeded();
       },
     };
     const saved: string[][] = [];
@@ -88,7 +92,7 @@ describe("session lifecycle generations (LIFE-004/005)", () => {
   it("aborts an in-flight compaction when the session is disposed", async () => {
     const agent: AgentPort = {
       async runTurn() {
-        return "";
+        return succeeded();
       },
     };
     const session = new SessionController({

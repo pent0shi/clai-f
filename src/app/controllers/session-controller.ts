@@ -128,6 +128,15 @@ function pathBackedMessages(messages: readonly ChatMessage[]): ChatMessage[] {
   });
 }
 
+const IDLE_RESPONDER_STATE = {
+  mode: "off",
+  running: 0,
+  ready: 0,
+  delivered: 0,
+  archived: 0,
+  failed: 0,
+} as const;
+
 export class SessionController implements Disposable {
   readonly spool = new OutputSpool();
 
@@ -162,6 +171,8 @@ export class SessionController implements Disposable {
   private contextUsage: ContextUsageSnapshot | undefined;
   /** Bumped by reset/history load/dispose so late callbacks can be ignored. */
   private lifecycleGeneration = 0;
+  /** Last settled turn result; gates whether queued prompts may continue. */
+  private lastTurnResult: TurnResult | undefined;
   private readonly projectContext = createContextProjector((snapshot) =>
     formatContextChip(snapshot, { compact: false }),
   );
@@ -195,6 +206,7 @@ export class SessionController implements Disposable {
       notifyState: () => this.notifyState(),
       notice: (text) => this.notice("info", text),
       runTurn: (prompt, options) => this.runTurn(prompt, options),
+      lastTurnResult: () => this.lastTurnResult,
     });
     if (deps.jobs) {
       this.responder = new SessionResponder({
@@ -244,14 +256,7 @@ export class SessionController implements Disposable {
       compacting: this.compactingFlag,
       historyLength: this.history.length,
       queued: this.prompts.snapshot(),
-      responder: this.responder?.getState() ?? {
-        mode: "off",
-        running: 0,
-        ready: 0,
-        delivered: 0,
-        archived: 0,
-        failed: 0,
-      },
+      responder: this.responder?.getState() ?? IDLE_RESPONDER_STATE,
       title: this.sessionTitle,
       contextUsage,
       contextChip,
@@ -484,9 +489,8 @@ export class SessionController implements Disposable {
         { budgetTokens: 0, keepRecent, purpose: options.purpose },
         sessionTranscript,
       );
-      // A reset/load/dispose while the summary was in flight rebound this
-      // controller to another session; committing here would leak session A's
-      // compacted history into session B.
+      // A reset/load/dispose during the summary rebound this controller, so
+      // committing here would leak session A's history into session B.
       if (compactGeneration !== this.lifecycleGeneration) return result;
       this.history = result.messages;
       if (result.summarized) this.noteContextCompacted(result.afterTokens);
@@ -669,10 +673,7 @@ export class SessionController implements Disposable {
     return () => this.turnEndListeners.delete(listener);
   }
 
-  async submit(
-    prompt: string,
-    opts?: TurnDisplayOptions,
-  ): Promise<TurnResult> {
+  async submit(prompt: string, opts?: TurnDisplayOptions): Promise<TurnResult> {
     this.responder?.activate();
     return this.prompts.submit(prompt, opts);
   }
@@ -720,8 +721,7 @@ export class SessionController implements Disposable {
       requestSecret: this.deps.requestSecret,
       session: this.policy,
       onMessages: (messages) => {
-        // A reset/history load/dispose after this turn started owns the
-        // session now; late callbacks must not resurrect its history.
+        // A later reset/load owns the session; ignore late callbacks.
         if (turnGeneration !== this.lifecycleGeneration) return;
         this.history = pathBackedMessages(messages);
         this.notifyState();
@@ -735,6 +735,7 @@ export class SessionController implements Disposable {
     this.notifyState();
     this.responder?.scheduleWake();
     const sameGeneration = turnGeneration === this.lifecycleGeneration;
+    if (sameGeneration) this.lastTurnResult = result;
     try {
       if (
         sameGeneration &&
@@ -773,12 +774,10 @@ export class SessionController implements Disposable {
       });
   }
 
-  /**
-   * Abort and fence the previous lifecycle: a running turn, an in-flight
-   * compaction and a pending title all belong to the generation being replaced.
-   */
+  /** Fence the previous lifecycle: running turn, compaction and title. */
   private beginLifecycleGeneration(): void {
     this.lifecycleGeneration += 1;
+    this.lastTurnResult = undefined;
     if (this.turn.running) this.turn.abort();
     this.compactAbort?.abort();
     this.compactAbort = undefined;

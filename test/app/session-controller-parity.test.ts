@@ -5,6 +5,7 @@ import {
   isCompactionMemoryMessage,
 } from "../../src/agent/context-manager.js";
 import { SessionController } from "../../src/app/controllers/session-controller.js";
+import { createTurnOutcome } from "../../src/agent/turn-outcome.js";
 import type { AnyAppEvent } from "../../src/app/events/app-event.js";
 
 const completeWithProvider = vi.fn();
@@ -31,7 +32,7 @@ function fakeAgent(): AgentPort {
   return {
     async runTurn(_req, handlers) {
       handlers.onMessages?.([{ role: "user", content: "x" }, { role: "assistant", content: "y" }]);
-      return "y";
+      return createTurnOutcome({ status: "succeeded", answer: "y", steps: 1, remainingCriteria: [] });
     },
   };
 }
@@ -130,7 +131,7 @@ describe("SessionController parity helpers (V2-080)", () => {
       async runTurn(_req, handlers) {
         await gate;
         handlers.onMessages?.([]);
-        return "";
+        return createTurnOutcome({ status: "succeeded", answer: "", steps: 1, remainingCriteria: [] });
       },
     };
     const session = new SessionController({
