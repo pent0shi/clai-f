@@ -1,11 +1,9 @@
-/**
- * Deterministic durable work envelope for compaction.
- *
- * Narrative memory is model-written and therefore lossy. The envelope is built
- * from canonical stores (plan, outcome contract, evidence, responder ledger,
- * mutation ledger) so file changes, proven checks, unresolved criteria, failed
- * approaches and the exact next step survive every compaction verbatim.
- */
+// Deterministic durable work envelope for compaction.
+//
+// Narrative memory is model-written and therefore lossy. The envelope is built
+// from canonical stores (plan, outcome contract, evidence, responder ledger,
+// mutation ledger) so file changes, proven checks, unresolved criteria, failed
+// approaches and the exact next step survive every compaction verbatim.
 import { relative } from "node:path";
 import type { ToolCall } from "../types.js";
 import type { OutcomeEnvelope } from "./outcomes.js";
@@ -20,9 +18,9 @@ import {
 
 export const DURABLE_ENVELOPE_PREFIX = "DURABLE WORK ENVELOPE";
 
-/** Max entries rendered per list before a bounded overflow marker. */
+// Max entries rendered per list before a bounded overflow marker.
 const MAX_LIST_ENTRIES = 20;
-/** Max chars of a single rendered statement. */
+// Max chars of a single rendered statement.
 const MAX_STATEMENT_CHARS = 180;
 
 export type FileMutationKind = "created" | "modified" | "deleted";
@@ -36,11 +34,9 @@ const MUTATION_KIND_BY_TOOL: ReadonlyMap<string, FileMutationKind> = new Map([
   ["fs.delete", "deleted"],
 ]);
 
-/**
- * Session-scoped record of successful filesystem mutations and durable
- * artifacts. Insertion order is preserved so the envelope is stable between
- * compactions of the same work.
- */
+// Session-scoped record of successful filesystem mutations and durable
+// artifacts. Insertion order is preserved so the envelope is stable between
+// compactions of the same work.
 export class WorkLedger {
   private readonly files = new Map<string, FileMutationKind>();
   private readonly artifacts = new Set<string>();
@@ -165,10 +161,8 @@ function outcomeLines(outcome: OutcomeEnvelope, lines: string[]): void {
   }
 }
 
-/**
- * Render the envelope. Returns undefined when there is no canonical state worth
- * preserving, so compaction does not inject an empty block.
- */
+// Render the envelope. Returns undefined when there is no canonical state worth
+// preserving, so compaction does not inject an empty block.
 export function buildDurableEnvelope(
   input: DurableEnvelopeInput,
 ): string | undefined {

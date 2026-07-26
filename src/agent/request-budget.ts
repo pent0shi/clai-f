@@ -2,43 +2,39 @@ import { getConfig, hasExplicitConfigKey } from "../store/config.js";
 import { modelContextWindow } from "../llm/token-usage.js";
 import type { ProviderId } from "../types.js";
 
-/**
- * One authoritative auto-compaction policy, expressed in total estimated
- * request tokens (system blocks, history, tool protocol, schemas and media
- * together) rather than in transcript size. Behaviour, status line and
- * reliability policy all read this module so they cannot disagree.
- */
+// One authoritative auto-compaction policy, expressed in total estimated
+// request tokens (system blocks, history, tool protocol, schemas and media
+// together) rather than in transcript size. Behaviour, status line and
+// reliability policy all read this module so they cannot disagree.
 export const DEFAULT_AUTO_COMPACT_REQUEST_TOKENS = 80_000;
 
-/** Never trigger below this: compaction itself needs room to be useful. */
+// Never trigger below this: compaction itself needs room to be useful.
 export const MIN_AUTO_COMPACT_REQUEST_TOKENS = 20_000;
 
-/** Output allowance reserved inside the model window before the trigger. */
+// Output allowance reserved inside the model window before the trigger.
 export const RESERVED_OUTPUT_TOKENS = 24_576;
 
-/** Slack for wire overhead the estimator cannot see exactly. */
+// Slack for wire overhead the estimator cannot see exactly.
 export const SAFETY_MARGIN_TOKENS = 2_048;
 
 export type RequestBudgetSource = "explicit" | "legacy" | "default";
 
 export interface RequestBudget {
-  /** User-configured (or default) trigger, before model clamping. */
+  // User-configured (or default) trigger, before model clamping.
   readonly configured: number;
-  /** Largest trigger this provider/model can serve safely. */
+  // Largest trigger this provider/model can serve safely.
   readonly modelSafe: number;
-  /** The trigger actually applied: `min(configured, modelSafe)`. */
+  // The trigger actually applied: `min(configured, modelSafe)`.
   readonly effectiveTrigger: number;
-  /** Where `configured` came from, for diagnostics and migration notices. */
+  // Where `configured` came from, for diagnostics and migration notices.
   readonly source: RequestBudgetSource;
-  /** True when the model window, not the configuration, is the binding limit. */
+  // True when the model window, not the configuration, is the binding limit.
   readonly clampedByModel: boolean;
 }
 
-/**
- * Resolve the configured trigger. An explicit new-style value wins; a raw
- * persisted legacy value is honoured exactly once (even 72k) so upgrading does
- * not silently change a user's tuning; otherwise the 80k policy applies.
- */
+// Resolve the configured trigger. An explicit new-style value wins; a raw
+// persisted legacy value is honoured exactly once (even 72k) so upgrading does
+// not silently change a user's tuning; otherwise the 80k policy applies.
 export function configuredRequestTokens(): {
   tokens: number;
   source: RequestBudgetSource;
@@ -62,7 +58,7 @@ export function configuredRequestTokens(): {
   };
 }
 
-/** Largest request this provider/model can accept with room for the answer. */
+// Largest request this provider/model can accept with room for the answer.
 export function modelSafeRequestTokens(
   provider: ProviderId | undefined,
   model: string | undefined,
@@ -93,10 +89,8 @@ export function resolveRequestBudget(input?: {
   };
 }
 
-/**
- * Status/footer denominator: the request budget that actually governs the next
- * request, not the raw model window.
- */
+// Status/footer denominator: the request budget that actually governs the next
+// request, not the raw model window.
 export function requestBudgetDenominator(
   provider: ProviderId | undefined,
   model: string | undefined,

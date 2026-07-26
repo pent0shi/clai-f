@@ -103,11 +103,9 @@ export interface CompactOptions {
    * Does not change accept/reject heuristics.
    */
   purpose?: "default" | "plan-implement" | undefined;
-  /**
-   * Deterministic canonical state (files, evidence, criteria, plan, responder
-   * ledger) built by the caller from durable stores. It is fed to the summarizer
-   * as authoritative state and re-injected verbatim after compaction.
-   */
+  // Deterministic canonical state (files, evidence, criteria, plan, responder
+  // ledger) built by the caller from durable stores. Fed to the summarizer as
+  // authoritative state and re-injected verbatim after compaction.
   durableEnvelope?: string | undefined;
 }
 

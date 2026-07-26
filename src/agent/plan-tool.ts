@@ -425,18 +425,15 @@ export interface PlanToolResult {
 }
 
 /** Build the system-context block describing the session's active plan. */
-/** Marker that identifies the single live plan message in a request. */
+// Marker that identifies the single live plan message in a request.
 export const PLAN_CONTEXT_PREFIX = "ACTIVE PLAN";
 
-/**
- * Keep exactly one live ACTIVE PLAN copy in the request, as a suffix.
- *
- * The plan is mutable state: a snapshot embedded in the stable system prefix
- * goes stale as tasks advance, and a second re-injected copy lets the model see
- * two disagreeing plans. Every prior copy is dropped before the current one is
- * appended. Only call this at protocol-safe points (never between an assistant
- * tool call and its results).
- */
+// Keep exactly one live ACTIVE PLAN copy in the request, as a suffix. The plan
+// is mutable state: a snapshot frozen into the stable system prefix goes stale
+// as tasks advance, and a second re-injected copy lets the model see two
+// disagreeing plans. Every prior copy is dropped before the current one is
+// appended. Call only at protocol-safe points (never between an assistant tool
+// call and its results).
 export function upsertPlanContextMessage(
   messages: Array<{ role: string; content: string }>,
   content: string,

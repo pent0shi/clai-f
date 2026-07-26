@@ -1551,7 +1551,7 @@ export async function runAgentTurn(
       continueExisting: continueExistingOutcome,
     });
     await saveOutcomeState(outcomeState);
-    /** Canonical mutation/artifact ledger feeding the durable compaction envelope. */
+    // Canonical mutation/artifact ledger feeding the durable compaction envelope.
     const workLedger = new WorkLedger();
     let governorState: GovernorState = createGovernorState();
     let governorPauseReason: string | undefined;

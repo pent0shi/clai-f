@@ -1,10 +1,8 @@
-/**
- * Context-usage projection for the session footer.
- *
- * The denominator shown to the user is the request budget that governs the next
- * request (auto-compaction trigger), not the raw model window, so the footer
- * agrees with the moment compaction actually fires.
- */
+// Context-usage projection for the session footer.
+//
+// The denominator shown to the user is the request budget that governs the next
+// request (auto-compaction trigger), not the raw model window, so the footer
+// agrees with the moment compaction actually fires.
 import { requestBudgetDenominator } from "../../agent/request-budget.js";
 import { estimateMessagesTokens } from "../../agent/context-manager.js";
 import {
@@ -19,15 +17,13 @@ export interface ContextUsageTarget {
   readonly model?: string | undefined;
 }
 
-/** Effective request budget used as the footer denominator. */
+// Effective request budget used as the footer denominator.
 export function contextUsageLimit(target: ContextUsageTarget): number {
   return requestBudgetDenominator(target.provider, target.model);
 }
 
-/**
- * Prefer the last API `prompt_tokens` as context fill (exact); otherwise
- * estimate from current history so the footer always has a number.
- */
+// Prefer the last API `prompt_tokens` as context fill (exact); otherwise
+// estimate from current history so the footer always has a number.
 export function resolveContextUsageSnapshot(
   target: ContextUsageTarget,
   history: readonly ChatMessage[],
@@ -47,7 +43,7 @@ export function resolveContextUsageSnapshot(
   return { ...estimated, contextLimit };
 }
 
-/** Fold provider-reported usage into the snapshot against the request budget. */
+// Fold provider-reported usage into the snapshot against the request budget.
 export function recordUsageSnapshot(
   target: ContextUsageTarget,
   current: ContextUsageSnapshot | undefined,
@@ -56,10 +52,8 @@ export function recordUsageSnapshot(
   return applyUsageToSnapshot(current, usage, contextUsageLimit(target));
 }
 
-/**
- * After /compact or auto-compact the exact prompt_tokens are stale: report the
- * post-compaction size until the next API usage report.
- */
+// After /compact or auto-compact the exact prompt_tokens are stale: report the
+// post-compaction size until the next API usage report.
 export function compactedUsageSnapshot(
   target: ContextUsageTarget,
   current: ContextUsageSnapshot | undefined,

@@ -203,11 +203,9 @@ export function contextBreakdownAuditPayload(
 }
 
 
-/**
- * Name the block that dominates an irreducible request. When compaction cannot
- * get under the trigger, the user needs to know what is actually large instead
- * of watching the same attempt repeat.
- */
+// Name the block that dominates an irreducible request: when compaction cannot
+// get under the trigger, the user needs to know what is actually large instead
+// of watching the same attempt repeat.
 export function describeDominantContextBlock(
   messages: readonly ChatMessage[],
   tools?: readonly ToolDefinition[] | undefined,
@@ -238,7 +236,7 @@ export function describeDominantContextBlock(
   return `${dominant.label} (~${dominant.tokens.toLocaleString()} tokens)`;
 }
 
-/** Stable hash of the attached tool schemas, for attempt identity. */
+// Stable hash of the attached tool schemas, for attempt identity.
 export function toolSchemaHash(
   tools: readonly ToolDefinition[] | undefined,
 ): string {
