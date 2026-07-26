@@ -101,14 +101,28 @@ export function JobsPanel(props: JobsPanelProps): ReactNode {
   const [selected, setSelected] = useState(0);
   const [note, setNote] = useState("");
 
+  const hasLiveJob = jobs.some(
+    (job) =>
+      job.status === "running" ||
+      job.status === "starting" ||
+      job.status === "stopping",
+  );
+
   useEffect(() => {
     const refresh = (): void => {
       setJobs(readJobs());
       setNow(Date.now());
     };
-    const interval = setInterval(refresh, POLL_MS);
-    return () => clearInterval(interval);
-  }, [services.ports.jobs, services.session.sessionId]);
+    refresh();
+    const unsubscribe = services.ports.jobs.subscribe?.(refresh);
+    // The elapsed clock only moves while something runs; otherwise job changes
+    // arrive through the subscription instead of a permanent polling timer.
+    const interval = hasLiveJob ? setInterval(refresh, POLL_MS) : undefined;
+    return () => {
+      unsubscribe?.();
+      if (interval) clearInterval(interval);
+    };
+  }, [services.ports.jobs, services.session.sessionId, hasLiveJob]);
 
   async function tail(job: BackgroundJob): Promise<void> {
     const result = await services.ports.jobs.tail(job.id);
@@ -348,6 +362,8 @@ export function ResponderPanel(props: ResponderPanelProps): ReactNode {
   );
   const [now, setNow] = useState(() => Date.now());
 
+  const hasLiveWork = responderState.running > 0 || responderState.ready > 0;
+
   useEffect(() => {
     const refresh = (): void => {
       setProjection(readResponderProjection(services));
@@ -355,12 +371,12 @@ export function ResponderPanel(props: ResponderPanelProps): ReactNode {
     };
     refresh();
     const unsubscribe = services.ports.jobs.subscribe(refresh);
-    const timer = setInterval(refresh, POLL_MS);
+    const timer = hasLiveWork ? setInterval(refresh, POLL_MS) : undefined;
     return () => {
       unsubscribe();
-      clearInterval(timer);
+      if (timer) clearInterval(timer);
     };
-  }, [services.ports.jobs, services.session.sessionId]);
+  }, [services.ports.jobs, services.session.sessionId, hasLiveWork]);
 
   const notificationByJob = useMemo(
     () =>
