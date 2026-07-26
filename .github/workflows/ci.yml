@@ -29,9 +29,14 @@ jobs:
           node-version: 20
           cache: npm
       - run: npm ci
+      - run: npm run embed-prompts:check
       - run: npm run typecheck
       - run: npm test -- --reporter=dot
       - run: npm run build
+      - name: Smoke-test the built entrypoint
+        run: |
+          node dist/index.js --version
+          node dist/index.js --help > /dev/null
       - run: npm run prompt-budget
       - run: npm run release:verify
       - name: Upload redacted local diagnostics on failure
@@ -101,5 +106,11 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npx vitest run test/privilege-boundary.test.ts --reporter=dot
+      - name: Process-tree termination contract
+        run: npx vitest run test/process-tree.test.ts --reporter=dot
       - if: runner.os != 'Windows'
-        run: npx vitest run test/jobs-durable.test.ts --reporter=dot
+        run: npx vitest run test/jobs-durable.test.ts test/jobs-resource-hygiene.test.ts --reporter=dot
+      - name: Built entrypoint smoke
+        run: |
+          npm run build
+          node dist/index.js --version

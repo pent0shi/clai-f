@@ -40,6 +40,7 @@
     "start": "node dist/index.js",
     "sync-version": "node scripts/sync-version.mjs",
     "embed-prompts": "node scripts/embed-prompts.mjs",
+    "embed-prompts:check": "node scripts/embed-prompts.mjs --check",
     "prebuild": "node scripts/sync-version.mjs",
     "build": "node scripts/embed-prompts.mjs && tsc -p tsconfig.json && node -e \"const{cpSync,mkdirSync}=require('fs');mkdirSync('dist/prompts',{recursive:true});for(const f of['system.agent.md','system.ask.md'])cpSync('src/prompts/'+f,'dist/prompts/'+f);\"",
     "prepublishOnly": "npm run build",

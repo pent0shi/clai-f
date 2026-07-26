@@ -83,21 +83,54 @@ describe("V2-022 clipboard port", () => {
 });
 
 describe("V2-022 updates port", () => {
-  it("returns current version without a fetcher and never flags an update", async () => {
-    const status = await createCurrentUpdatesPort().check();
+  it("reports unknown — never current — when no version could be fetched", async () => {
+    const status = await createCurrentUpdatesPort(
+      async () => undefined,
+      () => undefined,
+    ).check();
     expect(status.currentVersion).toMatch(/^\d+\.\d+\.\d+/);
+    expect(status.state).toBe("unknown");
     expect(status.updateAvailable).toBe(false);
   });
 
+  it("reports unknown with a reason while offline", async () => {
+    const status = await createCurrentUpdatesPort(
+      async () => "999.0.0",
+      () => "offline mode",
+    ).check();
+    expect(status.state).toBe("unknown");
+    expect(status.detail).toBe("offline mode");
+  });
+
+  it("reports an error when the check throws", async () => {
+    const status = await createCurrentUpdatesPort(
+      async () => {
+        throw new Error("network down");
+      },
+      () => undefined,
+    ).check();
+    expect(status.state).toBe("error");
+    expect(status.detail).toContain("network down");
+  });
+
   it("flags an update when the injected latest version is newer", async () => {
-    const port = createCurrentUpdatesPort(async () => "999.0.0");
+    const port = createCurrentUpdatesPort(
+      async () => "999.0.0",
+      () => undefined,
+    );
     const status = await port.check();
     expect(status.latestVersion).toBe("999.0.0");
+    expect(status.state).toBe("update-available");
     expect(status.updateAvailable).toBe(true);
   });
 
-  it("does not flag an update when latest is not newer", async () => {
-    const port = createCurrentUpdatesPort(async () => "0.0.1");
-    expect((await port.check()).updateAvailable).toBe(false);
+  it("reports current only after a successful comparison", async () => {
+    const port = createCurrentUpdatesPort(
+      async () => "0.0.1",
+      () => undefined,
+    );
+    const status = await port.check();
+    expect(status.state).toBe("current");
+    expect(status.updateAvailable).toBe(false);
   });
 });

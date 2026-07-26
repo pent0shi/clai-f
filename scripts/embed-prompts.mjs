@@ -28,7 +28,27 @@ ${entries.join("\n")}
 };
 `;
 
-mkdirSync(promptsDir, { recursive: true });
 const outPath = join(promptsDir, "embedded.ts");
+
+if (process.argv.includes("--check")) {
+  let current = "";
+  try {
+    current = readFileSync(outPath, "utf8");
+  } catch {
+    console.error(`Missing ${outPath}; run: node scripts/embed-prompts.mjs`);
+    process.exit(1);
+  }
+  if (current !== out) {
+    console.error(
+      `Embedded prompts are stale versus the markdown sources.\n` +
+        `Run: node scripts/embed-prompts.mjs, then commit ${outPath}.`,
+    );
+    process.exit(1);
+  }
+  console.log(`Embedded prompts match their sources (${files.length} prompts)`);
+  process.exit(0);
+}
+
+mkdirSync(promptsDir, { recursive: true });
 writeFileSync(outPath, out, "utf8");
 console.log(`Wrote ${outPath} (${files.length} prompts)`);

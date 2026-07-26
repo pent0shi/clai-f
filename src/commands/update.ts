@@ -91,6 +91,20 @@ async function fetchLatestRelease(): Promise<GitHubRelease | null> {
   }
 }
 
+/** Latest published version without the leading `v`, or undefined if unknown. */
+export async function fetchLatestVersion(): Promise<string | undefined> {
+  const release = await fetchLatestRelease();
+  const tag = release?.tag_name?.replace(/^v/, "").trim();
+  return tag ? tag : undefined;
+}
+
+/** Why an update check cannot run right now, if it cannot. */
+export function updateCheckDisabledReason(): string | undefined {
+  if (process.env.CLAI_OFFLINE === "1") return "offline mode";
+  if (process.env.CLAI_NO_UPDATE_CHECK === "1") return "update checks disabled";
+  return getConfig().offline ? "offline mode" : undefined;
+}
+
 function isUpdateCheckDisabled(): boolean {
   if (
     process.env.CLAI_OFFLINE === "1" ||

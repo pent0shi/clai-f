@@ -196,14 +196,20 @@ export async function handlePrivacy(
 export async function handleUpdate(services: AppServices): Promise<void> {
   try {
     const status = await services.ports.updates.check();
-    if (status.updateAvailable && status.latestVersion) {
+    if (status.state === "update-available" && status.latestVersion) {
       notice(
         services,
         "info",
         `update available: ${status.currentVersion} → ${status.latestVersion} · run \`clai update\` outside the TUI`,
       );
-    } else {
+    } else if (status.state === "current") {
       notice(services, "info", `up to date · ${status.currentVersion}`);
+    } else {
+      notice(
+        services,
+        "warn",
+        `update status unknown · ${status.currentVersion}${status.detail ? ` (${status.detail})` : ""}`,
+      );
     }
   } catch (error) {
     notice(
