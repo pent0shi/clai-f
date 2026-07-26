@@ -4144,6 +4144,23 @@ export async function runAgentTurn(
             usage: completion.usage,
             model: completion.model,
           });
+          // Cache telemetry: without read/create counts there is no way to tell
+          // whether the stable prefix is actually being reused.
+          const cacheRead = completion.usage.cachedPromptTokens ?? 0;
+          const cacheCreated = completion.usage.cacheCreationTokens ?? 0;
+          if (cacheRead > 0 || cacheCreated > 0) {
+            await auditLog("agent.prompt.cache", {
+              provider: completion.provider,
+              model: completion.model,
+              promptTokens: completion.usage.promptTokens,
+              cacheReadTokens: cacheRead,
+              cacheCreationTokens: cacheCreated,
+              hitRatio:
+                completion.usage.promptTokens > 0
+                  ? Number((cacheRead / completion.usage.promptTokens).toFixed(3))
+                  : 0,
+            });
+          }
         }
         deltaParser?.finish();
         // Sticky text-only may have flipped dialect during stream retry.

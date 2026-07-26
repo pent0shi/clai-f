@@ -174,6 +174,8 @@ export interface TokenUsage {
   readonly exact: boolean;
   /** Prompt tokens served from provider cache, when reported. */
   readonly cachedPromptTokens?: number | undefined;
+  /** Prompt tokens written into the provider cache, when reported. */
+  readonly cacheCreationTokens?: number | undefined;
   /** Reasoning tokens inside the completion, when reported. */
   readonly reasoningTokens?: number | undefined;
 }

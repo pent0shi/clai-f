@@ -19,7 +19,7 @@ import {
   planStatusColor,
   progressBar,
   progressView,
-  TASK_GLYPH,
+  taskGlyph,
   taskRowColor,
   taskOwnerChip,
   wrapPlanText,
@@ -367,7 +367,7 @@ function TaskRow(props: {
     state === "pending" || state === "skipped"
       ? theme.foreground
       : stateColor;
-  const glyph = TASK_GLYPH[state] ?? "○";
+  const glyph = taskGlyph(task);
   // Stripe every other row; active/in_progress get a stronger plate.
   // Distinctions are background only — no row borders.
   const bg =

@@ -67,7 +67,15 @@ afterEach(async () => {
   for (const manager of managers.splice(0)) {
     for (const job of manager.getRunningJobs()) await manager.stopJob(job.id, { graceMs: 200 });
   }
-  await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
+  // A stopped job's shell can still flush a chunk while the dir is removed,
+  // so retry instead of failing the test on an ENOTEMPTY race.
+  await Promise.all(
+    dirs
+      .splice(0)
+      .map((dir) =>
+        rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 25 }),
+      ),
+  );
   await Promise.all(planSessionIds.splice(0).map((sessionId) => deletePlan(sessionId)));
 });
 

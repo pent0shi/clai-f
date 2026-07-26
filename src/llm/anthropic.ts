@@ -79,9 +79,32 @@ export function anthropicMaxTokens(
   return Math.max(requested ?? 8_192, budget + 1_024);
 }
 
+// Minimum prompt length worth a cache breakpoint. Below Anthropic's own cache
+// floor the marker only adds cache-write cost.
+const CACHE_BREAKPOINT_MIN_CHARS = 4_000;
+
+/**
+ * Mark the end of the stable system prefix as a cache breakpoint so repeated
+ * turns read the constitution from cache instead of re-billing it. Mutable
+ * state (plan, session state) is a request suffix, so the prefix is byte-stable.
+ */
+export function anthropicSystemBlocks(
+  system: string | undefined,
+): string | Array<Record<string, unknown>> | undefined {
+  if (!system) return system;
+  if (system.length < CACHE_BREAKPOINT_MIN_CHARS) return system;
+  return [
+    {
+      type: "text",
+      text: system,
+      cache_control: { type: "ephemeral" },
+    },
+  ];
+}
+
 export function buildAnthropicBody(request: CompletionRequest, stream: boolean): string {
   const model = request.model ?? defaultModels.anthropic;
-  const system = firstSystemPrompt(request.messages);
+  const system = anthropicSystemBlocks(firstSystemPrompt(request.messages));
   const messages = toAnthropicToolMessages(request.messages);
   const thinking = anthropicThinkingField(request.thinking, model);
   return JSON.stringify({

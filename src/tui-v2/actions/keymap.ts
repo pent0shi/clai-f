@@ -93,14 +93,9 @@ export const defaultKeymap: readonly KeyBinding[] = [
   binding("ctrl+shift+c", "selection.copy", "transcript"),
   binding("escape", "selection.clear", "transcript"),
   binding("ctrl+a", "selection.select-all", "transcript"),
-  binding("shift+left", "selection.extend-left", "transcript"),
-  binding("shift+right", "selection.extend-right", "transcript"),
-  binding("shift+up", "selection.extend-up", "transcript"),
-  binding("shift+down", "selection.extend-down", "transcript"),
-  binding("ctrl+shift+left", "selection.extend-word-left", "transcript"),
-  binding("ctrl+shift+right", "selection.extend-word-right", "transcript"),
-  binding("shift+home", "selection.extend-line-start", "transcript"),
-  binding("shift+end", "selection.extend-line-end", "transcript"),
+  // Keyboard range extension is intentionally unbound: the transcript has no
+  // caret or range highlight, so shift+arrow selections were invisible. Mouse
+  // drag (native selection) and Ctrl+A + Ctrl+Shift+C cover copying.
 
   // picker
   binding("up", "picker.up", "picker"),

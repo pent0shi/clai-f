@@ -44,6 +44,7 @@ export function normalizeTokenUsage(input: {
   totalTokens?: number | undefined;
   exact?: boolean | undefined;
   cachedPromptTokens?: number | undefined;
+  cacheCreationTokens?: number | undefined;
   reasoningTokens?: number | undefined;
 }): TokenUsage | undefined {
   const prompt = nonNegInt(input.promptTokens);
@@ -56,6 +57,7 @@ export function normalizeTokenUsage(input: {
   const c = completion ?? 0;
   if (total === undefined) total = p + c;
   const cached = nonNegInt(input.cachedPromptTokens);
+  const cacheCreation = nonNegInt(input.cacheCreationTokens);
   const reasoning = nonNegInt(input.reasoningTokens);
   return {
     promptTokens: p,
@@ -63,6 +65,7 @@ export function normalizeTokenUsage(input: {
     totalTokens: total,
     exact: input.exact !== false,
     ...(cached !== undefined ? { cachedPromptTokens: cached } : {}),
+    ...(cacheCreation !== undefined ? { cacheCreationTokens: cacheCreation } : {}),
     ...(reasoning !== undefined ? { reasoningTokens: reasoning } : {}),
   };
 }
@@ -121,6 +124,7 @@ export function parseAnthropicUsage(raw: unknown): TokenUsage | undefined {
     promptTokens: prompt > 0 ? prompt : undefined,
     completionTokens: u.output_tokens as number | undefined,
     ...(cacheRead > 0 ? { cachedPromptTokens: cacheRead } : {}),
+    ...(cacheCreate > 0 ? { cacheCreationTokens: cacheCreate } : {}),
     exact: true,
   });
 }
@@ -282,7 +286,16 @@ export function formatContextChip(
 ): string {
   const compact = opts?.compact ?? false;
   const used = formatTokenCount(snapshot.contextTokens, compact);
-  return snapshot.exact ? `ctx:${used}` : `ctx:~${used}`;
+  const approx = snapshot.exact ? "" : "~";
+  const limit = snapshot.contextLimit;
+  // The denominator is the auto-compaction trigger, so the percentage tells the
+  // user how close the next request is to being compacted.
+  if (!limit || limit <= 0) return `ctx:${approx}${used}`;
+  const percent = Math.min(999, Math.round((snapshot.contextTokens / limit) * 100));
+  const budget = formatTokenCount(limit, true);
+  return compact
+    ? `ctx:${approx}${used}/${budget} ${percent}%`
+    : `ctx ${approx}${used}/${budget} ${percent}%`;
 }
 
 /** Merge a new usage into session totals; prefer latest prompt as context fill. */

@@ -72,6 +72,7 @@ describe("token-usage parsers", () => {
       totalTokens: 50_136,
       exact: true,
       cachedPromptTokens: 48_000,
+      cacheCreationTokens: 2_000,
     });
     expect(
       parseAnthropicUsage({ cache_read_input_tokens: 30_000, output_tokens: 5 }),
@@ -80,24 +81,24 @@ describe("token-usage parsers", () => {
 });
 
 describe("token-usage format + context window", () => {
-  it("formats counts and context chips (used only, no window total)", () => {
+  it("formats counts and context chips against the request budget", () => {
     expect(formatTokenCount(12450)).toBe("12,450");
     expect(formatTokenCount(128_000, true)).toBe("128k");
     expect(
       formatContextChip({
-        contextTokens: 12_450,
-        contextLimit: 128_000,
+        contextTokens: 54_000,
+        contextLimit: 80_000,
         lastCompletionTokens: 80,
-        sessionPromptTokens: 12_450,
+        sessionPromptTokens: 54_000,
         sessionCompletionTokens: 80,
         exact: true,
       }),
-    ).toBe("ctx:12,450");
+    ).toBe("ctx 54,000/80k 68%");
     expect(
       formatContextChip(
         {
           contextTokens: 12_450,
-          contextLimit: 128_000,
+          contextLimit: 80_000,
           lastCompletionTokens: 0,
           sessionPromptTokens: 0,
           sessionCompletionTokens: 0,
@@ -105,7 +106,17 @@ describe("token-usage format + context window", () => {
         },
         { compact: true },
       ),
-    ).toBe("ctx:~12.4k");
+    ).toBe("ctx:~12.4k/80k 16%");
+    expect(
+      formatContextChip({
+        contextTokens: 900,
+        contextLimit: 0,
+        lastCompletionTokens: 0,
+        sessionPromptTokens: 0,
+        sessionCompletionTokens: 0,
+        exact: true,
+      }),
+    ).toBe("ctx:900");
   });
 
   it("resolves known model context windows", () => {

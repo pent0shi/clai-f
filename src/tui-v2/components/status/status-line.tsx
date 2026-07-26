@@ -47,9 +47,40 @@ export interface StatusLineProps {
   readonly onClearDraft?: (() => void) | undefined;
   readonly onOpenShortcuts?: (() => void) | undefined;
   readonly onCycleMode?: (() => void) | undefined;
+  /** Arm/confirm cancellation — the same controller path Esc uses. */
+  readonly onRequestCancel?: (() => void) | undefined;
 }
 
 const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"] as const;
+
+export interface StatusHint {
+  readonly short: string;
+  readonly expand: string;
+}
+
+// One vocabulary for the busy row: the target is always the same double-Esc
+// stop, spelled the same way at every density.
+export function busyCancelHint(density: StatusDensity): StatusHint {
+  return {
+    short: density === "sm" ? "Esc×2" : "Esc×2 stop",
+    expand: "stop turn, queue, and jobs",
+  };
+}
+
+export type IdleHintId = "commands" | "thinking" | "output" | "shortcuts";
+
+// Thin idle row: the chords users reach for, not every binding. The full list
+// lives behind /shortcuts.
+export function idleHintIds(density: StatusDensity): readonly IdleHintId[] {
+  if (density === "xs" || density === "sm") return [];
+  if (density === "md") return ["commands", "thinking", "output"];
+  return ["commands", "thinking", "output", "shortcuts"];
+}
+
+// Hover must not change a chip's width, or every chip to its right shifts.
+function hintWidth(short: string, expand: string): number {
+  return Math.max(short.length, expand.length) + 2;
+}
 
 export type StatusDensity = "xs" | "sm" | "md" | "lg";
 
@@ -244,12 +275,17 @@ function ClickableHint(props: {
   readonly onClick?: (() => void) | undefined;
   /** Cyan/bold when idle — used for cancel while agent is running. */
   readonly accent?: boolean | undefined;
+  /** Reserve the widest label so hover never reflows neighbours. */
+  readonly fixedWidth?: boolean | undefined;
 }): ReactNode {
-  const { short, expand, active, theme, onClick, accent = false } = props;
+  const { short, expand, active, theme, onClick, accent = false, fixedWidth = false } = props;
   const [hovered, setHovered] = useState(false);
   const full = expand ?? short;
   // Hover always shows the expanded phrase (with padding so the chip reads).
-  const content = hovered ? ` ${full} ` : accent ? ` ${short} ` : short;
+  const label = hovered ? ` ${full} ` : accent || fixedWidth ? ` ${short} ` : short;
+  const content = fixedWidth
+    ? label.padEnd(hintWidth(short, full), " ")
+    : label;
 
   const fg = hovered
     ? theme.white
@@ -336,6 +372,7 @@ export function StatusLine(props: StatusLineProps): ReactNode {
     onClearDraft,
     onOpenShortcuts,
     onCycleMode,
+    onRequestCancel,
   } = props;
   const state = useSessionState(session);
   const [frame, setFrame] = useState(0);
@@ -383,6 +420,7 @@ export function StatusLine(props: StatusLineProps): ReactNode {
 
   const ctxChip = contextChipForDensity(state.contextUsage, density);
   const scrollCompact = density === "xs" || density === "sm";
+  const idleHints = idleHintIds(density);
 
   // ── Running / compacting ──────────────────────────────────────────────
   if (busy) {
@@ -444,14 +482,15 @@ export function StatusLine(props: StatusLineProps): ReactNode {
                 style={{ flexShrink: 0 }}
               />
               <ClickableHint
-                short={density === "sm" ? "Esc×2" : "Esc×2 · cancel all"}
-                expand="cancel turn, queue, and jobs"
+                short={busyCancelHint(density).short}
+                expand={busyCancelHint(density).expand}
                 active={false}
                 theme={theme}
                 accent
-                onClick={() => {
-                  void session.cancelAll();
-                }}
+                fixedWidth
+                // Same arm/confirm ladder as pressing Esc — a click must not
+                // skip the confirmation the keyboard path requires.
+                onClick={onRequestCancel}
               />
             </>
           ) : null}
@@ -546,8 +585,8 @@ export function StatusLine(props: StatusLineProps): ReactNode {
           </>
         ) : null}
 
-        {/* sm+: minimal command hint */}
-        {density === "md" || density === "lg" ? (
+        {/* Thin idle row — full binding list lives behind /shortcuts. */}
+        {idleHints.includes("commands") ? (
           <>
             {sep(theme)}
             <text
@@ -557,57 +596,33 @@ export function StatusLine(props: StatusLineProps): ReactNode {
             />
           </>
         ) : null}
-
-        {/* md+: thinking / output / scroll / clear — short chords, expand on hover */}
-        {density === "md" || density === "lg" ? (
+        {idleHints.includes("thinking") ? (
           <>
             {sep(theme)}
             <ClickableHint
               short="^T"
-              expand={
-                thinkingExpanded ? "hide thinking" : "show thinking"
-              }
+              expand={thinkingExpanded ? "hide thinking" : "show thinking"}
               active={thinkingExpanded}
               theme={theme}
+              fixedWidth
               onClick={onToggleThinking}
             />
+          </>
+        ) : null}
+        {idleHints.includes("output") ? (
+          <>
             {sep(theme)}
             <ClickableHint
               short="^O"
               expand={outputExpanded ? "hide output" : "show output"}
               active={outputExpanded}
               theme={theme}
+              fixedWidth
               onClick={onToggleOutput}
-            />
-            {sep(theme)}
-            <ClickableHint
-              short="^U"
-              expand="jump to top"
-              active={false}
-              theme={theme}
-              onClick={onJumpTop}
-            />
-            {sep(theme)}
-            <ClickableHint
-              short="^D"
-              expand="jump to end"
-              active={false}
-              theme={theme}
-              onClick={onJumpBottom}
-            />
-            {sep(theme)}
-            <ClickableHint
-              short="^X"
-              expand="clear draft"
-              active={false}
-              theme={theme}
-              onClick={onClearDraft}
             />
           </>
         ) : null}
-
-        {/* lg only: shortcuts link */}
-        {density === "lg" ? (
+        {idleHints.includes("shortcuts") ? (
           <>
             {sep(theme)}
             <ClickableHint
@@ -615,6 +630,7 @@ export function StatusLine(props: StatusLineProps): ReactNode {
               expand="keyboard shortcuts"
               active={false}
               theme={theme}
+              fixedWidth
               onClick={onOpenShortcuts}
             />
           </>

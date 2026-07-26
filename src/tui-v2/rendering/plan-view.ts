@@ -167,13 +167,40 @@ export function activeTaskId(plan: SessionPlan): string | undefined {
 
 /** Responder children read as background work, not as a second active task. */
 export function taskRowColor(task: PlanTask): PlanColorToken {
-  if (task.responderOwned && task.state === "in_progress") return "cyan";
-  return taskStateColor(task.state);
+  if (!task.responderOwned) return taskStateColor(task.state);
+  if (task.state === "failed") return "diffDel";
+  if (task.state === "skipped") return "muted";
+  // Background work keeps one cyan rail through its whole lifecycle so a row is
+  // never mistaken for the single yellow foreground task.
+  return "cyan";
 }
 
-/** Short chip that explains why a row is not foreground work. */
+/** Background glyphs so responder rows differ from foreground ones at a glance. */
+const RESPONDER_GLYPH: Record<TaskState, string> = {
+  pending: "◌",
+  in_progress: "⟳",
+  done: "✓",
+  failed: "✗",
+  skipped: "–",
+};
+
+export function taskGlyph(task: PlanTask): string {
+  const glyphs = task.responderOwned ? RESPONDER_GLYPH : TASK_GLYPH;
+  return glyphs[task.state] ?? "○";
+}
+
+const RESPONDER_PHASE: Record<TaskState, string> = {
+  pending: "QUEUED",
+  in_progress: "RUNNING",
+  done: "DELIVERED",
+  failed: "FAILED",
+  skipped: "DROPPED",
+};
+
+/** Short chip that explains why a row is not foreground work, plus its phase. */
 export function taskOwnerChip(task: PlanTask): string | undefined {
-  return task.responderOwned ? "RESPONDER" : undefined;
+  if (!task.responderOwned) return undefined;
+  return `RESPONDER · ${RESPONDER_PHASE[task.state] ?? "BACKGROUND"}`;
 }
 
 /** Soft-wrap without ellipsis — full text, never truncated. */

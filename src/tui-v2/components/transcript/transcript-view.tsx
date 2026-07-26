@@ -10,7 +10,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { useKeyboard, useTerminalDimensions } from "@opentui/react";
+import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/react";
 import type { MouseEvent, ScrollBoxRenderable } from "@opentui/core";
 import type { AppServices } from "../../bootstrap/composition-root.js";
 import type { Theme } from "../../rendering/theme.js";
@@ -39,6 +39,7 @@ import {
   registerTranscriptScrollPort,
 } from "./transcript-scroll-port.js";
 import { useNativeSelectionCopy } from "./use-native-selection-copy.js";
+import { useTranscriptSelection } from "./use-transcript-selection.js";
 
 export interface TranscriptViewProps {
   readonly services: AppServices;
@@ -163,6 +164,17 @@ export function TranscriptView(props: TranscriptViewProps): ReactNode {
 
   // Drag-select on response/thinking text → OSC 52 copy on release.
   useNativeSelectionCopy(services);
+  const renderer = useRenderer();
+
+  // Keyboard selection (select-all / copy / clear) goes through the pane
+  // selection controller; mouse drag stays on OpenTUI's native selection.
+  const selection = useTranscriptSelection({
+    services,
+    state,
+    spool: services.session.spool,
+    scrollRef,
+    focused,
+  });
 
   /**
    * Click/touch in the chat pane: claim keyboard so ↑/↓ scroll the transcript
@@ -518,6 +530,19 @@ export function TranscriptView(props: TranscriptViewProps): ReactNode {
     if (chord === "ctrl+r") {
       key.preventDefault();
       openSearch();
+      return;
+    }
+
+    // Selection chords first: Esc only lands here when there is a selection to
+    // clear, so the global cancel ladder still sees every other Esc.
+    if (selection.handleKey(key, chord)) return;
+    if (chord === "escape" && renderer.hasSelection) {
+      key.preventDefault();
+      try {
+        renderer.clearSelection();
+      } catch {
+        /* renderer already torn down */
+      }
       return;
     }
 

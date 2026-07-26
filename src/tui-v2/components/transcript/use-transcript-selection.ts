@@ -12,6 +12,7 @@ import {
   type SemanticDocument,
 } from "../../state/semantic-document.js";
 import { isItemExpanded, type TranscriptState } from "../../state/transcript-types.js";
+
 import { extractTranscriptSemanticDocument } from "../../rendering/transcript-semantic.js";
 
 interface TranscriptSelectionOptions {
@@ -51,13 +52,29 @@ export function useTranscriptSelection(
   const pointerRef = useRef<PointerState | undefined>(undefined);
   const clickRef = useRef<ClickState | undefined>(undefined);
 
-  useEffect(() => {
-    const document = extractTranscriptSemanticDocument(state, {
-      toolOutput: (item) => visibleToolOutput(state, spool, item.id, item.toolCallId),
+  const stateRef = useRef(state);
+  const builtForRef = useRef<TranscriptState | undefined>(undefined);
+  stateRef.current = state;
+
+  // Bounded updates: extracting the semantic document walks the whole
+  // transcript, so it is rebuilt on interaction (or while a selection is live)
+  // instead of on every streaming delta.
+  function ensureDocument(): SemanticDocument {
+    const current = stateRef.current;
+    if (builtForRef.current === current) return documentRef.current;
+    const document = extractTranscriptSemanticDocument(current, {
+      toolOutput: (item) => visibleToolOutput(current, spool, item.id, item.toolCallId),
     });
+    builtForRef.current = current;
     documentRef.current = document;
     services.selection.setDocument("transcript", document);
-  }, [services.selection, spool, state]);
+    return document;
+  }
+
+  useEffect(() => {
+    if (!services.selection.hasSelection()) return;
+    ensureDocument();
+  });
 
   useEffect(() => {
     const scroll = scrollRef.current;
@@ -76,7 +93,7 @@ export function useTranscriptSelection(
     // If a child (YOU bubble / tool card) already handled the click, do not
     // start a selection drag that would swallow open-modal handlers.
     if (event.defaultPrevented) return;
-    const anchor = anchorAtPointer(documentRef.current, scrollRef.current, event.x, event.y);
+    const anchor = anchorAtPointer(ensureDocument(), scrollRef.current, event.x, event.y);
     if (!anchor) return;
     const clicks = nextClickCount(clickRef.current, anchor);
     clickRef.current = { at: Date.now(), anchor, count: clicks };
@@ -88,6 +105,7 @@ export function useTranscriptSelection(
     const pointer = pointerRef.current;
     if (!pointer) return;
     const anchor = anchorAtPointer(documentRef.current, scrollRef.current, event.x, event.y);
+
     if (anchor) services.selection.dragTo("transcript", anchor, event);
     pointerRef.current = { ...pointer, moved: true };
   }
@@ -118,7 +136,39 @@ export function useTranscriptSelection(
   function handleKey(key: KeyEvent, chord: string): boolean {
     if (!focused || services.focus.activeContext() !== "transcript") return false;
     const action = services.router.resolve(chord, "transcript");
-    if (!action || !services.selection.handleAction(action, "transcript")) return false;
+    if (!action || !action.startsWith("selection.")) return false;
+    // Esc must fall through to the global cancel ladder unless there is
+    // actually a selection to clear.
+    if (action === "selection.clear" && !services.selection.hasSelection()) {
+      return false;
+    }
+    ensureDocument();
+    if (action === "selection.copy") {
+      key.preventDefault();
+      void services.selection.copy().then((result) => {
+        if (result.status === "copied") {
+          services.toast.success("Copied to clipboard", {
+            key: "clipboard",
+            durationMs: 1600,
+          });
+        } else if (result.status === "empty") {
+          services.toast.info("Nothing selected", {
+            key: "clipboard",
+            durationMs: 1400,
+          });
+        } else {
+          services.toast.error("Copy failed", { key: "clipboard", durationMs: 2200 });
+        }
+      });
+      return true;
+    }
+    if (!services.selection.handleAction(action, "transcript")) return false;
+    if (action === "selection.select-all") {
+      services.toast.info("Transcript selected · Ctrl+Shift+C to copy", {
+        key: "selection",
+        durationMs: 1800,
+      });
+    }
     key.preventDefault();
     return true;
   }

@@ -704,6 +704,7 @@ export function App(): ReactNode {
           onClearDraft={clearDraft}
           onOpenShortcuts={openShortcutsPager}
           onCycleMode={cycleMode}
+          onRequestCancel={() => handleEscapeCancellation(false)}
         />
       </box>
 
