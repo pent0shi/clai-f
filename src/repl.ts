@@ -2000,7 +2000,7 @@ export async function startRepl(options: ReplOptions = {}): Promise<void> {
           console.log(chalk.dim(`  ↳ ${resolvedInput.fallbackReason}`));
         }
         const hasImageAttachment = expansion.attachments.some(
-          (att) => att.kind === "image",
+          (att) => att.kind === "image" && att.sendable !== false,
         );
         const sentImagePaths = new Set(
           images.map((img) => img.path).filter((p): p is string => Boolean(p)),

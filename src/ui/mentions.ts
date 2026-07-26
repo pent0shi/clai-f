@@ -1,11 +1,14 @@
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
+  closeSync,
   copyFileSync,
   existsSync,
   mkdirSync,
+  openSync,
   readdirSync,
   readFileSync,
+  readSync,
   rmSync,
   statSync,
 } from "node:fs";
@@ -190,6 +193,11 @@ export interface Attachment {
   truncated?: boolean;
   /** Human-readable note (binary/missing/directory). */
   note?: string;
+  /**
+   * Image kind only: the bytes decode to a model-supported image within the
+   * size cap. Callers must not switch models for a rejected image.
+   */
+  sendable?: boolean;
 }
 
 export interface FileSuggestion {
@@ -223,6 +231,61 @@ const IMAGE_MEDIA_TYPES: Record<string, string> = {
 
 export function imageMediaType(absPath: string): string | undefined {
   return IMAGE_MEDIA_TYPES[extname(absPath).toLowerCase()];
+}
+
+/** Read at most `cap` bytes from one handle instead of the whole file. */
+function readCappedText(absPath: string, cap: number): string {
+  if (cap <= 0) return "";
+  const handle = openSync(absPath, "r");
+  try {
+    const bytes = Buffer.alloc(cap);
+    const read = readSync(handle, bytes, 0, cap, 0);
+    return bytes.subarray(0, read).toString("utf8");
+  } finally {
+    closeSync(handle);
+  }
+}
+
+/** Signatures for formats clai can convert, beyond the model-native four. */
+function looksLikeImageBytes(header: Buffer): boolean {
+  if (header.length < 4) return false;
+  if (detectModelImageMediaType(header)) return true;
+  const ascii = header.subarray(0, 2).toString("latin1");
+  if (ascii === "BM") return true;
+  const tiff = header.subarray(0, 4).toString("latin1");
+  if (tiff === "II*\u0000" || tiff === "MM\u0000*") return true;
+  if (
+    header[0] === 0x00 &&
+    header[1] === 0x00 &&
+    header[2] === 0x01 &&
+    header[3] === 0x00
+  ) {
+    return true;
+  }
+  return header.subarray(4, 8).toString("latin1") === "ftyp";
+}
+
+/** Magic-byte inspection, so an extension alone never claims vision input. */
+function inspectImageBytes(
+  absPath: string,
+): { mediaType?: string | undefined; decodable: boolean } {
+  try {
+    const handle = openSync(absPath, "r");
+    try {
+      const header = Buffer.alloc(64);
+      const read = readSync(handle, header, 0, header.length, 0);
+      const bytes = header.subarray(0, read);
+      const mediaType = detectModelImageMediaType(bytes);
+      return {
+        ...(mediaType ? { mediaType } : {}),
+        decodable: looksLikeImageBytes(bytes),
+      };
+    } finally {
+      closeSync(handle);
+    }
+  } catch {
+    return { decodable: false };
+  }
 }
 
 function expandHome(p: string): string {
@@ -689,9 +752,9 @@ export function expandMentions(
           });
           continue;
         }
-        const buf = readFileSync(absPath);
         const truncated = stat.size > MAX_INLINE_BYTES;
-        const content = buf.subarray(0, cap).toString("utf8");
+        // Read only the cap: a multi-GB reference must never be loaded whole.
+        const content = readCappedText(absPath, cap);
         totalInlined += cap;
         attachments.push({
           raw: token,
@@ -710,8 +773,10 @@ export function expandMentions(
       }
     } else if (kind === "image") {
       const stablePath = stabilizeImagePaths([absPath], baseDir)[0] ?? absPath;
-      const mediaType = imageMediaType(stablePath);
-      const sendable = Boolean(mediaType && isModelImageMediaType(mediaType));
+      // Trust the bytes, not the extension: a mislabelled file must not claim
+      // multimodal input (which would switch models and then send nothing).
+      const inspected = inspectImageBytes(stablePath);
+      const decodable = inspected.decodable || inspectImageBytes(absPath).decodable;
       let oversized = false;
       try {
         oversized = statSync(stablePath).size > MAX_IMAGE_BYTES;
@@ -726,10 +791,11 @@ export function expandMentions(
         raw: token,
         path: stablePath,
         kind: "image",
+        sendable: decodable && !oversized,
         note: oversized
           ? `image is larger than ${Math.round(MAX_IMAGE_BYTES / 1_000_000)}MB and was NOT attached — downscale it first (macOS: sips -Z 1600 "<img>" --out /tmp/small.png; or use magick/ffmpeg), then reference the smaller copy`
-          : !sendable
-            ? "image format could not be converted to PNG/JPEG/GIF/WebP and was NOT attached"
+          : !decodable
+            ? "file has an image extension but its bytes are not a supported image — NOT attached; convert it to PNG/JPEG/GIF/WebP first"
             : visionCapable
               ? "image file — attached as multimodal input; inspect it directly for text, colors, layout, spacing, and visual style. Stable path used if original may vanish. Prefer vision over OCR unless the user asks for OCR."
               : "image file — the current model can't view images; switch to a vision model for colors/layout/style, or extract text with OCR if only text is needed (OCR grounding may still be attached)",

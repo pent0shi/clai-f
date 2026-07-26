@@ -25,6 +25,10 @@ export interface ResolvedTurnInput {
   readonly fallbackReason?: string | undefined;
 }
 
+function isSendableImage(attachment: Attachment): boolean {
+  return attachment.kind === "image" && attachment.sendable !== false;
+}
+
 /** Shared frontend-neutral attachment and same-provider vision resolution. */
 export function resolveTurnInput(input: {
   prompt: string;
@@ -37,7 +41,7 @@ export function resolveTurnInput(input: {
   let model = input.model;
   let vision = modelSupportsVision(input.provider, model);
   let expansion = expandMentions(input.prompt, baseDir, vision);
-  const hasImage = expansion.attachments.some((attachment) => attachment.kind === "image");
+  const hasImage = expansion.attachments.some(isSendableImage);
   let fallbackReason: string | undefined;
   if (hasImage && !vision) {
     const fallback = preferredVisionModel(input.provider, model);
@@ -53,10 +57,18 @@ export function resolveTurnInput(input: {
   const images = vision
     ? loadImagePaths(
         expansion.attachments
-          .filter((attachment) => attachment.kind === "image")
+          .filter(isSendableImage)
           .map((attachment) => attachment.path),
       )
     : [];
+  // A model switch is only justified if images actually reach the provider.
+  if (fallbackReason && images.length === 0) {
+    model = input.model;
+    vision = modelSupportsVision(input.provider, model);
+    fallbackReason =
+      "Kept the current model: the referenced image could not be attached, so no vision model was needed.";
+    expansion = expandMentions(input.prompt, baseDir, vision);
+  }
   const prompt = expansion.contextBlock
     ? `${expansion.text}\n\n${expansion.contextBlock}`
     : expansion.text;
