@@ -39,9 +39,9 @@ const READ_ONLY_TOOLS = new Set([
 ]);
 
 /**
- * Track tool attempts for failure reflection. Successful re-calls are always
- * allowed (no "already succeeded / use prior results" nagging — that caused
- * model thrash and false "tool failed" behavior).
+ * Track tool attempts for failure reflection. Successful calls that produced
+ * an observation remain repeatable; an empty success is different because the
+ * model has no result from which to choose its next action.
  */
 export interface LoopGuardOptions {
   /** @deprecated Retry authorization belongs in RetryContext passed to shouldBlock. */
@@ -74,6 +74,14 @@ export class LoopGuard {
   private attempts: ToolAttempt[] = [];
   private signatureCount = new Map<string, number>();
   private signatureSuccess = new Map<string, boolean>();
+  /**
+   * A successful call with no body is not evidence that repeating the exact
+   * call can make progress. Keep only lightweight retry state, never output.
+   */
+  private emptySuccessfulCalls = new Map<
+    string,
+    { step: number; stateKey?: string | undefined; retryReason?: string | undefined }
+  >();
   /** Failed read-only signatures that already used their one free env-change retry. */
   private failedReadRetryUsed = new Set<string>();
   private successfulProbes = new Map<
@@ -157,6 +165,14 @@ export class LoopGuard {
       this.signatureSuccess.set(sig, true);
       if (name !== "task.update" && name !== "plan.create") {
         this.lastSuccessfulNonMetaStep = step;
+      }
+      if (output === undefined || output.trim()) {
+        this.emptySuccessfulCalls.delete(sig);
+      } else if (name !== "task.update" && name !== "plan.create") {
+        this.emptySuccessfulCalls.set(sig, {
+          step,
+          ...(context?.stateKey ? { stateKey: context.stateKey } : {}),
+        });
       }
     } else {
       if (!this.signatureSuccess.has(sig)) this.signatureSuccess.set(sig, false);
@@ -265,6 +281,34 @@ export class LoopGuard {
       return { block: false };
     }
 
+    const sig = this.canonicalize(name, args);
+    const emptySuccess = this.emptySuccessfulCalls.get(sig);
+    if (emptySuccess) {
+      if (
+        (retryContext?.stateKey !== undefined &&
+          retryContext.stateKey !== emptySuccess.stateKey) ||
+        this.lastSuccessfulNonMetaStep > emptySuccess.step
+      ) {
+        return { block: false };
+      }
+      const retryReason = retryContext?.retryReason;
+      const reasonKey =
+        retryReason?.code.trim() && retryReason.detail.trim()
+          ? `${retryReason.code.trim()}\0${retryReason.detail.trim()}`
+          : undefined;
+      if (reasonKey && reasonKey !== emptySuccess.retryReason) {
+        emptySuccess.retryReason = reasonKey;
+        return { block: false };
+      }
+      return {
+        block: true,
+        kind: "unchanged-success",
+        reason:
+          `${name} completed with an empty result and identical arguments. ` +
+          "Do not repeat it unchanged; use a different action, wait for an observable state change, or provide one new structured retry reason.",
+      };
+    }
+
     const probeSignature = completedOperationSignature(name, args);
     const probe = probeSignature
       ? this.successfulProbes.get(probeSignature)
@@ -298,7 +342,6 @@ export class LoopGuard {
       };
     }
 
-    const sig = this.canonicalize(name, args);
     const restoredFailure = probeSignature
       ? this.failedProbes.get(probeSignature)
       : undefined;

@@ -24,6 +24,34 @@ describe("LoopGuard", () => {
     expect(thrice.reason).toBeUndefined();
   });
 
+  it("blocks an unchanged successful call that produced no observation", () => {
+    const guard = new LoopGuard();
+    const args = { command: "true" };
+    guard.recordAttempt(0, "shell.exec", args, true, 0, "");
+
+    expect(guard.shouldBlock("shell.exec", args)).toMatchObject({
+      block: true,
+      kind: "unchanged-success",
+      reason: expect.stringMatching(/empty result/i),
+    });
+  });
+
+  it("allows an empty-result retry after a distinct successful action or one new reason", () => {
+    const args = { command: "true" };
+    const afterProgress = new LoopGuard();
+    afterProgress.recordAttempt(0, "shell.exec", args, true, 0, "");
+    afterProgress.recordAttempt(1, "shell.exec", { command: "printf ready" }, true, 0, "ready");
+    expect(afterProgress.shouldBlock("shell.exec", args).block).toBe(false);
+
+    const withReason = new LoopGuard();
+    withReason.recordAttempt(0, "shell.exec", args, true, 0, "");
+    const retry = {
+      retryReason: { code: "service-ready", detail: "the dependency is now running" },
+    };
+    expect(withReason.shouldBlock("shell.exec", args, retry).block).toBe(false);
+    expect(withReason.shouldBlock("shell.exec", args, retry).block).toBe(true);
+  });
+
   it("suppresses an unchanged successful read without affecting mutations", () => {
     const guard = new LoopGuard();
     const args = { path: "/tmp/blog" };
