@@ -64,7 +64,7 @@ describe("auto-compaction native tool schemas", () => {
     for (let i = 0; i < 11; i += 1) {
       history.push({
         role: i % 2 === 0 ? "user" : "assistant",
-        content: `${i}: ${"history ".repeat(2_400)}`,
+        content: `${i}: ${"history ".repeat(3_200)}`,
       });
     }
 

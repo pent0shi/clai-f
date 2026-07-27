@@ -6,7 +6,7 @@ import type { ProviderId } from "../types.js";
 // request tokens (system blocks, history, tool protocol, schemas and media
 // together) rather than in transcript size. Behaviour, status line and
 // reliability policy all read this module so they cannot disagree.
-export const DEFAULT_AUTO_COMPACT_REQUEST_TOKENS = 80_000;
+export const DEFAULT_AUTO_COMPACT_REQUEST_TOKENS = 120_000;
 
 // Never trigger below this: compaction itself needs room to be useful.
 export const MIN_AUTO_COMPACT_REQUEST_TOKENS = 20_000;

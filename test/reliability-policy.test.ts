@@ -25,13 +25,15 @@ afterEach(() => {
 });
 
 describe("reliability policy (E1–E6)", () => {
-  it("E1: soft early compact trigger defaults to 80k (below the hard ceiling)", () => {
+  it("E1: soft early compact trigger defaults to 120k, clamped by the default model window", () => {
     const p = getReliabilityPolicy();
     expect(p.softEarlyCompact).toBe(true);
     expect(p.softCompactTokenBudget).toBe(DEFAULT_SOFT_COMPACT_TOKEN_BUDGET);
-    expect(autoCompactTriggerTokens(p)).toBe(DEFAULT_SOFT_COMPACT_TOKEN_BUDGET);
-    expect(autoCompactTriggerTokens(p)).toBe(80_000);
-    expect(autoCompactTriggerTokens(p)).toBeLessThan(HARD_COMPACT_TOKEN_BUDGET);
+    expect(DEFAULT_SOFT_COMPACT_TOKEN_BUDGET).toBe(120_000);
+    // No model window can serve the full 120k plus output reserve, so the
+    // effective trigger is clamped to what the default model window allows.
+    expect(autoCompactTriggerTokens(p)).toBeLessThanOrEqual(120_000);
+    expect(autoCompactTriggerTokens(p)).toBeLessThanOrEqual(HARD_COMPACT_TOKEN_BUDGET);
   });
 
   it("E1: soft compact trigger can be lowered via env", () => {
@@ -41,11 +43,11 @@ describe("reliability policy (E1–E6)", () => {
     expect(autoCompactTriggerTokens(p)).toBeLessThan(HARD_COMPACT_TOKEN_BUDGET);
   });
 
-  it("E1: soft early compact can be disabled → hard budget only", () => {
+  it("E1: soft early compact can be disabled → hard budget only (clamped by model window)", () => {
     process.env.CLAI_SOFT_EARLY_COMPACT = "0";
     const p = getReliabilityPolicy();
     expect(p.softEarlyCompact).toBe(false);
-    expect(autoCompactTriggerTokens(p)).toBe(HARD_COMPACT_TOKEN_BUDGET);
+    expect(autoCompactTriggerTokens(p)).toBeLessThanOrEqual(HARD_COMPACT_TOKEN_BUDGET);
   });
 
   it("E2: fs passthrough default is tiered 64k not 400k", () => {

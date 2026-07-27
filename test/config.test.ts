@@ -79,7 +79,7 @@ describe('config store', () => {
     const c = getConfig();
     expect(c.softEarlyCompact).toBe(true);
     expect(c.softCompactTokenBudget).toBeUndefined();
-    expect(c.autoCompactRequestTokens).toBe(80_000);
+    expect(c.autoCompactRequestTokens).toBe(120_000);
     expect(c.fsPassthroughCapChars).toBe(64_000);
     expect(c.adaptiveMaxTokens).toBe(true);
     expect(c.freeTierContextGuard).toBe(true);
