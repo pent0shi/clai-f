@@ -215,7 +215,7 @@ describe("agent plan gate enforcement", () => {
     expect(confirmTool).toHaveBeenCalledTimes(1);
   });
 
-  it("allows repeated successful reads to re-execute without nags", async () => {
+  it("suppresses repeated successful reads without reporting a failure", async () => {
     const repeated =
       '```tool\n{"name":"fs.list","args":{"path":"/test"}}\n```';
     stream
@@ -235,8 +235,8 @@ describe("agent plan gate enforcement", () => {
       maxSteps: 8,
     });
 
-    // Successful identical calls always re-run (no "use prior results" short-circuit).
-    expect(runTool).toHaveBeenCalledTimes(3);
+    // The first result is reused; later identical probes complete successfully without execution.
+    expect(runTool).toHaveBeenCalledTimes(1);
     expect(answer).toContain("Inspection complete.");
     expect(answer).not.toMatch(/Blocked or Cancelled|Status: blocked/i);
     expect(answer).not.toMatch(/already been called|results you already have/i);

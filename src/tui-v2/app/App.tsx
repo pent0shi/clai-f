@@ -71,6 +71,9 @@ export function App(): ReactNode {
   const lastCtrlC = useRef(0);
   const lastEscape = useRef(0);
   const lastEscapeHandledAt = useRef(0);
+  const escapeCancelTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const escapeCancelArmedRef = useRef(false);
+  const [escapeCancelArmed, setEscapeCancelArmed] = useState(false);
   const seenPlanKey = useRef<string | undefined>(undefined);
   /** Seed the composer when the user clicks Edit on a queued prompt. */
   const [composerSeed, setComposerSeed] = useState<
@@ -86,12 +89,31 @@ export function App(): ReactNode {
 
   useEffect(() => {
     return services.session.onTurnEnd((result) => {
+      clearEscapeCancellation();
       if (result.status === "completed") void promptPlanApprovalIfNeeded(services);
       // Drain "send now" priority + remaining queue after every settled turn
       // (including abort). Without this, queued prompts never auto-ran in v2.
       void services.session.continueQueue();
     });
   }, [services]);
+
+  useEffect(() => {
+    return services.ports.jobs.subscribe(() => {
+      if (!escapeCancelArmedRef.current) return;
+      const state = services.session.getState();
+      const hasForegroundWork = state.running || state.compacting || state.queued.length > 0;
+      const hasResponderWork =
+        services.ports.jobs.running(services.session.sessionId).length > 0 ||
+        services.ports.jobs.pendingNotifications(services.session.sessionId).length > 0;
+      if (!hasForegroundWork && !hasResponderWork) clearEscapeCancellation();
+    });
+  }, [services]);
+
+  useEffect(() => {
+    return () => {
+      if (escapeCancelTimer.current) clearTimeout(escapeCancelTimer.current);
+    };
+  }, []);
 
   useEffect(() => {
     if (!plan) {
@@ -392,6 +414,29 @@ export function App(): ReactNode {
   // of walking prompt history in the textarea.
   const composerFocused = overlay.kind === "none" && focusContext === "composer";
 
+  function clearEscapeCancellation(): void {
+    lastEscape.current = 0;
+    if (escapeCancelTimer.current) {
+      clearTimeout(escapeCancelTimer.current);
+      escapeCancelTimer.current = undefined;
+    }
+    escapeCancelArmedRef.current = false;
+    setEscapeCancelArmed(false);
+  }
+
+  function armEscapeCancellation(now: number): void {
+    lastEscape.current = now;
+    if (escapeCancelTimer.current) clearTimeout(escapeCancelTimer.current);
+    escapeCancelArmedRef.current = true;
+    setEscapeCancelArmed(true);
+    escapeCancelTimer.current = setTimeout(() => {
+      lastEscape.current = 0;
+      escapeCancelTimer.current = undefined;
+      escapeCancelArmedRef.current = false;
+      setEscapeCancelArmed(false);
+    }, ESC_CANCEL_WINDOW_MS);
+  }
+
   function handleEscapeCancellation(dismissed: boolean): void {
     const now = Date.now();
     // One physical Esc can reach both this global handler and the composer's
@@ -418,9 +463,10 @@ export function App(): ReactNode {
       hasResponderWork;
 
     if (doublePress && hasCancelableWork) {
-      lastEscape.current = 0;
+      clearEscapeCancellation();
       services.overlay.cancelBlockingPrompt();
       void services.session.cancelAll().then((result) => {
+        clearEscapeCancellation();
         const text = result.ok
           ? "Cancelled turn, queue, and Responder jobs"
           : "Cancellation completed with job stop failures — open Jobs for details";
@@ -439,18 +485,16 @@ export function App(): ReactNode {
       return;
     }
 
-    lastEscape.current = now;
     if (hasCancelableWork) {
-      notifyWarn(
-        services,
-        `${dismissed ? "Prompt dismissed · " : ""}Esc again to cancel turn + queue + Responder jobs`,
-        { key: "escape-cancel-all", durationMs: ESC_CANCEL_WINDOW_MS },
-      );
+      armEscapeCancellation(now);
     } else if (dismissed) {
+      clearEscapeCancellation();
       notify(services, "Closed · Esc", {
         key: "escape-dismiss",
         durationMs: 1000,
       });
+    } else {
+      clearEscapeCancellation();
     }
   }
 
@@ -704,6 +748,7 @@ export function App(): ReactNode {
           onClearDraft={clearDraft}
           onOpenShortcuts={openShortcutsPager}
           onCycleMode={cycleMode}
+          cancelArmed={escapeCancelArmed}
           onRequestCancel={() => handleEscapeCancellation(false)}
         />
       </box>
@@ -734,7 +779,6 @@ export function App(): ReactNode {
           {planPanel}
         </box>
       ) : null}
-
       {/* Full-bleed overlay host (pickers, Ctrl+P pager, prompt actions, …).
           Sibling of the padded column so open/close never reflows the intro. */}
       <OverlayHost services={services} theme={theme} width={width} height={height} />

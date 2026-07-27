@@ -14,11 +14,13 @@ import {
 import { serializeTranscriptForCompaction } from "../src/tui-v2/state/transcript-compaction.js";
 
 const completeWithProvider = vi.hoisted(() => vi.fn());
+const streamWithProvider = vi.hoisted(() => vi.fn());
 vi.mock("../src/llm/router.js", async (importActual) => {
   const actual = await importActual<typeof import("../src/llm/router.js")>();
   return {
     ...actual,
     completeWithProvider: (...args: unknown[]) => completeWithProvider(...args),
+    streamWithProvider: (...args: unknown[]) => streamWithProvider(...args),
   };
 });
 
@@ -36,10 +38,17 @@ let dataDir: string;
 let originalEnv: Partial<Record<(typeof dataEnvKeys)[number], string | undefined>>;
 
 beforeEach(() => {
+  const summary =
+    "Earlier turns in this session, summarized: the user asked, the assistant answered.";
   completeWithProvider.mockReset();
-  completeWithProvider.mockResolvedValue({
-    text: "Earlier turns in this session, summarized: the user asked, the assistant answered.",
-  });
+  completeWithProvider.mockResolvedValue({ text: summary });
+  streamWithProvider.mockReset();
+  streamWithProvider.mockImplementation(
+    async (_request: unknown, onToken: (token: string) => void) => {
+      onToken(summary);
+      return { text: summary };
+    },
+  );
   originalEnv = {};
   for (const key of dataEnvKeys) originalEnv[key] = process.env[key];
   dataDir = mkdtempSync(join(tmpdir(), "clai-compact-quit-"));

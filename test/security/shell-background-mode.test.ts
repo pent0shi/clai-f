@@ -1,7 +1,11 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { jobManager } from "../../src/tools/jobs.js";
 import { toolRegistry } from "../../src/tools/registry.js";
 
 const shellExec = toolRegistry["shell.exec"]!;
+const shellStart = toolRegistry["shell.start"]!;
+
+afterEach(() => vi.restoreAllMocks());
 
 describe("TOOL-002 shell.exec background mode", () => {
   it('background:"never" keeps an expensive-looking command in the foreground', async () => {
@@ -22,6 +26,101 @@ describe("TOOL-002 shell.exec background mode", () => {
   it("a cheap scanner-shaped command stays in the foreground by default", async () => {
     const result = await shellExec({ command: "find . -maxdepth 0" }, {});
     expect(result.backgroundJob).toBeUndefined();
+  });
+
+  it("auto-delegates costly finite commands unless responder:false opts out", async () => {
+    const start = vi.spyOn(jobManager, "startJob").mockResolvedValue({
+      ok: true,
+      output: "launch policy",
+      backgroundJob: {
+        id: "cost-job",
+        status: "running",
+        artifactPath: "/tmp/cost-job.log",
+      },
+    });
+
+    await shellExec({ command: "find / -name definitely-not-here-xyz" }, {});
+    expect(start.mock.calls[0]?.[1]).toMatchObject({
+      responder: true,
+      wakeOnCompletion: true,
+    });
+
+    start.mockClear();
+    await shellExec(
+      {
+        command: "find / -name definitely-not-here-xyz",
+        responder: false,
+      },
+      {},
+    );
+    expect(start.mock.calls[0]?.[1]).toMatchObject({
+      responder: false,
+      wakeOnCompletion: false,
+    });
+  });
+
+  it('background:"always" is pollable unless responder:true is explicit', async () => {
+    const start = vi.spyOn(jobManager, "startJob").mockResolvedValue({
+      ok: true,
+      output: "launch policy",
+      backgroundJob: {
+        id: "forced-job",
+        status: "running",
+        artifactPath: "/tmp/forced-job.log",
+      },
+    });
+
+    await shellExec({ command: "echo finite", background: "always" }, {});
+    expect(start.mock.calls[0]?.[1]).toMatchObject({
+      responder: false,
+      wakeOnCompletion: false,
+    });
+
+    start.mockClear();
+    await shellExec(
+      { command: "echo finite", background: "always", responder: true },
+      {},
+    );
+    expect(start.mock.calls[0]?.[1]).toMatchObject({
+      responder: true,
+      wakeOnCompletion: true,
+    });
+  });
+
+  it("background never overrides responder and persistent commands cannot delegate", async () => {
+    const start = vi.spyOn(jobManager, "startJob").mockResolvedValue({
+      ok: true,
+      output: "launch policy",
+      backgroundJob: {
+        id: "ownership-job",
+        status: "running",
+        artifactPath: "/tmp/ownership-job.log",
+      },
+    });
+
+    const foreground = await shellExec(
+      {
+        command: "printf foreground",
+        background: "never",
+        responder: true,
+      },
+      {},
+    );
+    expect(foreground.backgroundJob).toBeUndefined();
+    expect(start).not.toHaveBeenCalled();
+
+    await shellExec({ command: "npm run dev", responder: true }, {});
+    expect(start.mock.calls[0]?.[1]).toMatchObject({
+      responder: false,
+      wakeOnCompletion: false,
+    });
+
+    start.mockClear();
+    await shellStart({ command: "npm run dev", responder: true }, {});
+    expect(start.mock.calls[0]?.[1]).toMatchObject({
+      responder: false,
+      wakeOnCompletion: false,
+    });
   });
 
   it("explains that timeoutMs does not apply when auto-backgrounded", async () => {

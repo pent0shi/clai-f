@@ -234,6 +234,8 @@ export interface BackgroundJobReceipt {
   nextOffset?: number | undefined;
   exitCode?: number | undefined;
   signal?: string | undefined;
+  /** True when completion is delivered by the Responder; false/absent means pollable. */
+  responder?: boolean | undefined;
 }
 
 export interface ToolResult {

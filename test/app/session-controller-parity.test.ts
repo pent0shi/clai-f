@@ -1,6 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentPort } from "../../src/app/ports/agent-port.js";
-import type { PersistencePort } from "../../src/app/ports/persistence-port.js";
+import type {
+  PersistencePort,
+  SaveSessionOptions,
+} from "../../src/app/ports/persistence-port.js";
 import {
   isCompactionMemoryMessage,
 } from "../../src/agent/context-manager.js";
@@ -14,6 +17,17 @@ vi.mock("../../src/llm/router.js", async (importActual) => {
   return {
     ...actual,
     completeWithProvider: (...args: unknown[]) => completeWithProvider(...args),
+    streamWithProvider: async (
+      request: unknown,
+      onToken: (text: string) => void,
+    ) => {
+      const result = await completeWithProvider(request);
+      const chunks = Array.isArray(result.chunks)
+        ? result.chunks
+        : [result.text];
+      for (const chunk of chunks) onToken(String(chunk));
+      return result;
+    },
   };
 });
 
@@ -146,6 +160,17 @@ describe("SessionController parity helpers (V2-080)", () => {
   });
 
   it("compact after loadHistory summarizes resumed history + newer turns", async () => {
+    const visibleSummary =
+      "User goals: resumed work. Work completed: history + follow-up.";
+    completeWithProvider.mockResolvedValueOnce({
+      text: `<thinking>hidden compaction reasoning</thinking>${visibleSummary}`,
+      chunks: [
+        "<think",
+        "ing>hidden compaction reasoning</think",
+        `ing>${visibleSummary.slice(0, 24)}`,
+        visibleSummary.slice(24),
+      ],
+    });
     const events: AnyAppEvent[] = [];
     const session = new SessionController({
       agent: fakeAgent(),
@@ -191,7 +216,121 @@ describe("SessionController parity helpers (V2-080)", () => {
           m.content.includes("Session memory from compacted earlier turns"),
       ),
     ).toBe(true);
-    expect(events.some((e) => e.type === "compacted")).toBe(true);
+    expect(events.some((e) => e.type === "compaction-completed")).toBe(true);
+    const streamedSummary = events
+      .filter((event) => event.type === "compaction-delta")
+      .map((event) => event.payload.text)
+      .join("");
+    expect(streamedSummary).toBe(visibleSummary);
+    expect(streamedSummary).not.toMatch(/<\/?think|hidden compaction/i);
+    const completed = events.find(
+      (event) => event.type === "compaction-completed",
+    );
+    if (completed?.type === "compaction-completed") {
+      expect(completed.payload.summary).toContain(visibleSummary);
+      expect(completed.payload.summary).not.toMatch(/<\/?think|hidden compaction/i);
+    }
+  });
+
+  it("retries a reasoning-only manual summary with thinking disabled", async () => {
+    const visibleSummary =
+      "User goals: preserve the session. Current state: continue implementation.";
+    completeWithProvider
+      .mockResolvedValueOnce({
+        text: "<think>reasoning consumed the first allowance</think>",
+        chunks: ["<thi", "nk>reasoning consumed the first allowance</think>"],
+      })
+      .mockResolvedValueOnce({ text: visibleSummary });
+    const events: AnyAppEvent[] = [];
+    const session = new SessionController({
+      agent: fakeAgent(),
+      persistence: fakePersistence(),
+      emit: (event) => events.push(event),
+      sessionId: "sess-thinking-retry",
+      provider: "nvidia" as never,
+      model: "thinking-model",
+    });
+    session.loadHistory(
+      [
+        { role: "user", content: "build the feature" },
+        { role: "assistant", content: "implementation started" },
+        { role: "user", content: "keep the original context safe" },
+        { role: "assistant", content: "continuing" },
+      ],
+      { sessionId: "sess-thinking-retry" },
+    );
+
+    const result = await session.compact(undefined, 2);
+
+    expect(result.summarized).toBe(true);
+    expect(completeWithProvider).toHaveBeenCalledTimes(2);
+    expect(completeWithProvider.mock.calls[1]?.[0]).toMatchObject({
+      maxTokens: 8_192,
+      temperature: 0,
+      thinking: { enabled: false, effort: "none" },
+    });
+    const streamed = events
+      .filter((event) => event.type === "compaction-delta")
+      .map((event) => event.payload.text)
+      .join("");
+    expect(streamed).toBe(visibleSummary);
+    expect(streamed).not.toMatch(/reasoning consumed|<\/?think/i);
+    expect(session.messages.some(isCompactionMemoryMessage)).toBe(true);
+  });
+
+  it("keeps the exact original messages when both manual summary attempts contain only reasoning", async () => {
+    completeWithProvider
+      .mockResolvedValueOnce({
+        text: "<think>first hidden-only summary</think>",
+        chunks: ["<think>first hidden-only summary</think>"],
+      })
+      .mockResolvedValueOnce({
+        text: "<thinking>retry was still hidden-only</thinking>",
+      });
+    const events: AnyAppEvent[] = [];
+    const session = new SessionController({
+      agent: fakeAgent(),
+      persistence: fakePersistence(),
+      emit: (event) => events.push(event),
+      sessionId: "sess-thinking-failure",
+      provider: "nvidia" as never,
+      model: "thinking-model",
+    });
+    session.loadHistory(
+      [
+        { role: "user", content: "original user context" },
+        { role: "assistant", content: "original assistant context" },
+        { role: "user", content: "recent user context" },
+        { role: "assistant", content: "recent assistant context" },
+      ],
+      { sessionId: "sess-thinking-failure" },
+    );
+    const original = session.messages.map((message) => ({ ...message }));
+
+    await expect(session.compact(undefined, 2)).rejects.toThrow(
+      /model returned an empty summary/,
+    );
+
+    expect(completeWithProvider).toHaveBeenCalledTimes(2);
+    expect(session.messages).toEqual(original);
+    expect(events.some((event) => event.type === "compaction-completed")).toBe(
+      false,
+    );
+    expect(
+      events
+        .filter((event) => event.type === "compaction-delta")
+        .map((event) => event.payload.text)
+        .join(""),
+    ).toBe("");
+    const started = events.find(
+      (event) => event.type === "compaction-started",
+    );
+    const failed = events.find((event) => event.type === "compaction-failed");
+    expect(failed?.type).toBe("compaction-failed");
+    if (started?.type === "compaction-started" && failed?.type === "compaction-failed") {
+      expect(failed.payload.retainedTokens).toBe(started.payload.beforeTokens);
+      expect(failed.payload.retainedTokens).toBeGreaterThan(0);
+    }
   });
 
   it("persists after compaction even when the kept tail has no user message (trailing compacted card survives reload)", async () => {
@@ -272,9 +411,11 @@ describe("SessionController parity helpers (V2-080)", () => {
     );
     expect(systemPrompt).toContain("Do not add framing");
     expect(systemPrompt).not.toContain("State clearly that this context");
-    const compacted = events.find((event) => event.type === "compacted");
-    expect(compacted?.type).toBe("compacted");
-    if (compacted?.type === "compacted") {
+    const compacted = events.find(
+      (event) => event.type === "compaction-completed",
+    );
+    expect(compacted?.type).toBe("compaction-completed");
+    if (compacted?.type === "compaction-completed") {
       expect(compacted.payload.summary).toContain("PLAN MODE HANDOFF");
       expect(compacted.payload.summary).toContain("Verified React project state");
       expect(compacted.payload.summary).not.toContain("stale resumed memory");
@@ -329,7 +470,7 @@ describe("SessionController parity helpers (V2-080)", () => {
       agent: fakeAgent(),
       persistence,
       emit: (event) => {
-        if (event.type === "compacted") {
+        if (event.type === "compaction-completed") {
           transcript = [
             {
               kind: "compacted",
@@ -445,5 +586,77 @@ describe("SessionController parity helpers (V2-080)", () => {
     expect(identitiesB.map((identity) => identity.revision)).toEqual([1]);
     expect(identitiesB[0]!.generation.localeCompare(identitiesA[0]!.generation)).toBeGreaterThan(0);
     expect(identitiesA[1]!.generation).toBe(identitiesA[0]!.generation);
+  });
+
+  it("persists an in-flight checkpoint and restores recovery orientation", async () => {
+    const snapshots: SaveSessionOptions[] = [];
+    let release!: () => void;
+    const first = new SessionController({
+      agent: {
+        async runTurn(_request, handlers) {
+          handlers.onMessages?.([{ role: "user", content: "continue the audit" }]);
+          await new Promise<void>((resolve) => {
+            release = resolve;
+          });
+          return createTurnOutcome({
+            status: "succeeded",
+            answer: "done",
+            steps: 1,
+            remainingCriteria: [],
+          });
+        },
+      },
+      persistence: {
+        ...fakePersistence(),
+        async saveSession(_messages, options) {
+          snapshots.push({ ...options });
+        },
+      },
+      emit: () => {},
+      sessionId: "restart-source",
+    });
+
+    const pending = first.submit("continue the audit");
+    await vi.waitFor(() => expect(snapshots.length).toBeGreaterThan(0));
+    const interrupted = snapshots.at(-1)?.previousTurn;
+    expect(interrupted).toMatchObject({
+      status: "error",
+      reason: expect.stringContaining("before the turn settled"),
+    });
+
+    first.loadHistory([{ role: "user", content: "different session" }], {
+      sessionId: "restart-destination",
+    });
+    await first.persistNow();
+    expect(snapshots.at(-1)?.previousTurn).toBeNull();
+
+    let resumedRequest: Parameters<AgentPort["runTurn"]>[0] | undefined;
+    const resumed = new SessionController({
+      agent: {
+        async runTurn(request) {
+          resumedRequest = request;
+          return createTurnOutcome({
+            status: "succeeded",
+            answer: "continued",
+            steps: 1,
+            remainingCriteria: [],
+          });
+        },
+      },
+      persistence: fakePersistence(),
+      emit: () => {},
+      sessionId: "restart-source",
+    });
+    resumed.loadHistory([{ role: "user", content: "continue the audit" }], {
+      sessionId: "restart-source",
+      previousTurn: interrupted ?? undefined,
+    });
+    await resumed.submit("keep going");
+
+    expect(resumedRequest?.previousTurn).toEqual(interrupted);
+
+    release();
+    await pending;
+    expect(snapshots.at(-1)?.previousTurn).toBeNull();
   });
 });

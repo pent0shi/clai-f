@@ -159,6 +159,14 @@ interface PersistedRegistryV2 {
   jobs: BackgroundJob[];
   notifications: ResponderNotification[];
   settlements?: PendingSettlement[];
+  consumedResults?: ConsumedResponderResult[];
+}
+
+interface ConsumedResponderResult {
+  jobId: string;
+  resultHash: string;
+  resultRevision: number;
+  acknowledgedAt: string;
 }
 
 /** Durable projection marker for a terminal result whose plan child is unsettled. */
@@ -203,6 +211,16 @@ function displayArg(value: string): string {
 function commandDisplay(command: string | BackgroundSpawnSpec): string {
   if (typeof command === "string") return command;
   return command.display ?? [command.command, ...command.argv].map(displayArg).join(" ");
+}
+
+function launchFollowUp(id: string, responder: boolean): string {
+  return responder
+    ? "Responder owns completion tracking for this self-completing job. " +
+        "Do not poll it with shell.tail/shell.jobs, sleep, or read its artifact. " +
+        "Continue other work; if not already delivered, its terminal result will be delivered automatically."
+    : "OS launch does not prove application readiness or continued liveness. " +
+        `This is a normal background job: use shell.tail {"id":"${id}"} with nextOffset and shell.jobs for status; ` +
+        "for a server or watcher, also run an application readiness probe. Do not launch a duplicate.";
 }
 
 const PER_FILE_BYTES = 1024 * 1024;
@@ -508,6 +526,7 @@ export class JobManager {
   private responderLeases = new Map<string, string>();
   private settlementTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private pendingSettlements = new Map<string, PendingSettlement>();
+  private consumedResponderResults = new Map<string, ConsumedResponderResult>();
   private livenessWatchTimer: ReturnType<typeof setInterval> | undefined;
   private finalizations = new Map<string, Promise<boolean>>();
   private listeners = new Set<JobManagerListener>();
@@ -565,6 +584,10 @@ export class JobManager {
   private forgetJob(id: string): void {
     const job = this.jobs.get(id);
     this.jobs.delete(id);
+    for (const [notificationId, notification] of this.notifications) {
+      if (notification.jobId === id) this.notifications.delete(notificationId);
+    }
+    this.consumedResponderResults.delete(id);
     this.livenessMisses.delete(id);
     this.livenessCheckedAt.delete(id);
     if (!job) return;
@@ -731,6 +754,14 @@ export class JobManager {
       )
       .digest("hex")
       .slice(0, 24);
+    const consumed = this.consumedResponderResults.get(job.id);
+    if (!existing && consumed?.resultHash === resultHash) {
+      return { created: false, updated: false };
+    }
+    const correctsConsumed = Boolean(
+      !existing && consumed && consumed.resultHash !== resultHash,
+    );
+    if (correctsConsumed) this.consumedResponderResults.delete(job.id);
     // A materially different authoritative result is a new revision: every
     // delivery/read/analysis marker belonged to the superseded result and must
     // not suppress review of the corrected one.
@@ -741,7 +772,9 @@ export class JobManager {
     );
     const resultRevision = supersedes
       ? (existing?.resultRevision ?? 1) + 1
-      : (existing?.resultRevision ?? 1);
+      : correctsConsumed
+        ? (consumed?.resultRevision ?? 1) + 1
+        : (existing?.resultRevision ?? 1);
     const supersededRevisions = supersedes && existing
       ? [
           ...(existing.supersededRevisions ?? []),
@@ -804,6 +837,15 @@ export class JobManager {
         ? { acknowledgedAt: carried.acknowledgedAt }
         : {}),
       ...(carried?.settledAt ? { settledAt: carried.settledAt } : {}),
+      ...(carried?.discardedAt
+        ? {
+            discardedAt: carried.discardedAt,
+            ...(carried.discardReason
+              ? { discardReason: carried.discardReason }
+              : {}),
+            wakeOnCompletion: false,
+          }
+        : {}),
       ...(carried?.archivedAt ? { archivedAt: carried.archivedAt } : {}),
     };
     if (supersedes) this.claimedNotifications.delete(notification.id);
@@ -1088,12 +1130,13 @@ export class JobManager {
       output:
         `Reusing background job id=${job.id} (${reason}) pid=${job.pid ?? "?"} status=${job.status}\n` +
         `Command: ${job.commandDisplay}\nArtifact: ${job.stdoutArtifact}\n` +
-        "The duplicate launch was not started; poll this id instead.",
+        `The duplicate launch was not started. ${launchFollowUp(job.id, job.responder === true)}`,
       outputPath: job.stdoutArtifact,
       backgroundJob: {
         id: job.id,
         status: job.status,
         artifactPath: job.stdoutArtifact,
+        ...(job.responder ? { responder: true } : {}),
         nextOffset: 0,
       },
     };
@@ -1309,11 +1352,15 @@ export class JobManager {
           launchError.syscall ? `syscall=${JSON.stringify(launchError.syscall)}` : undefined,
           launchError.path ? `path=${JSON.stringify(launchError.path)}` : undefined,
         ].filter((value): value is string => Boolean(value));
+        const ownership = job.responder
+          ? "Responder owns this terminal launch failure; do not poll or retry it. Its result will be delivered automatically."
+          : "Inspect the failed job receipt before deciding whether changed evidence supports a retry.";
         const detail =
           `${launchRetried ? "Automatic retry after a transient launch ENOENT also failed.\n" : ""}` +
           `Background command launch error [${code}]: ${launchError.message}\n` +
           `${fields.join("; ")}\n` +
-          "The command did not start. Do not rewrite its syntax to work around this infrastructure error; verify the target and cwd.";
+          "The command did not start. Do not rewrite its syntax to work around this infrastructure error; verify the target and cwd.\n" +
+          ownership;
         stderr.append(`${detail}\n`);
         await this.finalizeJob(job, "failed", { exitCode: 127 });
         return {
@@ -1326,6 +1373,7 @@ export class JobManager {
             status: "failed",
             exitCode: 127,
             artifactPath: stdoutArtifact,
+            ...(job.responder ? { responder: true } : {}),
             nextOffset: 0,
           },
         };
@@ -1455,11 +1503,14 @@ export class JobManager {
       const earlyStatus = this.getJob(id)?.status;
       if (earlyStatus === "failed") {
         await this.persist();
+        const failureFollowUp = job.responder
+          ? "Responder owns this terminal failure; do not poll or retry it. Its result will be delivered automatically."
+          : `Use shell.tail {"id":"${id}"} for captured stderr; do not retry unchanged.`;
         return {
           ok: false,
           output:
             `Background job failed immediately: id=${id} exit=${job.exitCode ?? "?"}\n` +
-            `Command: ${job.commandDisplay}\nUse shell.tail {"id":"${id}"} for captured stderr; do not retry unchanged.`,
+            `Command: ${job.commandDisplay}\n${failureFollowUp}`,
           exitCode: job.exitCode ?? 1,
           outputPath: stdoutArtifact,
           backgroundJob: {
@@ -1467,6 +1518,7 @@ export class JobManager {
             status: "failed",
             exitCode: job.exitCode,
             artifactPath: stdoutArtifact,
+            ...(job.responder ? { responder: true } : {}),
             nextOffset: 0,
           },
         };
@@ -1478,14 +1530,14 @@ export class JobManager {
         ok: true,
         output:
           `OS process launch confirmed: id=${id} (canonical job ID) pid=${child.pid ?? "?"}\n` +
-          `This does not prove application readiness or continued liveness; use shell.tail {"id":"${id}"} and a readiness probe.\n` +
-          `Use shell.jobs for status; do not use the artifact filename as the id.\n` +
-          `Command: ${job.commandDisplay}\nArtifact: ${stdoutArtifact}`,
+          `Command: ${job.commandDisplay}\nArtifact: ${stdoutArtifact}\n` +
+          launchFollowUp(id, job.responder === true),
         outputPath: stdoutArtifact,
         backgroundJob: {
           id,
           status: job.status,
           artifactPath: stdoutArtifact,
+          ...(job.responder ? { responder: true } : {}),
           ...(options?.profile ? { profile: options.profile } : {}),
           ...(options?.estimatedSeconds !== undefined ? { estimatedSeconds: options.estimatedSeconds } : {}),
           nextOffset: 0,
@@ -1502,11 +1554,13 @@ export class JobManager {
           this.persistSync();
           this.emit({ type: "job", jobId: id });
         }
+        const followUp = launchFollowUp(id, job.responder === true);
         return {
           ok: alive,
           output:
             `Background command launched as pid=${job.pid ?? "?"}, but job setup/persistence failed: ${detail}\n` +
-            `${alive ? `The process is still running as job ${id}; do not launch a duplicate. Use shell.jobs/tail/stop.` : "The process is no longer running; inspect its artifacts before deciding whether to retry."}`,
+            `${alive ? `The process is still running as job ${id}; do not launch a duplicate. ` : "The process has already stopped. "}` +
+            followUp,
           exitCode: alive ? undefined : job.exitCode,
           outputPath: stdoutArtifact,
           backgroundJob: {
@@ -1514,6 +1568,7 @@ export class JobManager {
             status: job.status,
             exitCode: job.exitCode,
             artifactPath: stdoutArtifact,
+            ...(job.responder ? { responder: true } : {}),
             nextOffset: 0,
           },
         };
@@ -1523,8 +1578,18 @@ export class JobManager {
         ok: false,
         output:
           `Background command launch error [UNKNOWN]: ${detail}\n` +
-          `cwd=${JSON.stringify(cwd)}\nThe command did not start.`,
+          `cwd=${JSON.stringify(cwd)}\nThe command did not start.\n` +
+          launchFollowUp(id, job.responder === true),
         exitCode: 127,
+        outputPath: stdoutArtifact,
+        backgroundJob: {
+          id,
+          status: "failed",
+          exitCode: 127,
+          artifactPath: stdoutArtifact,
+          ...(job.responder ? { responder: true } : {}),
+          nextOffset: 0,
+        },
       };
     }
   }
@@ -1562,7 +1627,27 @@ export class JobManager {
           ? "alive"
           : "unresponsive"
         : "terminal";
-      return `[${job.id}] ${job.status} health=${health} exit=${job.exitCode ?? "?"} ${formatJobElapsed(job)}  ${job.commandDisplay.slice(0, 80)}`;
+      const notification = this.notificationForJob(job.id);
+      const receipt = notification
+        ? notification.acknowledgedAt
+          ? "consumed"
+          : notification.analyzedAt
+            ? "analyzed"
+            : notification.readAt
+              ? "read"
+              : notification.deliveredAt
+                ? "delivered-unread"
+                : notification.deliveryStartedAt
+                  ? "delivering"
+                  : "ready"
+        : this.consumedResponderResults.has(job.id)
+          ? "consumed"
+          : job.responder
+            ? this.isLive(job)
+              ? "running"
+              : "pending"
+            : undefined;
+      return `[${job.id}] ${job.status} health=${health} exit=${job.exitCode ?? "?"}${receipt ? ` responder=${receipt}` : ""} ${formatJobElapsed(job)}  ${job.commandDisplay.slice(0, 80)}`;
     };
     const header = sessionId
       ? `Session background jobs (${durable.length} total, session ${sessionId}):`
@@ -1648,7 +1733,6 @@ export class JobManager {
           candidate.responderLeaseId === leaseId &&
           !candidate.archivedAt &&
           !candidate.discardedAt &&
-          !candidate.deliveredAt &&
           !candidate.readAt &&
           !candidate.analyzedAt &&
           !candidate.acknowledgedAt &&
@@ -1697,7 +1781,13 @@ export class JobManager {
       }
       this.emit({ type: "notification", jobId: notification.jobId, notificationId });
     }
-    this.claimedNotifications.delete(notificationId);
+    if (
+      notification.readAt ||
+      notification.analyzedAt ||
+      notification.acknowledgedAt
+    ) {
+      this.claimedNotifications.delete(notificationId);
+    }
     return true;
   }
 
@@ -1707,7 +1797,8 @@ export class JobManager {
       !notification ||
       notification.ownerSessionId !== sessionId ||
       !notification.responder ||
-      notification.archivedAt
+      notification.archivedAt ||
+      notification.discardedAt
     ) {
       return false;
     }
@@ -1760,6 +1851,12 @@ export class JobManager {
     this.claimedNotifications.delete(notificationId);
     if (!notification.acknowledgedAt) {
       notification.acknowledgedAt = new Date().toISOString();
+      this.consumedResponderResults.set(notification.jobId, {
+        jobId: notification.jobId,
+        resultHash: notification.resultHash ?? "",
+        resultRevision: notification.resultRevision ?? 1,
+        acknowledgedAt: notification.acknowledgedAt,
+      });
       const persisted = this.persistSync();
       if (!persisted) this.scheduleRegistryRetry();
       if (persisted) {
@@ -2093,6 +2190,7 @@ export class JobManager {
       notification.wakeOnCompletion = false;
       notification.discardedAt = acknowledgedAt;
       notification.discardReason = "session-cancelled";
+      this.claimedNotifications.delete(notification.id);
     }
     const acknowledgementsPersisted = this.persistSync();
     if (!acknowledgementsPersisted) {
@@ -2191,6 +2289,9 @@ export class JobManager {
         this.notifications.delete(id);
       }
     }
+    for (const [jobId] of this.consumedResponderResults) {
+      if (!this.jobs.has(jobId)) this.consumedResponderResults.delete(jobId);
+    }
     const durableTerminal: BackgroundJob[] = [];
     for (const [id, job] of this.jobs) {
       if (!this.isDurable(job)) {
@@ -2239,6 +2340,18 @@ export class JobManager {
         for (const settlement of parsed.settlements) {
           if (!settlement || typeof settlement.jobId !== "string") continue;
           this.pendingSettlements.set(settlement.jobId, settlement);
+        }
+      }
+      if (parsed.schemaVersion === 2 && Array.isArray(parsed.consumedResults)) {
+        for (const consumed of parsed.consumedResults) {
+          if (
+            !consumed ||
+            typeof consumed.jobId !== "string" ||
+            typeof consumed.resultHash !== "string"
+          ) {
+            continue;
+          }
+          this.consumedResponderResults.set(consumed.jobId, consumed);
         }
       }
       if (parsed.schemaVersion === 2 && Array.isArray(parsed.notifications)) {
@@ -2300,6 +2413,9 @@ export class JobManager {
       notifications: [...this.notifications.values()],
       ...(this.pendingSettlements.size
         ? { settlements: [...this.pendingSettlements.values()] }
+        : {}),
+      ...(this.consumedResponderResults.size
+        ? { consumedResults: [...this.consumedResponderResults.values()] }
         : {}),
     };
   }

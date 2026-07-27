@@ -206,6 +206,7 @@ export async function toolCheckHandler(
     ["pip", "pip3", "poetry", "uv", "pipenv"],
     ["python", "python3"],
     ["node", "nodejs"],
+    ["ffuf", "gobuster", "feroxbuster", "dirsearch", "wfuzz"],
   ];
 
   function familyOf(name: string): string[] | undefined {

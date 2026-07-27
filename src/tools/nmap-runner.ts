@@ -231,8 +231,13 @@ export async function runNmapScan(
             interactiveStdin: true,
             noArtifact: true,
           });
-          if (options?.signal?.aborted || auth.exitCode === 130) return auth;
-          if (auth.ok) {
+          if (options?.signal?.aborted) return auth;
+          if (auth.exitCode === 130) {
+            options?.onOutput?.(
+              "\nSudo authentication was cancelled; using an unprivileged TCP connect scan instead. Authentication will not be reopened automatically.\n",
+              "stderr",
+            );
+          } else if (auth.ok) {
             attempts.push({
               command: "sudo",
               argv: ["-n", "nmap", ...scanArgv],

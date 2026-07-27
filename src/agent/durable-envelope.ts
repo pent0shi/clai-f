@@ -171,6 +171,15 @@ function outcomeLines(outcome: OutcomeEnvelope, lines: string[]): void {
       `Failed approaches (do not repeat): ${recent.map((entry) => `${entry.signature} — ${clip(entry.premise, 90)}`).join("; ")}`,
     );
   }
+  const completed = outcome.completedOperations ?? [];
+  if (completed.length > 0) {
+    lines.push(
+      `Completed read-only operations (do not repeat identical calls): ${completed
+        .slice(-MAX_LIST_ENTRIES)
+        .map((entry) => `${entry.signature} ${clip(entry.summary, 90)} — ${clip(entry.observation, 80)}${entry.artifact ? ` artifact=${entry.artifact}` : ""}`)
+        .join("; ")}`,
+    );
+  }
 }
 
 function renderJob(job: EnvelopeJobState): string {

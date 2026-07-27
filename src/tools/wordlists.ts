@@ -22,7 +22,7 @@
  */
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { homedir, platform } from "node:os";
 import { join } from "node:path";
 import type { ToolResult } from "../types.js";
@@ -127,9 +127,12 @@ const NAME_ALIASES: Record<string, string[]> = {
   big: ["big.txt"],
   medium: ["directory-list-2.3-medium.txt"],
   "directory-medium": ["directory-list-2.3-medium.txt"],
-  small: ["directory-list-2.3-small.txt"],
-  "directory-small": ["directory-list-2.3-small.txt"],
-  directories: ["directory-list-2.3-medium.txt", "raft-medium-directories.txt"],
+  small: ["common.txt", "quickhits.txt", "raft-small-directories.txt", "directory-list-2.3-small.txt"],
+  short: ["common.txt", "quickhits.txt", "raft-small-directories.txt", "directory-list-2.3-small.txt"],
+  quick: ["quickhits.txt", "common.txt", "raft-small-directories.txt"],
+  "directory-small": ["common.txt", "quickhits.txt", "raft-small-directories.txt", "directory-list-2.3-small.txt"],
+  directory: ["common.txt", "quickhits.txt", "raft-small-directories.txt", "directory-list-2.3-small.txt"],
+  directories: ["common.txt", "quickhits.txt", "raft-small-directories.txt", "directory-list-2.3-small.txt"],
   rockyou: ["rockyou.txt", "rockyou.txt.gz"],
   passwords: ["rockyou.txt", "rockyou.txt.gz"],
   password: ["rockyou.txt", "rockyou.txt.gz"],
@@ -358,10 +361,58 @@ async function searchSudo(patterns: string[]): Promise<string[]> {
 
 // --- Result builder ---
 
-function found(hits: string[], source: string): ToolResult {
-  const uniq = dedupe(hits).slice(0, MAX_HITS);
+function safeFileSize(path: string): number {
+  try {
+    return statSync(path).size;
+  } catch {
+    return Number.MAX_SAFE_INTEGER;
+  }
+}
+
+function rankHits(hits: string[], query: string): string[] {
+  const lowerQuery = query.toLowerCase();
+  const shortIntent = /\b(?:short|small|quick|common)\b/.test(lowerQuery);
+  const webContentIntent =
+    shortIntent ||
+    /\b(?:dir(?:ectory|ectories)?|content|path|endpoint|web)\b/.test(lowerQuery);
+  const credentialIntent = /\b(?:password|credential|username|user)\b/.test(lowerQuery);
+  const mediumIntent = /\bmedium\b/.test(lowerQuery);
+  const candidates = dedupe(hits).filter(
+    (path) =>
+      !webContentIntent ||
+      credentialIntent ||
+      !/password|username|credential/i.test(path),
+  );
+  const score = (path: string): number => {
+    const lower = path.toLowerCase();
+    let value = 0;
+    if (webContentIntent) {
+      if (/discovery[/\\]web-content|dirb|dirbuster|raft-.*director|directory-list|quickhits|common\.txt/.test(lower)) value += 100;
+      if (/password|username|credential/.test(lower)) value -= 500;
+    }
+    if (shortIntent && /quickhits|common\.txt|raft-small|directory-list-2\.3-small/.test(lower)) value += 200;
+    if (mediumIntent && /medium/.test(lower)) value += 300;
+    return value;
+  };
+  return candidates.sort((left, right) => {
+    const scoreDelta = score(right) - score(left);
+    if (scoreDelta !== 0) return scoreDelta;
+    if (shortIntent) return safeFileSize(left) - safeFileSize(right);
+    return left.localeCompare(right);
+  });
+}
+
+function found(hits: string[], source: string, query: string): ToolResult {
+  const uniq = rankHits(hits, query).slice(0, MAX_HITS);
   const label = `${source} (${uniq.length} match${uniq.length === 1 ? "" : "es"})`;
-  return { ok: true, output: `${label}:\n${uniq.join("\n")}`, exitCode: 0 };
+  const recommendation = uniq[0]
+    ? `Recommended first match for this intent: ${uniq[0]} (${safeFileSize(uniq[0]).toLocaleString()} bytes)`
+    : "";
+  return {
+    ok: true,
+    output: `${label}:\n${recommendation}\n${uniq.join("\n")}`,
+    exitCode: 0,
+  };
 }
 
 // --- Main ---
@@ -389,8 +440,8 @@ export async function wordlistFind(args: WordlistFindArgs): Promise<ToolResult> 
 
   // Pass 1: well-known install locations (shallow, fast, broad matching ok).
   for (const root of roots) {
-    const hits = await searchRoot(root, rootPatterns, 6);
-    if (hits.length > 0) return found(hits, "Found in a known wordlist location");
+    const hits = rankHits(await searchRoot(root, rootPatterns, 6), query);
+    if (hits.length > 0) return found(hits, "Found in a known wordlist location", query);
   }
 
   if (args.expand === false) {
@@ -418,21 +469,21 @@ export async function wordlistFind(args: WordlistFindArgs): Promise<ToolResult> 
   ].filter((r) => !roots.includes(r));
 
   for (const root of broaderRoots) {
-    const hits = await searchRoot(root, precisePatterns, 5);
-    if (hits.length > 0) return found(hits, "Found in user directory");
+    const hits = rankHits(await searchRoot(root, precisePatterns, 5), query);
+    if (hits.length > 0) return found(hits, "Found in user directory", query);
   }
 
   // Pass 3: locate database (fast indexed search, POSIX only).
-  const locateHits = await searchLocate(plan);
-  if (locateHits.length > 0) return found(locateHits, "Found via locate database");
+  const locateHits = rankHits(await searchLocate(plan), query);
+  if (locateHits.length > 0) return found(locateHits, "Found via locate database", query);
 
   // Pass 4: full filesystem search (find / or all Windows drives).
-  const fsHits = await searchFullFilesystem(precisePatterns);
-  if (fsHits.length > 0) return found(fsHits, "Found via full filesystem search");
+  const fsHits = rankHits(await searchFullFilesystem(precisePatterns), query);
+  if (fsHits.length > 0) return found(fsHits, "Found via full filesystem search", query);
 
   // Pass 5: cached-credential sudo search (POSIX only, never prompts).
-  const sudoHits = await searchSudo(precisePatterns);
-  if (sudoHits.length > 0) return found(sudoHits, "Found via elevated filesystem search");
+  const sudoHits = rankHits(await searchSudo(precisePatterns), query);
+  if (sudoHits.length > 0) return found(sudoHits, "Found via elevated filesystem search", query);
 
   return {
     ok: false,

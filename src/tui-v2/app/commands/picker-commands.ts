@@ -459,6 +459,9 @@ export async function handleHistory(services: AppServices): Promise<void> {
         sessionId: session.id,
         title: session.name,
         persistenceRevision: session.revision,
+        ...(session.previousTurn
+          ? { previousTurn: session.previousTurn }
+          : {}),
         ...(session.contextUsage
           ? { contextUsage: session.contextUsage }
           : {}),

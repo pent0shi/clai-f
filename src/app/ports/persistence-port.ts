@@ -1,6 +1,7 @@
 import type { ChatMessage } from "../../types.js";
 import type { SessionPlan } from "../../store/plan.js";
 import type { PersistedContextUsage } from "../../store/history.js";
+import type { PreviousTurnSignal } from "../../agent/continue-orient.js";
 import type { TranscriptItem } from "../../tui/state.js";
 
 export interface SaveSessionOptions {
@@ -19,6 +20,8 @@ export interface SaveSessionOptions {
   readonly transcript?: readonly TranscriptItem[] | undefined;
   /** Token/context footer snapshot so /history resume matches the live count. */
   readonly contextUsage?: PersistedContextUsage | undefined;
+  /** Restart checkpoint. Null clears a previously persisted unfinished turn. */
+  readonly previousTurn?: PreviousTurnSignal | null | undefined;
 }
 
 

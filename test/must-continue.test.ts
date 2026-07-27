@@ -11,7 +11,7 @@ import {
 } from "../src/agent/must-continue.js";
 import { shouldYieldForDeclaredResponderDependency } from "../src/agent/runner.js";
 import { appendPlanTask, createPlan } from "../src/store/plan.js";
-import { scopeContextMessage } from "../src/agent/scope-context.js";
+import { outOfScopeToolMessage, scopeContextMessage } from "../src/agent/scope-context.js";
 import { isReadOnlyReconTool } from "../src/agent/task-evidence.js";
 
 describe("recovery budgets", () => {
@@ -90,6 +90,20 @@ describe("scope context", () => {
     expect(msg).toMatch(/ENGAGEMENT SCOPE/);
     expect(msg).toContain("app.example.com");
     expect(msg).toContain("blog.example.com");
+    expect(msg).toContain("do not stop");
+  });
+
+  it("returns a model-facing refusal that continues in-scope work", () => {
+    const message = outOfScopeToolMessage({
+      target: "other.example.com",
+      reason: "target is not authorized",
+      allowed: ["app.example.com"],
+    });
+    expect(message).toContain("OUT_OF_SCOPE");
+    expect(message).toContain("tool call was not run");
+    expect(message).toContain("app.example.com");
+    expect(message).toContain("Continue the task");
+    expect(message).toContain("do not end the agent");
   });
 
   it("returns undefined when inactive", () => {

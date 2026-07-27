@@ -48,13 +48,6 @@ vi.mock("../src/tools/definitions.js", async (importActual) => {
   };
 });
 
-function streamReply(text: string) {
-  return (_req: unknown, onToken: (token: string) => void) => {
-    onToken(text);
-    return Promise.resolve({ text, provider: "nvidia", model: "test-model" });
-  };
-}
-
 describe("auto-compaction native tool schemas", () => {
   beforeEach(async () => {
     stream.mockReset();
@@ -84,13 +77,24 @@ describe("auto-compaction native tool schemas", () => {
     expect(messageOnlyTokens).toBeLessThan(trigger);
     expect(requestTokens).toBeGreaterThan(trigger);
 
-    stream.mockImplementation(streamReply("All set."));
-    complete.mockResolvedValue({
-      text:
-        "The session has prior work. Preserve the decisions and continue from the latest request.",
-      provider: "nvidia",
-      model: "test-model",
-    });
+    stream.mockImplementation(
+      (
+        req: { messages?: Array<{ content: string }> },
+        onToken: (token: string) => void,
+      ) => {
+        const text = req.messages?.[0]?.content
+          .toLowerCase()
+          .includes("continuation memory")
+          ? "The session has prior work. Preserve the decisions and continue from the latest request."
+          : "All set.";
+        onToken(text);
+        return Promise.resolve({
+          text,
+          provider: "nvidia",
+          model: "test-model",
+        });
+      },
+    );
 
     const events: AgentEvent[] = [];
     await runAgent("continue", {
@@ -106,7 +110,7 @@ describe("auto-compaction native tool schemas", () => {
     });
 
     const compactedIndex = events.findIndex(
-      (event) => event.type === "compacted",
+      (event) => event.type === "compaction-completed",
     );
     const firstStreamStatusIndex = events.findIndex(
       (event) => event.type === "status" && event.text === "waiting for model",
@@ -116,7 +120,7 @@ describe("auto-compaction native tool schemas", () => {
     expect(stream).toHaveBeenCalled();
 
     const compacted = events[compactedIndex];
-    if (compacted?.type === "compacted") {
+    if (compacted?.type === "compaction-completed") {
       expect(compacted.beforeTokens).toBeGreaterThan(trigger);
       expect(compacted.afterTokens).toBeLessThan(compacted.beforeTokens);
     }

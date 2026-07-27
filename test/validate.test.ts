@@ -3,6 +3,7 @@ import {
   parseHost,
   parsePortSpec,
   parseLegacyFlags,
+  normalizeScanProfile,
   profileToNmapArgs,
   nmapScanNeedsPrivilege,
   toConnectScanArgv,
@@ -115,6 +116,34 @@ describe("phase 4 — profileToNmapArgs", () => {
     );
   });
 
+  it("normalizes safe legacy script shapes without a scripts.filter crash", () => {
+    expect(normalizeScanProfile({ scripts: "default,safe" })).toMatchObject({
+      scripts: ["default", "safe"],
+    });
+    expect(profileToNmapArgs({ scripts: true } as any)).toEqual([
+      "-sS",
+      "--script",
+      "default",
+    ]);
+    expect(profileToNmapArgs({ scripts: "default,safe" } as any)).toEqual([
+      "-sS",
+      "--script",
+      "default,safe",
+    ]);
+  });
+
+  it("rejects malformed profile fields with actionable errors", () => {
+    expect(() => normalizeScanProfile({ scripts: { name: "default" } })).toThrow(
+      /profile\.scripts.*array/i,
+    );
+    expect(() => normalizeScanProfile({ serviceDetect: "yes" })).toThrow(
+      /profile\.serviceDetect.*boolean/i,
+    );
+    expect(() => normalizeScanProfile({ unknownFlag: true })).toThrow(
+      /Invalid profile field.*unknownFlag/i,
+    );
+  });
+
   it("rejects invalid timing template", () => {
     expect(() => profileToNmapArgs({ timing: "T9" as any })).toThrow();
   });
@@ -124,11 +153,11 @@ describe("phase 4 — profileToNmapArgs", () => {
   });
 
   it("rejects invalid topPorts", () => {
-    // topPorts <= 0 is silently ignored (treated as "not specified"), not an error
-    expect(profileToNmapArgs({ topPorts: 0 })).toEqual(["-sS"]);
-    expect(profileToNmapArgs({ topPorts: -1 })).toEqual(["-sS"]);
-    // Out-of-range positive values still throw
-    expect(() => profileToNmapArgs({ topPorts: 100000 })).toThrow();
+    for (const value of [0, -1, 65_536, 1.5]) {
+      expect(() => profileToNmapArgs({ topPorts: value })).toThrow(
+        /profile\.topPorts|Invalid topPorts/i,
+      );
+    }
   });
 });
 

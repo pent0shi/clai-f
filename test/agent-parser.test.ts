@@ -648,11 +648,11 @@ describe("bare-JSON tool-call recovery", () => {
     expect(recognizeBareToolJson(text)).toBeUndefined();
   });
 
-  it("infers task.read from an exact notification id", () => {
+  it("infers job.read from an exact notification id", () => {
     const result = recognizeBareToolJson(
       '{"notificationId":"completion:responder-1"}',
     );
-    expect(result?.call?.name).toBe("task.read");
+    expect(result?.call?.name).toBe("job.read");
     expect(result?.call?.args).toEqual({
       notificationId: "completion:responder-1",
     });

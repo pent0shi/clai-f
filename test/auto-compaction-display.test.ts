@@ -32,13 +32,6 @@ vi.mock("../src/commands/providers.js", async (importActual) => {
   return { ...actual, ensureProviderConfigured: async () => {} };
 });
 
-function streamReply(text: string) {
-  return (_req: unknown, onToken: (t: string) => void) => {
-    onToken(text);
-    return Promise.resolve({ text, provider: "nvidia", model: "test-model" });
-  };
-}
-
 const SUMMARY_KEYWORD = "PostgreSQL";
 const SUMMARY_TEXT = `User asked to set up a ${SUMMARY_KEYWORD} cluster with replication. Decisions: use ${SUMMARY_KEYWORD} 15, streaming replication. Work completed: installed binaries, initialized data dir. Remaining work: configure replication slots and failover.`;
 
@@ -70,17 +63,31 @@ describe("auto-compaction display (Chunk 3)", () => {
         });
       }
 
-      // The agent loop will stream one assistant reply (no tool call) and end
-      // the turn. completeWithProvider returns the compaction summary.
       stream.mockImplementation(
-        streamReply("All set; nothing else to do."),
-      );
-      complete.mockImplementation(
-        async () => ({
-          text: SUMMARY_TEXT,
-          provider: "nvidia",
-          model: "test-model",
-        }),
+        (
+          req: { messages?: Array<{ role: string; content: string }> },
+          onToken: (t: string) => void,
+        ) => {
+          const isCompaction = req.messages?.[0]?.content
+            .toLowerCase()
+            .includes("continuation memory");
+          const rawText = isCompaction
+            ? `<think>private chain of thought</think>${SUMMARY_TEXT}`
+            : "All set; nothing else to do.";
+          if (isCompaction) {
+            onToken("<thi");
+            onToken("nk>private chain of thought</think>");
+            onToken(SUMMARY_TEXT.slice(0, 60));
+            onToken(SUMMARY_TEXT.slice(60));
+          } else {
+            onToken(rawText);
+          }
+          return Promise.resolve({
+            text: rawText,
+            provider: "nvidia",
+            model: "test-model",
+          });
+        },
       );
 
       const events: AgentEvent[] = [];
@@ -96,20 +103,35 @@ describe("auto-compaction display (Chunk 3)", () => {
         onEvent: (e) => events.push(e),
       });
 
-      const compacted = events.find((e) => e.type === "compacted");
+      const started = events.find((e) => e.type === "compaction-start");
+      const deltas = events.filter((e) => e.type === "compaction-delta");
+      const compacted = events.find((e) => e.type === "compaction-completed");
+      expect(started, "expected compaction lifecycle to start").toBeDefined();
+      expect(deltas.length).toBeGreaterThan(0);
+      const streamedSummary = deltas
+        .map((event) =>
+          event.type === "compaction-delta" ? event.text : "",
+        )
+        .join("");
+      expect(streamedSummary).toBe(SUMMARY_TEXT);
+      expect(streamedSummary).not.toMatch(/<\/?think|private chain/i);
       expect(
         compacted,
-        "expected a compacted event to be emitted during auto-compaction",
+        "expected the streaming compaction to complete",
       ).toBeDefined();
 
-      if (compacted && compacted.type === "compacted") {
+      if (
+        started?.type === "compaction-start" &&
+        compacted?.type === "compaction-completed"
+      ) {
+        expect(compacted.id).toBe(started.id);
+        expect(deltas.every((event) => event.type !== "compaction-delta" || event.id === started.id)).toBe(true);
         expect(compacted.summary).toContain(SUMMARY_KEYWORD);
         expect(compacted.summary).toMatch(/cluster with replication/i);
         expect(typeof compacted.beforeTokens).toBe("number");
         expect(typeof compacted.afterTokens).toBe("number");
         expect(compacted.beforeTokens).toBeGreaterThan(0);
         expect(compacted.afterTokens).toBeGreaterThan(0);
-        // Token stats must be surfaced (compaction should shrink context).
         expect(compacted.afterTokens).toBeLessThanOrEqual(compacted.beforeTokens);
       }
 
@@ -121,6 +143,83 @@ describe("auto-compaction display (Chunk 3)", () => {
           expect(ev.text).not.toContain(SUMMARY_KEYWORD);
         }
       }
+    },
+    30_000,
+  );
+
+  it(
+    "retries a reasoning-only auto-compaction summary without streaming hidden reasoning",
+    async () => {
+      const history: ChatMessage[] = [
+        { role: "system", content: "system prompt" },
+      ];
+      for (let i = 0; i < 60; i += 1) {
+        const role: ChatMessage["role"] = i % 2 === 0 ? "user" : "assistant";
+        history.push({
+          role,
+          content: `${role}-${i} ${"x".repeat(12_000)}`,
+        });
+      }
+
+      stream.mockImplementation(
+        (
+          req: { messages?: Array<{ role: string; content: string }> },
+          onToken: (token: string) => void,
+        ) => {
+          const system = req.messages?.[0]?.content ?? "";
+          const user = req.messages?.[1]?.content ?? "";
+          const isCompaction = system.toLowerCase().includes("continuation memory");
+          const isFinalSummary = /\nREGION 1:\n/.test(user);
+          const rawText = isCompaction
+            ? isFinalSummary
+              ? "<think>the final allowance contained only reasoning</think>"
+              : SUMMARY_TEXT
+            : "All set; nothing else to do.";
+          onToken(rawText);
+          return Promise.resolve({
+            text: rawText,
+            provider: "nvidia",
+            model: "thinking-model",
+          });
+        },
+      );
+      complete.mockResolvedValue({
+        text: SUMMARY_TEXT,
+        provider: "nvidia",
+        model: "thinking-model",
+      });
+
+      const events: AgentEvent[] = [];
+      await runAgent("continue with the next step", {
+        session: {
+          sessionId: "session-compaction",
+          planApproved: { value: false },
+          allow: new Set(),
+          pentestAuthorized: { value: false },
+        } as any,
+        history,
+        maxSteps: 1,
+        onEvent: (event) => events.push(event),
+      });
+
+      expect(complete).toHaveBeenCalledTimes(1);
+      expect(complete.mock.calls[0]?.[0]).toMatchObject({
+        maxTokens: 8_192,
+        temperature: 0,
+        thinking: { enabled: false, effort: "none" },
+      });
+      const streamed = events
+        .filter((event) => event.type === "compaction-delta")
+        .map((event) => (event.type === "compaction-delta" ? event.text : ""))
+        .join("");
+      expect(streamed).toBe(SUMMARY_TEXT);
+      expect(streamed).not.toMatch(/final allowance|<\/?think/i);
+      expect(
+        events.some((event) => event.type === "compaction-completed"),
+      ).toBe(true);
+      expect(events.some((event) => event.type === "compaction-failed")).toBe(
+        false,
+      );
     },
     30_000,
   );

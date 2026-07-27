@@ -46,8 +46,13 @@ const FS_RE =
  */
 export function isNarrowExplicitNmapOperation(prompt: string): boolean {
   const text = prompt.replace(/\s+/g, " ").trim();
-  if (!/\bnmap\b/i.test(text)) return false;
+  const hasNmap = /\bnmap\b/i.test(text);
+  const openPortIntent =
+    /\b(?:find|check|scan|identify|show|list|discover)\b[\s\S]{0,32}\bopen\s+ports?\b/i.test(text) ||
+    /\b(?:which|what)\s+ports?\s+(?:are\s+)?open\b/i.test(text);
+  if (!hasNmap && !openPortIntent) return false;
   const explicitRun =
+    openPortIntent ||
     /^(?:sudo\s+)?nmap(?:\s|$)/i.test(text) ||
     /\b(?:run|execute|start|perform)\b[\s\S]{0,40}\bnmap\b/i.test(text) ||
     /\bnmap\b[\s\S]{0,20}\bscan\b/i.test(text) ||
@@ -275,7 +280,7 @@ export function analyzeTask(prompt: string): TaskAnalysis {
       needsToolPreflight: true,
       likelyTools: ["net.scan"],
       stopWhen:
-        "The requested nmap operation has started or completed and its canonical job ID, status, and output are reported; do not broaden scope.",
+        "The requested port scan has started or completed and its canonical job ID, status, and output are reported; do not broaden scope.",
       suggestedSteps: [],
     };
   }

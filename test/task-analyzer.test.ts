@@ -23,6 +23,14 @@ describe("task-analyzer", () => {
     expect(
       isNarrowExplicitNmapOperation("nmap --top-ports 100 example.com"),
     ).toBe(true);
+    expect(
+      isNarrowExplicitNmapOperation("find open ports on aniketpandey.website"),
+    ).toBe(true);
+    expect(analyzeTask("check which ports are open on example.com")).toMatchObject({
+      shouldPlan: false,
+      likelyTools: ["net.scan"],
+      suggestedSteps: [],
+    });
     const analysis = analyzeTask(prompt);
     expect(analysis.shouldPlan).toBe(false);
     expect(analysis.complexity).toBe("standard");

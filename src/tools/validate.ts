@@ -108,6 +108,93 @@ export interface ScanProfile {
   udp?: boolean | undefined;
 }
 
+const SCAN_PROFILE_KEYS = new Set([
+  "scanType",
+  "topPorts",
+  "serviceDetect",
+  "scripts",
+  "timing",
+  "udp",
+]);
+
+/** Normalize provider/model JSON into the exact safe scan-profile contract. */
+export function normalizeScanProfile(raw: unknown): ScanProfile | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  if (typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error("Invalid profile: expected an object");
+  }
+  const input = raw as Record<string, unknown>;
+  const unknown = Object.keys(input).filter((key) => !SCAN_PROFILE_KEYS.has(key));
+  if (unknown.length > 0) {
+    throw new Error(`Invalid profile field${unknown.length === 1 ? "" : "s"}: ${unknown.join(", ")}`);
+  }
+  const profile: ScanProfile = {};
+
+  if (input.scanType !== undefined) {
+    if (typeof input.scanType !== "string") {
+      throw new Error("Invalid profile.scanType: expected syn, tcp, udp, or ping");
+    }
+    const scanType = input.scanType.toLowerCase();
+    if (scanType !== "syn" && scanType !== "tcp" && scanType !== "udp" && scanType !== "ping") {
+      throw new Error(`Invalid profile.scanType: ${input.scanType}`);
+    }
+    profile.scanType = scanType;
+  }
+  if (input.topPorts !== undefined) {
+    const topPorts =
+      typeof input.topPorts === "string" && /^\d+$/.test(input.topPorts.trim())
+        ? Number(input.topPorts)
+        : input.topPorts;
+    if (
+      typeof topPorts !== "number" ||
+      !Number.isInteger(topPorts) ||
+      topPorts < 1 ||
+      topPorts > 65535
+    ) {
+      throw new Error("Invalid profile.topPorts: expected an integer from 1 to 65535");
+    }
+    profile.topPorts = topPorts;
+  }
+  for (const key of ["serviceDetect", "udp"] as const) {
+    const value = input[key];
+    if (value === undefined) continue;
+    if (typeof value !== "boolean") {
+      throw new Error(`Invalid profile.${key}: expected a boolean`);
+    }
+    profile[key] = value;
+  }
+  if (input.timing !== undefined) {
+    if (typeof input.timing !== "string") {
+      throw new Error("Invalid profile.timing: expected T0 through T5");
+    }
+    const timing = input.timing.toUpperCase();
+    if (!/^T[0-5]$/.test(timing)) {
+      throw new Error(`Invalid profile.timing: ${input.timing}`);
+    }
+    profile.timing = timing as TimingTemplate;
+  }
+  if (input.scripts !== undefined) {
+    const scripts = Array.isArray(input.scripts)
+      ? input.scripts
+      : typeof input.scripts === "string"
+        ? input.scripts.split(",")
+        : input.scripts === true
+          ? ["default"]
+          : input.scripts === false
+            ? []
+            : undefined;
+    if (!scripts || scripts.some((script) => typeof script !== "string")) {
+      throw new Error(
+        "Invalid profile.scripts: expected an array of safe script names",
+      );
+    }
+    profile.scripts = scripts
+      .map((script) => script.trim())
+      .filter((script) => script.length > 0);
+  }
+  return profile;
+}
+
 const SAFE_SCRIPT_RE = /^[a-z0-9_-]+(?:,[a-z0-9_-]+)*$/i;
 
 /**
@@ -221,7 +308,8 @@ export function looksLikeNmapNoHostsUp(output: string): boolean {
 }
 
 /** Convert a structured scan profile into safe argv for nmap. */
-export function profileToNmapArgs(profile: ScanProfile = {}): string[] {
+export function profileToNmapArgs(rawProfile: ScanProfile = {}): string[] {
+  const profile = normalizeScanProfile(rawProfile) ?? {};
   const args: string[] = [];
   // Default to a STEALTH SYN scan (-sS): it is quieter than a full TCP
   // connect, completes faster, and is the professional default. It needs

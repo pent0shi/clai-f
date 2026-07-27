@@ -235,6 +235,12 @@ export function compactMessages(
   return [...head, memo, ...preservedLedger, ...tail];
 }
 
+export interface CompactionSummaryStage {
+  readonly phase: "single" | "map" | "reduce";
+  readonly index?: number | undefined;
+  readonly total?: number | undefined;
+}
+
 /**
  * Compact older turns into a model-written memory while retaining recent
  * messages verbatim. The model summary is the ONLY compaction path: if the
@@ -245,7 +251,10 @@ export function compactMessages(
  */
 export async function compactMessagesWithSummary(
   messages: ChatMessage[],
-  summarize: (prompt: string) => Promise<string>,
+  summarize: (
+    prompt: string,
+    stage?: CompactionSummaryStage,
+  ) => Promise<string>,
   options: CompactOptions = {},
   sessionTranscript?: string | undefined,
 ): Promise<CompactResult> {
@@ -369,6 +378,7 @@ export async function compactMessagesWithSummary(
         durableState: durableState || undefined,
         purpose: options.purpose,
       }),
+      { phase: "single" },
     );
   } else {
     const partials: string[] = [];
@@ -380,6 +390,7 @@ export async function compactMessagesWithSummary(
           total: chunks.length,
           purpose: options.purpose,
         }),
+        { phase: "map", index, total: chunks.length },
       );
       const cleaned = stripThinking(partial ?? "").visible.trim();
       if (cleaned) partials.push(cleaned);
@@ -395,6 +406,7 @@ export async function compactMessagesWithSummary(
         ...(durableState ? { durableState } : {}),
         ...(options.purpose ? { purpose: options.purpose } : {}),
       }),
+      { phase: "reduce", total: chunks.length },
     );
   }
 

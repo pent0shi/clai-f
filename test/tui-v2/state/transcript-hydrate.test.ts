@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import type { TranscriptItem as ClassicItem } from "../../../src/tui/state.js";
+import {
+  serializeTranscriptForCompaction,
+  type TranscriptItem as ClassicItem,
+} from "../../../src/tui/state.js";
 import {
   boundSessionVisualInput,
   displayCompactSummary,
@@ -430,6 +433,40 @@ describe("serializeForHistory", () => {
     expect(classic[0]).toMatchObject({ kind: "user", text: "hi" });
     const again = hydrateFromClassicTranscript(classic);
     expect(again.state.order).toHaveLength(2);
+  });
+
+  it("preserves failed compaction status across save and reload", () => {
+    const classic: ClassicItem[] = [
+      { kind: "user", id: "u1", text: "original context", done: true },
+      {
+        kind: "compacted",
+        id: "c-failed",
+        summary: "discarded candidate",
+        originalItems: [],
+        done: true,
+        error: "summary rejected",
+        beforeTokens: 24_240,
+        afterTokens: 24_240,
+      },
+    ];
+    const hydrated = hydrateFromClassicTranscript(classic);
+    expect(hydrated.state.byId.get("c-failed")).toMatchObject({
+      kind: "compacted",
+      error: "summary rejected",
+      beforeTokens: 24_240,
+      afterTokens: 24_240,
+    });
+
+    const savedAgain = serializeForHistory(hydrated.state, () => "");
+    expect(savedAgain[1]).toMatchObject({
+      kind: "compacted",
+      error: "summary rejected",
+      beforeTokens: 24_240,
+      afterTokens: 24_240,
+    });
+    const compactionSource = serializeTranscriptForCompaction(savedAgain);
+    expect(compactionSource).toContain("original context");
+    expect(compactionSource).not.toContain("discarded candidate");
   });
 
   it("never persists UI notices (session resumed / Ctrl+C hints)", () => {

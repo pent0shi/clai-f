@@ -136,7 +136,9 @@ export function TranscriptView(props: TranscriptViewProps): ReactNode {
           parts.push(`n:${item.id}:${item.text.length}`);
           break;
         case "compacted":
-          parts.push(`c:${item.id}`);
+          parts.push(
+            `c:${item.id}:${item.summary.length}:${item.streaming ? 1 : 0}:${item.error?.length ?? 0}`,
+          );
           break;
         default:
           parts.push(id);

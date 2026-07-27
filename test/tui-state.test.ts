@@ -259,6 +259,27 @@ describe("TUI compaction transcript", () => {
     expect(source).toContain("COMPACTED CONTEXT:\nPreviously did task X");
   });
 
+  it("does not treat a failed compacted candidate as source memory", () => {
+    const source = serializeTranscriptForCompaction([
+      { kind: "user", id: "u", text: "original context", done: true },
+      {
+        kind: "compacted",
+        id: "c-failed",
+        summary: "discarded candidate",
+        originalItems: [],
+        done: true,
+        error: "summary rejected",
+        beforeTokens: 24_240,
+        afterTokens: 24_240,
+      },
+      { kind: "user", id: "u2", text: "recent context", done: true },
+    ]);
+    expect(source).toContain("original context");
+    expect(source).toContain("recent context");
+    expect(source).not.toContain("discarded candidate");
+    expect(source).not.toContain("summary rejected");
+  });
+
   it("omits UI notices from compaction source material", () => {
     const source = serializeTranscriptForCompaction([
       { kind: "user", id: "u", text: "hello", done: true },
@@ -277,6 +298,28 @@ describe("TUI compaction transcript", () => {
 });
 
 describe("TUI compaction reducer", () => {
+  it("creates a settled failure card even when the start event was missed", () => {
+    const state = apply(initialState(), [
+      {
+        type: "compaction-failed",
+        id: "missing-start",
+        message: "summary rejected",
+        retainedTokens: 24_240,
+      },
+    ]);
+    expect(state.items).toHaveLength(1);
+    expect(state.items[0]).toMatchObject({
+      kind: "compacted",
+      id: "compacted-missing-start",
+      summary: "",
+      error: "summary rejected",
+      beforeTokens: 24_240,
+      afterTokens: 24_240,
+      done: true,
+      streaming: false,
+    });
+  });
+
   it("appends a compacted block to visual items", () => {
     let state = initialState();
     state.items = [

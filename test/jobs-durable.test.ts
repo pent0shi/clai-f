@@ -133,6 +133,54 @@ describe("durable background jobs", () => {
     expect(tail.backgroundJob).toMatchObject({ status: "failed", exitCode: 7 });
   });
 
+  it("gives Responder launches one no-poll policy and structural ownership", async () => {
+    const { manager } = await fixture();
+    const command = `${JSON.stringify(process.execPath)} -e ${JSON.stringify(
+      "setTimeout(() => process.exit(0), 150)",
+    )}`;
+    const started = await manager.startJob(command, {
+      ownerSessionId: "responder-receipt",
+      responder: true,
+      wakeOnCompletion: true,
+    });
+
+    expect(started.ok).toBe(true);
+    expect(started.backgroundJob?.responder).toBe(true);
+    expect(started.output).toMatch(/Responder owns completion tracking/i);
+    expect(started.output).toMatch(/Do not poll/i);
+    expect(started.output).not.toMatch(/use shell\.tail|shell\.jobs for status|readiness probe/i);
+
+    const id = started.backgroundJob?.id;
+    expect(id).toBeTruthy();
+    await waitForStatus(manager, id!, ["exited", "failed"]);
+  });
+
+  it("keeps Responder no-poll ownership on deduplicated launches", async () => {
+    const { manager } = await fixture();
+    const command = `${JSON.stringify(process.execPath)} -e ${JSON.stringify(
+      "setTimeout(() => process.exit(0), 250)",
+    )}`;
+    const options = {
+      ownerSessionId: "responder-dedup",
+      delegationId: "delegation-dedup",
+      responder: true,
+      wakeOnCompletion: true,
+    } as const;
+    const first = await manager.startJob(command, options);
+    const duplicate = await manager.startJob(command, options);
+
+    expect(duplicate.backgroundJob?.id).toBe(first.backgroundJob?.id);
+    expect(duplicate.backgroundJob?.responder).toBe(true);
+    expect(duplicate.output).toMatch(/duplicate launch was not started/i);
+    expect(duplicate.output).toMatch(/Responder owns completion tracking/i);
+    expect(duplicate.output).toMatch(/Do not poll/i);
+    expect(duplicate.output).not.toMatch(/poll this id instead|use shell\.tail/i);
+
+    const id = first.backgroundJob?.id;
+    expect(id).toBeTruthy();
+    await waitForStatus(manager, id!, ["exited", "failed"]);
+  });
+
   it("labels launch success separately from later application failure", async () => {
     const { manager } = await fixture();
     const command = `${JSON.stringify(process.execPath)} -e ${JSON.stringify("setTimeout(() => process.exit(7), 80)")}`;
@@ -265,6 +313,58 @@ describe("durable job safety edges", () => {
       status: "failed",
       exitCode: 127,
     });
+  });
+
+  it("preserves Responder ownership on OS spawn failure", async () => {
+    const { dir, manager } = await fixture();
+    const missingExecutable = join(dir, "missing-responder-command");
+    const result = await manager.startJob(
+      {
+        command: missingExecutable,
+        argv: [],
+        display: "missing-responder-fixture",
+      },
+      {
+        ownerSessionId: "responder-spawn-failure",
+        responder: true,
+        wakeOnCompletion: true,
+      },
+    );
+
+    expect(result).toMatchObject({ ok: false, exitCode: 127 });
+    expect(result.backgroundJob).toMatchObject({
+      status: "failed",
+      responder: true,
+    });
+    expect(result.output).toMatch(/Responder owns this terminal launch failure/i);
+    expect(result.output).toMatch(/do not poll or retry/i);
+    expect(result.output).not.toMatch(/use shell\.tail|shell\.jobs for status/i);
+  });
+
+  it("preserves Responder ownership when spawn throws before launch confirmation", async () => {
+    const { manager } = await fixture();
+    const result = await manager.startJob(
+      {
+        command: "invalid\0command",
+        argv: [],
+        display: "invalid-command-fixture",
+      },
+      {
+        ownerSessionId: "responder-thrown-spawn",
+        responder: true,
+        wakeOnCompletion: true,
+      },
+    );
+
+    expect(result).toMatchObject({ ok: false, exitCode: 127 });
+    expect(result.backgroundJob).toMatchObject({
+      status: "failed",
+      responder: true,
+    });
+    expect(result.output).toMatch(/Background command launch error \[UNKNOWN\]/i);
+    expect(result.output).toMatch(/Responder owns completion tracking/i);
+    expect(result.output).toMatch(/Do not poll/i);
+    expect(result.output).not.toMatch(/use shell\.tail|shell\.jobs for status/i);
   });
 
   it("rejects an invalid cwd before creating a phantom background job", async () => {
@@ -671,7 +771,7 @@ describe("authoritative job completion", () => {
 
 
 describe("responder receipt delivery boundaries", () => {
-  it("claims without delivery and never reselects a delivered receipt", async () => {
+  it("holds a receipt within one turn and reselects it later until read", async () => {
     const { manager } = await fixture();
     const sessionId = "claim-boundary";
     const leaseId = manager.activateResponderLease(sessionId);
@@ -707,6 +807,10 @@ describe("responder receipt delivery boundaries", () => {
 
     expect(manager.markDelivered(first!.id)).toBe(true);
     expect(manager.claimNextResponderNotification(sessionId, leaseId)).toBeUndefined();
+    manager.releaseResponderNotificationClaim(first!.id);
+    expect(
+      manager.claimNextResponderNotification(sessionId, leaseId)?.id,
+    ).toBe(first?.id);
 
     const secondJobId = await start();
     const second = manager.claimNextResponderNotification(sessionId, leaseId);

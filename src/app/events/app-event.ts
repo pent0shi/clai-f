@@ -92,6 +92,27 @@ export interface AppEventPayloads {
       | "switch";
     readonly prompt: string;
   };
+  "compaction-started": {
+    readonly compactionId: string;
+    readonly beforeTokens: number;
+  };
+  "compaction-delta": {
+    readonly compactionId: string;
+    readonly text: string;
+  };
+  "compaction-completed": {
+    readonly compactionId: string;
+    readonly summary: string;
+    readonly beforeTokens: number;
+    readonly afterTokens: number;
+  };
+  "compaction-failed": {
+    readonly compactionId: string;
+    readonly message: string;
+    /** Original request context retained after the failed attempt. */
+    readonly retainedTokens?: number | undefined;
+  };
+  /** Legacy one-shot event for stored/session integrations. */
   compacted: {
     readonly summary: string;
     readonly beforeTokens: number;
@@ -121,6 +142,7 @@ export type AnyAppEvent = TypedAppEvent;
 const DELTA_TYPES: ReadonlySet<AppEventType> = new Set<AppEventType>([
   "assistant-delta",
   "thinking-delta",
+  "compaction-delta",
 ]);
 
 export function isDeltaEvent(type: AppEventType): boolean {

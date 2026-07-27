@@ -21,7 +21,18 @@ export function scopeContextMessage(
     lines.push(`note: ${scope.authorizationNote.trim()}`);
   }
   lines.push(
-    "Do not scan or attack hosts outside authorized targets. Flag out-of-scope discoveries; do not act on them without explicit expansion.",
+    "Do not scan or attack hosts outside authorized targets. If a tool is refused as OUT_OF_SCOPE, do not stop: explain the boundary briefly and continue with useful in-scope work without retrying the same call.",
   );
   return lines.join("\n");
+}
+
+export function outOfScopeToolMessage(input: {
+  target: string;
+  reason: string;
+  allowed?: readonly string[] | undefined;
+}): string {
+  const allowed = input.allowed?.length
+    ? ` Authorized targets: ${input.allowed.join(", ")}.`
+    : "";
+  return `OUT_OF_SCOPE: tool call was not run for ${input.target}: ${input.reason}.${allowed} Continue the task using only in-scope targets; do not retry this unchanged call and do not end the agent solely because it was refused.`;
 }

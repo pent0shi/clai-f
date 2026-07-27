@@ -39,7 +39,7 @@ export function responderContextMessage(input: {
     }
   }
   if (input.pending.length > 0) {
-    lines.push("Unread completions (durable until task.read and persisted analysis):");
+    lines.push("Unread completions (durable until job.read and persisted analysis):");
     for (const notification of input.pending.slice(0, 12)) {
       lines.push(
         `- notification=${notification.id} job=${notification.jobId} status=${notification.status}` +
@@ -57,8 +57,8 @@ export function responderContextMessage(input: {
     "FIRE AND CONTINUE: after launching, move to the next task immediately. Do NOT sleep, shell.jobs-poll, repeat shell.tail, or fs.read the job log to watch progress — this inbox delivers each completion to you automatically at the next safe model boundary.",
     "PARENT-DONE RULE: a parent task is done when its own non-Responder work is done; Responder-owned child subtasks advance from the real process lifecycle — never mark, block on, or wait for them.",
     "TASK SETTLEMENT: Responder-owned tasks reconcile automatically from the latest authoritative job result after analysis. Do not call task.update for that child.",
-    "MANDATORY READ RECEIPT: after you have seen and analyzed a delivered completion and are satisfied that responder subtask is finished, call task.read with its exact notification id. Do not call task.read before analysis is complete. You may not give a final response while a delivered notification remains unread.",
-    "ON COMPLETION (delivered here): extract ONLY the key result lines from the artifact with a filter — grep the matched status codes / hits / findings, or a bounded shell.tail byte-window — NEVER a full fs.read of a noisy scanner log. Analyze just those lines, task.add evidence-driven follow-ups, then call task.read when satisfied. Never launch a duplicate while a job is live.",
+    "MANDATORY READ RECEIPT: after analyzing a delivered completion and deciding its job is finished, call job.read with that job id or exact notification id. job.read is plan-independent, records delivered + read atomically, and is required before a final response. Do not create a plan merely to acknowledge a job.",
+    "ON COMPLETION: extract only the key result lines with a filter or bounded shell.tail window, never a full noisy scanner log. Add evidence-driven follow-up tasks only when an active plan exists and the result requires them; otherwise report the result directly after job.read. Never launch a duplicate while a job is live.",
     "PARENT OWNERSHIP: when you delegate to the Responder, pass parentTaskId with the plan task id that owns the work (e.g. parentTaskId:\"t3\"). The child subtask is created under exactly that task; an unknown, completed, or Responder-owned id is rejected.",
     "DECLARED WAITS ONLY: never idle because a Responder job is running. If a foreground task genuinely cannot start until a child finishes, declare that child as its dependency when you add it; otherwise keep executing the next dependency-ready task and fold late results in as an addendum.",
     "FRAME COMMANDS TO PRESERVE THE KEY FIELDS: choose flags/output so the completed result still carries exactly what you need and little else — e.g. ffuf with -json (or a matcher on real codes, not a blanket -mc all), nmap -oX/-oG, grep -o for just the hits. Never run a command that discards the required signal.",

@@ -288,11 +288,12 @@ function deliveryPrompt(
     notification.stdoutArtifact.path;
   const resume = foreground
     ? `After handling this result, resume exactly the interrupted foreground task ${foreground}. Do not repeat its completed work.`
-    : "After handling this result, continue the next foreground task normally.";
+    : "No active plan is required. After acknowledging the job, report its result directly; do not create or update a plan solely to consume this receipt.";
   return [
     "Responder result arrived while the model was idle.",
     `notification=${notification.id}`,
     `job=${notification.jobId}`,
+    `resultRevision=${notification.resultRevision ?? 1}`,
     `status=${notification.status}`,
     `durationMs=${Math.max(0, Date.parse(notification.endedAt) - Date.parse(notification.startedAt))}`,
     `stdoutBytes=${notification.stdoutArtifact.bytes}`,
@@ -300,8 +301,8 @@ function deliveryPrompt(
     `artifact=${artifact}`,
     "Preview (maximum 20 lines / 4 KiB):",
     preview,
-    "Review this compact result. If it reveals useful new surface, gather only the necessary evidence and append evidence-driven follow-up tasks when needed.",
-    `MANDATORY ACKNOWLEDGMENT: after you have seen and analyzed this result and are satisfied this responder subtask is finished, call task.read with notificationId=${notification.id}. Do not call task.read before analysis is complete. You may not give a final response while this notification remains unread.`,
+    "Review this compact result. Gather only bounded evidence still needed to understand it. Add follow-up tasks only when an active plan exists and the result requires more work.",
+    `MANDATORY ACKNOWLEDGMENT: after analyzing this result and deciding the job is finished, call job.read with jobId=${notification.jobId} or notificationId=${notification.id}. job.read requires no plan, atomically records delivery + read, and must happen before a final response.`,
     "Do not rerun the completed responder command, poll it, or update its responder-owned task; settlement follows the authoritative process result independently.",
     resume,
   ].join("\n");

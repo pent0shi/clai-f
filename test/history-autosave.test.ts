@@ -203,4 +203,37 @@ describe("history autosave upsert", () => {
     expect(restored?.transcript?.[0]?.kind).toBe("compacted");
     expect(restored?.contextUsage?.contextTokens).toBe(12_000);
   });
+
+  it("round-trips and clears the restart continuation checkpoint", async () => {
+    const { getSession, upsertSession } = await import("../src/store/history.js");
+    const messages = [{ role: "user" as const, content: "resume work" }];
+    const writer = "0000000000000003-restart";
+
+    await upsertSession(
+      "restart-session",
+      messages,
+      undefined,
+      undefined,
+      undefined,
+      1,
+      writer,
+      { status: "aborted", reason: "cancelled during tool execution" },
+    );
+    expect((await getSession("restart-session"))?.previousTurn).toEqual({
+      status: "aborted",
+      reason: "cancelled during tool execution",
+    });
+
+    await upsertSession(
+      "restart-session",
+      messages,
+      undefined,
+      undefined,
+      undefined,
+      2,
+      writer,
+      null,
+    );
+    expect((await getSession("restart-session"))?.previousTurn).toBeUndefined();
+  });
 });

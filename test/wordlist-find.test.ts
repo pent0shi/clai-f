@@ -78,6 +78,18 @@ describe("wordlist.find", () => {
     expect(result.output).toContain("rockyou.txt");
   }, 30_000);
 
+  it("keeps a short web-content query away from password and username lists", async () => {
+    seed("wordlists", "top-usernames-shortlist.txt", "admin\n");
+    seed(join("SecLists", "Discovery", "Web-Content"), "common.txt", "admin\nlogin\n");
+    seed(join("SecLists", "Discovery", "Web-Content"), "directory-list-2.3-small.txt", "x\n".repeat(1_000));
+
+    const result = await wordlistFind({ query: "short web content" });
+    expect(result.ok).toBe(true);
+    expect(result.output).toContain("Recommended first match");
+    expect(result.output).toContain("common.txt");
+    expect(result.output).not.toContain("top-usernames-shortlist.txt");
+  }, 30_000);
+
   it("fails cleanly (no throw, no noisy stderr) when nothing is found and expand=false", async () => {
     const result = await wordlistFind({
       query: "zzqxwordlistdoesnotexistxyzzy",

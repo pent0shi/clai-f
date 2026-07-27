@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { LoopGuard } from "../src/agent/loop-guard.js";
+import { completedOperationSignature } from "../src/agent/outcomes.js";
 
 describe("LoopGuard", () => {
   it("does not block the first call", () => {
@@ -23,16 +24,16 @@ describe("LoopGuard", () => {
     expect(thrice.reason).toBeUndefined();
   });
 
-  it("never nags successful fs.list / tool.check repeats", () => {
+  it("suppresses an unchanged successful read without affecting mutations", () => {
     const guard = new LoopGuard();
     const args = { path: "/tmp/blog" };
     guard.recordAttempt(0, "fs.list", args, true, 0, "a\nb\n");
-    for (let i = 0; i < 5; i++) {
-      const r = guard.shouldBlock("fs.list", args);
-      expect(r.block).toBe(false);
-      expect(r.reason).toBeUndefined();
-      guard.recordAttempt(i + 1, "fs.list", args, true, 0, "a\nb\n");
-    }
+
+    expect(guard.shouldBlock("fs.list", args)).toMatchObject({
+      block: true,
+      kind: "unchanged-success",
+    });
+    expect(guard.shouldBlock("fs.write", { path: "/tmp/blog/c", content: "c" }).block).toBe(false);
   });
 
   it("treats whitespace-normalized commands as equivalent for failure tracking", () => {
@@ -120,5 +121,47 @@ describe("LoopGuard", () => {
     );
     const retry = guard.shouldBlock("fs.list", listArgs);
     expect(retry.block).toBe(false);
+  });
+
+  it("blocks a failed read-only probe restored after interruption", () => {
+    const guard = new LoopGuard();
+    const args = {
+      command:
+        'curl -s -o /dev/null -w "%{http_code}" "https://images.picsum.photos/id/866/800/400" 2>&1',
+    };
+    const signature = completedOperationSignature("shell.exec", args);
+    expect(signature).toBeDefined();
+    guard.restoreCompletedOperations([
+      {
+        signature: signature!,
+        tool: "shell.exec",
+        summary: "failed curl probe",
+        observation: "000",
+        ok: false,
+        exitCode: 6,
+        observedAt: new Date().toISOString(),
+      },
+    ]);
+
+    expect(guard.shouldBlock("shell.exec", args)).toMatchObject({
+      block: true,
+      kind: "failed-retry",
+    });
+    expect(
+      guard.shouldBlock("shell.exec", args, {
+        retryReason: { code: "dns-fixed", detail: "resolver changed" },
+      }).block,
+    ).toBe(false);
+    expect(
+      guard.shouldBlock("shell.exec", args, {
+        retryReason: { code: "dns-fixed", detail: "resolver changed" },
+      }).block,
+    ).toBe(true);
+    expect(
+      guard.shouldBlock("shell.exec", {
+        command:
+          'curl -sS -L -o /dev/null -w "%{http_code}" "https://picsum.photos/id/866/800/400"',
+      }).block,
+    ).toBe(false);
   });
 });

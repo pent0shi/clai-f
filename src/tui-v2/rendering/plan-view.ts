@@ -165,14 +165,42 @@ export function activeTaskId(plan: SessionPlan): string | undefined {
   return foregroundActiveTask(plan)?.id;
 }
 
-/** Responder children read as background work, not as a second active task. */
+/** Stable display order with each responder subtree immediately after its parent. */
+export function orderPlanTasksForDisplay(tasks: readonly PlanTask[]): PlanTask[] {
+  const knownIds = new Set(tasks.map((task) => task.id));
+  const children = new Map<string, PlanTask[]>();
+  const roots: PlanTask[] = [];
+
+  for (const task of tasks) {
+    const parentId = task.parentTaskId;
+    if (!parentId || parentId === task.id || !knownIds.has(parentId)) {
+      roots.push(task);
+      continue;
+    }
+    const siblings = children.get(parentId) ?? [];
+    siblings.push(task);
+    children.set(parentId, siblings);
+  }
+
+  const ordered: PlanTask[] = [];
+  const visited = new Set<string>();
+  const append = (task: PlanTask): void => {
+    if (visited.has(task.id)) return;
+    visited.add(task.id);
+    ordered.push(task);
+    for (const child of children.get(task.id) ?? []) append(child);
+  };
+
+  for (const root of roots) append(root);
+  for (const task of tasks) append(task);
+  return ordered;
+}
+
+/** Responder ownership stays visible while terminal state colors remain truthful. */
 export function taskRowColor(task: PlanTask): PlanColorToken {
   if (!task.responderOwned) return taskStateColor(task.state);
-  if (task.state === "failed") return "diffDel";
-  if (task.state === "skipped") return "muted";
-  // Background work keeps one cyan rail through its whole lifecycle so a row is
-  // never mistaken for the single yellow foreground task.
-  return "cyan";
+  if (task.state === "pending" || task.state === "in_progress") return "cyan";
+  return taskStateColor(task.state);
 }
 
 /** Background glyphs so responder rows differ from foreground ones at a glance. */

@@ -936,7 +936,15 @@ function renderTableBlock(rawLines: string[], availWidth: number): string[] {
   const out: string[] = [border("┌", "┬", "┐")];
   for (const row of headerRows) out.push(...renderRow(row, true));
   out.push(border("├", "┼", "┤"));
-  for (const row of bodyRows) out.push(...renderRow(row, false));
+  for (let i = 0; i < bodyRows.length; i++) {
+    if (i > 0) {
+      const spacer = Array.from({ length: columns }, () => [
+        { rendered: "", width: 0 },
+      ]);
+      out.push(...renderRow(spacer, false));
+    }
+    out.push(...renderRow(bodyRows[i]!, false));
+  }
   out.push(border("└", "┴", "┘"));
   return out;
 }

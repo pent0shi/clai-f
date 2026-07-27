@@ -18,7 +18,7 @@ import type {
 import type { ResponderRuntimeState } from "../../../app/controllers/session-responder.js";
 import type { Mode } from "../../../types.js";
 import {
-  formatContextChip,
+  formatTokenCount,
   type ContextUsageSnapshot,
 } from "../../../llm/token-usage.js";
 import type { Theme } from "../../rendering/theme.js";
@@ -47,6 +47,8 @@ export interface StatusLineProps {
   readonly onClearDraft?: (() => void) | undefined;
   readonly onOpenShortcuts?: (() => void) | undefined;
   readonly onCycleMode?: (() => void) | undefined;
+  /** Whether the first Esc has armed cancellation for 1.5 seconds. */
+  readonly cancelArmed?: boolean | undefined;
   /** Arm/confirm cancellation — the same controller path Esc uses. */
   readonly onRequestCancel?: (() => void) | undefined;
 }
@@ -58,13 +60,15 @@ export interface StatusHint {
   readonly expand: string;
 }
 
-// One vocabulary for the busy row: the target is always the same double-Esc
-// stop, spelled the same way at every density.
-export function busyCancelHint(density: StatusDensity): StatusHint {
+export function busyCancelHint(_density: StatusDensity): StatusHint {
   return {
-    short: density === "sm" ? "Esc×2" : "Esc×2 stop",
-    expand: "stop turn, queue, and jobs",
+    short: "esc: cancel",
+    expand: "cancel active work",
   };
+}
+
+export function armedCancelHint(): string {
+  return "esc again to cancel";
 }
 
 export type IdleHintId = "commands" | "thinking" | "output" | "shortcuts";
@@ -75,11 +79,6 @@ export function idleHintIds(density: StatusDensity): readonly IdleHintId[] {
   if (density === "xs" || density === "sm") return [];
   if (density === "md") return ["commands", "thinking", "output"];
   return ["commands", "thinking", "output", "shortcuts"];
-}
-
-// Hover must not change a chip's width, or every chip to its right shifts.
-function hintWidth(short: string, expand: string): number {
-  return Math.max(short.length, expand.length) + 2;
 }
 
 export type StatusDensity = "xs" | "sm" | "md" | "lg";
@@ -169,24 +168,13 @@ function formatActivity(
   return `${base} · ${elapsedSec}s`;
 }
 
-/**
- * Context chip tiers (session fill, not cumulative billing):
- *  - xs: bare count (`12.4k` / `~12.4k`)
- *  - sm+: `ctx:12.4k` / `ctx:~12.4k`
- */
-function contextChipForDensity(
+/** Raw current context-token count; request budgets remain internal. */
+export function contextChipForDensity(
   usage: ContextUsageSnapshot | undefined,
-  density: StatusDensity,
+  _density: StatusDensity,
 ): string | undefined {
   if (!usage) return undefined;
-  const chip = formatContextChip(usage, {
-    compact: density === "xs" || density === "sm" || density === "md",
-  });
-  if (density === "xs") {
-    // Drop the `ctx:` prefix on the narrowest tier.
-    return chip.replace(/^ctx:/i, "");
-  }
-  return chip;
+  return `ctx ${formatTokenCount(usage.contextTokens)}`;
 }
 
 function ContextChip(props: {
@@ -208,11 +196,11 @@ function ContextChip(props: {
   );
 }
 
-function sep(theme: Theme, tight = false): ReactNode {
+function sep(theme: Theme): ReactNode {
   return (
     <text
       selectable={false}
-      content={tight ? " │ " : " │ "}
+      content=" │ "
       style={{ fg: theme.muted, flexShrink: 0 }}
     />
   );
@@ -275,17 +263,11 @@ function ClickableHint(props: {
   readonly onClick?: (() => void) | undefined;
   /** Cyan/bold when idle — used for cancel while agent is running. */
   readonly accent?: boolean | undefined;
-  /** Reserve the widest label so hover never reflows neighbours. */
-  readonly fixedWidth?: boolean | undefined;
 }): ReactNode {
-  const { short, expand, active, theme, onClick, accent = false, fixedWidth = false } = props;
+  const { short, expand, active, theme, onClick, accent = false } = props;
   const [hovered, setHovered] = useState(false);
   const full = expand ?? short;
-  // Hover always shows the expanded phrase (with padding so the chip reads).
-  const label = hovered ? ` ${full} ` : accent || fixedWidth ? ` ${short} ` : short;
-  const content = fixedWidth
-    ? label.padEnd(hintWidth(short, full), " ")
-    : label;
+  const content = hovered ? full : short;
 
   const fg = hovered
     ? theme.white
@@ -372,6 +354,7 @@ export function StatusLine(props: StatusLineProps): ReactNode {
     onClearDraft,
     onOpenShortcuts,
     onCycleMode,
+    cancelArmed = false,
     onRequestCancel,
   } = props;
   const state = useSessionState(session);
@@ -461,7 +444,7 @@ export function StatusLine(props: StatusLineProps): ReactNode {
           }}
         >
           <ModeBadge mode={mode} theme={theme} short={shortMode} />
-          <text selectable={false} content=" " />
+          {sep(theme)}
           <text
             selectable={false}
             content={`${SPINNER_FRAMES[frame]} `}
@@ -474,20 +457,15 @@ export function StatusLine(props: StatusLineProps): ReactNode {
               style={{ fg: theme.activity, flexShrink: 1 }}
             />
           ) : null}
-          {density !== "xs" && !state.compacting ? (
+          {cancelArmed || (density !== "xs" && !state.compacting) ? (
             <>
-              <text
-                selectable={false}
-                content=" "
-                style={{ flexShrink: 0 }}
-              />
+              {sep(theme)}
               <ClickableHint
-                short={busyCancelHint(density).short}
-                expand={busyCancelHint(density).expand}
-                active={false}
+                short={cancelArmed ? armedCancelHint() : busyCancelHint(density).short}
+                expand={cancelArmed ? armedCancelHint() : busyCancelHint(density).expand}
+                active={cancelArmed}
                 theme={theme}
                 accent
-                fixedWidth
                 // Same arm/confirm ladder as pressing Esc — a click must not
                 // skip the confirmation the keyboard path requires.
                 onClick={onRequestCancel}
@@ -496,7 +474,7 @@ export function StatusLine(props: StatusLineProps): ReactNode {
           ) : null}
           {showTasks ? (
             <>
-              <text selectable={false} content=" " />
+              {sep(theme)}
               <ClickableHint
                 short={tasksToggleLabel(planVisible, density)}
                 expand={planVisible ? "hide tasks" : "show tasks"}
@@ -508,7 +486,7 @@ export function StatusLine(props: StatusLineProps): ReactNode {
           ) : null}
           {queued > 0 && density !== "xs" ? (
             <>
-              <text selectable={false} content=" " />
+              {sep(theme)}
               <text
                 selectable={false}
                 content={`${queued}q`}
@@ -570,11 +548,24 @@ export function StatusLine(props: StatusLineProps): ReactNode {
         }}
       >
         <ModeBadge mode={mode} theme={theme} short={shortMode} />
+        {cancelArmed ? (
+          <>
+            {sep(theme)}
+            <ClickableHint
+              short={armedCancelHint()}
+              expand={armedCancelHint()}
+              active
+              theme={theme}
+              accent
+              onClick={onRequestCancel}
+            />
+          </>
+        ) : null}
 
         {/* Shift+Tab mode cycle hint (click to cycle ask → agent → plan) */}
         {density !== "xs" ? (
           <>
-            <text selectable={false} content=" " />
+            {sep(theme)}
             <ClickableHint
               short="⇧⇥"
               expand="cycle mode"
@@ -604,7 +595,6 @@ export function StatusLine(props: StatusLineProps): ReactNode {
               expand={thinkingExpanded ? "hide thinking" : "show thinking"}
               active={thinkingExpanded}
               theme={theme}
-              fixedWidth
               onClick={onToggleThinking}
             />
           </>
@@ -617,7 +607,6 @@ export function StatusLine(props: StatusLineProps): ReactNode {
               expand={outputExpanded ? "hide output" : "show output"}
               active={outputExpanded}
               theme={theme}
-              fixedWidth
               onClick={onToggleOutput}
             />
           </>
@@ -630,7 +619,6 @@ export function StatusLine(props: StatusLineProps): ReactNode {
               expand="keyboard shortcuts"
               active={false}
               theme={theme}
-              fixedWidth
               onClick={onOpenShortcuts}
             />
           </>
@@ -672,7 +660,6 @@ export function StatusLine(props: StatusLineProps): ReactNode {
       >
         {ctxChip ? (
           <>
-            <text selectable={false} content=" " />
             <ContextChip
               chip={ctxChip}
               theme={theme}

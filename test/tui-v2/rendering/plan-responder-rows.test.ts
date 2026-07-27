@@ -30,11 +30,11 @@ function plan(tasks: PlanTask[]): SessionPlan {
 }
 
 describe("responder rows in the plan pane (TUI-006)", () => {
-  it("keeps one cyan rail across the whole responder lifecycle", () => {
-    const states: TaskState[] = ["pending", "in_progress", "done"];
-    for (const state of states) {
+  it("keeps active responder rails cyan and terminal rails state-colored", () => {
+    for (const state of ["pending", "in_progress"] as TaskState[]) {
       expect(taskRowColor(task({ id: "c1", state, responderOwned: true }))).toBe("cyan");
     }
+    expect(taskRowColor(task({ id: "c1", state: "done", responderOwned: true }))).toBe("success");
     expect(taskRowColor(task({ id: "c2", state: "failed", responderOwned: true }))).toBe(
       "diffDel",
     );

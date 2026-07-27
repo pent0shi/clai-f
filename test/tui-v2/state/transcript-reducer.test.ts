@@ -8,9 +8,11 @@ import {
 import { createCountingIdFactory, EventSequencer } from "../../../src/app/events/sequencer.js";
 import { applyAppEvent } from "../../../src/tui-v2/state/transcript-reducer.js";
 import {
+  compactionTokenLabel,
   EMPTY_TRANSCRIPT_STATE,
   transcriptItems,
   type AssistantItem,
+  type CompactedItem,
   type ThinkingItem,
   type ToolItem,
   type TranscriptState,
@@ -597,6 +599,125 @@ describe("transcript reducer (V2-050)", () => {
     // Notices are toast-only — must never become chat rows.
     expect(items.every((i) => i.kind !== "notice")).toBe(true);
     expect(items[0]).toMatchObject({ kind: "compacted", beforeTokens: 100, afterTokens: 40 });
+  });
+
+  it("streams compaction deltas into one stable card and finalizes it in place", () => {
+    const seq = buildSequencer();
+    let state = EMPTY_TRANSCRIPT_STATE;
+    state = applyAppEvent(
+      state,
+      seq.build(
+        "compaction-started",
+        { compactionId: "c1", beforeTokens: 900 },
+        undefined,
+      ),
+    );
+    state = applyAppEvent(
+      state,
+      seq.build(
+        "compaction-delta",
+        { compactionId: "c1", text: "## Work\n" },
+        undefined,
+      ),
+    );
+    state = applyAppEvent(
+      state,
+      seq.build(
+        "compaction-delta",
+        { compactionId: "c1", text: "- done" },
+        undefined,
+      ),
+    );
+    expect(transcriptItems(state)).toHaveLength(1);
+    expect(transcriptItems(state)[0]).toMatchObject({
+      id: "compacted-c1",
+      summary: "## Work\n- done",
+      streaming: true,
+    });
+
+    state = applyAppEvent(
+      state,
+      seq.build(
+        "compaction-completed",
+        {
+          compactionId: "c1",
+          summary: "## Work\n- done",
+          beforeTokens: 900,
+          afterTokens: 300,
+        },
+        undefined,
+      ),
+    );
+    expect(transcriptItems(state)).toHaveLength(1);
+    expect(transcriptItems(state)[0]).toMatchObject({
+      id: "compacted-c1",
+      streaming: false,
+      beforeTokens: 900,
+      afterTokens: 300,
+    });
+  });
+
+  it("marks a failed compaction as retaining the original context", () => {
+    const seq = buildSequencer();
+    let state = applyAppEvent(
+      EMPTY_TRANSCRIPT_STATE,
+      seq.build(
+        "compaction-started",
+        { compactionId: "c-failed", beforeTokens: 24_240 },
+        undefined,
+      ),
+    );
+    state = applyAppEvent(
+      state,
+      seq.build(
+        "compaction-failed",
+        {
+          compactionId: "c-failed",
+          message: "model returned an empty summary",
+          retainedTokens: 24_240,
+        },
+        undefined,
+      ),
+    );
+
+    const item = transcriptItems(state)[0] as CompactedItem;
+    expect(item).toMatchObject({
+      id: "compacted-c-failed",
+      summary: "",
+      beforeTokens: 24_240,
+      afterTokens: 24_240,
+      streaming: false,
+      error: "model returned an empty summary",
+    });
+    expect(compactionTokenLabel(item)).toBe(
+      "~24,240 tokens · original context retained",
+    );
+    expect(compactionTokenLabel(item)).not.toContain("→ ~0");
+  });
+
+  it("creates a retained-context failure card when the start event was missed", () => {
+    const seq = buildSequencer();
+    const state = applyAppEvent(
+      EMPTY_TRANSCRIPT_STATE,
+      seq.build(
+        "compaction-failed",
+        {
+          compactionId: "late-failure",
+          message: "summary rejected",
+          retainedTokens: 8_000,
+        },
+        undefined,
+      ),
+    );
+    expect(transcriptItems(state)[0]).toMatchObject({
+      kind: "compacted",
+      id: "compacted-late-failure",
+      summary: "",
+      beforeTokens: 8_000,
+      afterTokens: 8_000,
+      error: "summary rejected",
+      streaming: false,
+    });
   });
 
   it("closes an open streaming item and surfaces a notice on turn-error", () => {

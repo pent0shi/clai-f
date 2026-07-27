@@ -99,6 +99,71 @@ describe("durable outcome and evidence invariants", () => {
     }
   });
 
+  it("persists bounded redacted signatures for successful read-only operations", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "clai-operation-ledger-"));
+    const previous = process.env.CLAI_DATA_DIR;
+    process.env.CLAI_DATA_DIR = dataDir;
+    try {
+      const state = await openOutcomeState({
+        sessionId: "operation-ledger",
+        userIntent: "inspect the service",
+        kind: "answer",
+      });
+      for (let index = 0; index < 45; index++) {
+        recordToolEvidence(state, {
+          tool: "fs.read",
+          callId: `read-${index}`,
+          ok: true,
+          output: `contents ${index}`,
+          args: { path: `file-${index}.txt`, token: "secret-value" },
+        });
+      }
+      recordToolEvidence(state, {
+        tool: "shell.exec",
+        callId: "curl",
+        ok: true,
+        output: "HTTP 200",
+        args: { command: "curl -H 'Authorization: Bearer sk-proj-secret' https://example.test" },
+      });
+      recordToolEvidence(state, {
+        tool: "shell.exec",
+        callId: "bad-curl",
+        ok: false,
+        exitCode: 6,
+        output: "000",
+        args: {
+          command:
+            'curl -s -o /dev/null -w "%{http_code}" https://images.picsum.photos/id/866/800/400',
+        },
+      });
+      await saveOutcomeState(state);
+
+      const restored = await loadOutcomeState("operation-ledger");
+      expect(restored?.completedOperations).toHaveLength(40);
+      const serialized = JSON.stringify(restored?.completedOperations);
+      expect(serialized).not.toContain("secret-value");
+      expect(serialized).not.toContain("sk-proj-secret");
+      expect(
+        restored?.completedOperations?.find(
+          (operation) => operation.observation === "HTTP 200",
+        ),
+      ).toMatchObject({
+        tool: "shell.exec",
+        ok: true,
+      });
+      expect(restored?.completedOperations?.at(-1)).toMatchObject({
+        tool: "shell.exec",
+        observation: "000",
+        ok: false,
+        exitCode: 6,
+      });
+    } finally {
+      if (previous === undefined) delete process.env.CLAI_DATA_DIR;
+      else process.env.CLAI_DATA_DIR = previous;
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
   it("serializes parallel saves with unique temp files and keeps the newest snapshot", async () => {
     const dataDir = await mkdtemp(join(tmpdir(), "clai-outcome-parallel-"));
     const previous = process.env.CLAI_DATA_DIR;

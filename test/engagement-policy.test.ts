@@ -3,6 +3,7 @@ import {
   actionFromUrl,
   EngagementPolicyEngine,
   engagementActionForToolCall,
+  engagementActionsForToolCall,
   evaluateEngagementAction,
 } from "../src/safety/engagement-policy.js";
 import type { EngagementScope } from "../src/store/scope.js";
@@ -80,6 +81,27 @@ describe("engagement target-aware policy matrix", () => {
       phase: "post-exploitation",
       capability: "destructive",
     });
+  });
+
+  it("handles malformed URL-like text and checks every mixed target", () => {
+    expect(
+      engagementActionForToolCall({
+        name: "shell.exec",
+        args: { command: "rg 'https://app.test|/api' src" },
+      }),
+    ).toBeUndefined();
+    const actions = engagementActionsForToolCall({
+      name: "shell.exec",
+      args: { command: "nmap app.test evil.test" },
+    });
+    expect(actions.map((action) => action.target).sort()).toEqual([
+      "app.test",
+      "evil.test",
+    ]);
+    expect(actions.map((action) => evaluateEngagementAction(scope, action).allowed)).toEqual([
+      true,
+      false,
+    ]);
   });
 
   it("enforces the configured time window with an injected clock", () => {

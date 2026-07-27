@@ -31,14 +31,20 @@ function plan() {
 }
 
 describe("responder parent ownership (TASK-005)", () => {
-  it("exposes parentTaskId on every responder-capable schema", () => {
-    for (const name of ["shell.exec", "shell.start", "net.scan", "pentest.recon"]) {
+  it("exposes parentTaskId only on tools that can create Responder children", () => {
+    for (const name of ["shell.exec", "net.scan", "pentest.recon"]) {
       const def = TOOL_DEFINITIONS.find((candidate) => candidate.name === name);
       expect(def, name).toBeDefined();
       const properties = (def!.parameters as any).properties ?? {};
       expect(Object.keys(properties), name).toContain("parentTaskId");
       expect(Object.keys(properties), name).not.toContain("taskId");
     }
+    const shellStart = TOOL_DEFINITIONS.find(
+      (candidate) => candidate.name === "shell.start",
+    );
+    expect(Object.keys(shellStart?.parameters.properties ?? {})).not.toContain(
+      "parentTaskId",
+    );
   });
 
   it("reads only a non-empty declared parent", () => {
@@ -108,13 +114,35 @@ describe("responder parent ownership (TASK-005)", () => {
 
 
 describe("explicit responder delegation", () => {
-  it("only recognizes responder-capable tools that opted in", () => {
+  it("applies foreground and persistent precedence before creating a child", () => {
     expect(
       isExplicitResponderDelegation({
         name: "shell.exec",
         args: { command: "ffuf -u x", responder: true },
       }),
     ).toBe(true);
+    expect(
+      isExplicitResponderDelegation({
+        name: "shell.exec",
+        args: {
+          command: "ffuf -u x",
+          responder: true,
+          background: "never",
+        },
+      }),
+    ).toBe(false);
+    expect(
+      isExplicitResponderDelegation({
+        name: "shell.exec",
+        args: { command: "npm run dev", responder: true },
+      }),
+    ).toBe(false);
+    expect(
+      isExplicitResponderDelegation({
+        name: "shell.start",
+        args: { command: "npm run dev", responder: true },
+      }),
+    ).toBe(false);
     expect(
       isExplicitResponderDelegation({
         name: "shell.exec",

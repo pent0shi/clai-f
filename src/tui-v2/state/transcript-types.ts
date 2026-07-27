@@ -65,6 +65,27 @@ export interface CompactedItem extends ItemBase {
   readonly summary: string;
   readonly beforeTokens: number;
   readonly afterTokens: number;
+  readonly streaming?: boolean | undefined;
+  readonly error?: string | undefined;
+}
+
+export function compactionTokenLabel(
+  item: Pick<CompactedItem, "streaming" | "error" | "beforeTokens" | "afterTokens">,
+): string {
+  if (item.streaming) {
+    return item.beforeTokens > 0
+      ? `~${item.beforeTokens.toLocaleString()} tokens before`
+      : "";
+  }
+  if (item.error) {
+    const retainedTokens = item.afterTokens || item.beforeTokens;
+    return retainedTokens > 0
+      ? `~${retainedTokens.toLocaleString()} tokens · original context retained`
+      : "original context retained";
+  }
+  return item.beforeTokens > 0 || item.afterTokens > 0
+    ? `~${item.beforeTokens.toLocaleString()} → ~${item.afterTokens.toLocaleString()} tokens`
+    : "";
 }
 
 export type TranscriptItem =

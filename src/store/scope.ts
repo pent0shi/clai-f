@@ -93,14 +93,26 @@ export function normalizeScopeTarget(target: string): string {
   } catch {
     // Fall through to token cleanup below.
   }
-  const noBrackets = trimmed.replace(/^\[/, "").replace(/\]$/, "");
-  if (/^(?:\d{1,3}\.){3}\d{1,3}\/\d{1,2}$/.test(noBrackets)) {
-    return noBrackets.toLowerCase();
+
+  const bracketed = /^\[([^\]]+)\](?::\d+)?$/.exec(trimmed);
+  if (bracketed?.[1] && net.isIP(bracketed[1])) {
+    return bracketed[1].toLowerCase();
   }
-  const withoutPath = noBrackets.split(/[/?#]/)[0] ?? noBrackets;
-  if (net.isIP(withoutPath)) {
-    return withoutPath.toLowerCase();
+
+  const cidr = /^(?:\[([^\]]+)\]|([^/]+))\/(\d{1,3})$/.exec(trimmed);
+  const cidrHost = cidr?.[1] ?? cidr?.[2];
+  if (cidrHost && cidr?.[3]) {
+    const version = net.isIP(cidrHost);
+    const prefix = Number(cidr[3]);
+    const maxPrefix = version === 4 ? 32 : version === 6 ? 128 : -1;
+    if (prefix >= 0 && prefix <= maxPrefix) {
+      return `${cidrHost.toLowerCase()}/${prefix}`;
+    }
   }
+
+  if (net.isIP(trimmed)) return trimmed.toLowerCase();
+  const withoutPath = trimmed.split(/[/?#]/)[0] ?? trimmed;
+  if (net.isIP(withoutPath)) return withoutPath.toLowerCase();
   return withoutPath.replace(/:\d+$/, "").toLowerCase();
 }
 
@@ -201,26 +213,23 @@ export function isLoopbackScopeTarget(target: string): boolean {
   return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(n);
 }
 
-function ipToNumber(ip: string): number {
-  const parts = ip.split(".").map((p) => Number(p));
-  if (parts.length !== 4 || parts.some((p) => !Number.isInteger(p) || p < 0 || p > 255)) {
-    return NaN;
-  }
-  return parts.reduce((acc, octet) => acc * 256 + octet, 0);
-}
-
 function ipInCidr(ip: string, cidr: string): boolean {
-  const [base, maskRaw] = cidr.split("/");
-  if (!base || !maskRaw) return false;
-  const mask = Number(maskRaw);
-  if (!Number.isInteger(mask) || mask < 0 || mask > 32) return false;
-  const ipNum = ipToNumber(ip);
-  const baseNum = ipToNumber(base);
-  if (Number.isNaN(ipNum) || Number.isNaN(baseNum)) return false;
-  if (mask === 0) return true;
-  const shift = 32 - mask;
-  // eslint-disable-next-line no-bitwise
-  return (ipNum >>> shift) === (baseNum >>> shift);
+  const slash = cidr.lastIndexOf("/");
+  if (slash <= 0) return false;
+  const base = cidr.slice(0, slash);
+  const prefix = Number(cidr.slice(slash + 1));
+  const version = net.isIP(ip);
+  if (!version || net.isIP(base) !== version) return false;
+  const maxPrefix = version === 4 ? 32 : 128;
+  if (!Number.isInteger(prefix) || prefix < 0 || prefix > maxPrefix) return false;
+  try {
+    const family = version === 4 ? "ipv4" : "ipv6";
+    const block = new net.BlockList();
+    block.addSubnet(base, prefix, family);
+    return block.check(ip, family);
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -251,8 +260,8 @@ export function targetInScope(target: string, scope: EngagementScope): boolean {
 
 function matchEntry(target: string, entry: string): boolean {
   if (entry === target) return true;
-  // CIDR membership for IPv4 targets
-  if (entry.includes("/") && net.isIPv4(target)) {
+  // CIDR membership for IP targets.
+  if (entry.includes("/") && net.isIP(target)) {
     return ipInCidr(target, entry);
   }
   // Hostname suffix match (entry "example.com" covers "api.example.com")

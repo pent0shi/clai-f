@@ -41,6 +41,22 @@ export type AgentEvent =
   | { type: "turn-end"; outcome: TurnOutcome; finalAnswer: string; steps: number }
   | { type: "turn-aborted" }
   | { type: "turn-error"; message: string }
+  | { type: "compaction-start"; id: string; beforeTokens: number }
+  | { type: "compaction-delta"; id: string; text: string }
+  | {
+      type: "compaction-completed";
+      id: string;
+      summary: string;
+      beforeTokens: number;
+      afterTokens: number;
+    }
+  | {
+      type: "compaction-failed";
+      id: string;
+      message: string;
+      retainedTokens: number;
+    }
+  /** Legacy one-shot compaction event retained for non-streaming integrations. */
   | { type: "compacted"; summary: string; beforeTokens: number; afterTokens: number }
   /** Provider-reported token usage after a model completion. */
   | { type: "token-usage"; usage: TokenUsage; model?: string | undefined };

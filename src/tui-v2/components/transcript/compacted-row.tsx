@@ -4,14 +4,20 @@
  * pager modal (same as tool OUTPUT), not an in-chat mega-expand.
  */
 
-import { useMemo, type ReactNode } from "react";
+import { Fragment, useMemo, useRef, type ReactNode } from "react";
 import { TextAttributes } from "@opentui/core";
 import { useTerminalDimensions } from "@opentui/react";
 import type { CompactedItem } from "../../state/transcript-types.js";
+import { compactionTokenLabel } from "../../state/transcript-types.js";
 import type { Theme } from "../../rendering/theme.js";
 import type { AppServices } from "../../bootstrap/composition-root.js";
 import { displayCompactSummary } from "../../state/transcript-hydrate.js";
-import { renderMarkdownLines } from "../../rendering/render-markdown-lines.js";
+import {
+  EMPTY_MARKDOWN_STREAM_CACHE,
+  renderStreamingMarkdown,
+  type MarkdownStreamCache,
+} from "../../rendering/streaming-markdown.js";
+import { liveCompactionHeadTail } from "../../rendering/thinking-tail.js";
 import { useClickWithoutDrag } from "./use-click-without-drag.js";
 
 const PREVIEW_LINES = 4;
@@ -34,32 +40,47 @@ export function CompactedRow(props: {
       ? Math.max(20, contentWidth - 4)
       : Math.max(40, termWidth - 10),
   );
-  const summary = displayCompactSummary(item.summary);
-
-  const allLines = useMemo(
-    () =>
-      renderMarkdownLines(summary, {
+  const fullSummary = item.streaming
+    ? item.summary
+    : displayCompactSummary(item.summary);
+  const visibleSummary = item.streaming
+    ? liveCompactionHeadTail(fullSummary)
+    : fullSummary;
+  const cacheRef = useRef<MarkdownStreamCache>(EMPTY_MARKDOWN_STREAM_CACHE);
+  const allLines = useMemo(() => {
+    const rendered = renderStreamingMarkdown({
+      text: visibleSummary,
+      streaming: item.streaming === true,
+      options: {
         width: wrapWidth,
         defaultFg: theme.foreground,
         stripOuterIndent: true,
-      }),
-    [summary, wrapWidth, theme.foreground],
-  );
+      },
+      cache: cacheRef.current,
+    });
+    cacheRef.current = rendered.cache;
+    return rendered.lines;
+  }, [visibleSummary, item.streaming, wrapWidth, theme.foreground]);
 
-  const preview = allLines.slice(0, PREVIEW_LINES);
-  const hidden = Math.max(0, allLines.length - PREVIEW_LINES);
+  const showLiveGap = item.streaming === true && allLines.length > 10;
+  const preview = item.streaming
+    ? showLiveGap
+      ? [...allLines.slice(0, PREVIEW_LINES), ...allLines.slice(-6)]
+      : allLines
+    : allLines.slice(0, PREVIEW_LINES);
+  const hidden = item.streaming
+    ? Math.max(0, allLines.length - preview.length)
+    : Math.max(0, allLines.length - PREVIEW_LINES);
 
-  const tokenLabel =
-    item.beforeTokens > 0 || item.afterTokens > 0
-      ? `~${item.beforeTokens.toLocaleString()} → ~${item.afterTokens.toLocaleString()} tokens`
-      : "";
+  const tokenLabel = compactionTokenLabel(item);
 
   const openPager = (): void => {
-    const title = tokenLabel
-      ? `Compacted context · ${tokenLabel}`
-      : "Compacted context";
-    // Compacted memory is always markdown-friendly — start formatted.
-    services.overlay.openPager(title, summary, undefined, undefined, "force");
+    const title = item.streaming
+      ? "Compacted context · streaming"
+      : tokenLabel
+        ? `Compacted context · ${tokenLabel}`
+        : "Compacted context";
+    services.overlay.openPager(title, fullSummary, undefined, undefined, "force");
   };
 
   const click = useClickWithoutDrag(openPager);
@@ -94,7 +115,7 @@ export function CompactedRow(props: {
         }}
       >
         <text selectable style={{ fg: borderFg, attributes: TextAttributes.BOLD }}>
-          ✦ Compacted context
+          ✦ Compacted context{item.streaming ? " …" : ""}
         </text>
         <text content=" " selectable />
         <text
@@ -117,7 +138,7 @@ export function CompactedRow(props: {
         ) : null}
       </box>
 
-      {preview.length > 0 ? (
+      {preview.length > 0 || item.streaming ? (
         <box
           style={{
             flexDirection: "column",
@@ -134,21 +155,37 @@ export function CompactedRow(props: {
               attributes: TextAttributes.BOLD,
             }}
           >
-            {" SUMMARY "}
+            {item.streaming ? " STREAMING MARKDOWN " : " SUMMARY "}
           </text>
+          {preview.length === 0 && item.streaming ? (
+            <text selectable style={{ fg: theme.muted }}>
+              │ Building compacted memory…
+            </text>
+          ) : null}
           {preview.map((content, i) => (
-            <box key={`l-${i}`} style={{ flexDirection: "row", width: "100%" }}>
-              <text selectable style={{ fg: theme.muted, flexShrink: 0 }}>
-                {"│ "}
-              </text>
-              <text
-                content={content ?? " "}
-                selectable
-                style={{ width: "100%", flexGrow: 1 }}
-              />
-            </box>
+            <Fragment key={`l-${i}`}>
+              {showLiveGap && i === PREVIEW_LINES ? (
+                <text selectable style={{ width: "100%" }}>
+                  <span style={{ fg: theme.muted }}>{"│ "}</span>
+                  <span style={{ fg: theme.muted, attributes: TextAttributes.DIM }}>
+                    {`··· ${hidden} streaming lines omitted ···`}
+                  </span>
+                </text>
+              ) : null}
+              <box style={{ flexDirection: "row", width: "100%" }}>
+                <text selectable style={{ fg: theme.muted, flexShrink: 0 }}>
+                  {"│ "}
+                </text>
+                <text
+                  content={content ?? " "}
+                  selectable
+                  wrapMode="none"
+                  style={{ width: "100%", flexGrow: 1 }}
+                />
+              </box>
+            </Fragment>
           ))}
-          {hidden > 0 ? (
+          {!item.streaming && hidden > 0 ? (
             <text selectable style={{ width: "100%" }}>
               <span style={{ fg: theme.muted }}>{"│ "}</span>
               <span style={{ fg: theme.muted, attributes: TextAttributes.DIM }}>
@@ -156,7 +193,16 @@ export function CompactedRow(props: {
               </span>
             </text>
           ) : null}
+          {item.error ? (
+            <text selectable style={{ fg: theme.diffDel }}>
+              {`Compaction stopped: ${item.error}`}
+            </text>
+          ) : null}
         </box>
+      ) : item.error ? (
+        <text selectable style={{ fg: theme.diffDel }}>
+          {`Compaction stopped: ${item.error}`}
+        </text>
       ) : null}
 
       <box style={{ flexDirection: "row", width: "100%", marginTop: 0 }}>
@@ -167,7 +213,11 @@ export function CompactedRow(props: {
           selectable={false}
           style={{ fg: theme.cyan, attributes: TextAttributes.DIM }}
         >
-          click or Ctrl+O to open full memory in pager
+          {item.streaming
+            ? "rendering bounded top + live tail · click for current memory"
+            : item.error
+              ? "original context retained · no compacted memory was applied"
+              : "click or Ctrl+O to open full memory in pager"}
         </text>
       </box>
     </box>

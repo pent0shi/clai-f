@@ -3,7 +3,6 @@
  * Composer: completion menu above input; provider/model/permissions on the
  * top border. Focus is region-aware so transcript scroll is not stolen.
  */
-
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
   decodePasteBytes,
@@ -86,7 +85,6 @@ export interface ComposerEditorProps {
    */
   readonly seedDraft?: { readonly token: number; readonly text: string } | undefined;
 }
-
 const textareaKeyBindings = buildComposerTextareaOverrides() as never;
 
 export function ComposerEditor(props: ComposerEditorProps): ReactNode {
@@ -282,9 +280,10 @@ export function ComposerEditor(props: ComposerEditorProps): ReactNode {
       setPasteChips([]);
       return;
     }
-    // Prompt "❯ " (2) + horizontal padding (2) leave this for wrapped text.
-    const wrapWidth = Math.max(10, props.width - 4);
-    const nextRows = countComposerVisualLines(editor.plainText, wrapWidth);
+    // Prompt (2) + borders (2) + horizontal padding (2) leave this for text.
+    const wrapWidth = Math.max(10, props.width - 6);
+    const estimatedRows = countComposerVisualLines(editor.plainText, wrapWidth);
+    const nextRows = measureComposerLines(editor, estimatedRows);
     setContentRows((current) => (current === nextRows ? current : nextRows));
     const nextChips = pasteRegistry.current.activeIn(editor.plainText);
     setPasteChips((current) =>
@@ -716,9 +715,11 @@ export function ComposerEditor(props: ComposerEditorProps): ReactNode {
     handleMenuOrComposerKey(key);
   }
 
-  // Re-measure soft-wrap rows when the terminal width changes.
+  // Re-measure once immediately and once after native layout on resize.
   useEffect(() => {
     syncContentRows();
+    const frame = requestAnimationFrame(syncContentRows);
+    return () => cancelAnimationFrame(frame);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- width-only reflow
   }, [props.width]);
 
@@ -776,7 +777,7 @@ export function ComposerEditor(props: ComposerEditorProps): ReactNode {
         editorRef={editorRef}
         focused={shouldOwnKeyboard}
         running={props.running}
-        textRows={textRows}
+        width={inputWidth}
         boxHeight={boxHeight}
         metaShown={metaShown}
         chromeFg={chromeFg}
@@ -786,9 +787,12 @@ export function ComposerEditor(props: ComposerEditorProps): ReactNode {
         onSubmit={submit}
         onContentChange={() => {
           refreshMenu();
+          queueMicrotask(syncContentRows);
+        }}
+        onCursorChange={() => {
+          refreshMenu();
           syncContentRows();
         }}
-        onCursorChange={refreshMenu}
         onKeyDown={onKeyDown}
       />
     </box>

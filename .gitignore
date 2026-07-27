@@ -22,3 +22,5 @@ docs/v2/
 .vscode/
 debug-test.ts
 improvements/
+audit/
+prompt.txt

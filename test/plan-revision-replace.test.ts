@@ -131,40 +131,38 @@ describe("plan.create draft revision replaces obsolete tasks", () => {
     expect(loaded!.tasks[0]!.id).toBe("t1");
   });
 
-  it("post-approval rewrite keeps finished work and drops obsolete pending", async () => {
-    const session = createSessionPolicy("post-approve-rewrite");
+  it("post-approval plan.create appends new work without replacing active t5", async () => {
+    const session = createSessionPolicy("post-approve-append");
     session.planApproved.value = true;
     const prior = createPlan({
-      sessionId: "post-approve-rewrite",
-      goal: "blog",
-      detail: "full stack",
+      sessionId: "post-approve-append",
+      goal: "Build blogging app",
+      detail: "Implement and verify the existing project",
       kind: "coding",
       taskTitles: [
-        "Scaffold Next.js",
-        "Prisma schema",
-        "Public UI",
-        "Verify",
+        "Scaffold app",
+        "Build home page",
+        "Add post editor",
+        "Verify initial app",
+        "Fix reported bugs",
       ],
     });
     prior.status = "in_progress";
-    prior.tasks[0]!.state = "done";
-    prior.tasks[1]!.state = "pending";
-    prior.tasks[2]!.state = "pending";
-    prior.tasks[3]!.state = "pending";
+    for (const task of prior.tasks.slice(0, 4)) task.state = "done";
+    prior.tasks[4]!.state = "in_progress";
     await savePlan(prior);
 
     const result = await handlePlanTool(
       {
         name: "plan.create",
         args: {
-          goal: "blog frontend-only",
-          detail: "no backend",
-          kind: "coding",
+          goal: "Fix blogging app bugs",
+          detail: "Images, theme persistence, and new-post display",
+          kind: "bugfix",
           tasks: [
-            "Scaffold Next.js",
-            "Public UI glassmorphism",
-            "localStorage content",
-            "Verify",
+            { id: "t1", title: "Fix broken image URLs" },
+            { id: "t2", title: "Persist theme toggler" },
+            { id: "t3", title: "Display newly created posts" },
           ],
         },
       },
@@ -172,14 +170,34 @@ describe("plan.create draft revision replaces obsolete tasks", () => {
       { loopGuard: new LoopGuard(), step: 2 },
     );
 
-    expect(result.ok).toBe(true);
-    const loaded = await loadPlan("post-approve-rewrite");
-    const titles = loaded!.tasks.map((t) => t.title);
-    expect(titles).not.toContain("Prisma schema");
-    expect(titles).toContain("Scaffold Next.js");
-    expect(loaded!.tasks.find((t) => t.title === "Scaffold Next.js")?.state).toBe(
-      "done",
-    );
+    expect(result.ok, result.modelNote).toBe(true);
+    expect(result.display).toMatch(/append-only/i);
+    const loaded = await loadPlan("post-approve-append");
+    expect(loaded?.goal).toBe("Build blogging app");
+    expect(loaded?.tasks.slice(0, 5).map((task) => task.id)).toEqual([
+      "t1",
+      "t2",
+      "t3",
+      "t4",
+      "t5",
+    ]);
+    expect(loaded?.tasks[4]).toMatchObject({
+      id: "t5",
+      title: "Fix reported bugs",
+      state: "in_progress",
+    });
+    expect(loaded?.tasks.slice(5).map((task) => task.id)).toEqual([
+      "t6",
+      "t7",
+      "t8",
+    ]);
+    expect(loaded?.tasks.slice(5).map((task) => task.dependencies)).toEqual([
+      ["t5"],
+      ["t6"],
+      ["t7"],
+    ]);
+    expect(loaded?.status).toBe("in_progress");
+    expect(session.planApproved.value).toBe(true);
   });
 
   it("revision prompt demands a complete decisive rewrite", () => {

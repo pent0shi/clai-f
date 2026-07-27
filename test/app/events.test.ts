@@ -58,6 +58,8 @@ describe("V2-020 AppEvent envelope + sequencer", () => {
   it("classifies delta vs structural events", () => {
     expect(isDeltaEvent("assistant-delta")).toBe(true);
     expect(isDeltaEvent("thinking-delta")).toBe(true);
+    expect(isDeltaEvent("compaction-delta")).toBe(true);
+    expect(isStructuralEvent("compaction-started")).toBe(true);
     expect(isDeltaEvent("tool-call")).toBe(false);
     expect(isStructuralEvent("tool-call")).toBe(true);
     expect(isStructuralEvent("assistant-delta")).toBe(false);

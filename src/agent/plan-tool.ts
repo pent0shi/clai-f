@@ -479,7 +479,7 @@ export function planContextMessage(plan: SessionPlan, approved: boolean): string
     lines.push(`  ${i + 1}. [${t.id}] (${t.state}) ${t.title}${hierarchyHint}${jobHint}${aliasHint}${dependencyHint}${resourceHint}${evidenceHint}`);
   });
   lines.push(
-    "task.update taskId MUST be t1, t2, … from this list (or a listed alias). Use task.add for newly discovered work; it is placed before unfinished report creation. Use task.move with position/beforeTaskId/afterTaskId to rearrange work without changing ids or evidence. Responder-owned job tasks advance automatically; never task.update them. After analyzing a delivered Responder result, task.read its notification before finalizing.",
+    "task.update taskId MUST be t1, t2, … from this list (or a listed alias). Use task.add for newly discovered work; it is placed before unfinished report creation. Use task.move with position/beforeTaskId/afterTaskId to rearrange work without changing ids or evidence. Responder-owned job tasks advance automatically; never task.update them. After analyzing a delivered Responder result, job.read its job or notification before finalizing.",
   );
   if (plan.meta?.projectRoot) {
     lines.push(`project_root: ${plan.meta.projectRoot}`);
@@ -638,6 +638,93 @@ export async function handlePlanTool(
           "Just shell.start the dev server, shell.tail until ready, probe localhost " +
           "(curl or http.fetch with iOwnThis:true), LEAVE the server running, and tell the user " +
           "the URL (http://localhost:<port>), port, and job id.",
+      };
+    }
+
+    const appendingToActivePlan =
+      existingPlan &&
+      existingPlan.status !== "draft" &&
+      !isPlanTerminal(existingPlan) &&
+      (session.planApproved.value ||
+        existingPlan.status === "approved" ||
+        existingPlan.status === "in_progress");
+    if (appendingToActivePlan) {
+      const priorIds = new Set(existingPlan.tasks.map((task) => task.id));
+      let invalidDependency: string | undefined;
+      const appended = await mutatePlan(existingPlan.sessionId, (draft) => {
+        let changed = false;
+        let previousForegroundId = [...draft.tasks]
+          .reverse()
+          .find((task) => !task.responderOwned)?.id;
+        for (const entry of taskEntries) {
+          if (
+            isBareTaskIdTitle(entry.title) ||
+            draft.tasks.some((task) =>
+              titlesMatchForPlan(task.title, entry.title),
+            )
+          ) {
+            continue;
+          }
+          const dependencies = entry.dependenciesSpecified
+            ? entry.dependencies.map((reference) => {
+                const resolved = resolvePlanTaskId(draft, reference);
+                if (!resolved) invalidDependency = reference;
+                return resolved;
+              })
+            : previousForegroundId
+              ? [previousForegroundId]
+              : [];
+          if (invalidDependency) return false;
+          const task = appendPlanTask(draft, {
+            title: entry.title,
+            state: "pending",
+            aliases: entry.aliases,
+            dependencies: dependencies.filter(
+              (dependency): dependency is string => Boolean(dependency),
+            ),
+            resourceLocks: entry.resourceLocks,
+          });
+          previousForegroundId = task.id;
+          changed = true;
+        }
+        return changed;
+      }).catch(() => undefined);
+
+      if (!appended?.ok || !appended.plan) {
+        const reason = invalidDependency
+          ? `unknown dependency "${invalidDependency}"`
+          : "every proposed task already exists in ACTIVE PLAN";
+        return {
+          handled: true,
+          ok: false,
+          display: chalk.yellow(
+            `  ⚠ plan.create kept the active plan — ${reason}\n`,
+          ),
+          modelNote:
+            `plan.create did not replace ACTIVE PLAN: ${reason}. ` +
+            "Continue its current in_progress task. Use task.add once per genuinely new task; never recreate or renumber active work.",
+        };
+      }
+
+      session.planApproved.value = true;
+      const addedTasks = appended.plan.tasks.filter(
+        (task) => !priorIds.has(task.id),
+      );
+      const checklist = renderPlanForTerminal(appended.plan);
+      return {
+        handled: true,
+        ok: true,
+        plan: appended.plan,
+        display:
+          chalk.cyan("  ● active plan extended (append-only)\n") +
+          checklist +
+          "\n" +
+          chalk.dim(
+            `  ✦ preserved all existing ids/states; appended ${addedTasks.length} new task(s).\n`,
+          ),
+        modelNote:
+          `ACTIVE PLAN was preserved and ${addedTasks.length} genuinely new task(s) were appended as ${addedTasks.map((task) => task.id).join(", ")}. ` +
+          "Continue the existing in_progress task first. For later discoveries use task.add, not plan.create; never re-run completed work.",
       };
     }
 

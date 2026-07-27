@@ -172,9 +172,15 @@ export function renderThinkingToggleMessage(): string {
   return chalk.dim("  ▸ thinking collapsed — reasoning hidden");
 }
 
+export interface ThinkingStreamOptions {
+  /** Keep hidden reasoning available to the response-level Ctrl+T viewer. */
+  remember?: boolean | undefined;
+}
+
 export function createThinkingStreamParser(
   onVisible: (text: string) => void,
   onReasoning?: (text: string) => void,
+  options: ThinkingStreamOptions = {},
 ): {
   push(token: string): void;
   finish(): ThinkingResult;
@@ -273,7 +279,9 @@ export function createThinkingStreamParser(
       processPending(true);
       if (inThink) finishThinkingBlock();
       const thinkContent = trimBlocks(thinkBlocks);
-      if (thinkContent) rememberThinking(thinkContent);
+      if (thinkContent && options.remember !== false) {
+        rememberThinking(thinkContent);
+      }
       return {
         visible,
         hasThinking: thinkContent.length > 0,

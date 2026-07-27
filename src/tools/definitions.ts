@@ -83,9 +83,18 @@ export const PLAN_TOOL_NAMES = new Set([
   "task.update",
 ]);
 
-/** Meta tools with no registry handler (plan + ask-mode handoff). */
-export const NON_REGISTRY_TOOL_NAMES = new Set([
+/** Plan-independent Responder receipt tools dispatched by the runner. */
+export const RESPONDER_TOOL_NAMES = new Set(["job.read"]);
+
+/** Every runner-owned meta tool that has no registry handler. */
+export const RUNNER_META_TOOL_NAMES = new Set([
   ...PLAN_TOOL_NAMES,
+  ...RESPONDER_TOOL_NAMES,
+]);
+
+/** Meta tools with no registry handler (runner-owned + ask-mode handoff). */
+export const NON_REGISTRY_TOOL_NAMES = new Set([
+  ...RUNNER_META_TOOL_NAMES,
   "agent.handoff",
 ]);
 
@@ -331,7 +340,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   ),
   def(
     "shell.exec",
-    "Run a finite shell command and wait for completion. Default timeoutMs is 40000; choose a larger timeout for builds/installs/scaffolds. Known long installs get a safe automatic budget when omitted. Expensive scans/searches (broad port specs, wordlist fuzzing, filesystem-wide find) are automatically launched as durable background jobs; when a backgroundJob receipt is returned, poll shell.tail using nextOffset and shell.jobs until terminal status instead of launching a duplicate. Pass background:\"never\" when you need the output in this turn, or background:\"always\" to force a durable job. Pass cwd instead of cd; use shell.start for persistent servers/watchers/listeners. Set responder:true ONLY for a long, self-completing scan (ffuf/nmap/gobuster and similar) you want to fire-and-forget: the Responder then tracks it, wakes you with the result, and you must NOT poll it. Leave responder off (default) for everything else and poll normally.",
+    "Run a finite shell command and wait for completion. Default timeoutMs is 40000; choose a larger timeout for builds/installs/scaffolds. Known long installs get a safe automatic budget when omitted. Expensive self-completing scans/searches (broad nmap, wordlist fuzzing, filesystem-wide find) auto-launch as Responder jobs: continue other work and do not poll; their terminal result is delivered automatically. Persistent commands auto-launch as normal background jobs that require shell.tail/shell.jobs plus a readiness probe. Pass background:\"never\" to force foreground and honor timeoutMs, or background:\"always\" to force a normal pollable job. responder:true explicitly delegates a finite background job; responder:false explicitly keeps an auto-backgrounded finite job pollable. Pass cwd instead of cd; use shell.start for persistent servers/watchers/listeners.",
     {
       type: "object",
       properties: {
@@ -347,7 +356,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         responder: {
           type: "boolean",
           description:
-            "Delegate this durable job to the Responder (fire-and-forget, auto-wake on completion). Default false: a normal background job you poll yourself.",
+            "Ownership override for a finite background job. true: Responder fire-and-continue with automatic terminal delivery (never poll). false: normal pollable job, including when cost auto-backgrounds it. Omit: costly finite commands auto-delegate; persistent commands remain normal jobs.",
         },
         parentTaskId: {
           type: "string",
@@ -362,23 +371,13 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   ),
   def(
     "shell.start",
-    "Start a persistent server/watcher/listener as a tracked background job. Returns a stable job id and persists registry/status across turns and CLI restarts. Captured output is incrementally available while this CLI process owns the child pipes; after a restart, status is reconciled but detached output pipes cannot be reattached. Launch success does not prove readiness: use shell.tail with offset/nextOffset, shell.jobs, and an application readiness probe. Do not start duplicates; use shell.stop for cleanup. Durable background jobs have no generic execution deadline and stop only naturally, by explicit cancellation, process error, or authorization expiry. Servers do not self-complete, so leave responder off here and poll/probe as usual.",
+    "Start a persistent server/watcher/listener as a normal tracked background job. Returns a stable job id and persists registry/status across turns and CLI restarts. Captured output is incrementally available while this CLI process owns the child pipes; after a restart, status is reconciled but detached output pipes cannot be reattached. Launch success does not prove readiness: use shell.tail with offset/nextOffset, shell.jobs, and an application readiness probe. Do not start duplicates; use shell.stop for cleanup. Durable background jobs have no generic execution deadline and stop only naturally, by explicit cancellation, process error, or authorization expiry. Servers do not self-complete, so shell.start cannot delegate to the Responder.",
     {
       type: "object",
       properties: {
         command: { type: "string" },
         cwd: { type: "string" },
         name: { type: "string" },
-        responder: {
-          type: "boolean",
-          description:
-            "Delegate to the Responder (fire-and-forget, auto-wake on completion). Default false. Only useful for a job that exits on its own; leave off for long-lived servers/watchers.",
-        },
-        parentTaskId: {
-          type: "string",
-          description:
-            "Plan task id that owns this delegation (e.g. \"t3\"). Required whenever more than one task could own it; the Responder child is created under exactly this task.",
-        },
       },
       required: ["command"],
       additionalProperties: false,
@@ -441,15 +440,40 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   ),
   def(
     "net.scan",
-    "Port/service scan a target with nmap (confirm required for live scans).",
+    "Validated nmap port/service scan. Put only the IP, hostname, or CIDR in target; put a port expression such as 1-1000 in ports without a -p prefix. Use profile for scan behavior: scanType syn/tcp/udp/ping, serviceDetect boolean, scripts as an array of safe NSE names (for -sC use [\"default\"]), timing T0-T5, or topPorts. Broad/deep scans run as Responder jobs: do not poll; continue other work and wait for automatic terminal delivery.",
     {
       type: "object",
       properties: {
-        target: { type: "string" },
-        ports: { type: "string" },
+        target: {
+          type: "string",
+          description: "IP, hostname, or CIDR only; never append nmap flags",
+        },
+        ports: {
+          type: "string",
+          description: "Port or range expression, e.g. 443, 80,443, or 1-1000; omit -p",
+        },
         profile: {
           type: "object",
-          description: "Structured nmap profile",
+          description: "Structured nmap options",
+          properties: {
+            scanType: {
+              type: "string",
+              enum: ["syn", "tcp", "udp", "ping"],
+            },
+            topPorts: { type: "integer", minimum: 1, maximum: 65535 },
+            serviceDetect: { type: "boolean" },
+            scripts: {
+              type: "array",
+              items: { type: "string", pattern: "^[A-Za-z0-9_-]+$" },
+              description: "Safe NSE script names; use [\"default\"] for nmap -sC",
+            },
+            timing: {
+              type: "string",
+              enum: ["T0", "T1", "T2", "T3", "T4", "T5"],
+            },
+            udp: { type: "boolean" },
+          },
+          additionalProperties: false,
         },
         flags: {
           type: "string",
@@ -976,7 +1000,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   ),
   def(
     "plan.create",
-    "Create or revise a durable multi-step session plan with task checklist.",
+    "Create the initial durable plan or revise a draft awaiting approval. If a plan is already approved/in progress, use task.add; runtime preserves it and treats proposed new tasks as append-only.",
     {
       type: "object",
       properties: {
@@ -1064,8 +1088,27 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     { mutates: true },
   ),
   def(
+    "job.read",
+    "Mark one delivered Responder job result read after analysis. This is plan-independent and mandatory before a final response. Identify the receipt by jobId or notificationId; reading atomically records delivery and prevents duplicate notification of the same result revision.",
+    {
+      type: "object",
+      properties: {
+        jobId: {
+          type: "string",
+          description: "Canonical background job id from the delivered result",
+        },
+        notificationId: {
+          type: "string",
+          description: "Exact notification id from the delivered Responder result",
+        },
+      },
+      additionalProperties: false,
+    },
+    { mutates: true },
+  ),
+  def(
     "task.read",
-    "Mark one delivered Responder subtask result read. Call this only after you have seen and analyzed that notification's result and are satisfied the responder subtask is finished. This is mandatory before continuing to a final response; never call it merely because a result arrived.",
+    "Compatibility alias for job.read using notificationId. It does not require an active plan. Call only after analyzing the delivered Responder result.",
     {
       type: "object",
       properties: {
@@ -1178,6 +1221,7 @@ export function getToolDefinitions(filter?: {
       "plan.create",
       "task.add",
       "task.move",
+      "job.read",
       "task.read",
       "task.update",
     ]);

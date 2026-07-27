@@ -312,6 +312,48 @@ export function longFiniteCommandCost(command: string): {
   return { reason: undefined };
 }
 
+export interface ShellExecBackgroundPolicy {
+  readonly backgroundMode: "auto" | "never" | "always";
+  readonly costReason: string | undefined;
+  readonly persistent: boolean;
+  readonly wantsBackground: boolean;
+  readonly responder: boolean;
+}
+
+/** Single ownership policy shared by pre-dispatch planning and tool runtime. */
+export function resolveShellExecBackgroundPolicy(input: {
+  command: string;
+  background?: unknown;
+  responder?: unknown;
+}): ShellExecBackgroundPolicy {
+  const backgroundMode =
+    input.background === "never" || input.background === "always"
+      ? input.background
+      : "auto";
+  const responderPreference =
+    typeof input.responder === "boolean" ? input.responder : undefined;
+  const costReason = longFiniteCommandCost(input.command).reason;
+  const persistent = looksLongRunning(input.command);
+  const wantsBackground =
+    backgroundMode === "always"
+      ? true
+      : backgroundMode === "never"
+        ? false
+        : persistent || Boolean(costReason) || responderPreference === true;
+  const responder =
+    wantsBackground &&
+    !persistent &&
+    (responderPreference ??
+      (backgroundMode === "auto" && Boolean(costReason)));
+  return {
+    backgroundMode,
+    costReason,
+    persistent,
+    wantsBackground,
+    responder,
+  };
+}
+
 function portSpecIsBroad(spec: string): boolean {
   if (spec === "-" || spec.includes("-")) return true;
   const parts = spec.split(",").filter(Boolean);

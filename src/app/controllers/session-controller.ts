@@ -1,34 +1,21 @@
-import type {
-  ChatMessage,
-  Mode,
-  ProviderId,
-  TokenUsage,
-  ToolResult,
-} from "../../types.js";
+import type { ChatMessage, Mode, ProviderId, TokenUsage, ToolResult } from "../../types.js";
 import {
-  compactMessagesWithSummary,
   estimateMessagesTokens,
   isCompactionMemoryMessage,
   type CompactResult,
 } from "../../agent/context-manager.js";
 import { repairToolProtocol } from "../../agent/tool-history.js";
 import {
-  formatContextChip,
-  snapshotFromEstimate,
-  type ContextUsageSnapshot,
+  formatContextChip, snapshotFromEstimate, type ContextUsageSnapshot,
 } from "../../llm/token-usage.js";
 import {
-  compactedUsageSnapshot,
-  recordUsageSnapshot,
-  resolveContextUsageSnapshot,
-  restoredUsageSnapshot,
-  createContextProjector,
-  type PartialUsageSnapshot,
-  type ContextProjection,
-  type ContextUsageTarget,
+  compactedUsageSnapshot, recordUsageSnapshot, resolveContextUsageSnapshot,
+  restoredUsageSnapshot, createContextProjector, type PartialUsageSnapshot,
+  type ContextProjection, type ContextUsageTarget,
 } from "./session-context-usage.js";
 import { createSessionPolicy, type SessionPolicy } from "../../agent/session-policy.js";
 import { previousTurnSignal } from "./turn-continuation.js";
+import type { PreviousTurnSignal } from "../../agent/continue-orient.js";
 import { buildTurnRequest } from "./session-turn-request.js";
 import { resolveTurnInput } from "../../attachments/service.js";
 import { generateSessionTitle } from "../../agent/session-title.js";
@@ -36,20 +23,13 @@ import { clearTextOnlyModels } from "../../llm/tool-protocol.js";
 import { getConfig, getProviderModel } from "../../store/config.js";
 import { beginSessionWorkspace, getActiveSessionWorkspace, type SessionWorkspace } from "../../store/session-workspace.js";
 import { materializeHistoryImages } from "../../store/history.js";
-import { summarizeForSessionCompact } from "./session-compact-helper.js";
+import {
+  runSessionCompaction,
+} from "./session-compact-helper.js";
 import { settlePersistedResponderResults } from "./responder-settlement.js";
 import type { TranscriptItem as ClassicTranscriptItem } from "../../tui/state.js";
-import {
-  asSessionId,
-  type AnyAppEvent,
-  type SessionId,
-  type TurnId,
-} from "../events/app-event.js";
-import {
-  EventSequencer,
-  type Clock,
-  type IdFactory,
-} from "../events/sequencer.js";
+import { asSessionId, type AnyAppEvent, type SessionId, type TurnId } from "../events/app-event.js";
+import { EventSequencer, type Clock, type IdFactory } from "../events/sequencer.js";
 import { OutputSpool } from "../events/event-buffer.js";
 import type { AgentPort, RunTurnRequest } from "../ports/agent-port.js";
 import type { JobsPort } from "../ports/jobs-port.js";
@@ -173,8 +153,9 @@ export class SessionController implements Disposable {
   private contextUsage: ContextUsageSnapshot | undefined;
   /** Bumped by reset/history load/dispose so late callbacks can be ignored. */
   private lifecycleGeneration = 0;
-  /** Last settled turn result; gates whether queued prompts may continue. */
   private lastTurnResult: TurnResult | undefined;
+  private restoredPreviousTurn: PreviousTurnSignal | undefined;
+  private activeTurnGeneration: number | undefined;
   private readonly projectContext = createContextProjector((snapshot) =>
     formatContextChip(snapshot, { compact: false }),
   );
@@ -354,6 +335,8 @@ export class SessionController implements Disposable {
       contextUsage?: ContextUsageSnapshot | PartialUsageSnapshot | undefined;
       /** Loaded durable revision; resume advances to a fresh writer generation. */
       persistenceRevision?: number | undefined;
+      /** Last turn outcome or interrupted in-flight checkpoint from history. */
+      previousTurn?: PreviousTurnSignal | undefined;
       /** Per-session scratch/output folder (restored with history). */
       workspaceFolder?: string | undefined;
       workspaceCode?: string | undefined;
@@ -365,6 +348,7 @@ export class SessionController implements Disposable {
     const healed: ChatMessage[] = messages.map((m) => ({ ...m }));
     repairToolProtocol(healed);
     this.history = healed;
+    this.restoredPreviousTurn = options.previousTurn;
     this.prompts.clear();
     this.spool.clear();
     // Keep the resumed session's existing title; only refresh after the user
@@ -421,6 +405,7 @@ export class SessionController implements Disposable {
   reset(options: { mintNewId?: boolean } = {}): void {
     this.beginLifecycleGeneration();
     this.history = [];
+    this.restoredPreviousTurn = undefined;
     this.prompts.clear();
     this.sessionTitle = undefined;
     this.titledAtUserCount = 0;
@@ -467,68 +452,43 @@ export class SessionController implements Disposable {
 
     const cfg = getConfig();
     const provider = this.provider ?? (cfg.defaultProvider as ProviderId | undefined);
-    const model = this.model ?? cfg.defaultModel;
+    const history = [...this.history];
     const persist = options.persist !== false;
-    const historySnapshot = [...this.history];
-
+    const generation = this.lifecycleGeneration;
+    const abortController = new AbortController();
     this.compactingFlag = true;
-    const compactGeneration = this.lifecycleGeneration;
-    const compactAc = new AbortController();
-    this.compactAbort = compactAc;
-    if (signal?.aborted) compactAc.abort();
-    else signal?.addEventListener("abort", () => compactAc.abort(), { once: true });
+    this.compactAbort = abortController;
+    if (signal?.aborted) abortController.abort();
+    else signal?.addEventListener("abort", () => abortController.abort(), { once: true });
     this.notifyState();
+
     try {
-      const result = await compactMessagesWithSummary(
-        historySnapshot,
-        (prompt) =>
-          summarizeForSessionCompact(prompt, {
-            provider,
-            model,
-            signal: compactAc.signal,
-            purpose: options.purpose,
-          }),
-        { budgetTokens: 0, keepRecent, purpose: options.purpose },
+      return await runSessionCompaction({
+        history,
         sessionTranscript,
-      );
-      // A reset/load/dispose during the summary rebound this controller, so
-      // committing here would leak session A's history into session B.
-      if (compactGeneration !== this.lifecycleGeneration) return result;
-      this.history = result.messages;
-      if (result.summarized) this.noteContextCompacted(result.afterTokens);
-      this.notifyState();
-      if (persist && result.summarized && result.after !== result.before) {
-        // Re-compaction can encounter legacy memory in resumed histories.
-        // Emit the newest inserted memory, never an older retained snapshot.
-        const memo =
-          [...result.messages]
-            .reverse()
-            .find((message) => isCompactionMemoryMessage(message))?.content ??
-          "Compacted context";
-        this.deps.emit(
-          this.sequencer.build(
-            "compacted",
-            {
-              summary: memo,
-              beforeTokens: result.beforeTokens,
-              afterTokens: result.afterTokens,
-            },
-            undefined,
-          ),
-        );
-        await this.persistNow();
-      }
-      return result;
+        keepRecent,
+        signal: abortController.signal,
+        purpose: options.purpose,
+        provider,
+        model: this.model ?? cfg.defaultModel,
+        persist,
+        compactionId: String(this.sequencer.ids.message()),
+        sequencer: this.sequencer,
+        emit: this.deps.emit,
+        isCurrent: () => generation === this.lifecycleGeneration,
+        commit: (result) => {
+          this.history = result.messages;
+          if (result.summarized) this.noteContextCompacted(result.afterTokens);
+          this.notifyState();
+        },
+        persistNow: () => this.persistNow(),
+      });
     } finally {
-      if (compactGeneration === this.lifecycleGeneration) {
+      if (generation === this.lifecycleGeneration) {
         this.compactingFlag = false;
         this.compactAbort = undefined;
       }
       this.notifyState();
-      // Becoming idle after compaction is an idle transition just like a turn
-      // ending: a responder completion that arrived while compactingFlag was
-      // set had its wake suppressed by isBusy(). Re-arm it here or the agent
-      // stays stranded (job exited, no wake, no delivery) until the next turn.
       this.responder?.scheduleWake();
     }
   }
@@ -539,6 +499,13 @@ export class SessionController implements Disposable {
       sessionId: this.sessionIdValue,
       history: this.history,
     });
+  }
+
+  private continuationCheckpoint(): PreviousTurnSignal | undefined {
+    if (this.activeTurnGeneration === this.lifecycleGeneration) {
+      return { status: "error", reason: "the previous process stopped before the turn settled" };
+    }
+    return previousTurnSignal(this.lastTurnResult) ?? this.restoredPreviousTurn;
   }
 
   async persistNow(name?: string): Promise<void> {
@@ -559,6 +526,7 @@ export class SessionController implements Disposable {
       sessionId: this.sessionIdValue,
       name: name ?? this.sessionTitle,
       transcript: this.deps.getTranscriptSnapshot?.(),
+      previousTurn: this.continuationCheckpoint() ?? null,
       ...(contextUsage ? { contextUsage } : {}),
     });
     this.settlePersistedResponderResults();
@@ -695,6 +663,7 @@ export class SessionController implements Disposable {
     const config = getConfig();
     const provider = this.provider ?? config.defaultProvider;
     const model = this.model ?? getProviderModel(provider);
+    const checkpoint = this.continuationCheckpoint();
     const built = buildTurnRequest({
       prompt,
       mode: this.mode,
@@ -705,13 +674,12 @@ export class SessionController implements Disposable {
       ...(opts?.displayPrompt !== undefined
         ? { displayPrompt: opts.displayPrompt }
         : {}),
-      ...(previousTurnSignal(this.lastTurnResult)
-        ? { previousTurn: previousTurnSignal(this.lastTurnResult) }
-        : {}),
+      ...(checkpoint ? { previousTurn: checkpoint } : {}),
     });
     if (built.fallbackReason) this.notice("info", built.fallbackReason);
     const request = built.request;
     const turnGeneration = this.lifecycleGeneration;
+    this.activeTurnGeneration = turnGeneration;
     const pending = this.turn.run(request, {
       confirm: this.deps.confirm,
       requestSecret: this.deps.requestSecret,
@@ -728,10 +696,16 @@ export class SessionController implements Disposable {
     });
     this.notifyState();
     const result = await pending;
+    if (this.activeTurnGeneration === turnGeneration) {
+      this.activeTurnGeneration = undefined;
+    }
     this.notifyState();
     this.responder?.scheduleWake();
     const sameGeneration = turnGeneration === this.lifecycleGeneration;
-    if (sameGeneration) this.lastTurnResult = result;
+    if (sameGeneration) {
+      this.lastTurnResult = result;
+      this.restoredPreviousTurn = undefined;
+    }
     try {
       if (
         sameGeneration &&
@@ -774,6 +748,7 @@ export class SessionController implements Disposable {
   private beginLifecycleGeneration(): void {
     this.lifecycleGeneration += 1;
     this.lastTurnResult = undefined;
+    this.restoredPreviousTurn = undefined;
     if (this.turn.running) this.turn.abort();
     this.compactAbort?.abort();
     this.compactAbort = undefined;

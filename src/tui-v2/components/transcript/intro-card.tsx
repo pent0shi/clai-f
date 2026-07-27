@@ -47,6 +47,7 @@ export function IntroCard(props: IntroCardProps): ReactNode {
   // composer meta line, even before the session selection is populated.
   const provider = session.provider ?? cfg.defaultProvider;
   const model = session.model ?? cfg.defaultModel;
+  const variant = cfg.thinking.enabled ? cfg.thinking.effort : "off";
 
   const lines = useMemo(
     () =>
@@ -58,6 +59,7 @@ export function IntroCard(props: IntroCardProps): ReactNode {
         model,
         permissions,
         workdir,
+        variant,
       }).map((line) => ansiToStyledText(line.length === 0 ? " " : line)),
     [
       width,
@@ -67,6 +69,7 @@ export function IntroCard(props: IntroCardProps): ReactNode {
       model,
       permissions,
       workdir,
+      variant,
     ],
   );
 

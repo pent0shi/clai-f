@@ -169,8 +169,8 @@ describe("ordinary-turn responder delivery", () => {
             toolCalls: [
               {
                 id: "call-read-responder",
-                name: "task.read",
-                args: { notificationId: jobsHarness.notification.id },
+                name: "job.read",
+                args: { jobId: jobsHarness.notification.jobId },
               },
             ],
             finishReason: "tool_calls",
@@ -312,6 +312,7 @@ describe("standalone responder report continuation", () => {
           model: "gpt-4o-mini",
           maxSteps: 4,
           signal: abort.signal,
+          displayPrompt: null,
           session: policy,
           onEvent: () => undefined,
         },
@@ -323,7 +324,7 @@ describe("standalone responder report continuation", () => {
         requests[1]?.messages.some(
           (message) =>
             message.role === "user" &&
-            message.content.includes("MUST call task.read"),
+            message.content.includes("MUST call job.read"),
         ),
       ).toBe(true);
       expect(
@@ -336,5 +337,61 @@ describe("standalone responder report continuation", () => {
     } finally {
       await deletePlan(sessionId);
     }
+  });
+
+  it("settles an exact stale internal wake without retrying an impossible read", async () => {
+    const [{ createSessionPolicy }, { runAgentTurn }] = await Promise.all([
+      import("../src/agent/session-policy.js"),
+      import("../src/agent/runner.js"),
+    ]);
+    const requests: CompletionRequest[] = [];
+    streamMock.mockImplementation(
+      async (request: CompletionRequest): Promise<CompletionResult> => {
+        requests.push(request);
+        if (requests.length === 1) {
+          return {
+            text: "",
+            provider: "openai",
+            model: "gpt-test",
+            toolCalls: [
+              {
+                id: "call-read-stale",
+                name: "job.read",
+                args: { notificationId: jobsHarness.notification.id },
+              },
+            ],
+            finishReason: "tool_calls",
+          };
+        }
+        return {
+          text: "The cancelled scan was discarded.",
+          provider: "openai",
+          model: "gpt-test",
+          finishReason: "stop",
+        };
+      },
+    );
+
+    const outcome = await runAgentTurn(
+      [
+        "Responder result arrived while the model was idle.",
+        `notification=${jobsHarness.notification.id}`,
+        `job=${jobsHarness.notification.jobId}`,
+        "resultRevision=1",
+      ].join("\n"),
+      {
+        provider: "openai",
+        model: "gpt-4o-mini",
+        maxSteps: 3,
+        displayPrompt: null,
+        session: createSessionPolicy("inband-session"),
+        onEvent: () => undefined,
+      },
+    );
+
+    expect(outcome.status).toBe("succeeded");
+    expect(outcome.answer).toContain("cancelled scan was discarded");
+    expect(requests).toHaveLength(2);
+    expect(jobsHarness.manager.markRead).not.toHaveBeenCalled();
   });
 });

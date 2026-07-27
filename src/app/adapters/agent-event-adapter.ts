@@ -175,6 +175,33 @@ export class AgentEventAdapter {
           prompt: event.prompt,
         });
         return;
+      case "compaction-start":
+        this.push("compaction-started", {
+          compactionId: event.id,
+          beforeTokens: event.beforeTokens,
+        });
+        return;
+      case "compaction-delta":
+        this.push("compaction-delta", {
+          compactionId: event.id,
+          text: event.text,
+        });
+        return;
+      case "compaction-completed":
+        this.push("compaction-completed", {
+          compactionId: event.id,
+          summary: event.summary,
+          beforeTokens: event.beforeTokens,
+          afterTokens: event.afterTokens,
+        });
+        return;
+      case "compaction-failed":
+        this.push("compaction-failed", {
+          compactionId: event.id,
+          message: event.message,
+          retainedTokens: event.retainedTokens,
+        });
+        return;
       case "compacted":
         this.push("compacted", {
           summary: event.summary,

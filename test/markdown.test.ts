@@ -138,6 +138,27 @@ describe("markdown extras", () => {
     expect(out).toContain("┴");
   });
 
+  it("inserts one bordered spacer between logical body rows only", () => {
+    const md = [
+      "| Item | Notes |",
+      "| --- | --- |",
+      "| One | wrapped words that need several physical lines |",
+      "| Two | final |",
+    ].join("\n");
+    const lines = strip(renderMarkdown(md, 34)).split("\n");
+    const one = lines.findIndex((line) => line.includes("One"));
+    const two = lines.findIndex((line) => line.includes("Two"));
+    const between = lines.slice(one + 1, two);
+    const borderedBlank = between.filter(
+      (line) => line.trim().startsWith("│") && line.replace(/[│\s]/g, "") === "",
+    );
+    expect(borderedBlank).toHaveLength(1);
+    const contentRows = between.filter(
+      (line) => line.trim().startsWith("│") && line.replace(/[│\s]/g, "") !== "",
+    );
+    expect(contentRows.length).toBeGreaterThan(0);
+  });
+
   it("expands <br> inside a table cell into stacked lines (no literal <br>)", () => {
     const md =
       "| Item | Notes |\n| --- | --- |\n| One | first<br>second<br>third |";

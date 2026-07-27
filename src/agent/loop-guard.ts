@@ -1,5 +1,10 @@
 import type { ToolCall } from "../types.js";
 import { slimToolArgs } from "./message-slim.js";
+import {
+  completedOperationObservationDigest,
+  completedOperationSignature,
+  type CompletedOperation,
+} from "./outcomes.js";
 
 export interface ToolAttempt {
   step: number;
@@ -50,11 +55,19 @@ export interface RetryContext {
   dependenciesChanged?: boolean;
   /** The execution environment changed since the failed attempt. */
   environmentChanged?: boolean;
+  /** Stable live state for status probes, excluding elapsed time. */
+  stateKey?: string | undefined;
   /** Structured justification for retrying without an external change. */
   retryReason?: {
     code: string;
     detail: string;
   };
+}
+
+export interface LoopDecision {
+  block: boolean;
+  kind?: "failed-retry" | "unchanged-success" | undefined;
+  reason?: string | undefined;
 }
 
 export class LoopGuard {
@@ -63,9 +76,41 @@ export class LoopGuard {
   private signatureSuccess = new Map<string, boolean>();
   /** Failed read-only signatures that already used their one free env-change retry. */
   private failedReadRetryUsed = new Set<string>();
+  private successfulProbes = new Map<
+    string,
+    {
+      digest: string;
+      unchangedRepeats: number;
+      stateKey?: string | undefined;
+      compareAfterRestore: boolean;
+      retryReason?: string | undefined;
+    }
+  >();
+  private failedProbes = new Map<
+    string,
+    { stateKey?: string | undefined; retryReason?: string | undefined }
+  >();
   private lastSuccessfulNonMetaStep = -1;
 
   constructor(_options: LoopGuardOptions = {}) {}
+
+  restoreCompletedOperations(operations: readonly CompletedOperation[]): void {
+    for (const operation of operations) {
+      if (operation.ok === false) {
+        this.failedProbes.set(operation.signature, {
+          ...(operation.stateKey ? { stateKey: operation.stateKey } : {}),
+        });
+        continue;
+      }
+      if (!operation.observationDigest) continue;
+      this.successfulProbes.set(operation.signature, {
+        digest: operation.observationDigest,
+        unchangedRepeats: operation.unchangedRepeats ?? 0,
+        ...(operation.stateKey ? { stateKey: operation.stateKey } : {}),
+        compareAfterRestore: true,
+      });
+    }
+  }
 
   /**
    * Produce a canonical string for a (name, args) pair so that calls
@@ -93,7 +138,8 @@ export class LoopGuard {
     args: Record<string, unknown>,
     ok: boolean,
     exitCode?: number | undefined,
-    _output?: string | undefined,
+    output?: string | undefined,
+    context?: RetryContext | undefined,
   ): void {
     const sig = this.canonicalize(name, args);
     this.attempts.push({
@@ -116,7 +162,37 @@ export class LoopGuard {
       if (!this.signatureSuccess.has(sig)) this.signatureSuccess.set(sig, false);
     }
 
+    const probeSignature = completedOperationSignature(name, args);
+    if (ok && output !== undefined && probeSignature) {
+      const digest = completedOperationObservationDigest(name, output);
+      const prior = this.successfulProbes.get(probeSignature);
+      const unchanged =
+        prior?.digest === digest && prior.stateKey === context?.stateKey;
+      this.successfulProbes.set(probeSignature, {
+        digest,
+        unchangedRepeats: unchanged ? (prior?.unchangedRepeats ?? 0) + 1 : 0,
+        ...(context?.stateKey ? { stateKey: context.stateKey } : {}),
+        compareAfterRestore: false,
+        ...(prior?.retryReason ? { retryReason: prior.retryReason } : {}),
+      });
+    }
+
+    if (probeSignature) {
+      if (ok) {
+        this.failedProbes.delete(probeSignature);
+      } else {
+        const priorFailure = this.failedProbes.get(probeSignature);
+        this.failedProbes.set(probeSignature, {
+          ...(context?.stateKey ? { stateKey: context.stateKey } : {}),
+          ...(priorFailure?.retryReason
+            ? { retryReason: priorFailure.retryReason }
+            : {}),
+        });
+      }
+    }
+
     if (ok && this.isPathMutatingTool(name)) {
+      this.successfulProbes.clear();
       this.invalidateReadsAfterSuccess(name, args);
     }
   }
@@ -184,11 +260,87 @@ export class LoopGuard {
     name: string,
     args: Record<string, unknown>,
     retryContext?: RetryContext,
-  ): { block: boolean; reason?: string | undefined } {
+  ): LoopDecision {
     if (name === "task.update" || name === "plan.create") {
       return { block: false };
     }
+
+    const probeSignature = completedOperationSignature(name, args);
+    const probe = probeSignature
+      ? this.successfulProbes.get(probeSignature)
+      : undefined;
+    if (probe) {
+      if (probe.compareAfterRestore) {
+        probe.compareAfterRestore = false;
+        return { block: false };
+      }
+      if (
+        retryContext?.stateKey !== undefined &&
+        retryContext.stateKey !== probe.stateKey
+      ) {
+        return { block: false };
+      }
+      const retryReason = retryContext?.retryReason;
+      const reasonKey =
+        retryReason?.code.trim() && retryReason.detail.trim()
+          ? `${retryReason.code.trim()}\0${retryReason.detail.trim()}`
+          : undefined;
+      if (reasonKey && reasonKey !== probe.retryReason) {
+        probe.retryReason = reasonKey;
+        return { block: false };
+      }
+      return {
+        block: true,
+        kind: "unchanged-success",
+        reason:
+          `${name} already completed with identical arguments and no observed state change. ` +
+          "Reuse the prior observation; choose a different action unless the job state, arguments, or retry reason changes.",
+      };
+    }
+
     const sig = this.canonicalize(name, args);
+    const restoredFailure = probeSignature
+      ? this.failedProbes.get(probeSignature)
+      : undefined;
+    if (restoredFailure) {
+      if (
+        retryContext?.dependenciesChanged === true ||
+        retryContext?.environmentChanged === true ||
+        (retryContext?.stateKey !== undefined &&
+          retryContext.stateKey !== restoredFailure.stateKey)
+      ) {
+        return { block: false };
+      }
+      if (READ_ONLY_TOOLS.has(name) && !this.failedReadRetryUsed.has(sig)) {
+        const lastFailStep = [...this.attempts]
+          .reverse()
+          .find((attempt) => attempt.canonicalSignature === sig && !attempt.ok)?.step;
+        if (
+          lastFailStep !== undefined &&
+          this.lastSuccessfulNonMetaStep > lastFailStep
+        ) {
+          this.failedReadRetryUsed.add(sig);
+          return { block: false };
+        }
+      }
+      const retryReason = retryContext?.retryReason;
+      const reasonKey =
+        retryReason?.code.trim() && retryReason.detail.trim()
+          ? `${retryReason.code.trim()}\0${retryReason.detail.trim()}`
+          : undefined;
+      if (reasonKey && reasonKey !== restoredFailure.retryReason) {
+        restoredFailure.retryReason = reasonKey;
+        return { block: false };
+      }
+      return {
+        block: true,
+        kind: "failed-retry",
+        reason:
+          `${name} previously failed with identical arguments, including in an interrupted turn. ` +
+          "Change the command/args, fix the environment, or provide one new structured retry reason.",
+      };
+    }
+
     const count = this.signatureCount.get(sig) ?? 0;
     if (count === 0) return { block: false };
 
@@ -225,6 +377,7 @@ export class LoopGuard {
     }
     return {
       block: true,
+      kind: "failed-retry",
       reason: `${name} previously failed with identical arguments. Change the command/args, fix the environment, or provide a structured retry reason.`,
     };
   }

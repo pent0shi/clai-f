@@ -18,7 +18,7 @@ export function ComposerInputBox(props: {
   readonly editorRef: RefObject<TextareaRenderable | null>;
   readonly focused: boolean;
   readonly running?: boolean | undefined;
-  readonly textRows: number;
+  readonly width: number;
   readonly boxHeight: number;
   readonly metaShown: string;
   readonly chromeFg: string;
@@ -35,7 +35,7 @@ export function ComposerInputBox(props: {
     editorRef,
     focused,
     running,
-    textRows,
+    width,
     boxHeight,
     metaShown,
     chromeFg,
@@ -61,12 +61,14 @@ export function ComposerInputBox(props: {
         : {})}
       style={{
         height: boxHeight,
-        width: "100%",
+        width,
         borderColor: chromeFg,
         backgroundColor: theme.statusBackground,
         paddingLeft: 1,
         paddingRight: 1,
         flexDirection: "row",
+        minWidth: 0,
+        overflow: "hidden",
       }}
       onMouseDown={onMouseDown}
       onMouseScroll={onMouseScroll}
@@ -102,7 +104,14 @@ export function ComposerInputBox(props: {
         onCursorChange={onCursorChange}
         onKeyDown={onKeyDown}
         onMouseDown={onMouseDown}
-        style={{ flexGrow: 1, height: textRows }}
+        style={{
+          flexGrow: 1,
+          flexShrink: 1,
+          minWidth: 0,
+          minHeight: 1,
+          width: 0,
+          height: "100%",
+        }}
       />
     </box>
   );

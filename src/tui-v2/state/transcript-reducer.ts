@@ -9,6 +9,7 @@
 import type { AnyAppEvent } from "../../app/events/app-event.js";
 import type {
   AssistantItem,
+  CompactedItem,
   NoticeLevel,
   ThinkingItem,
   ToolItem,
@@ -411,6 +412,83 @@ export function applyAppEvent(state: TranscriptState, event: AnyAppEvent): Trans
         reason: event.payload.reason,
       }));
 
+    case "compaction-started": {
+      const id = `compacted-${event.payload.compactionId}`;
+      if (withSeq.byId.has(id)) {
+        return updateItem(withSeq, id, (item) => ({
+          ...(item as CompactedItem),
+          streaming: true,
+          error: undefined,
+          beforeTokens: event.payload.beforeTokens,
+        }));
+      }
+      return appendItem(withSeq, {
+        id,
+        sequence: event.sequence,
+        turnId: event.turnId,
+        timestamp: event.timestamp,
+        kind: "compacted",
+        summary: "",
+        beforeTokens: event.payload.beforeTokens,
+        afterTokens: event.payload.beforeTokens,
+        streaming: true,
+      });
+    }
+
+    case "compaction-delta": {
+      const id = `compacted-${event.payload.compactionId}`;
+      if (!withSeq.byId.has(id)) return withSeq;
+      return updateItem(withSeq, id, (item) => ({
+        ...(item as CompactedItem),
+        summary: (item as CompactedItem).summary + event.payload.text,
+        streaming: true,
+      }));
+    }
+
+    case "compaction-completed": {
+      const id = `compacted-${event.payload.compactionId}`;
+      const completed: CompactedItem = {
+        id,
+        sequence: event.sequence,
+        turnId: event.turnId,
+        timestamp: event.timestamp,
+        kind: "compacted",
+        summary: event.payload.summary,
+        beforeTokens: event.payload.beforeTokens,
+        afterTokens: event.payload.afterTokens,
+        streaming: false,
+      };
+      return withSeq.byId.has(id)
+        ? updateItem(withSeq, id, () => completed)
+        : appendItem(withSeq, completed);
+    }
+
+    case "compaction-failed": {
+      const id = `compacted-${event.payload.compactionId}`;
+      const existing = withSeq.byId.get(id);
+      const retainedTokens =
+        event.payload.retainedTokens ??
+        (existing?.kind === "compacted" ? existing.beforeTokens : 0);
+      const failed: CompactedItem = {
+        id,
+        sequence: event.sequence,
+        turnId: event.turnId,
+        timestamp: event.timestamp,
+        kind: "compacted",
+        summary: "",
+        beforeTokens:
+          existing?.kind === "compacted"
+            ? existing.beforeTokens
+            : retainedTokens,
+        afterTokens: retainedTokens,
+        streaming: false,
+        error: event.payload.message,
+      };
+      return existing
+        ? updateItem(withSeq, id, () => failed)
+        : appendItem(withSeq, failed);
+    }
+
     case "compacted":
       return appendItem(withSeq, {
         id: `compacted-${event.id}`,
@@ -421,6 +499,7 @@ export function applyAppEvent(state: TranscriptState, event: AnyAppEvent): Trans
         summary: event.payload.summary,
         beforeTokens: event.payload.beforeTokens,
         afterTokens: event.payload.afterTokens,
+        streaming: false,
       });
 
     case "turn-ended":

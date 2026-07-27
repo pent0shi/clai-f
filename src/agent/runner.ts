@@ -11,7 +11,7 @@ import type {
   ToolDefinition,
   ToolResult,
 } from "../types.js";
-import { streamWithProvider, completeWithProvider } from "../llm/router.js";
+import { completeWithProvider, streamWithProvider } from "../llm/router.js";
 import { streamAlreadyEmitted } from "../llm/stream-progress.js";
 import {
   classifyStreamFailure,
@@ -92,7 +92,7 @@ import {
 import {
   getToolDefinitions,
   getCompactToolDefinitions,
-  PLAN_TOOL_NAMES,
+  RUNNER_META_TOOL_NAMES,
 } from "../tools/definitions.js";
 import {
   appendAssistantWithTools,
@@ -111,6 +111,7 @@ import {
   COMPACTION_MEMORY_PREFIX,
   PLAN_IMPLEMENT_MEMORY_PREFIX,
   isCompactionMemoryMessage,
+  type CompactionSummaryStage,
 } from "./context-manager.js";
 import {
   buildContextBreakdown,
@@ -326,7 +327,7 @@ import {
   recoveryForRuntimeVerify,
   recoveryForShallowPentest,
 } from "./must-continue.js";
-import { scopeContextMessage } from "./scope-context.js";
+import { outOfScopeToolMessage, scopeContextMessage } from "./scope-context.js";
 import {
   EngagementPolicyEngine,
   actionFromUrl,
@@ -383,7 +384,12 @@ import {
   validateCriterionEvidence,
   type OutcomeEnvelope,
 } from "./outcomes.js";
-import { createTurnOutcome, renderTurnOutcome, type TurnOutcomeStatus } from "./turn-outcome.js";
+import {
+  createTurnOutcome,
+  normalizeTurnOutcomeInput,
+  renderTurnOutcome,
+  type TurnOutcomeStatus,
+} from "./turn-outcome.js";
 import {
   beginEngagementAction,
   finishEngagementAction,
@@ -672,30 +678,65 @@ export async function runAgentTurn(
   /** Strip a known prefix from a string, returning the remainder unchanged. */
   const insertedText = (value: string, prefix: string): string =>
     value.startsWith(prefix) ? value.slice(prefix.length) : value;
-  /**
-   * Surface the compacted-context summary to both the TUI (via an event)
-   * and, when running with a direct stdout writer, as a rendered box.
-   * Token-count stats are always emitted for logs.
-   */
-  const writeCompacted = (
+  const writeCompactionStarted = (
+    id: string,
+    beforeTokens: number,
+  ): void => {
+    emit({ type: "compaction-start", id, beforeTokens });
+    if (writesDirectly) {
+      process.stdout.write(chalk.dim("  ✦ Compacted Context · streaming Markdown\n\n"));
+    }
+  };
+  const writeCompactionDelta = (id: string, text: string): void => {
+    if (!text) return;
+    emit({ type: "compaction-delta", id, text });
+    if (writesDirectly) process.stdout.write(text);
+  };
+  const writeCompactionCompleted = (
+    id: string,
     summary: string,
     beforeTokens: number,
     afterTokens: number,
   ): void => {
-    emit({ type: "compacted", summary, beforeTokens, afterTokens });
+    emit({
+      type: "compaction-completed",
+      id,
+      summary,
+      beforeTokens,
+      afterTokens,
+    });
     if (writesDirectly) {
-      const header = chalk.dim("  \u2726 Compacted Context");
       const footer = chalk.dim(
-        `  ~${beforeTokens.toLocaleString()} \u2192 ~${afterTokens.toLocaleString()} tokens`,
+        `\n  ~${beforeTokens.toLocaleString()} → ~${afterTokens.toLocaleString()} tokens`,
       );
-      const body = summary ? renderMarkdown(summary) : "(empty summary)";
-      process.stdout.write(`${header}\n\n${body}\n${footer}\n`);
+      process.stdout.write(`${footer}\n`);
+    }
+  };
+  const writeCompactionFailed = (
+    id: string,
+    message: string,
+    retainedTokens: number,
+  ): void => {
+    emit({ type: "compaction-failed", id, message, retainedTokens });
+    if (writesDirectly) {
+      process.stdout.write(
+        chalk.yellow(
+          `\n  Compaction failed: ${message} (~${retainedTokens.toLocaleString()} tokens retained)\n`,
+        ),
+      );
     }
   };
   // Points at the live message array so finishTurn can hand the full
   // conversation back to the caller. Assigned once `messages` is built below;
   // all later mutations are in-place so this reference stays current.
   let liveMessages: ChatMessage[] = [];
+  let suppressOutcomeDiagnostics = false;
+  const unreadResponderNotificationIds = new Set<string>();
+  const releaseUnreadResponderClaims = (): void => {
+    for (const notificationId of unreadResponderNotificationIds) {
+      jobManager.releaseResponderNotificationClaim(notificationId);
+    }
+  };
   const finishTurn = (
     answer: string,
     steps: number,
@@ -703,14 +744,19 @@ export async function runAgentTurn(
     remainingCriteria: readonly string[] = [],
     reason?: string,
   ): import("./turn-outcome.js").TurnOutcome => {
-    const outcome = createTurnOutcome({
-      status,
-      answer,
-      steps,
-      remainingCriteria,
-      reason,
+    releaseUnreadResponderClaims();
+    const outcome = createTurnOutcome(
+      normalizeTurnOutcomeInput({
+        status,
+        answer,
+        steps,
+        remainingCriteria,
+        reason,
+      }),
+    );
+    const rendered = renderTurnOutcome(outcome, {
+      diagnostics: !suppressOutcomeDiagnostics,
     });
-    const rendered = renderTurnOutcome(outcome);
     writeAssistantMessage(rendered);
     if (options.onMessages) {
       try {
@@ -763,6 +809,7 @@ export async function runAgentTurn(
     // freshness retries — a false "act don't narrate" path burned tokens on
     // web.search recovery loops after a simple "hi".
     const idleOrSocialPrompt = looksLikeIdleOrSocialPrompt(prompt);
+    suppressOutcomeDiagnostics = informationalQuery || idleOrSocialPrompt;
     const freshWebSearchRequired =
       !buildLikeTurn &&
       !pentestLikeTurn &&
@@ -798,7 +845,7 @@ export async function runAgentTurn(
       const base = compact
         ? getCompactToolDefinitions()
         : getToolDefinitions();
-      const allow = new Set([...toolNames, ...PLAN_TOOL_NAMES]);
+      const allow = new Set([...toolNames, ...RUNNER_META_TOOL_NAMES]);
       return base.filter((d) => allow.has(d.name));
     };
     let lastAnswer = "";
@@ -1136,13 +1183,33 @@ export async function runAgentTurn(
         planContextMessage(activePlan, session.planApproved.value),
       );
     }
-    const responderWakeTurn = prompt.startsWith("Responder result arrived");
+    const responderWakeTurn =
+      options.displayPrompt === null &&
+      prompt.startsWith("Responder result arrived");
     const responderWakeNotificationId = responderWakeTurn
       ? /^notification=(.+)$/m.exec(prompt)?.[1]?.trim()
       : undefined;
-    const unreadResponderNotificationIds = new Set<string>();
-    if (responderWakeNotificationId) {
-      unreadResponderNotificationIds.add(responderWakeNotificationId);
+    const responderWakeJobId = responderWakeTurn
+      ? /^job=(.+)$/m.exec(prompt)?.[1]?.trim()
+      : undefined;
+    const responderWakeResultRevision = responderWakeTurn
+      ? Number(/^resultRevision=(\d+)$/m.exec(prompt)?.[1]) || undefined
+      : undefined;
+    const matchesWakeRevision = (notification: ResponderNotification): boolean =>
+      responderWakeResultRevision === undefined ||
+      (notification.resultRevision ?? 1) === responderWakeResultRevision;
+    const wakeNotification = responderWakeNotificationId
+      ? jobManager
+          .getPendingNotifications(session.sessionId)
+          .find(
+            (notification) =>
+              notification.id === responderWakeNotificationId &&
+              (!responderWakeJobId || notification.jobId === responderWakeJobId) &&
+              matchesWakeRevision(notification),
+          )
+      : undefined;
+    if (wakeNotification) {
+      unreadResponderNotificationIds.add(wakeNotification.id);
     }
     const refreshResponderInbox = (): ResponderNotification | undefined => {
       const running = jobManager
@@ -1155,6 +1222,7 @@ export async function runAgentTurn(
             (notification) =>
               notification.responder &&
               unreadResponderNotificationIds.has(notification.id) &&
+              matchesWakeRevision(notification) &&
               !notification.readAt &&
               !notification.analyzedAt &&
               !notification.archivedAt,
@@ -1235,6 +1303,36 @@ export async function runAgentTurn(
 
     const loopGuard = new LoopGuard();
     const engagementPolicy = new EngagementPolicyEngine();
+    const probeStateKey = (call: ToolCall): string | undefined => {
+      const project = (job: ReturnType<typeof jobManager.getJob>) =>
+        job
+          ? [
+              job.id,
+              job.status,
+              job.exitCode ?? null,
+              job.signal ?? null,
+              job.stdoutArtifact,
+              job.artifacts.stdout.bytes,
+              job.artifacts.stdout.sha256,
+              job.stderrArtifact,
+              job.artifacts.stderr.bytes,
+              job.artifacts.stderr.sha256,
+            ]
+          : undefined;
+      if (call.name === "shell.tail" && typeof call.args.id === "string") {
+        const projected = project(jobManager.getJob(call.args.id));
+        return projected ? JSON.stringify(projected) : undefined;
+      }
+      if (call.name === "shell.jobs") {
+        return JSON.stringify(
+          jobManager
+            .getRecentJobs(100, session.sessionId)
+            .map((job) => project(job))
+            .filter(Boolean),
+        );
+      }
+      return undefined;
+    };
 
     // Track consecutive thinking-only responses so we can nudge the model
     // to actually act instead of silently returning an empty answer.
@@ -1560,6 +1658,7 @@ export async function runAgentTurn(
       kind: inferOutcomeKind({ userIntent: prompt, buildLike, pentestLike }),
       continueExisting: continueExistingOutcome,
     });
+    loopGuard.restoreCompletedOperations(outcomeState.completedOperations ?? []);
     await saveOutcomeState(outcomeState);
     // Canonical mutation/artifact ledger feeding the durable compaction envelope.
     const workLedger = new WorkLedger();
@@ -1686,6 +1785,8 @@ export async function runAgentTurn(
       result: ToolResult;
       contextOutput: string;
       lastAnswer?: string | undefined;
+      aborted?: boolean | undefined;
+      suppressedRepeat?: boolean | undefined;
       blockOrCancel?: boolean | undefined;
     }> {
 
@@ -1725,7 +1826,13 @@ export async function runAgentTurn(
       }
 
       if (narrowNmapOperation) {
-        const allowed = new Set(["net.scan", "shell.tail", "shell.jobs"]);
+        const allowed = new Set([
+          "net.scan",
+          "shell.tail",
+          "shell.jobs",
+          "job.read",
+          "task.read",
+        ]);
         if (!allowed.has(call.name)) {
           const reason =
             `Narrow nmap request: ${call.name} was not run because the user requested only one nmap operation. ` +
@@ -1775,18 +1882,28 @@ export async function runAgentTurn(
             detail: String((retryReasonRaw as Record<string, unknown>).detail ?? ""),
           }
           : undefined;
-      // Only block identical *failed* re-tries without changed context.
-      // Successful re-calls always run for real — no "already succeeded /
-      // use prior results" nags (those caused model abnormalities).
+      const currentProbeState = probeStateKey(call);
       const loopCheck = loopGuard.shouldBlock(call.name, call.args, {
         dependenciesChanged: retryDependenciesChanged,
         environmentChanged: retryEnvironmentChanged,
+        ...(currentProbeState ? { stateKey: currentProbeState } : {}),
         ...(retryReason ? { retryReason } : {}),
       });
       if (loopCheck.block) {
         const reason =
           loopCheck.reason ??
           `${call.name} previously failed with identical arguments. Change the command/args and retry.`;
+        if (loopCheck.kind === "unchanged-success") {
+          const result: ToolResult = { ok: true, output: reason, exitCode: 0 };
+          emitToolResult(toolEventId, result, reason);
+          return {
+            ok: true,
+            call,
+            result,
+            contextOutput: reason,
+            suppressedRepeat: true,
+          };
+        }
         writeNotice("warn", reason, chalk.yellow(`  ⚠ ${reason}\n`));
         const result = { ok: false, output: reason, exitCode: 1 };
         emitToolResult(toolEventId, result, reason);
@@ -1802,33 +1919,74 @@ export async function runAgentTurn(
         call.name === "plan.create" ||
         call.name === "task.add" ||
         call.name === "task.move" ||
+        call.name === "job.read" ||
         call.name === "task.read" ||
         call.name === "task.update"
       ) {
-        if (call.name === "task.read") {
-          const notificationId =
+        if (call.name === "job.read" || call.name === "task.read") {
+          const requestedNotificationId =
             typeof call.args.notificationId === "string"
               ? call.args.notificationId.trim()
               : "";
-          const notification = jobManager
-            .getPendingNotifications(session.sessionId)
-            .find((candidate) => candidate.id === notificationId);
-          const visible = unreadResponderNotificationIds.has(notificationId);
-          const marked = Boolean(
+          const requestedJobId =
+            typeof call.args.jobId === "string" ? call.args.jobId.trim() : "";
+          const pending = jobManager.getPendingNotifications(session.sessionId);
+          const eligible = responderWakeTurn
+            ? pending.filter(matchesWakeRevision)
+            : pending;
+          const byNotification = requestedNotificationId
+            ? eligible.find((candidate) => candidate.id === requestedNotificationId)
+            : undefined;
+          const byJob = requestedJobId
+            ? eligible.find((candidate) => candidate.jobId === requestedJobId)
+            : undefined;
+          const identifiersConflict = Boolean(
+            (byNotification && requestedJobId && byNotification.jobId !== requestedJobId) ||
+              (byJob && requestedNotificationId && byJob.id !== requestedNotificationId),
+          );
+          const notification = identifiersConflict
+            ? undefined
+            : (byNotification ?? byJob);
+          const visible = Boolean(
+            notification && unreadResponderNotificationIds.has(notification.id),
+          );
+          const wakeIdentityMatches = Boolean(
+            responderWakeTurn &&
+              (requestedNotificationId || requestedJobId) &&
+              (!requestedNotificationId ||
+                requestedNotificationId === responderWakeNotificationId) &&
+              (!requestedJobId || requestedJobId === responderWakeJobId),
+          );
+          const staleWakeSettled =
+            wakeIdentityMatches && !identifiersConflict && !notification;
+          const persistedRead = Boolean(
             notification &&
               visible &&
-              jobManager.markRead(notificationId, session.sessionId),
+              jobManager.markRead(notification.id, session.sessionId),
           );
-          const output = marked
-            ? `Responder notification ${notificationId} marked delivered and read after model analysis.`
-            : !notificationId
-              ? "task.read failed: notificationId is required."
-              : !visible
-                ? `task.read failed: notification ${notificationId} was not delivered to this model turn. Analyze a delivered result before marking it read.`
-                : `task.read failed: notification ${notificationId} is unavailable, archived, or its read state could not be persisted.`;
-          if (marked && notification) {
+          const marked = persistedRead || staleWakeSettled;
+          const identifier = requestedJobId || requestedNotificationId;
+          const revisionLabel = responderWakeResultRevision
+            ? ` revision ${responderWakeResultRevision}`
+            : "";
+          const output = persistedRead
+            ? `Responder job ${notification!.jobId} (${notification!.id}) marked delivered and read after model analysis.`
+            : staleWakeSettled
+              ? `Responder result ${identifier}${revisionLabel} was already settled or discarded; the stale wake is acknowledged idempotently.`
+              : !requestedNotificationId && !requestedJobId
+                ? `${call.name} failed: jobId or notificationId is required.`
+                : identifiersConflict
+                  ? `${call.name} failed: jobId and notificationId refer to different Responder results.`
+                  : !notification
+                    ? `${call.name} failed: Responder result ${identifier} is unavailable, consumed, or archived.`
+                    : !visible
+                      ? `${call.name} failed: Responder result ${identifier} was not delivered to this model turn. Analyze a delivered result before marking it read.`
+                      : `${call.name} failed: read state for Responder result ${identifier} could not be persisted.`;
+          if (persistedRead && notification) {
             upsertResponderResultLedger(messages, notification);
-            unreadResponderNotificationIds.delete(notificationId);
+            unreadResponderNotificationIds.delete(notification.id);
+          } else if (staleWakeSettled && responderWakeNotificationId) {
+            unreadResponderNotificationIds.delete(responderWakeNotificationId);
           }
           if (!alreadyPrintedIds.has(toolEventId)) {
             const toolCallLine =
@@ -2341,10 +2499,15 @@ export async function runAgentTurn(
         });
         if (!decisionForAction.allowed) {
           const target =
-            decisionForAction.normalizedTarget || action.target || scopeTarget;
-          const reason =
-            `Blocked engagement action for ${target}: ${decisionForAction.reason}. ` +
-            scopeHint(target);
+            decisionForAction.normalizedTarget ||
+            action.target ||
+            scopeTarget ||
+            "requested target";
+          const reason = outOfScopeToolMessage({
+            target,
+            reason: decisionForAction.reason,
+            allowed: scope?.authorizedTargets,
+          });
           writeToolBlocked(
             toolEventId,
             call.name,
@@ -2569,7 +2732,12 @@ export async function runAgentTurn(
       if (engagementAction) {
         engagementLease = engagementPolicy.acquire(scope, engagementAction);
         if (!engagementLease.decision.allowed) {
-          const reason = `Blocked engagement action: ${engagementLease.decision.reason}`;
+          const target = engagementLease.decision.normalizedTarget || engagementAction.target;
+          const reason = outOfScopeToolMessage({
+            target,
+            reason: engagementLease.decision.reason,
+            allowed: scope?.authorizedTargets,
+          });
           const result = { ok: false, output: reason, exitCode: 1 };
           emitToolResult(toolEventId, result, reason);
           return { ok: false, call, result, contextOutput: reason };
@@ -2803,13 +2971,18 @@ export async function runAgentTurn(
         // User Esc/Ctrl+C: force-settle may resolve with a cancel result
         // instead of throwing — still end the turn as aborted.
         if (parentSignal.aborted && !stalledByWatchdog && !hardTimedOut) {
-          writeAbort();
+          const result: ToolResult = {
+            ok: false,
+            output: "Cancelled by user.",
+            exitCode: 130,
+          };
+          emitToolResult(toolEventId, result, result.output);
           return {
             ok: false,
             call,
-            result: { ok: false, output: "Aborted." },
-            contextOutput: "Aborted.",
-            lastAnswer: "Aborted.",
+            result,
+            contextOutput: result.output,
+            aborted: true,
           };
         }
         if (liveBytes > 0) {
@@ -2824,13 +2997,18 @@ export async function runAgentTurn(
         jobManager.updateJobStatus(jobId, "failed", 1);
         if (isAbortError(toolError, toolAc.signal) || forceSettled) {
           if (parentSignal.aborted && !stalledByWatchdog && !hardTimedOut) {
-            writeAbort();
+            const result: ToolResult = {
+              ok: false,
+              output: "Cancelled by user.",
+              exitCode: 130,
+            };
+            emitToolResult(toolEventId, result, result.output);
             return {
               ok: false,
               call,
-              result: { ok: false, output: "Aborted." },
-              contextOutput: "Aborted.",
-              lastAnswer: "Aborted.",
+              result,
+              contextOutput: result.output,
+              aborted: true,
             };
           }
           result = {
@@ -3183,13 +3361,16 @@ export async function runAgentTurn(
 
       workLedger.recordToolCall(call, result.ok, savedOutputPath);
 
+      const completedProbeState = probeStateKey(call);
       const newEvidence = recordToolEvidence(outcomeState, {
         tool: call.name,
         callId: toolEventId,
         ok: result.ok,
+        ...(result.exitCode !== undefined ? { exitCode: result.exitCode } : {}),
         output: result.output,
         ...(savedOutputPath ? { artifact: savedOutputPath } : {}),
         ...(dispatchedTaskId ? { taskId: dispatchedTaskId } : {}),
+        ...(completedProbeState ? { stateKey: completedProbeState } : {}),
         args: call.args,
       });
       let hypothesisDelta = 0;
@@ -3271,6 +3452,7 @@ export async function runAgentTurn(
         result.ok,
         result.exitCode,
         result.output,
+        completedProbeState ? { stateKey: completedProbeState } : undefined,
       );
 
       // Evidence for verify-before-done: only successful real work counts.
@@ -3464,6 +3646,7 @@ export async function runAgentTurn(
     const AUTO_COMPACT_KEEP_RECENT = 2;
     let lastCompactionMsgCount = 0;
     const compactionAttempts = new CompactionAttemptLedger();
+    let activeCompactionId: string | undefined;
     /** E5: identical tool bodies within this turn → pointer instead of re-append. */
     const toolResultHashes = new Map<
       string,
@@ -3479,20 +3662,55 @@ export async function runAgentTurn(
 
     const summarizeForCompaction = async (
       summaryPrompt: string,
+      stage?: CompactionSummaryStage,
     ): Promise<string> => {
-      const response = await completeWithProvider({
+      const streamFinalSummary = stage?.phase !== "map";
+      const compactionId = streamFinalSummary ? activeCompactionId : undefined;
+      const deltaParser = compactionId
+        ? createThinkingStreamParser(
+            (text) => writeCompactionDelta(compactionId, text),
+            undefined,
+            { remember: false },
+          )
+        : undefined;
+      const request = {
         provider,
         model,
         messages: [
-          { role: "system", content: COMPACTION_SYSTEM_PROMPT },
-          { role: "user", content: summaryPrompt },
+          { role: "system" as const, content: COMPACTION_SYSTEM_PROMPT },
+          { role: "user" as const, content: summaryPrompt },
         ],
         temperature: 0.1,
-        // Prefer dense memory; enough room for findings without forcing a tiny stub.
         maxTokens: 2_048,
         signal: options.signal,
+      };
+      const response = await streamWithProvider(
+        request,
+        (token) => deltaParser?.push(token),
+        { onStatus: () => undefined },
+      );
+      deltaParser?.finish();
+      const parsed = stripThinking(response.text);
+      if (parsed.visible.trim() || !parsed.hasThinking) return response.text;
+
+      const retry = await completeWithProvider({
+        ...request,
+        messages: [
+          {
+            role: "system" as const,
+            content: `${COMPACTION_SYSTEM_PROMPT}\nReturn only the continuation-memory summary. Do not include analysis, reasoning, or <think> tags.`,
+          },
+          { role: "user" as const, content: summaryPrompt },
+        ],
+        temperature: 0,
+        maxTokens: 8_192,
+        thinking: { enabled: false, effort: "none" as const },
       });
-      return response.text;
+      const retryVisible = stripThinking(retry.text).visible.trim();
+      if (retryVisible && compactionId) {
+        writeCompactionDelta(compactionId, retryVisible);
+      }
+      return retry.text;
     };
 
     /**
@@ -3568,6 +3786,7 @@ export async function runAgentTurn(
       if (!force && beforeTokens < compactTrigger) return;
       // Structural eligibility only: there must be closed history to summarize.
       if (messages.length <= AUTO_COMPACT_KEEP_RECENT + 2) return;
+      const durableEnvelope = await buildTurnDurableEnvelope();
       const attemptKey = compactionAttemptKey({
         messages,
         provider,
@@ -3575,10 +3794,13 @@ export async function runAgentTurn(
         dialect: toolDialect,
         triggerTokens: compactTrigger,
         schemaHash: toolSchemaHash(selectToolDefs(nativeToolsActive, useCompactSystemPrompt)),
+        ...(durableEnvelope ? { durableEnvelope } : {}),
       });
       if (!force && compactionAttempts.isSuppressed(attemptKey)) return;
+      const compactionId = `compact-${randomUUID().slice(0, 12)}`;
+      activeCompactionId = compactionId;
+      writeCompactionStarted(compactionId, beforeTokens);
       try {
-        const durableEnvelope = await buildTurnDurableEnvelope();
         const result = await compactMessagesWithSummary(
           messages,
           summarizeForCompaction,
@@ -3600,9 +3822,13 @@ export async function runAgentTurn(
             afterMessages: result.messages,
           })
         ) {
+          writeCompactionFailed(
+            compactionId,
+            "The generated summary was not accepted; the original context was retained.",
+            beforeTokens,
+          );
           return;
         }
-        // The accepted candidate must actually fit the trigger it was run for,
         // otherwise the oversized request is sent anyway and corrective
         // compaction is suppressed as "already compacted".
         const candidateTokens = estimateNextRequestTokens(result.messages);
@@ -3621,6 +3847,11 @@ export async function runAgentTurn(
             chalk.yellow(
               `  ⚠ context still ~${candidateTokens.toLocaleString()} tokens after compaction; largest block: ${dominant}\n`,
             ),
+          );
+          writeCompactionFailed(
+            compactionId,
+            `Summary remained over the context limit; largest block: ${dominant}.`,
+            beforeTokens,
           );
           return;
         }
@@ -3666,7 +3897,12 @@ export async function runAgentTurn(
                   : COMPACTION_MEMORY_PREFIX,
               );
         // Card shows pre/post of the summarization; plan re-injection is noted.
-        writeCompacted(summaryText, beforeTokens, compactedTokens);
+        writeCompactionCompleted(
+          compactionId,
+          summaryText,
+          beforeTokens,
+          compactedTokens,
+        );
         const planNote =
           afterTokens > compactedTokens
             ? ` (compacted to ~${compactedTokens.toLocaleString()}, +plan → ~${afterTokens.toLocaleString()})`
@@ -3679,18 +3915,22 @@ export async function runAgentTurn(
           ),
         );
       } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        writeCompactionFailed(
+          compactionId,
+          /aborted/i.test(message) ? "Compaction was cancelled." : message,
+          beforeTokens,
+        );
         if (
           error instanceof Error &&
           (error.name === "AbortError" || error.message.includes("aborted"))
         ) {
           throw error;
         }
-        // Summarization failed — DO NOT fall back to a mechanical dump. Keep the
-        // current context and continue; we'll try again as it keeps growing.
         compactionAttempts.recordFailure(attemptKey);
-        await auditLog("agent.compact.failed", {
-          reason: error instanceof Error ? error.message : String(error),
-        });
+        await auditLog("agent.compact.failed", { reason: message });
+      } finally {
+        if (activeCompactionId === compactionId) activeCompactionId = undefined;
       }
     }
 
@@ -4726,7 +4966,7 @@ export async function runAgentTurn(
             messages.push(
               recoveryUserMessage(
                 `You have ${unread.length} delivered Responder result(s) that remain unread: ${unread.join(", ")}. ` +
-                  "If analysis is incomplete, call the necessary bounded evidence tool now. If you have seen and analyzed each result and are satisfied its responder subtask is finished, you MUST call task.read for each exact notificationId before giving a final response. Do not merely say it is read.",
+                  "If analysis is incomplete, call only the bounded evidence tool needed now. If each result has been analyzed and is satisfactory, you MUST call job.read with its jobId or exact notificationId before giving a final response. job.read does not require an active plan; do not create or update a plan merely to acknowledge a result.",
               ),
             );
             continue;
@@ -5284,6 +5524,8 @@ export async function runAgentTurn(
             contextOutput: string;
             ok: boolean;
             lastAnswer?: string | undefined;
+            aborted?: boolean | undefined;
+            suppressedRepeat?: boolean | undefined;
             blockOrCancel?: boolean | undefined;
           },
         ): void => {
@@ -5291,7 +5533,7 @@ export async function runAgentTurn(
           if (res.ok && res.call.name === "plan.create") {
             planCreatedThisTurn = true;
           }
-          productiveSteps += 1;
+          if (!res.suppressedRepeat) productiveSteps += 1;
           // E5: collapse identical large tool bodies within this turn to a pointer.
           const deduped = dedupeToolContextOutput({
             content: res.contextOutput,
@@ -5493,7 +5735,7 @@ export async function runAgentTurn(
           }
           // User Esc/Ctrl+C only — never cancel siblings because a delete failed
           // or a confirm was declined; the model must see every tool result.
-          if (res.lastAnswer === "Aborted.") aborted = true;
+          if (res.aborted) aborted = true;
         };
 
         // Multi-task sync guard: when one model message advances more than one
@@ -5699,7 +5941,7 @@ export async function runAgentTurn(
         }
 
         if (aborted) {
-          lastAnswer = "Aborted.";
+          lastAnswer = "";
           outcomeState.outcome.status = "aborted";
           await saveOutcomeState(outcomeState);
           moveTurn("aborted", "turn aborted");
@@ -5742,11 +5984,12 @@ export async function runAgentTurn(
     );
   } catch (error) {
     const isAbort = isAbortError(error, options.signal);
-    const msg = isAbort ? "Aborted." : `Error: ${error instanceof Error ? error.message : String(error)}`;
     if (isAbort) {
       writeAbort();
-      return finishTurn(msg, 0, "aborted", [], "The turn was aborted.");
+      return finishTurn("", 0, "aborted");
     }
+    releaseUnreadResponderClaims();
+    const msg = `Error: ${error instanceof Error ? error.message : String(error)}`;
     if (options.onMessages) {
       try {
         options.onMessages(buildTurnHistory(liveMessages, msg));

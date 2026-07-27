@@ -68,6 +68,10 @@ export interface CompactedItem {
   summary: string;
   originalItems: TranscriptItem[];
   done: boolean;
+  streaming?: boolean | undefined;
+  error?: string | undefined;
+  beforeTokens?: number | undefined;
+  afterTokens?: number | undefined;
 }
 
 export type TranscriptItem =
@@ -88,7 +92,14 @@ function compactField(value: string): string {
 
 /** Plain, detailed session record used as source material for model compaction. */
 export function serializeTranscriptForCompaction(items: TranscriptItem[]): string {
-  const lastCompactedIndex = items.map((i) => i.kind).lastIndexOf("compacted");
+  let lastCompactedIndex = -1;
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const item = items[index];
+    if (item?.kind === "compacted" && !item.error) {
+      lastCompactedIndex = index;
+      break;
+    }
+  }
   const itemsToSerialize =
     lastCompactedIndex !== -1 ? items.slice(lastCompactedIndex) : items;
 
@@ -118,7 +129,9 @@ export function serializeTranscriptForCompaction(items: TranscriptItem[]): strin
       case "plan":
         return `PLAN/TASK STATE:\n${compactField(JSON.stringify(item.plan, null, 2))}`;
       case "compacted":
-        return `COMPACTED CONTEXT:\n${compactField(item.summary)}`;
+        return item.error
+          ? undefined
+          : `COMPACTED CONTEXT:\n${compactField(item.summary)}`;
     }
   }).filter(Boolean).join("\n\n---\n\n");
 }
@@ -477,6 +490,86 @@ function applyEvent(state: TuiState, event: AgentEvent): TuiState {
           prompt: event.prompt,
         },
       };
+    case "compaction-start": {
+      const id = `compacted-${event.id}`;
+      return {
+        ...state,
+        items: [
+          ...state.items,
+          {
+            kind: "compacted",
+            id,
+            summary: "",
+            originalItems: [],
+            done: false,
+            streaming: true,
+            beforeTokens: event.beforeTokens,
+            afterTokens: event.beforeTokens,
+          },
+        ],
+      };
+    }
+    case "compaction-delta": {
+      const id = `compacted-${event.id}`;
+      return {
+        ...state,
+        items: state.items.map((item) =>
+          item.id === id && item.kind === "compacted"
+            ? { ...item, summary: item.summary + event.text }
+            : item,
+        ),
+      };
+    }
+    case "compaction-completed": {
+      const id = `compacted-${event.id}`;
+      return {
+        ...state,
+        items: state.items.map((item) =>
+          item.id === id && item.kind === "compacted"
+            ? {
+                ...item,
+                summary: event.summary,
+                done: true,
+                streaming: false,
+                error: undefined,
+                beforeTokens: event.beforeTokens,
+                afterTokens: event.afterTokens,
+              }
+            : item,
+        ),
+      };
+    }
+    case "compaction-failed": {
+      const id = `compacted-${event.id}`;
+      let found = false;
+      const items = state.items.map((item) => {
+        if (item.id !== id || item.kind !== "compacted") return item;
+        found = true;
+        return {
+          ...item,
+          summary: "",
+          done: true,
+          streaming: false,
+          error: event.message,
+          beforeTokens: item.beforeTokens ?? event.retainedTokens,
+          afterTokens: event.retainedTokens,
+        };
+      });
+      if (!found) {
+        items.push({
+          kind: "compacted",
+          id,
+          summary: "",
+          originalItems: [],
+          done: true,
+          streaming: false,
+          error: event.message,
+          beforeTokens: event.retainedTokens,
+          afterTokens: event.retainedTokens,
+        });
+      }
+      return { ...state, items };
+    }
     case "compacted": {
       // The runner emits this after replacing the model context with a
       // summary. App.tsx normally intercepts it and dispatches the richer

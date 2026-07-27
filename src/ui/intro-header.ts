@@ -37,6 +37,7 @@ export interface IntroHeaderOptions {
   model: string;
   permissions: string;
   workdir: string;
+  variant?: string | undefined;
 }
 
 function stripAnsiLen(s: string): number {
@@ -89,6 +90,7 @@ function renderIntroHeaderLinesInner(opts: IntroHeaderOptions): string[] {
   const provider = opts.provider || "openai";
   const model = opts.model || "gpt-4";
   const permissions = opts.permissions || "default";
+  const variant = opts.variant;
   const cwd = opts.workdir;
 
   // Hard budget: never wider than the pane we were given (plan pane must not
@@ -109,7 +111,7 @@ function renderIntroHeaderLinesInner(opts: IntroHeaderOptions): string[] {
   // Side-by-side needs room for the wordmark + a usable info column.
   // Below that threshold, fall back to a stacked compact card so borders stay
   // intact when Ctrl+H opens the plan pane.
-  const minSideBySide = wmWidth + 2 + 18;
+  const minSideBySide = Math.max(wmWidth * 2, 36);
   if (available < minSideBySide) {
     return renderCompactCard({
       totalWidth,
@@ -118,22 +120,15 @@ function renderIntroHeaderLinesInner(opts: IntroHeaderOptions): string[] {
       provider,
       model,
       permissions,
+      variant,
       cwd,
       wmLines,
     });
   }
 
-  // Fit left/right exactly into `available` — never let mins overflow the pane.
-  let leftWidth = Math.max(wmWidth + 2, Math.floor(available * 0.38));
-  let rightWidth = available - leftWidth;
-  if (rightWidth < 16) {
-    rightWidth = 16;
-    leftWidth = available - rightWidth;
-  }
-  if (leftWidth < wmWidth) {
-    leftWidth = Math.min(wmWidth, available - 12);
-    rightWidth = available - leftWidth;
-  }
+  // Wide cards use a true half split; an odd spare column stays on the right.
+  const leftWidth = Math.floor(available / 2);
+  const rightWidth = available - leftWidth;
 
   const CHIP_LABEL = Math.min(8, Math.max(4, rightWidth - 10));
   const chip = (label: string): string =>
@@ -161,6 +156,7 @@ function renderIntroHeaderLinesInner(opts: IntroHeaderOptions): string[] {
     infoRow("workdir", cwd, chalk.white),
     infoRow("model", model, chalk.cyan),
     infoRow("provider", provider, chalk.green),
+    ...(variant ? [infoRow("variant", variant, chalk.magenta)] : []),
     infoRow("version", version, chalk.white),
     "",
     modeBanner,
@@ -245,10 +241,11 @@ function renderCompactCard(args: {
   provider: string;
   model: string;
   permissions: string;
+  variant?: string | undefined;
   cwd: string;
   wmLines: string[];
 }): string[] {
-  const { totalWidth, version, mode, provider, model, permissions, cwd, wmLines } = args;
+  const { totalWidth, version, mode, provider, model, permissions, variant, cwd, wmLines } = args;
   // Outer line budget includes the two-space indent + border glyphs.
   // top = "  " + "╭" + "─"*N + "╮"  → plain length 4 + N, so N = totalWidth - 4.
   const rule = Math.max(8, totalWidth - 4);
@@ -287,6 +284,7 @@ function renderCompactCard(args: {
   lines.push(row(chip("workdir", cwd, chalk.white)));
   lines.push(row(chip("model", model, chalk.cyan)));
   lines.push(row(chip("provider", provider, chalk.green)));
+  if (variant) lines.push(row(chip("variant", variant, chalk.magenta)));
   lines.push(row(chip("version", version, chalk.white)));
   lines.push(row(""));
   lines.push(row(modeBanner));

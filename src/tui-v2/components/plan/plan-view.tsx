@@ -22,6 +22,7 @@ import {
   taskGlyph,
   taskRowColor,
   taskOwnerChip,
+  orderPlanTasksForDisplay,
   wrapPlanText,
   type PlanColorToken,
 } from "../../rendering/plan-view.js";
@@ -95,6 +96,7 @@ export function PlanView(props: PlanViewProps): ReactNode {
   const scrollRef = useRef<ScrollBoxRenderable>(null);
   const activeId = plan ? activeTaskId(plan) : undefined;
   const innerW = Math.max(14, (widthProp ?? 36) - 4);
+  const displayTasks = plan ? orderPlanTasksForDisplay(plan.tasks) : [];
 
   useEffect(() => {
     if (activeId) {
@@ -332,7 +334,7 @@ export function PlanView(props: PlanViewProps): ReactNode {
           paddingTop: 0,
         }}
       >
-        {plan.tasks.map((task, index) => (
+        {displayTasks.map((task, index) => (
           <TaskRow
             key={task.id}
             task={task}

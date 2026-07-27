@@ -15,17 +15,28 @@ export interface CompactionAttemptKeyInput {
   readonly dialect: string;
   readonly triggerTokens: number;
   readonly schemaHash: string;
+  readonly durableEnvelope?: string | undefined;
+}
+
+function stableValue(value: unknown): string {
+  if (value === undefined) return "null";
+  if (value === null || typeof value !== "object") {
+    return JSON.stringify(value) ?? "undefined";
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map(stableValue).join(",")}]`;
+  }
+  const record = value as Record<string, unknown>;
+  return `{${Object.keys(record)
+    .filter((key) => record[key] !== undefined)
+    .sort()
+    .map((key) => `${JSON.stringify(key)}:${stableValue(record[key])}`)
+    .join(",")}}`;
 }
 
 export function compactionAttemptKey(input: CompactionAttemptKeyInput): string {
   const transcript = createHash("sha256");
-  transcript.update(String(input.messages.length));
-  for (const message of input.messages) {
-    transcript.update("\0");
-    transcript.update(message.role);
-    transcript.update("\0");
-    transcript.update(String(message.content?.length ?? 0));
-  }
+  transcript.update(stableValue(input.messages));
   return createHash("sha256")
     .update(
       [
@@ -35,6 +46,7 @@ export function compactionAttemptKey(input: CompactionAttemptKeyInput): string {
         input.dialect,
         String(input.triggerTokens),
         input.schemaHash,
+        input.durableEnvelope ?? "",
       ].join("|"),
     )
     .digest("hex")

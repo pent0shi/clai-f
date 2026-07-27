@@ -119,8 +119,10 @@ export function evaluateEngagementAction(
   if (action.port !== undefined && scope.allowedPorts?.length && !scope.allowedPorts.includes(action.port)) {
     return deny(`port is not authorized: ${action.port}`);
   }
-  if (!methodAllowed(action.method ?? "GET", scope)) return deny(`HTTP method is not authorized: ${action.method}`);
-  if (!pathAllowed(action.path ?? "/", scope)) return deny(`path is not authorized: ${action.path}`);
+  if (action.url) {
+    if (!methodAllowed(action.method ?? "GET", scope)) return deny(`HTTP method is not authorized: ${action.method}`);
+    if (!pathAllowed(action.path ?? "/", scope)) return deny(`path is not authorized: ${action.path}`);
+  }
 
   for (const redirect of action.redirectChain ?? []) {
     if (!targetInScope(redirect, scope)) return deny(`redirect destination is excluded or out of scope: ${normalizeScopeTarget(redirect)}`);
@@ -291,9 +293,14 @@ export function engagementActionForToolCall(call: ToolCall): EngagementAction | 
   const command = String(call.args.command ?? "");
   const urlToken = command.match(/https?:\/\/[^\s'"<>]+/i)?.[0];
   const parsedUrl = urlToken ? safeParseUrl(urlToken) : undefined;
-  const hostCandidates = [...command.matchAll(/(?:^|\s)((?:[a-z0-9-]+\.)+[a-z]{2,}|(?:\d{1,3}\.){3}\d{1,3})(?=\s|$)/gi)]
-    .map((match) => match[1])
-    .filter((candidate): candidate is string => Boolean(candidate));
+  const namesRemoteTarget =
+    Boolean(parsedUrl) ||
+    /\b(?:curl|wget|httpie|nmap|masscan|nikto|nuclei|ffuf|gobuster|sqlmap|hydra|metasploit|msfconsole|dig|nslookup|host|ping|traceroute|tracepath|nc|netcat|telnet|ssh|ftp|openssl\s+s_client|rm\s+-rf|mkfs|shutdown|reboot|crontab|launchctl|systemctl\s+enable|schtasks|reverse.shell|exploit|payload)\b/i.test(command);
+  const hostCandidates = namesRemoteTarget
+    ? [...command.matchAll(/(?:^|\s)((?:[a-z0-9-]+\.)+[a-z]{2,}|(?:\d{1,3}\.){3}\d{1,3})(?=\s|$)/gi)]
+        .map((match) => match[1])
+        .filter((candidate): candidate is string => Boolean(candidate))
+    : [];
   // A URL-looking token that does not parse (regex passed to rg/grep, etc.) is
   // not a real network destination — fall back to bare host candidates.
   const url = parsedUrl ? urlToken : undefined;
@@ -361,18 +368,21 @@ export function engagementActionsForToolCall(
     return [primary];
   }
   const command = String(call.args.command ?? "");
+  const urlHosts = [...command.matchAll(/https?:\/\/[^\s'"<>]+/gi)]
+    .map((match) => safeParseUrl(match[0])?.hostname)
+    .filter((host): host is string => Boolean(host));
+  const acceptsMultipleBareTargets =
+    /\b(?:nmap|masscan|nuclei|nikto|ffuf|gobuster|dig|nslookup|ping|traceroute|tracepath)\b/i.test(command);
+  const bareHosts = acceptsMultipleBareTargets
+    ? [...command.matchAll(
+        /(?:^|\s)((?:[a-z0-9-]+\.)+[a-z]{2,}|(?:\d{1,3}\.){3}\d{1,3})(?=\s|$)/gi,
+      )]
+        .map((match) => match[1])
+        .filter((candidate): candidate is string => Boolean(candidate))
+    : [];
   const hosts = [
     ...new Set(
-      [
-        primary.target,
-        ...[
-          ...command.matchAll(
-            /(?:^|\s)((?:[a-z0-9-]+\.)+[a-z]{2,}|(?:\d{1,3}\.){3}\d{1,3})(?=\s|$)/gi,
-          ),
-        ]
-          .map((match) => match[1])
-          .filter((candidate): candidate is string => Boolean(candidate)),
-      ]
+      [...urlHosts, ...bareHosts, primary.target]
         .map((host) => host.trim())
         .filter(Boolean),
     ),

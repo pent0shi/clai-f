@@ -1,5 +1,6 @@
 import type { SessionPlan } from "../store/plan.js";
 import type { ToolCall } from "../types.js";
+import { resolveShellExecBackgroundPolicy } from "../tools/command-intent.js";
 
 // responder ownership is declared by the caller, never inferred from
 // titles. `parentTaskId` names the foreground task that owns the delegation;
@@ -79,23 +80,23 @@ export function resolveResponderParent(input: {
 }
 
 
-const RESPONDER_DELEGATING_TOOLS: ReadonlySet<string> = new Set([
-  "shell.exec",
-  "shell.start",
-  "net.scan",
-  "pentest.recon",
-]);
-
 /**
- * True when the call itself asks for Responder delegation. Only these
- * calls get a delegation record before launch; jobs that the registry promotes
- * to a durable job on its own are reconciled by the idempotent post-launch
- * upsert instead, because their delegation is not knowable in advance.
+ * True when an explicit shell.exec request will actually be Responder-owned
+ * after applying the same foreground/persistent precedence as tool runtime.
  */
 export function isExplicitResponderDelegation(call: ToolCall): boolean {
-  return (
-    RESPONDER_DELEGATING_TOOLS.has(call.name) && call.args?.responder === true
-  );
+  if (
+    call.name !== "shell.exec" ||
+    call.args?.responder !== true ||
+    typeof call.args.command !== "string"
+  ) {
+    return false;
+  }
+  return resolveShellExecBackgroundPolicy({
+    command: call.args.command,
+    background: call.args.background,
+    responder: call.args.responder,
+  }).responder;
 }
 
 /** Stable, readable child-task title for a delegated command. */

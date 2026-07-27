@@ -135,8 +135,9 @@ export function hydrateFromClassicTranscript(
           ...base,
           kind: "compacted",
           summary: raw.summary ?? "Compacted context",
-          beforeTokens: 0,
-          afterTokens: 0,
+          beforeTokens: raw.beforeTokens ?? 0,
+          afterTokens: raw.afterTokens ?? raw.beforeTokens ?? 0,
+          ...(raw.error ? { error: raw.error } : {}),
         };
         byId.set(id, item);
         order.push(id);
@@ -705,6 +706,9 @@ export function serializeForHistory(
           summary: item.summary,
           originalItems: [],
           done: true,
+          beforeTokens: item.beforeTokens,
+          afterTokens: item.afterTokens,
+          ...(item.error ? { error: item.error } : {}),
         });
         break;
       default:

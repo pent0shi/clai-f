@@ -1,7 +1,8 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { getDataDir } from "../store/paths.js";
+import { redactSecrets } from "../llm/provider.js";
 
 export type OutcomeKind = "answer" | "build" | "bugfix" | "operation" | "pentest";
 export type OutcomeStatus = "active" | "succeeded" | "partial" | "blocked" | "failed" | "aborted" | "paused_budget";
@@ -50,11 +51,27 @@ export interface EvidenceRecord {
   outcomeRevision: number;
 }
 
+export interface CompletedOperation {
+  signature: string;
+  tool: string;
+  summary: string;
+  observation: string;
+  /** Missing on legacy entries means a successful completed observation. */
+  ok?: boolean | undefined;
+  exitCode?: number | undefined;
+  observationDigest?: string | undefined;
+  unchangedRepeats?: number | undefined;
+  stateKey?: string | undefined;
+  artifact?: string | undefined;
+  observedAt: string;
+}
+
 export interface OutcomeEnvelope {
   schemaVersion: 1;
   outcome: OutcomeContract;
   evidence: EvidenceRecord[];
   failedHypotheses: Array<{ signature: string; premise: string; observedAt: string }>;
+  completedOperations?: CompletedOperation[] | undefined;
 }
 
 const fileFor = (sessionId: string): string => join(getDataDir(), "outcomes", `${encodeURIComponent(sessionId)}.json`);
@@ -92,6 +109,12 @@ function mergeOutcomeEnvelopes(
       ]),
     ).values(),
   ];
+  const completedOperations = [
+    ...new Map(
+      [...(existing.completedOperations ?? []), ...(incoming.completedOperations ?? [])]
+        .map((operation) => [operation.signature, operation]),
+    ).values(),
+  ].slice(-40);
   const criteria = [
     ...new Map(
       [...existing.outcome.criteria, ...incoming.outcome.criteria].map((criterion) => [
@@ -136,7 +159,13 @@ function mergeOutcomeEnvelopes(
         : incoming.outcome.updatedAt,
   };
   outcome.status = deriveOutcomeStatus(outcome, evidence);
-  return { schemaVersion: 1, outcome, evidence, failedHypotheses };
+  return {
+    schemaVersion: 1,
+    outcome,
+    evidence,
+    failedHypotheses,
+    completedOperations,
+  };
 }
 
 export function createOutcome(input: {
@@ -279,7 +308,13 @@ export async function loadOutcomeState(sessionId: string): Promise<OutcomeEnvelo
     // Conservative migration: old completion labels never become evidenced success.
     const outcome = { ...parsed.outcome };
     if (outcome.status === "succeeded" && deriveOutcomeStatus(outcome, parsed.evidence) !== "succeeded") outcome.status = "partial";
-    return { schemaVersion: 1, outcome, evidence: parsed.evidence, failedHypotheses: parsed.failedHypotheses ?? [] };
+    return {
+      schemaVersion: 1,
+      outcome,
+      evidence: parsed.evidence,
+      failedHypotheses: parsed.failedHypotheses ?? [],
+      completedOperations: parsed.completedOperations ?? [],
+    };
   } catch {
     return undefined;
   }
@@ -352,6 +387,7 @@ export async function openOutcomeState(input: {
     }),
     evidence: [],
     failedHypotheses: existing?.failedHypotheses ?? [],
+    completedOperations: existing?.completedOperations ?? [],
   };
 }
 
@@ -367,21 +403,138 @@ export function recordFailedHypothesis(
   }
 }
 
+function canonicalOperationValue(value: unknown, key = ""): unknown {
+  if (/^(?:_?retryReason)$/i.test(key)) return undefined;
+  if (/pass|secret|token|authorization|api.?key|cookie/i.test(key)) return "[redacted]";
+  if (typeof value === "string") return redactSecrets(value);
+  if (Array.isArray(value)) return value.map((item) => canonicalOperationValue(item));
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>)
+        .filter(([, item]) => item !== undefined)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([name, item]) => [name, canonicalOperationValue(item, name)])
+        .filter(([, item]) => item !== undefined),
+    );
+  }
+  return value;
+}
+
+export function isCompletedReadOperation(
+  tool: string,
+  args: Record<string, unknown> = {},
+): boolean {
+  if (/^(?:fs\.(?:read|list|search)|web\.(?:search|fetch)|shell\.(?:tail|jobs)|tool\.check|net\.context|pentest\.scanStatus|dns\.|whois\.)/.test(tool)) return true;
+  if (tool === "http.fetch") return /^(?:GET|HEAD|OPTIONS)$/i.test(String(args.method ?? "GET"));
+  if (tool !== "shell.exec") return false;
+  const command = String(args.command ?? "");
+  return /^\s*curl\b/i.test(command) &&
+    !/(?:-X|--request)\s*(?:POST|PUT|PATCH|DELETE)\b|(?:^|\s)(?:-d|--data(?:-raw|-binary)?|-F|--form)(?:\s|=)/i.test(command);
+}
+
+export function completedOperationSignature(
+  tool: string,
+  args: Record<string, unknown> = {},
+): string | undefined {
+  if (!isCompletedReadOperation(tool, args)) return undefined;
+  const canonicalArgs = JSON.stringify(canonicalOperationValue(args));
+  return createHash("sha256")
+    .update(`${tool}\0${canonicalArgs}`)
+    .digest("hex")
+    .slice(0, 20);
+}
+
+function stableOperationOutput(tool: string, output: string): string {
+  let stable = redactSecrets(output).replace(/\r\n/g, "\n").trim();
+  if (tool === "shell.jobs") {
+    stable = stable.replace(/\b(elapsed|age)=?\s*<?\d+(?:\.\d+)?(?:ms|s|m|h)\b/gi, "$1=<elapsed>");
+  }
+  if (tool === "http.fetch" || tool === "web.fetch") {
+    stable = stable
+      .replace(/^(?:date|x-request-id|x-trace-id|traceparent|server-timing):.*$/gim, "")
+      .replace(/\b(elapsed|duration|latency)\s*[=:]\s*\d+(?:\.\d+)?\s*ms\b/gi, "$1=<elapsed>");
+  }
+  return stable.replace(/[ \t]+$/gm, "").replace(/\n{3,}/g, "\n\n");
+}
+
+export function completedOperationObservationDigest(
+  tool: string,
+  output: string,
+): string {
+  return createHash("sha256")
+    .update(stableOperationOutput(tool, output))
+    .digest("hex")
+    .slice(0, 24);
+}
+
+export function recordCompletedOperation(
+  envelope: OutcomeEnvelope,
+  input: {
+    tool: string;
+    args?: Record<string, unknown>;
+    output: string;
+    ok?: boolean;
+    exitCode?: number;
+    artifact?: string;
+    stateKey?: string;
+  },
+): CompletedOperation | undefined {
+  const args = input.args ?? {};
+  const signature = completedOperationSignature(input.tool, args);
+  if (!signature) return undefined;
+  const canonicalArgs = JSON.stringify(canonicalOperationValue(args));
+  const digest = completedOperationObservationDigest(input.tool, input.output);
+  const operations = envelope.completedOperations ?? (envelope.completedOperations = []);
+  const existingIndex = operations.findIndex((item) => item.signature === signature);
+  const existing = existingIndex >= 0 ? operations[existingIndex] : undefined;
+  const unchanged =
+    existing?.observationDigest === digest &&
+    existing.stateKey === input.stateKey;
+  const operation: CompletedOperation = {
+    signature,
+    tool: input.tool,
+    summary: `${input.tool} ${canonicalArgs}`.slice(0, 240),
+    observation: input.output.replace(/\s+/g, " ").trim().slice(0, 240),
+    ok: input.ok !== false,
+    ...(input.exitCode !== undefined ? { exitCode: input.exitCode } : {}),
+    observationDigest: digest,
+    unchangedRepeats: unchanged ? (existing.unchangedRepeats ?? 0) + 1 : 0,
+    ...(input.stateKey ? { stateKey: input.stateKey } : {}),
+    ...(input.artifact ? { artifact: input.artifact } : {}),
+    observedAt: new Date().toISOString(),
+  };
+  if (existingIndex >= 0) operations.splice(existingIndex, 1);
+  operations.push(operation);
+  if (operations.length > 40) operations.splice(0, operations.length - 40);
+  return operation;
+}
+
 export function recordToolEvidence(
   envelope: OutcomeEnvelope,
   input: {
     tool: string;
     callId: string;
     ok: boolean;
+    exitCode?: number | undefined;
     output: string;
     artifact?: string | undefined;
     taskId?: string | undefined;
     args?: Record<string, unknown> | undefined;
+    stateKey?: string | undefined;
   },
 ): EvidenceRecord[] {
   const ids = new Set(envelope.outcome.criteria.map((criterion) => criterion.id));
   const command = typeof input.args?.command === "string" ? input.args.command : "";
   const url = typeof input.args?.url === "string" ? input.args.url : "";
+  recordCompletedOperation(envelope, {
+    tool: input.tool,
+    output: input.output,
+    ok: input.ok,
+    ...(input.exitCode !== undefined ? { exitCode: input.exitCode } : {}),
+    ...(input.args ? { args: input.args } : {}),
+    ...(input.artifact ? { artifact: input.artifact } : {}),
+    ...(input.stateKey ? { stateKey: input.stateKey } : {}),
+  });
   const records: EvidenceRecord[] = [];
   const add = (
     criterionIds: string[],

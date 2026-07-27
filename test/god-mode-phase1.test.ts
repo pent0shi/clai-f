@@ -3,7 +3,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { composeAgentSystemPrompt } from "../src/agent/prompt-composer.js";
-import { createTurnOutcome, renderTurnOutcome } from "../src/agent/turn-outcome.js";
+import {
+  createTurnOutcome,
+  normalizeTurnOutcomeInput,
+  renderTurnOutcome,
+} from "../src/agent/turn-outcome.js";
 import { compactMessagesWithSummary } from "../src/agent/context-manager.js";
 import { hasOrphanToolMessages } from "../src/agent/tool-history.js";
 import { createPlan, isPlanSuccessful, isPlanTerminal, markTask } from "../src/store/plan.js";
@@ -53,6 +57,33 @@ describe("God Mode Phase 1 contracts", () => {
     });
     expect(renderTurnOutcome(outcome)).toContain("Status: failed");
     expect(renderTurnOutcome(outcome)).toContain("verify behavior");
+  });
+
+  it("normalizes a success signal with unfinished criteria before enforcing the invariant", () => {
+    const normalized = normalizeTurnOutcomeInput({
+      status: "succeeded",
+      answer: "Work stopped before verification.",
+      steps: 2,
+      remainingCriteria: ["verify behavior"],
+    });
+    const outcome = createTurnOutcome(normalized);
+    expect(outcome.status).toBe("partial");
+    expect(outcome.remainingCriteria).toEqual(["verify behavior"]);
+    expect(outcome.reason).toMatch(/remain incomplete/i);
+  });
+
+  it("keeps structured partial state without appending diagnostics to conversational answers", () => {
+    const outcome = createTurnOutcome({
+      status: "partial",
+      answer: "Yes — I can help with an authorized assessment.",
+      steps: 0,
+      remainingCriteria: ["Authorized assessment completed"],
+      reason: "no target was provided",
+    });
+    expect(renderTurnOutcome(outcome, { diagnostics: false })).toBe(
+      "Yes — I can help with an authorized assessment.",
+    );
+    expect(renderTurnOutcome(outcome)).toContain("Status: partial");
   });
 
   it("keeps native assistant/tool-result groups atomic during semantic compaction", async () => {

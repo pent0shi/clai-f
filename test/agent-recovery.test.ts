@@ -143,7 +143,7 @@ describe("agent recovery request shaping", () => {
         maxSteps: 2,
         signal: controller.signal,
       }),
-    ).resolves.toBe("Aborted.");
+    ).resolves.toBe("");
 
     expect(requests).toHaveLength(2);
     expect(requests[1]!.messages.at(-1)?.content).toContain("web.search now");

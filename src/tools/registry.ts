@@ -38,19 +38,22 @@ import {
   parseHost,
   parsePortSpec,
   parseLegacyFlags,
+  normalizeScanProfile,
   profileToNmapArgs,
   nmapScanNeedsPrivilege,
-  type ScanProfile,
+  toConnectScanArgv,
+  withNmapSkipDiscovery,
 } from "./validate.js";
 import { getNetworkContext } from "./network-context.js";
 import { pingSweep } from "./net-ping-sweep.js";
 import { toolCheckHandler } from "./capabilities.js";
 import { wordlistFind } from "./wordlists.js";
-import { jobManager, type StartJobOptions } from "./jobs.js";
 import {
-  longFiniteCommandCost,
-  looksLongRunning,
-} from "./command-intent.js";
+  jobManager,
+  type BackgroundSpawnSpec,
+  type StartJobOptions,
+} from "./jobs.js";
+import { resolveShellExecBackgroundPolicy } from "./command-intent.js";
 import { packageBinaryName } from "./package-binary.js";
 import { resolveNmapTimeoutPolicy, runNmapScan } from "./nmap-runner.js";
 import { compareAuthorizationContexts, discoverWebSurface, enumerateApi } from "./pentest-workflows.js";
@@ -169,6 +172,48 @@ export function estimateScanResources(argv: readonly string[]): ScanResourceEsti
   };
 }
 
+type PreparedNmapJob =
+  | { prepared: true; spec: BackgroundSpawnSpec }
+  | { prepared: false; result: ToolResult };
+
+async function prepareDurableNmapJob(
+  argv: string[],
+  options: ToolRunOptions | undefined,
+  prompt: string,
+): Promise<PreparedNmapJob> {
+  if (!nmapScanNeedsPrivilege(argv)) {
+    return { prepared: true, spec: { command: "nmap", argv: [...argv] } };
+  }
+  const elevated = await preparePrivilegedBackgroundArgv("nmap", argv, {
+    signal: options?.signal,
+    onOutput: options?.onOutput,
+    requestSecret: options?.requestSecret,
+    title: "Administrator access for nmap",
+    prompt,
+  });
+  if (elevated.prepared || options?.signal?.aborted) return elevated;
+  if (argv.includes("-sU") || argv.includes("-sO")) {
+    return {
+      prepared: false,
+      result: {
+        ...elevated.result,
+        output:
+          `${elevated.result.output}\n` +
+          "The requested UDP/protocol scan has no equivalent unprivileged fallback. Authentication will not be reopened automatically; choose a TCP connect scan explicitly to continue without elevation.",
+      },
+    };
+  }
+  const fallbackArgv = withNmapSkipDiscovery(toConnectScanArgv(argv));
+  options?.onOutput?.(
+    "\nAdministrator scan was cancelled or unavailable. Starting one unprivileged TCP connect fallback (-sT -Pn); authentication will not be requested again.\n",
+    "stderr",
+  );
+  return {
+    prepared: true,
+    spec: { command: "nmap", argv: fallbackArgv },
+  };
+}
+
 /** nmap argv for pentest.recon — ports configurable (default top-100). */
 export function buildPentestReconNmapArgv(
   args: Record<string, unknown>,
@@ -230,27 +275,17 @@ export const toolRegistry: Record<string, ToolHandler> = {
     //   auto   — persistent commands and cost-signalled finite commands go
     //            background; everything else stays foreground (default)
     const requestedTimeoutMs = optionalNumber(args, "timeoutMs");
-    const responderRequested = optionalBoolean(args, "responder") ?? false;
-    const backgroundRaw = optionalString(args, "background");
-    const backgroundMode: "auto" | "never" | "always" =
-      backgroundRaw === "never" || backgroundRaw === "always"
-        ? backgroundRaw
-        : "auto";
-    // A finite command is auto-backgrounded only when parsed argv shows a real
-    // cost signal (broad port spec, wordlist, filesystem-wide find, …) — never
-    // from the bare binary name.
-    const costReason = longFiniteCommandCost(command).reason;
-    const persistent = looksLongRunning(command);
-    const wantsBackground =
-      backgroundMode === "always"
-        ? true
-        : backgroundMode === "never"
-          ? false
-          : persistent || Boolean(costReason) || responderRequested;
-    // Persistent servers are deliberately NOT responder jobs: they never
-    // "complete", so the agent probes them and leaves them running.
-    const responder =
-      wantsBackground && !persistent && (responderRequested || Boolean(costReason) || backgroundMode === "always");
+    const policy = resolveShellExecBackgroundPolicy({
+      command,
+      background: args.background,
+      responder: args.responder,
+    });
+    const {
+      backgroundMode,
+      costReason,
+      wantsBackground,
+      responder,
+    } = policy;
     if (wantsBackground) {
       const elevated = await prepareElevatedBackgroundCommand(command, {
         signal: options?.signal,
@@ -279,16 +314,7 @@ export const toolRegistry: Record<string, ToolHandler> = {
             : "";
         return {
           ...job,
-          output:
-            `${job.output}\n\n` +
-            (responder
-              ? "Auto-delegated to the RESPONDER as a durable background job (it finishes on its own after a while and can emit a lot of output). " +
-                "Do NOT poll, shell.tail, shell.jobs, sleep, or fs.read it to watch progress — the Responder tracks the process and delivers the completed result into your context automatically between turns. " +
-                "Mark your launch step done and move to the next task now. " +
-                "When the result arrives, read ONLY the key lines you need (matched status codes / hits / findings) with a filtered shell.tail byte-window or a grep of the artifact — never a full read of a noisy scanner log, and make sure the command you ran preserves those key fields (e.g. keep status codes, not just the wordlist name)."
-              : "This persistent command was started in the BACKGROUND. It is not proof of readiness — inspect shell.tail, run a readiness probe, use shell.jobs for status, and shell.stop when appropriate.") +
-            costNote +
-            timeoutNote,
+          output: `${job.output}${costNote}${timeoutNote}`,
         };
       }
       return job;
@@ -445,12 +471,7 @@ export const toolRegistry: Record<string, ToolHandler> = {
       : null;
     const ports =
       portsRaw && !topPortsMatch ? parsePortSpec(portsRaw) : undefined;
-    let profile =
-      args.profile &&
-      typeof args.profile === "object" &&
-      !Array.isArray(args.profile)
-        ? (args.profile as ScanProfile)
-        : undefined;
+    let profile = normalizeScanProfile(args.profile);
     if (topPortsMatch) {
       const n = Math.max(1, Math.min(65535, Number(topPortsMatch[1])));
       profile = { ...(profile ?? {}), topPorts: profile?.topPorts ?? n };
@@ -470,16 +491,11 @@ export const toolRegistry: Record<string, ToolHandler> = {
     const estimate = estimateScanResources(argv);
     const durable = args.background === true || estimate.durableRecommended;
     if (durable) {
-      const prepared = nmapScanNeedsPrivilege(argv)
-        ? await preparePrivilegedBackgroundArgv("nmap", argv, {
-            signal: options?.signal,
-            onOutput: options?.onOutput,
-            requestSecret: options?.requestSecret,
-            title: "Administrator access for nmap",
-            prompt:
-              "Enter your password for the nmap raw-socket scan. It is sent only to sudo stdin and is never stored. Esc cancels.",
-          })
-        : { prepared: true as const, spec: { command: "nmap", argv: [...argv] } };
+      const prepared = await prepareDurableNmapJob(
+        argv,
+        options,
+        "Enter your password for the nmap raw-socket scan. It is sent only to sudo stdin and is never stored. Esc cancels.",
+      );
       if (!prepared.prepared) return prepared.result;
       return jobManager.startJob(prepared.spec, {
         name: `nmap-${estimate.profile}-${host.value}`,
@@ -805,16 +821,11 @@ export const toolRegistry: Record<string, ToolHandler> = {
         if (step.key === "nmap") {
           const estimate = estimateScanResources(step.argv);
           if (estimate.durableRecommended || args.background === true) {
-            const prepared = nmapScanNeedsPrivilege(step.argv)
-              ? await preparePrivilegedBackgroundArgv("nmap", step.argv, {
-                  signal: options?.signal,
-                  onOutput: options?.onOutput,
-                  requestSecret: options?.requestSecret,
-                  title: "Administrator access for nmap",
-                  prompt:
-                    "Enter your password for the durable nmap raw-socket scan. It is sent only to sudo stdin and is never stored. Esc cancels.",
-                })
-              : { prepared: true as const, spec: { command: "nmap", argv: [...step.argv] } };
+            const prepared = await prepareDurableNmapJob(
+              step.argv,
+              options,
+              "Enter your password for the durable nmap raw-socket scan. It is sent only to sudo stdin and is never stored. Esc cancels.",
+            );
             const result = prepared.prepared
               ? await jobManager.startJob(prepared.spec, {
                   name: `recon-${estimate.profile}-${host.value}`,
@@ -987,13 +998,12 @@ export const toolRegistry: Record<string, ToolHandler> = {
       requestSecret: options?.requestSecret,
     });
     if (elevated && !elevated.prepared) return elevated.result;
-    const responder = optionalBoolean(args, "responder") ?? false;
     return jobManager.startJob(elevated?.prepared ? elevated.spec : command, {
       cwd: optionalString(args, "cwd"),
       name: optionalString(args, "name"),
       ...responderJobOptions(options),
-      responder,
-      wakeOnCompletion: responder,
+      responder: false,
+      wakeOnCompletion: false,
     });
   },
   async "shell.jobs"(_args, options) {

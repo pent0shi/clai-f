@@ -79,4 +79,21 @@ describe('thinking helpers', () => {
       thinkContent: 'check the config',
     });
   });
+
+  it('can suppress streamed thinking without storing it as response reasoning', () => {
+    const visible: string[] = [];
+    const parser = createThinkingStreamParser(
+      (text) => visible.push(text),
+      undefined,
+      { remember: false },
+    );
+
+    parser.push('<think>private compaction chain</think>');
+    parser.push('## Visible summary');
+    const result = parser.finish();
+
+    expect(visible.join('')).toBe('## Visible summary');
+    expect(result.thinkContent).toBe('private compaction chain');
+    expect(getLastThinking()).toBe('');
+  });
 });

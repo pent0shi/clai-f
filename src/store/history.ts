@@ -25,6 +25,7 @@ import {
   MAX_IMAGE_BYTES,
 } from "../attachments/image-content.js";
 import type { TranscriptItem } from "../tui/state.js";
+import type { PreviousTurnSignal } from "../agent/continue-orient.js";
 import { redactSecrets } from "../llm/provider.js";
 import { redactSecretsCached } from "./redaction-cache.js";
 import { getConfig } from "./config.js";
@@ -112,6 +113,8 @@ export interface HistoryRecord {
    * falls back to a cheap estimate that under-counts vs live turns.
    */
   contextUsage?: PersistedContextUsage | undefined;
+  /** Last settled outcome, or an interrupted in-flight turn, for restart recovery. */
+  previousTurn?: PreviousTurnSignal | undefined;
   /**
    * Session workspace folder name under `{tmpdir}/clai/`
    * (e.g. `a3f9c1-18-07-2026-14-24-23`). Bound on resume so scratch +
@@ -886,6 +889,7 @@ function serializeSessionPayload(record: HistoryRecord): string {
     messages: record.messages,
     transcript: record.transcript,
     ...(record.contextUsage ? { contextUsage: record.contextUsage } : {}),
+    ...(record.previousTurn ? { previousTurn: record.previousTurn } : {}),
     ...(record.workspaceFolder
       ? {
           workspaceFolder: record.workspaceFolder,
@@ -942,6 +946,7 @@ export async function saveSession(
   contextUsage?: PersistedContextUsage | undefined,
   revision?: number | undefined,
   writerGeneration?: string | undefined,
+  previousTurn?: PreviousTurnSignal | null | undefined,
 ): Promise<HistoryRecord> {
   // Auto-derive a readable name from the first real user message if none provided
   if (!name) {
@@ -970,6 +975,7 @@ export async function saveSession(
     messages: scrubMessages(messages),
     transcript: scrubTranscript(transcript),
     ...(contextUsage ? { contextUsage } : {}),
+    ...(previousTurn ? { previousTurn } : {}),
     ...workspace,
   };
 
@@ -997,6 +1003,7 @@ export async function upsertSession(
   contextUsage?: PersistedContextUsage | undefined,
   revision?: number | undefined,
   writerGeneration?: string | undefined,
+  previousTurn?: PreviousTurnSignal | null | undefined,
 ): Promise<HistoryRecord> {
   const existing = await getSession(id);
   const requestedRevision =
@@ -1032,6 +1039,11 @@ export async function upsertSession(
       ? { contextUsage }
       : existing?.contextUsage
         ? { contextUsage: existing.contextUsage }
+        : {}),
+    ...(previousTurn
+      ? { previousTurn }
+      : previousTurn === undefined && existing?.previousTurn
+        ? { previousTurn: existing.previousTurn }
         : {}),
     ...workspace,
   };
@@ -1218,6 +1230,7 @@ function rowToSession(row: unknown): HistoryRecord {
         messages?: ChatMessage[];
         transcript?: TranscriptItem[];
         contextUsage?: PersistedContextUsage;
+        previousTurn?: PreviousTurnSignal;
         workspaceFolder?: string;
         workspaceCode?: string;
       };
@@ -1236,6 +1249,7 @@ function rowToSession(row: unknown): HistoryRecord {
     messages,
     transcript: Array.isArray(parsed) ? undefined : parsed.transcript,
     contextUsage: Array.isArray(parsed) ? undefined : parsed.contextUsage,
+    previousTurn: Array.isArray(parsed) ? undefined : parsed.previousTurn,
     workspaceFolder: Array.isArray(parsed) ? undefined : parsed.workspaceFolder,
     workspaceCode: Array.isArray(parsed) ? undefined : parsed.workspaceCode,
   };
