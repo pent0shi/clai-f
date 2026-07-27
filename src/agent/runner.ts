@@ -308,6 +308,7 @@ import {
 } from "./session-state.js";
 import {
   buildContinueOrientation,
+  looksLikeContinueOrResumePrompt,
   type PreviousTurnSignal,
 } from "./continue-orient.js";
 import { detectPackageManager } from "./workspace-orient.js";
@@ -809,7 +810,10 @@ export async function runAgentTurn(
     // freshness retries — a false "act don't narrate" path burned tokens on
     // web.search recovery loops after a simple "hi".
     const idleOrSocialPrompt = looksLikeIdleOrSocialPrompt(prompt);
-    suppressOutcomeDiagnostics = informationalQuery || idleOrSocialPrompt;
+    suppressOutcomeDiagnostics =
+      informationalQuery ||
+      idleOrSocialPrompt ||
+      looksLikeContinueOrResumePrompt(prompt);
     const freshWebSearchRequired =
       !buildLikeTurn &&
       !pentestLikeTurn &&
@@ -875,6 +879,7 @@ export async function runAgentTurn(
       // behind a stale "awaiting approval" gate for a plan that already ran.
       session.planApproved.value = true;
     }
+    suppressOutcomeDiagnostics ||= !session.planApproved.value;
 
     const destinationHint = resolveUserDestinationHint(prompt);
     const orientationSourceText = [
@@ -5014,6 +5019,7 @@ export async function runAgentTurn(
           const shouldRetryBeforeFinalizing =
             productiveSteps === 0 ||
             planNarrated ||
+            ((narratedAction || narratedWebAction) && !informationalQuery) ||
             (session.planApproved.value &&
               planHasOpenWorkNow &&
               (narratedAction || errorFixNarration)) ||
@@ -6005,10 +6011,10 @@ export async function runAgentTurn(
   }
 }
 
-/** Compatibility boundary for callers that still consume rendered text. */
+/** Compatibility boundary for callers that consume visible assistant text. */
 export async function runAgentLoop(
   prompt: string,
   options: AgentRunOptions = {},
 ): Promise<string> {
-  return renderTurnOutcome(await runAgentTurn(prompt, options));
+  return (await runAgentTurn(prompt, options)).answer;
 }

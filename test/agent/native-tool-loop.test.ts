@@ -223,6 +223,78 @@ describe("native tool loop integration", () => {
     expect(streamMock).toHaveBeenCalledTimes(4);
   });
 
+  it("recovers when action narration follows a productive tool step", async () => {
+    let turn = 0;
+    streamMock.mockImplementation(
+      async (request: CompletionRequest, onToken: (token: string) => void) => {
+        turn += 1;
+        if (turn === 1) {
+          return {
+            text: "",
+            provider: "gemini",
+            model: "gemini-test",
+            toolCalls: [
+              { id: "call_list_first", name: "fs.list", args: { path: cwd } },
+            ],
+            finishReason: "tool_calls",
+          };
+        }
+        if (turn === 2) {
+          const text = "Let's check the remaining files.";
+          onToken(text);
+          return {
+            text,
+            provider: "gemini",
+            model: "gemini-test",
+            finishReason: "stop",
+          };
+        }
+        expect(request.messages.at(-1)?.content).toMatch(/call.*tool|take the action/i);
+        return {
+          text: "Found all remaining files.",
+          provider: "gemini",
+          model: "gemini-test",
+          finishReason: "stop",
+        };
+      },
+    );
+
+    const { runAgentLoop } = await import("../../src/agent/runner.js");
+    const answer = await runAgentLoop("find all files in this directory", {
+      provider: "gemini",
+      model: "gemini-test",
+      maxSteps: 5,
+    });
+
+    expect(streamMock).toHaveBeenCalledTimes(3);
+    expect(answer).toBe("Found all remaining files.");
+  });
+
+  it("does not append internal outcome diagnostics to a continue response", async () => {
+    streamMock.mockImplementation(
+      async (): Promise<CompletionResult> => ({
+        text: "Here are the remaining results.",
+        provider: "gemini",
+        model: "gemini-test",
+        finishReason: "stop",
+      }),
+    );
+
+    const { runAgentLoop } = await import("../../src/agent/runner.js");
+    const answer = await runAgentLoop("continue", {
+      provider: "gemini",
+      model: "gemini-test",
+      maxSteps: 2,
+      history: [
+        { role: "user", content: "find the remaining posts" },
+        { role: "assistant", content: "I found the blog index." },
+      ],
+    });
+
+    expect(answer).toBe("Here are the remaining results.");
+    expect(answer).not.toMatch(/Status:|Required outcome criteria|Remaining:/);
+  });
+
   it("passes exact image bytes, MIME, and mode to the provider", async () => {
     const image: ChatImage = {
       dataBase64: Buffer.from([0, 1, 2, 253, 254, 255]).toString("base64"),
