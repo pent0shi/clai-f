@@ -98,21 +98,9 @@ export async function startTuiV2(
     handle,
     // Flush chat + visual transcript before the renderer is destroyed so an
     // aborted mid-run session still restores tools/code under /history.
-    // Disposers run in reverse registration order, so listing interactive
-    // cleanup last runs it first: children die before the final history write.
     disposers: [
       async () => {
         await services.session.persistNow().catch(() => undefined);
-      },
-      async () => {
-        const result = await services.ports.interactiveSessions
-          .closeAll("app-shutdown")
-          .catch(() => undefined);
-        for (const failure of result?.failures ?? []) {
-          process.stderr.write(
-            `clai interactive-session cleanup: [${failure.code}] ${failure.message}\n`,
-          );
-        }
       },
     ],
     // Ctrl+C / SIGINT: first signal aborts a live turn (or arms quit via the
