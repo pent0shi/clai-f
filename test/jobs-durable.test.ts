@@ -183,7 +183,7 @@ describe("durable background jobs", () => {
 
   it("labels launch success separately from later application failure", async () => {
     const { manager } = await fixture();
-    const command = `${JSON.stringify(process.execPath)} -e ${JSON.stringify("setTimeout(() => process.exit(7), 80)")}`;
+    const command = `${JSON.stringify(process.execPath)} -e ${JSON.stringify("setTimeout(() => process.exit(7), 500)")}`;
     const started = await manager.startJob(command);
 
     expect(started.ok).toBe(true);
