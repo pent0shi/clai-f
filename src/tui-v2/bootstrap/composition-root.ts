@@ -21,6 +21,8 @@ import type { SecretPort } from "../../app/ports/secret-port.js";
 import { createCurrentAgentPort } from "../../app/adapters/current-agent-adapter.js";
 import { createCurrentPersistencePort } from "../../app/adapters/current-store-adapter.js";
 import { createCurrentJobsPort } from "../../app/adapters/current-jobs-adapter.js";
+import { createCurrentInteractiveSessionsPort } from "../../app/adapters/current-interactive-sessions-adapter.js";
+import type { InteractiveSessionsPort } from "../../app/ports/interactive-sessions-port.js";
 import { createCurrentUpdatesPort } from "../../app/adapters/current-updates-adapter.js";
 import { createInMemoryClipboardPort } from "../../app/adapters/in-memory-clipboard-adapter.js";
 import { SessionController } from "../../app/controllers/session-controller.js";
@@ -55,6 +57,7 @@ export interface AppPorts {
   readonly agent: AgentPort;
   readonly persistence: PersistencePort;
   readonly jobs: JobsPort;
+  readonly interactiveSessions: InteractiveSessionsPort;
   readonly updates: UpdatesPort;
   readonly clipboard: ClipboardPort;
   readonly confirm: ConfirmationPort | undefined;
@@ -65,6 +68,7 @@ export interface CompositionOptions {
   readonly agent?: AgentPort | undefined;
   readonly persistence?: PersistencePort | undefined;
   readonly jobs?: JobsPort | undefined;
+  readonly interactiveSessions?: InteractiveSessionsPort | undefined;
   readonly updates?: UpdatesPort | undefined;
   readonly clipboard?: ClipboardPort | undefined;
   readonly confirm?: ConfirmationPort | undefined;
@@ -166,6 +170,8 @@ export function createCompositionRoot(
     agent: options.agent ?? createCurrentAgentPort(),
     persistence,
     jobs: options.jobs ?? createCurrentJobsPort(),
+    interactiveSessions:
+      options.interactiveSessions ?? createCurrentInteractiveSessionsPort(),
     updates: options.updates ?? createCurrentUpdatesPort(),
     clipboard: options.clipboard ?? createInMemoryClipboardPort(),
     confirm: options.confirm ?? createOverlayConfirmPort(overlay),
@@ -181,6 +187,7 @@ export function createCompositionRoot(
     agent: ports.agent,
     persistence: ports.persistence,
     jobs: ports.jobs,
+    interactiveSessions: ports.interactiveSessions,
     emit,
     confirm: ports.confirm,
     requestSecret: ports.requestSecret,

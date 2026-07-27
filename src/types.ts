@@ -257,4 +257,11 @@ export interface ToolResult {
    * UI renders Cursor-style green/red hunks; model history uses `output` only.
    */
   fileChanges?: import("./tools/file-diff.js").FileChange[] | undefined;
+  /**
+   * Structured receipt for the additive `terminal.*` interactive-session tools.
+   * `output` stays the concise ANSI-free projection used by providers.
+   */
+  interactiveSession?:
+    | import("./interactive-session/types.js").InteractiveSessionToolResult
+    | undefined;
 }

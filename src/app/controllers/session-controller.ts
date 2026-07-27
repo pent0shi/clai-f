@@ -33,6 +33,8 @@ import { EventSequencer, type Clock, type IdFactory } from "../events/sequencer.
 import { OutputSpool } from "../events/event-buffer.js";
 import type { AgentPort, RunTurnRequest } from "../ports/agent-port.js";
 import type { JobsPort } from "../ports/jobs-port.js";
+import type { InteractiveSessionsPort } from "../ports/interactive-sessions-port.js";
+import { mergeCancelAllResult } from "./cancel-all-result.js";
 import type { PersistencePort } from "../ports/persistence-port.js";
 import type { ConfirmationPort } from "../ports/confirm-port.js";
 import type { SecretPort } from "../ports/secret-port.js";
@@ -72,6 +74,7 @@ export interface SessionControllerDeps {
   readonly agent: AgentPort;
   readonly persistence: PersistencePort;
   readonly jobs?: JobsPort | undefined;
+  readonly interactiveSessions?: InteractiveSessionsPort | undefined;
   readonly emit: (event: AnyAppEvent) => void;
   readonly sessionId?: string | undefined;
   readonly provider?: ProviderId | undefined;
@@ -366,6 +369,9 @@ export class SessionController implements Disposable {
       this.refreshEstimatedContext();
     }
     if (options.sessionId) {
+      if (options.sessionId !== this.sessionIdValue) {
+        this.fenceInteractiveOwner(this.sessionIdValue);
+      }
       this.sessionIdValue = asSessionId(options.sessionId);
       this.sequencer.rebind(this.sessionIdValue);
       this.policy = createSessionPolicy(this.sessionIdValue);
@@ -413,6 +419,7 @@ export class SessionController implements Disposable {
     this.contextUsage = undefined;
     this.spool.clear();
     if (options.mintNewId) {
+      this.fenceInteractiveOwner(this.sessionIdValue);
       this.sessionIdValue = asSessionId(mintSessionId());
       this.sequencer.rebind(this.sessionIdValue);
       this.persistence.newSession();
@@ -584,10 +591,20 @@ export class SessionController implements Disposable {
     this.compactAbort?.abort(); // cancel in-flight /compact alongside the turn
     this.prompts.clear(true);
     this.notifyState();
-    if (!this.deps.jobs) {
-      return { ok: true, output: "Turn cancelled; no background-job service is configured." };
-    }
-    return this.deps.jobs.cancelAll(this.sessionIdValue);
+    const [jobs, interactive] = await Promise.all([
+      this.deps.jobs?.cancelAll(this.sessionIdValue),
+      this.deps.interactiveSessions?.cancelOwner(this.sessionIdValue),
+    ]);
+    return mergeCancelAllResult(jobs, interactive);
+  }
+
+  /**
+   * Fence the outgoing owner id and start one tracked teardown before that id is
+   * rebound or released, so no new operation can enter the old owner and the old
+   * owner never becomes reachable through the new conversation context.
+   */
+  private fenceInteractiveOwner(ownerId: string): void {
+    void this.deps.interactiveSessions?.beginCloseOwner(ownerId).catch(() => undefined);
   }
 
   enqueue(prompt: string, opts?: TurnDisplayOptions): void {
@@ -759,6 +776,8 @@ export class SessionController implements Disposable {
 
   dispose(): void {
     this.beginLifecycleGeneration();
+    // Teardown is awaited later by cancellation or application shutdown.
+    this.fenceInteractiveOwner(this.sessionIdValue);
     this.turnEndListeners.clear();
     this.stateListeners.clear();
     this.disposables.dispose();

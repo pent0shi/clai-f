@@ -1,4 +1,4 @@
-import { spawn, execFileSync, type ChildProcess } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { createWriteStream, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync, type WriteStream } from "node:fs";
 import { mkdir, open, stat } from "node:fs/promises";
 import { basename, join, sep } from "node:path";
@@ -11,6 +11,7 @@ import { safeCwd } from "../os/cwd.js";
 import { getJobsDir } from "../store/paths.js";
 import { resolveShell } from "./shell.js";
 import { terminateProcessTree } from "../os/process-tree.js";
+import { forgetProcessIdentity, processIdentity } from "../os/process-identity.js";
 
 export type JobStatus = "starting" | "running" | "exited" | "failed" | "stopping" | "killed" | "lost";
 export type JobTerminalStatus = Exclude<JobStatus, "starting" | "running" | "stopping">;
@@ -287,84 +288,6 @@ function processAlive(pid: number | undefined): boolean {
     // gone. Only ESRCH ("no such process") proves it is truly dead.
     return (error as NodeJS.ErrnoException).code === "EPERM";
   }
-}
-
-/** Identity is invariant for a pid's lifetime, so it caches safely. */
-const PROCESS_IDENTITY_TTL_MS = 15_000;
-const PROCESS_IDENTITY_CACHE_MAX = 512;
-const processIdentityCache = new Map<
-  number,
-  { value: string | undefined; at: number }
->();
-
-function readLinuxProcessStart(pid: number): string | undefined {
-  try {
-    const raw = readFileSync(`/proc/${pid}/stat`, "utf8");
-    const commEnd = raw.lastIndexOf(")");
-    if (commEnd < 0) return undefined;
-    const fields = raw.slice(commEnd + 2).trim().split(/\s+/);
-    const startTime = fields[19];
-    return startTime && startTime.length > 0 ? startTime : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-function readPsProcessStart(pid: number): string | undefined {
-  try {
-    // Start time only: the command line is deliberately excluded — `sh -c "cmd"`
-    // execs into `cmd`, mutating `ps command=` mid-run, which made a live job
-    // fail its OWN identity check.
-    return execFileSync("ps", ["-p", String(pid), "-o", "lstart="], {
-      encoding: "utf8",
-      timeout: 2_000,
-      stdio: ["ignore", "pipe", "ignore"],
-    }).trim();
-  } catch {
-    return undefined;
-  }
-}
-
-function computeProcessIdentity(pid: number): string | undefined {
-  const raw =
-    process.platform === "linux"
-      ? readLinuxProcessStart(pid)
-      : readPsProcessStart(pid);
-  return raw ? createHash("sha256").update(raw).digest("hex") : undefined;
-}
-
-function pruneProcessIdentityCache(now: number): void {
-  if (processIdentityCache.size <= PROCESS_IDENTITY_CACHE_MAX) return;
-  for (const [pid, entry] of processIdentityCache) {
-    if (now - entry.at >= PROCESS_IDENTITY_TTL_MS) processIdentityCache.delete(pid);
-  }
-  if (processIdentityCache.size > PROCESS_IDENTITY_CACHE_MAX) {
-    processIdentityCache.clear();
-  }
-}
-
-function forgetProcessIdentity(pid: number | undefined): void {
-  if (pid) processIdentityCache.delete(pid);
-}
-
-function processIdentity(
-  pid: number | undefined,
-  options: { refresh?: boolean } = {},
-): string | undefined {
-  if (!pid || process.platform === "win32") return undefined;
-  const now = Date.now();
-  const cached = processIdentityCache.get(pid);
-  if (
-    cached &&
-    !options.refresh &&
-    now - cached.at < PROCESS_IDENTITY_TTL_MS
-  ) {
-    return cached.value;
-  }
-  const value = computeProcessIdentity(pid);
-  processIdentityCache.set(pid, { value, at: now });
-  pruneProcessIdentityCache(now);
-  return value;
 }
 
 /**

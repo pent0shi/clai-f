@@ -6,6 +6,7 @@ import type { Mode, ProviderId } from "./types.js";
 /** Absolute path to this module — used to re-exec under Bun for OpenTUI. */
 const CLAI_ENTRY = fileURLToPath(import.meta.url);
 import { runAgent } from "./modes/agent.js";
+import { interactiveSessionManager } from "./interactive-session/manager.js";
 import { resolveTurnInput } from "./attachments/service.js";
 import { startRepl } from "./repl.js";
 import {
@@ -134,7 +135,6 @@ async function oneShot(
   }
 
   clearThinking();
-  let answer = "";
   const resolved = resolveTurnInput({
     prompt,
     mode,
@@ -144,13 +144,27 @@ async function oneShot(
   if (resolved.fallbackReason) {
     console.error(chalk.dim(`  ${resolved.fallbackReason}`));
   }
-  answer = await runAgent(resolved.prompt, {
-    provider: resolved.provider,
-    model: resolved.model,
-    autoConfirm: options.yes,
-    mode: resolved.mode,
-    images: [...resolved.images],
-  });
+  let answer = "";
+  try {
+    answer = await runAgent(resolved.prompt, {
+      provider: resolved.provider,
+      model: resolved.model,
+      autoConfirm: options.yes,
+      mode: resolved.mode,
+      images: [...resolved.images],
+    });
+  } finally {
+    // One-shot runs use the same idempotent close-all boundary as the REPL and
+    // the V2 renderer, so a tool-started session cannot outlive the process.
+    const cleanup = await interactiveSessionManager
+      .closeAll("app-shutdown")
+      .catch(() => undefined);
+    for (const failure of cleanup?.failures ?? []) {
+      console.error(
+        chalk.dim(`  interactive-session cleanup: [${failure.code}] ${failure.message}`),
+      );
+    }
+  }
   if (!options.noHistory) {
     await saveSession([
       { role: "user", content: prompt },
