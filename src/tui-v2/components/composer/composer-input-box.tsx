@@ -88,6 +88,11 @@ export function ComposerInputBox(props: {
         // OpenTUI places the caret via selection (updateCursor on mouse
         // down). selectable={false} kills click-to-position entirely.
         selectable
+        // Without explicit selection colours OpenTUI tracks the selection but
+        // paints no highlight, so dragging or shift+arrow looked like nothing
+        // happened. These make both visible.
+        selectionBg={theme.selection}
+        selectionFg={theme.white}
         placeholder={
           running
             ? "type to queue a message…"

@@ -91,6 +91,7 @@ export function TranscriptRowImpl(props: {
           theme={theme}
           expanded={expanded}
           liveBody={liveThinking}
+          contentWidth={contentWidth}
           onToggle={() => store.toggleItemOverride(item.id, expandThinkingGlobal)}
         />
       );

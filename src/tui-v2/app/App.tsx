@@ -41,6 +41,7 @@ import {
 import { usePanePresence } from "../components/plan/use-pane-presence.js";
 import { transcriptScrollPort } from "../components/transcript/transcript-scroll-port.js";
 import { composerActionPort } from "../composer/composer-action-port.js";
+import { useHasDraft } from "../state/use-has-draft.js";
 import { formatShortcutsReference } from "../actions/format-shortcuts.js";
 import { formatCommandHelpMarkdown } from "../rendering/format-help.js";
 import { notify, notifyWarn } from "../notify.js";
@@ -74,6 +75,7 @@ export function App(): ReactNode {
   const escapeCancelTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const escapeCancelArmedRef = useRef(false);
   const [escapeCancelArmed, setEscapeCancelArmed] = useState(false);
+  const hasDraft = useHasDraft();
   const seenPlanKey = useRef<string | undefined>(undefined);
   /** Seed the composer when the user clicks Edit on a queued prompt. */
   const [composerSeed, setComposerSeed] = useState<
@@ -579,6 +581,8 @@ export function App(): ReactNode {
     notify(services, "Draft cleared · ^X", { key: "draft", durationMs: 1400 });
   }
 
+
+
   function openShortcutsPager(): void {
     services.overlay.openPager(
       "Keyboard shortcuts",
@@ -746,6 +750,9 @@ export function App(): ReactNode {
           onJumpTop={jumpChatTop}
           onJumpBottom={jumpChatBottom}
           onClearDraft={clearDraft}
+          onCutDraft={composerActionPort.cut}
+          onOpenCommands={composerActionPort.openCommands}
+          hasDraft={hasDraft}
           onOpenShortcuts={openShortcutsPager}
           onCycleMode={cycleMode}
           cancelArmed={escapeCancelArmed}

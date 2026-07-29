@@ -17,6 +17,8 @@ import { attachCommandHandlers } from "../app/command-handlers.js";
 import { readCapabilitiesFromProcess } from "./capabilities.js";
 import { createCompositionRoot } from "./composition-root.js";
 import { RendererLifecycle, type RendererHandle } from "./lifecycle.js";
+import { installConsoleGuard } from "./console-guard.js";
+import { getLogsDirRoot } from "../../store/paths.js";
 import { createOsc52ClipboardPort } from "./osc52-clipboard.js";
 import { createPagerExportPort } from "./pager-export.js";
 import { patchOpenTuiTextContent } from "./patch-opentui-text.js";
@@ -94,6 +96,18 @@ export async function startTuiV2(
     },
   };
 
+  // Stray console output would land in cells the renderer never repaints and
+  // stick there for the rest of the session. Route it to a log while the TUI
+  // owns the screen; restored during teardown so errors print normally again.
+  const restoreConsole = installConsoleGuard({
+    logDir: getLogsDirRoot(),
+    onCapture: (level, message) => {
+      if (level === "error" || level === "warn") {
+        services.session.notice("warn", message.split("\n")[0]!.slice(0, 200));
+      }
+    },
+  });
+
   const lifecycle = new RendererLifecycle({
     handle,
     // Flush chat + visual transcript before the renderer is destroyed so an
@@ -102,6 +116,7 @@ export async function startTuiV2(
       async () => {
         await services.session.persistNow().catch(() => undefined);
       },
+      restoreConsole,
     ],
     // Ctrl+C / SIGINT: first signal aborts a live turn (or arms quit via the
     // App handler path when the key event arrives). A second SIGINT within

@@ -77,6 +77,8 @@ export const defaultKeymap: readonly KeyBinding[] = [
   binding("down", "editor.history-next", "composer"),
   // Clear draft (^X). ^U = delete-to-line-start in the textarea (not clear).
   binding("ctrl+x", "editor.clear", "composer"),
+  // Cut: copy the draft to the clipboard, then clear it.
+  binding("ctrl+shift+x", "editor.cut-draft", "composer"),
 
   // transcript
   binding("up", "transcript.scroll-up", "transcript"),

@@ -45,6 +45,12 @@ export interface StatusLineProps {
   readonly onJumpTop?: (() => void) | undefined;
   readonly onJumpBottom?: (() => void) | undefined;
   readonly onClearDraft?: (() => void) | undefined;
+  /** Copy the draft to the clipboard, then clear it (Ctrl+Shift+X). */
+  readonly onCutDraft?: (() => void) | undefined;
+  /** Open the slash-command list (same source as typing "/" in the composer). */
+  readonly onOpenCommands?: (() => void) | undefined;
+  /** Draft is non-empty — gates the ^X / ⇧^X hints. */
+  readonly hasDraft?: boolean | undefined;
   readonly onOpenShortcuts?: (() => void) | undefined;
   readonly onCycleMode?: (() => void) | undefined;
   /** Whether the first Esc has armed cancellation for 1.5 seconds. */
@@ -71,14 +77,26 @@ export function armedCancelHint(): string {
   return "esc again to cancel";
 }
 
-export type IdleHintId = "commands" | "thinking" | "output" | "shortcuts";
+export type IdleHintId =
+  | "commands"
+  | "thinking"
+  | "output"
+  | "shortcuts"
+  | "clear-draft"
+  | "cut-draft";
 
 // Thin idle row: the chords users reach for, not every binding. The full list
-// lives behind /shortcuts.
-export function idleHintIds(density: StatusDensity): readonly IdleHintId[] {
-  if (density === "xs" || density === "sm") return [];
-  if (density === "md") return ["commands", "thinking", "output"];
-  return ["commands", "thinking", "output", "shortcuts"];
+// lives behind /shortcuts. Draft hints only appear while a draft exists, so the
+// row does not carry chords that would currently do nothing.
+export function idleHintIds(
+  density: StatusDensity,
+  hasDraft = false,
+): readonly IdleHintId[] {
+  const draft: IdleHintId[] = hasDraft ? ["clear-draft", "cut-draft"] : [];
+  if (density === "xs") return [];
+  if (density === "sm") return hasDraft ? ["clear-draft"] : [];
+  if (density === "md") return ["commands", ...draft, "thinking", "output"];
+  return ["commands", ...draft, "thinking", "output", "shortcuts"];
 }
 
 export type StatusDensity = "xs" | "sm" | "md" | "lg";
@@ -352,6 +370,9 @@ export function StatusLine(props: StatusLineProps): ReactNode {
     onJumpTop,
     onJumpBottom,
     onClearDraft,
+    onCutDraft,
+    onOpenCommands,
+    hasDraft = false,
     onOpenShortcuts,
     onCycleMode,
     cancelArmed = false,
@@ -403,7 +424,7 @@ export function StatusLine(props: StatusLineProps): ReactNode {
 
   const ctxChip = contextChipForDensity(state.contextUsage, density);
   const scrollCompact = density === "xs" || density === "sm";
-  const idleHints = idleHintIds(density);
+  const idleHints = idleHintIds(density, hasDraft);
 
   // ── Running / compacting ──────────────────────────────────────────────
   if (busy) {
@@ -580,10 +601,38 @@ export function StatusLine(props: StatusLineProps): ReactNode {
         {idleHints.includes("commands") ? (
           <>
             {sep(theme)}
-            <text
-              selectable={false}
-              content={density === "lg" ? "/:commands" : "/"}
-              style={{ fg: theme.muted, flexShrink: 0 }}
+            {/* Just "/" at rest; hover names it and a click opens the same
+                command list that typing "/" in the composer shows. */}
+            <ClickableHint
+              short="/"
+              expand="/ commands"
+              active={false}
+              theme={theme}
+              onClick={onOpenCommands}
+            />
+          </>
+        ) : null}
+        {idleHints.includes("clear-draft") ? (
+          <>
+            {sep(theme)}
+            <ClickableHint
+              short="^X"
+              expand="clear draft"
+              active={false}
+              theme={theme}
+              onClick={onClearDraft}
+            />
+          </>
+        ) : null}
+        {idleHints.includes("cut-draft") ? (
+          <>
+            {sep(theme)}
+            <ClickableHint
+              short="⇧^X"
+              expand="cut draft (copy + clear)"
+              active={false}
+              theme={theme}
+              onClick={onCutDraft}
             />
           </>
         ) : null}

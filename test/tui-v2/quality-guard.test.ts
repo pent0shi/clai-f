@@ -17,6 +17,9 @@ const HARD_MAX_LINES = 800;
 const LINE_BUDGET_EXCEPTIONS: Readonly<Record<string, number>> = {
   "src/tui-v2/rendering/syntax-highlight.ts": 1500,
   "src/tui-v2/components/pager/pager.tsx": 1000,
+  // Root shell: owns the widest prop surface in the app (status row, overlays,
+  // plan pane, composer wiring). Capped tightly so it cannot drift upward.
+  "src/tui-v2/app/App.tsx": 820,
 };
 
 function walk(dir: string): string[] {

@@ -45,6 +45,7 @@ export const ACTION_IDS = [
   "editor.history-prev",
   "editor.history-next",
   "editor.clear",
+  "editor.cut-draft",
   // transcript / scrolling
   "transcript.scroll-up",
   "transcript.scroll-down",

@@ -21,7 +21,12 @@ export type TextareaActionName =
   | "delete-to-line-end"
   | "delete-line"
   | "delete-word-backward"
-  | "delete-word-forward";
+  | "delete-word-forward"
+  | "select-all"
+  | "select-word-backward"
+  | "select-word-forward"
+  | "select-line-home"
+  | "select-line-end";
 
 export interface TextareaKeyBindingLike {
   readonly name: string;
@@ -69,6 +74,40 @@ export function buildComposerTextareaOverrides(): TextareaKeyBindingLike[] {
   overrides.push({ name: "u", ctrl: true, action: "delete-line" });
   // Ctrl+K keeps "kill to end of line" (readline) for power users.
   overrides.push({ name: "k", ctrl: true, action: "delete-to-line-end" });
+
+  // ── Selection
+  // OpenTUI's defaults bind shift+arrow and shift+home/end, but never bind
+  // `select-all` or the word/line selection actions, so those were unreachable.
+  // Cmd+A is the platform-native select-all; Ctrl+Alt+A covers terminals that
+  // do not deliver super, without shadowing readline Ctrl+A (line-home).
+  overrides.push({ name: "a", super: true, action: "select-all" });
+  overrides.push({ name: "a", ctrl: true, meta: true, action: "select-all" });
+  // Option/Alt + Shift + arrow → extend by word (macOS/most terminals).
+  overrides.push({
+    name: "left",
+    meta: true,
+    shift: true,
+    action: "select-word-backward",
+  });
+  overrides.push({
+    name: "right",
+    meta: true,
+    shift: true,
+    action: "select-word-forward",
+  });
+  // Cmd + Shift + arrow → extend to the visual line edge.
+  overrides.push({
+    name: "left",
+    super: true,
+    shift: true,
+    action: "select-line-home",
+  });
+  overrides.push({
+    name: "right",
+    super: true,
+    shift: true,
+    action: "select-line-end",
+  });
 
   return overrides;
 }

@@ -36,6 +36,7 @@ import {
 } from "./completion.js";
 import { buildComposerTextareaOverrides } from "./textarea-keybindings.js";
 import { composerActionPort } from "./composer-action-port.js";
+import { useDraftActions } from "./use-draft-actions.js";
 import { createComposerImagePaste } from "./composer-image-paste.js";
 import { notify } from "../notify.js";
 import { CompletionMenuView } from "../components/completion/completion-menu.js";
@@ -146,25 +147,6 @@ export function ComposerEditor(props: ComposerEditorProps): ReactNode {
     };
   }, [shouldOwnKeyboard]);
 
-  useEffect(() => {
-    return composerActionPort.registerClear(() => {
-      const editor = editorRef.current;
-      if (!editor) return;
-      editor.clear();
-      pasteRegistry.current.clear();
-      promptHistory.current.reset();
-      menuRef.current = { kind: "none" };
-      menuKindRef.current = "none";
-      acceptedSlashRef.current = undefined;
-      setMenu({ kind: "none" });
-      setAcceptedSlash(undefined);
-      setContentRows(1);
-      setPasteChips([]);
-      services.focus.focusRegion("composer");
-      editor.focus();
-    });
-  }, [services.focus]);
-
   const lastSeedToken = useRef<number | undefined>(undefined);
   useEffect(() => {
     const seed = props.seedDraft;
@@ -176,11 +158,7 @@ export function ComposerEditor(props: ComposerEditorProps): ReactNode {
     editor.gotoBufferEnd();
     services.focus.focusRegion("composer");
     editor.focus();
-    menuRef.current = { kind: "none" };
-    menuKindRef.current = "none";
-    acceptedSlashRef.current = undefined;
-    setMenu({ kind: "none" });
-    setAcceptedSlash(undefined);
+    resetMenuState();
     queueMicrotask(() => {
       refreshMenu();
       syncContentRows();
@@ -289,6 +267,8 @@ export function ComposerEditor(props: ComposerEditorProps): ReactNode {
     setPasteChips((current) =>
       samePastePlaceholderEntries(current, nextChips) ? current : nextChips,
     );
+    // Gates the draft-only ^X / ⇧^X chips in the status row.
+    composerActionPort.setHasDraft(editor.plainText.trim().length > 0);
   }
 
   function refreshMenu(): void {
@@ -465,11 +445,7 @@ export function ComposerEditor(props: ComposerEditorProps): ReactNode {
     editor.clear();
     pasteRegistry.current.clear();
     promptHistory.current.reset();
-    menuRef.current = { kind: "none" };
-    menuKindRef.current = "none";
-    acceptedSlashRef.current = undefined;
-    setMenu({ kind: "none" });
-    setAcceptedSlash(undefined);
+    resetMenuState();
     setContentRows(1);
     setPasteChips([]);
     if (!expanded) return;
@@ -609,11 +585,7 @@ export function ComposerEditor(props: ComposerEditorProps): ReactNode {
         return;
       }
       if (chord === "escape") {
-        menuRef.current = { kind: "none" };
-        menuKindRef.current = "none";
-        acceptedSlashRef.current = undefined;
-        setMenu({ kind: "none" });
-        setAcceptedSlash(undefined);
+        resetMenuState();
         key.preventDefault();
         return;
       }
@@ -635,18 +607,15 @@ export function ComposerEditor(props: ComposerEditorProps): ReactNode {
       // Non-empty: let OpenTUI handle line kill (do not preventDefault).
       return;
     }
+    // Shift first: ctrl+shift+x must not fall through to the plain clear.
+    if (chord === "ctrl+shift+x") {
+      key.preventDefault();
+      void draftActions.cut();
+      return;
+    }
     if (chord === "ctrl+x") {
       key.preventDefault();
-      editor.clear();
-      pasteRegistry.current.clear();
-      promptHistory.current.reset();
-      menuRef.current = { kind: "none" };
-      menuKindRef.current = "none";
-      acceptedSlashRef.current = undefined;
-      setMenu({ kind: "none" });
-      setAcceptedSlash(undefined);
-      setContentRows(1);
-      setPasteChips([]);
+      clearDraftState(editor);
       notify(services, "Draft cleared · ^X", { key: "draft", durationMs: 1400 });
       return;
     }
@@ -734,6 +703,33 @@ export function ComposerEditor(props: ComposerEditorProps): ReactNode {
     services.focus.focusRegion("composer");
     editorRef.current?.focus();
   }
+
+  const resetMenuState = (): void => {
+    menuRef.current = { kind: "none" };
+    menuKindRef.current = "none";
+    acceptedSlashRef.current = undefined;
+    setMenu({ kind: "none" });
+    setAcceptedSlash(undefined);
+  };
+
+  const draftActions = useDraftActions({
+    editorRef,
+    services,
+    expandPastes: (text) => pasteRegistry.current.expand(text),
+    resetRegistries: () => {
+      pasteRegistry.current.clear();
+      promptHistory.current.reset();
+    },
+    resetMenuState,
+    setContentRows,
+    clearPasteChips: () => setPasteChips([]),
+    focusComposer,
+    refreshMenu,
+    syncContentRows,
+    notify: (message, durationMs) =>
+      notify(services, message, { key: "draft", durationMs }),
+  });
+  const clearDraftState = draftActions.clear;
 
   function hoverCompletion(index: number): void {
     selectedRef.current = index;
