@@ -273,23 +273,11 @@ async function readBodyCapped(
   return collected;
 }
 
-/**
- * Default no-byte watchdog for provider streams (all providers / modes).
- * Unified to 60s so "stream stalled" behaves the same everywhere.
- */
-export const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 60_000;
+export const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 90_000;
 
-/**
- * Mid-stream silence budget when reasoning/thinking is enabled.
- * Same as the global default (1 minute).
- */
-export const THINKING_STREAM_IDLE_TIMEOUT_MS = 60_000;
+export const THINKING_STREAM_IDLE_TIMEOUT_MS = 120_000;
 
-/**
- * First-byte idle budget when reasoning/thinking is enabled.
- * Same as the global default (1 minute).
- */
-export const THINKING_STREAM_INITIAL_IDLE_TIMEOUT_MS = 60_000;
+export const THINKING_STREAM_INITIAL_IDLE_TIMEOUT_MS = 300_000;
 
 
 
@@ -1476,23 +1464,33 @@ export async function openAiCompatibleStream(options: {
           const chunkUsage = parseOpenAiUsage(parsed.usage);
           if (chunkUsage) streamUsage = chunkUsage;
           const choice = parsed.choices?.[0];
-          // Reset only for an actual completion event. Blank SSE heartbeats
-          // and comments otherwise keep a frozen request alive forever.
-          // Usage-only final chunks (stream_options.include_usage) also count.
-          if (choice?.delta || choice?.finish_reason || chunkUsage) {
+          const delta = choice?.delta;
+          const reasoningToken = delta?.reasoning_content ?? delta?.reasoning;
+          const token = delta?.content;
+          const toolProgress = delta?.tool_calls?.some((toolCall) =>
+            Boolean(
+              toolCall.id ||
+                toolCall.function?.name ||
+                toolCall.function?.arguments,
+            ),
+          );
+          if (
+            choice?.finish_reason ||
+            chunkUsage ||
+            reasoningToken ||
+            token ||
+            toolProgress
+          ) {
             sawStreamProgress = true;
             resetIdleTimer();
           }
           if (choice?.finish_reason) finishReason = choice.finish_reason;
-          const delta = choice?.delta;
-          const reasoningToken = delta?.reasoning_content ?? delta?.reasoning;
           if (reasoningToken) {
             enterReasoning();
             reasoningSeen += reasoningToken;
             full += reasoningToken;
             options.onToken(reasoningToken);
           }
-          const token = delta?.content;
           if (token) {
             handleContentToken(token);
           }

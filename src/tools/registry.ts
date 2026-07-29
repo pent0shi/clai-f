@@ -268,12 +268,6 @@ function optionalResponseMode(
 export const toolRegistry: Record<string, ToolHandler> = {
   async "shell.exec"(args, options) {
     const command = requireString(args, "command");
-    // Persistent processes and genuinely expensive finite scanners/searches run
-    // as durable jobs. `background` gives the caller an explicit escape hatch:
-    //   never  — always foreground, timeoutMs honored
-    //   always — always a durable job
-    //   auto   — persistent commands and cost-signalled finite commands go
-    //            background; everything else stays foreground (default)
     const requestedTimeoutMs = optionalNumber(args, "timeoutMs");
     const policy = resolveShellExecBackgroundPolicy({
       command,
@@ -489,7 +483,7 @@ export const toolRegistry: Record<string, ToolHandler> = {
     if (ports) argv.push("-p", ports);
     argv.push(...profileArgs, ...legacyArgs, host.value);
     const estimate = estimateScanResources(argv);
-    const durable = args.background === true || estimate.durableRecommended;
+    const durable = args.background === true || args.responder === true;
     if (durable) {
       const prepared = await prepareDurableNmapJob(
         argv,
@@ -502,8 +496,8 @@ export const toolRegistry: Record<string, ToolHandler> = {
         profile: estimate.profile,
         estimatedSeconds: estimate.estimatedSeconds,
         ...responderJobOptions(options),
-        responder: true,
-        wakeOnCompletion: true,
+        responder: args.responder === true,
+        wakeOnCompletion: args.responder === true,
         ...(options?.engagementAuthorization ? { authorization: options.engagementAuthorization } : {}),
       });
     }
@@ -820,7 +814,7 @@ export const toolRegistry: Record<string, ToolHandler> = {
       try {
         if (step.key === "nmap") {
           const estimate = estimateScanResources(step.argv);
-          if (estimate.durableRecommended || args.background === true) {
+          if (args.background === true || args.responder === true) {
             const prepared = await prepareDurableNmapJob(
               step.argv,
               options,
@@ -832,8 +826,8 @@ export const toolRegistry: Record<string, ToolHandler> = {
                   profile: estimate.profile,
                   estimatedSeconds: estimate.estimatedSeconds,
                   ...responderJobOptions(options),
-                  responder: true,
-                  wakeOnCompletion: true,
+                  responder: args.responder === true,
+                  wakeOnCompletion: args.responder === true,
                   ...(options?.engagementAuthorization ? { authorization: options.engagementAuthorization } : {}),
                 })
               : prepared.result;

@@ -110,7 +110,10 @@ describe("TOOL-003 timeoutMs is opt-in per tool", () => {
     );
     expect((profile?.properties?.scripts as any)?.type).toBe("array");
     expect(scan?.description).toMatch(/ports without a -p prefix/i);
-    expect(scan?.description).toMatch(/do not poll/i);
+    expect(scan?.description).toMatch(/synchronously unless background or responder/i);
+    expect(Object.keys(scan?.parameters.properties ?? {})).toEqual(
+      expect.arrayContaining(["background", "responder"]),
+    );
   });
 
   it("preserves the net.scan profile across every native provider schema", () => {

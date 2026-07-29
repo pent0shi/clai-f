@@ -24,6 +24,7 @@ import { resolveToolDialect } from "../llm/capabilities.js";
 import {
   syntheticToolCallId,
   isTextOnlyModel,
+  markTextOnlyModel,
   fromWireName,
 } from "../llm/tool-protocol.js";
 import { sanitizeAssistantText } from "../ui/ansi-box.js";
@@ -1741,6 +1742,7 @@ export async function runAgentTurn(
     const maxIterations = Math.max(210, computeMaxIterations(stepBudget));
 
     let productiveSteps = 0;
+    let consecutiveModelOnlyRounds = 0;
     /** Successful file mutation this turn — kills false "error diagnosed but not fixed". */
     let sawSuccessfulMutation = false;
     let step = -1;
@@ -4149,7 +4151,12 @@ export async function runAgentTurn(
         const callIds: string[] = [];
         let streamedCallsCount = 0;
 
-        const deferredToolCalls: { eventId: string; call: ToolCall; rendered: string }[] = [];
+        const deferredToolCalls: {
+          eventId: string;
+          call: ToolCall;
+          rendered: string;
+          shown: boolean;
+        }[] = [];
         const deltaParser = writesDirectly
           ? undefined
           : createThinkingStreamParser(
@@ -4273,7 +4280,7 @@ export async function runAgentTurn(
                     const name =
                       fromWireName(delta.name) ?? delta.name;
                     const existing = deferredToolCalls[delta.index];
-                    if (existing) {
+                    if (existing && existing.call.name !== "…") {
                       if (
                         delta.argumentsBytes &&
                         delta.argumentsBytes >= 4096 &&
@@ -4286,20 +4293,23 @@ export async function runAgentTurn(
                       }
                       return;
                     }
-                    // Ensure slots are dense so index maps to deferredToolCalls[i].
                     while (deferredToolCalls.length < delta.index) {
+                      const slot = deferredToolCalls.length;
+                      const placeholderId = `tool-${++nextToolEventId}`;
+                      callIds[slot] = placeholderId;
                       deferredToolCalls.push({
-                        eventId: `tool-${++nextToolEventId}`,
+                        eventId: placeholderId,
                         call: { name: "…", args: {} },
                         rendered: "",
+                        shown: false,
                       });
                     }
                     const call = normalizeToolCall({
                       name,
                       args: {},
                     });
-                    const eventId = `tool-${++nextToolEventId}`;
-                    callIds.push(eventId);
+                    const eventId = existing?.eventId ?? `tool-${++nextToolEventId}`;
+                    callIds[delta.index] = eventId;
                     alreadyPrintedIds.add(eventId);
                     const toolCallLine =
                       chalk.cyan(`  ▶ ${call.name}`) +
@@ -4309,6 +4319,7 @@ export async function runAgentTurn(
                       call,
                       rendered:
                         styleToolChatter(call, toolCallLine) + "\n",
+                      shown: false,
                     };
                     if (deferredToolCalls.length === delta.index) {
                       deferredToolCalls.push(entry);
@@ -4320,6 +4331,8 @@ export async function runAgentTurn(
                       deferredToolCalls.length,
                     );
                     if (!writesDirectly) {
+                      writeToolCall(eventId, call, entry.rendered);
+                      entry.shown = true;
                       emit({ type: "status", text: call.name });
                     } else {
                       spinner.stop();
@@ -4348,18 +4361,22 @@ export async function runAgentTurn(
                   while (streamedCallsCount < parsedCalls.length) {
                     const call = parsedCalls[streamedCallsCount]!;
                     const eventId = `tool-${++nextToolEventId}`;
-                    callIds.push(eventId);
+                    callIds[streamedCallsCount] = eventId;
                     alreadyPrintedIds.add(eventId);
 
                     const toolCallLine =
                       chalk.cyan(`  ▶ ${call.name}`) +
                       chalk.gray(` ${formatToolArgs(call)}`);
-                    deferredToolCalls.push({
+                    const entry = {
                       eventId,
                       call,
                       rendered: styleToolChatter(call, toolCallLine) + "\n",
-                    });
+                      shown: false,
+                    };
+                    deferredToolCalls.push(entry);
                     if (!writesDirectly) {
+                      writeToolCall(eventId, call, entry.rendered);
+                      entry.shown = true;
                       emit({ type: "status", text: call.name });
                     }
                     streamedCallsCount += 1;
@@ -4448,23 +4465,56 @@ export async function runAgentTurn(
               kind: failureKind,
               state: recoveryState,
             });
-            if (plan.action === "give-up") {
-              throw streamError;
-            }
-            recordRecoveryAttempt(recoveryState, failureKind);
 
-            // The router refuses transparent retries after emission,
-            // but the recovery ladder may still re-run the step. Say so, since
-            // the visible answer restarts from scratch.
-            if (streamAlreadyEmitted(streamError)) {
+            const partialStream = streamAlreadyEmitted(streamError) || accumulatedText.length > 0;
+            let continuationNudge = "";
+            if (partialStream) {
+              spinner.stop();
+              deltaParser?.finish();
+              const partial = rememberThinkingFromText(accumulatedText);
+              const hasShownToolCall = deferredToolCalls.some(
+                (entry) => entry.shown,
+              );
+              const partialVisible = textBeforeToolCall(
+                stripThinking(collapseRepeatedText(accumulatedText)).visible,
+              ).trim();
+              if (partialVisible) {
+                if (!hasShownToolCall) {
+                  writeAssistantMessage(partialVisible);
+                }
+                pushAssistantHistory(partialVisible);
+              } else if (!writesDirectly && !hasShownToolCall) {
+                emit({ type: "assistant-message", text: partial.visible });
+              }
+              if (partial.hasThinking && !hasShownToolCall) {
+                writeThinkingBlock(partial.thinkContent);
+              }
+              for (const deferred of deferredToolCalls) {
+                if (!deferred.shown || deferred.call.name === "…") continue;
+                writeToolBlocked(
+                  deferred.eventId,
+                  deferred.call.name,
+                  "Incomplete tool call discarded after the provider stream was interrupted.",
+                  chalk.yellow("  ⚠ incomplete tool call discarded after stream interruption\n"),
+                );
+              }
+              continuationNudge =
+                "The provider stream was interrupted after partial output. Continue from the exact stopping point without repeating prior text. Any incomplete tool call was discarded and must be reissued in full.";
               const restartNotice =
-                "partial answer discarded after a mid-stream failure — the reply restarts below";
+                plan.action === "give-up"
+                  ? "partial response preserved before terminal provider failure"
+                  : "partial response preserved — resuming from the interruption";
               writeNotice(
                 "warn",
                 restartNotice,
                 chalk.yellow(`  ⚠ ${restartNotice}\n`),
               );
             }
+
+            if (plan.action === "give-up") {
+              throw streamError;
+            }
+            recordRecoveryAttempt(recoveryState, failureKind);
 
             if (plan.notice) {
               writeNotice(
@@ -4478,8 +4528,11 @@ export async function runAgentTurn(
             if (plan.forceCompact) {
               await maybeAutoCompact(`stream-recovery:${failureKind}`, true);
             }
-            if (plan.nudge) {
-              messages.push(recoveryUserMessage(plan.nudge));
+            const recoveryNudge = [continuationNudge, plan.nudge]
+              .filter((part): part is string => Boolean(part))
+              .join("\n\n");
+            if (recoveryNudge) {
+              messages.push(recoveryUserMessage(recoveryNudge));
             }
             if (plan.delayMs > 0) {
               emit({
@@ -4539,6 +4592,26 @@ export async function runAgentTurn(
 
         const assistantTextResult = rememberThinkingFromText(completion.text);
         assistantText = assistantTextResult;
+        const commitAssistantRetry = (historyText: string): void => {
+          const hasShownToolCall = deferredToolCalls.some((entry) => entry.shown);
+          if (!hasShownToolCall) {
+            const displayText = textBeforeToolCall(
+              stripThinking(collapseRepeatedText(completion.text)).visible,
+            ).trim();
+            if (displayText) {
+              writeAssistantMessage(displayText);
+            } else if (deltaParser) {
+              emit({ type: "assistant-message", text: "" });
+            }
+            if (assistantText.hasThinking && deltaParser) {
+              emit({
+                type: "thinking-block",
+                content: assistantText.thinkContent,
+              });
+            }
+          }
+          pushAssistantHistory(historyText);
+        };
 
 
         // Only emit a thinking-block event when the classic renderer is
@@ -4560,13 +4633,14 @@ export async function runAgentTurn(
         // otherwise create cards now (non-streaming / name-after-done providers).
         if (nativeToolCalls.length) {
           if (deferredToolCalls.length === 0) {
-            for (const tc of nativeToolCalls) {
+            for (let i = 0; i < nativeToolCalls.length; i += 1) {
+              const tc = nativeToolCalls[i]!;
               const normalized = normalizeToolCall({
                 name: tc.name,
                 args: tc.args,
               });
               const eventId = `tool-${++nextToolEventId}`;
-              callIds.push(eventId);
+              callIds[i] = eventId;
               alreadyPrintedIds.add(eventId);
               const toolCallLine =
                 chalk.cyan(`  ▶ ${normalized.name}`) +
@@ -4575,6 +4649,7 @@ export async function runAgentTurn(
                 eventId,
                 call: normalized,
                 rendered: styleToolChatter(normalized, toolCallLine) + "\n",
+                shown: false,
               });
             }
           } else {
@@ -4586,6 +4661,7 @@ export async function runAgentTurn(
               });
               const existing = deferredToolCalls[i];
               if (existing && existing.call.name !== "…") {
+                callIds[i] = existing.eventId;
                 existing.call = normalized;
                 const toolCallLine =
                   chalk.cyan(`  ▶ ${normalized.name}`) +
@@ -4595,10 +4671,8 @@ export async function runAgentTurn(
               } else if (!existing || existing.call.name === "…") {
                 const eventId =
                   existing?.eventId ?? `tool-${++nextToolEventId}`;
-                if (!existing) {
-                  callIds.push(eventId);
-                  alreadyPrintedIds.add(eventId);
-                }
+                callIds[i] = eventId;
+                alreadyPrintedIds.add(eventId);
                 const toolCallLine =
                   chalk.cyan(`  ▶ ${normalized.name}`) +
                   chalk.gray(` ${formatToolArgs(normalized)}`);
@@ -4606,6 +4680,7 @@ export async function runAgentTurn(
                   eventId,
                   call: normalized,
                   rendered: styleToolChatter(normalized, toolCallLine) + "\n",
+                  shown: existing?.shown ?? false,
                 };
                 if (existing) deferredToolCalls[i] = entry;
                 else deferredToolCalls.push(entry);
@@ -4765,7 +4840,7 @@ export async function runAgentTurn(
               );
             }
             if (assistantText.hasThinking) retryWithoutThinking = true;
-            pushAssistantHistory(
+            commitAssistantRetry(
               stripThinking(collapseRepeatedText(completion.text)).visible,
             );
             // Keep nudges SHORT — cheap models lose the key instruction in long text.
@@ -4836,6 +4911,7 @@ export async function runAgentTurn(
           }
         }
         if (!call) {
+          consecutiveModelOnlyRounds += 1;
           if (bareArgsOnly) {
             bareToolJsonRetries += 1;
             if (bareToolJsonRetries <= 3) {
@@ -4850,7 +4926,7 @@ export async function runAgentTurn(
                     : "  ⚠ tool call missing its name/fence — asking the model to re-emit a proper ```tool block\n",
                 ),
               );
-              pushAssistantHistory(assistantText.visible);
+              commitAssistantRetry(assistantText.visible);
               messages.push(
                 recoveryUserMessage(
                   isPlanMode && !activePlan
@@ -4888,7 +4964,7 @@ export async function runAgentTurn(
                 "  ⚠ tool call was malformed or cut off — asking the model to retry in JSON form\n",
               ),
             );
-            pushAssistantHistory(assistantText.visible);
+            commitAssistantRetry(assistantText.visible);
             messages.push(
               recoveryUserMessage(
                 toolsAttached
@@ -4924,7 +5000,7 @@ export async function runAgentTurn(
                       `  ℹ tool call was truncated — salvaged ${lineCount} lines to ${salvaged.path}\n`,
                     ),
                   );
-                  pushAssistantHistory(
+                  commitAssistantRetry(
                     stripThinking(assistantText.visible).visible,
                   );
                   const priorBytes = writeResult.bytesOnDisk;
@@ -4962,7 +5038,7 @@ export async function runAgentTurn(
                   "  ⚠ tool call was cut off (output too long) — asking the model to retry safely\n",
                 ),
               );
-              pushAssistantHistory(
+              commitAssistantRetry(
                 stripThinking(assistantText.visible).visible,
               );
               messages.push({
@@ -5007,7 +5083,7 @@ export async function runAgentTurn(
                       `  ℹ malformed tool call salvaged — wrote ${lineCount} lines to ${salvaged.path}\n`,
                     ),
                   );
-                  pushAssistantHistory(
+                  commitAssistantRetry(
                     stripThinking(assistantText.visible).visible,
                   );
                   messages.push({
@@ -5034,7 +5110,7 @@ export async function runAgentTurn(
                   "  ⚠ tool block present but its JSON didn't parse — asking the model to re-emit valid JSON\n",
                 ),
               );
-              pushAssistantHistory(
+              commitAssistantRetry(
                 stripThinking(assistantText.visible).visible,
               );
               messages.push({
@@ -5057,19 +5133,9 @@ export async function runAgentTurn(
             // Exhausted retries — fall through to the normal path.
           }
 
-          const cleaned = stripSentinelTokens(assistantText.visible);
-
-          if (unreadResponderNotificationIds.size > 0) {
-            const unread = [...unreadResponderNotificationIds];
-            pushAssistantHistory(assistantText.visible);
-            messages.push(
-              recoveryUserMessage(
-                `You have ${unread.length} delivered Responder result(s) that remain unread: ${unread.join(", ")}. ` +
-                  "If analysis is incomplete, call only the bounded evidence tool needed now. If each result has been analyzed and is satisfactory, you MUST call job.read with its jobId or exact notificationId before giving a final response. job.read does not require an active plan; do not create or update a plan merely to acknowledge a result.",
-              ),
-            );
-            continue;
-          }
+          const cleaned = collapseRepeatedText(
+            stripSentinelTokens(assistantText.visible),
+          );
 
           const narratedAction = looksLikeActionNarration(cleaned);
           const narratedWebAction = looksLikeWebActionNarration(cleaned);
@@ -5093,12 +5159,80 @@ export async function runAgentTurn(
               !idleOrSocialPrompt &&
               (buildLikeTurn || pentestLikeTurn));
 
+          const unreadResponderResults =
+            unreadResponderNotificationIds.size > 0;
           const wantsAction =
             !completedPlanDuringThisTurn &&
             !idleOrSocialPrompt &&
             (userExpectsWork ||
               (narratedAction && !informationalQuery) ||
               (narratedWebAction && !informationalQuery));
+          if (
+            (wantsAction || unreadResponderResults) &&
+            toolsAttached &&
+            consecutiveModelOnlyRounds === 2
+          ) {
+            markTextOnlyModel(provider, model);
+            commitAssistantRetry(assistantText.visible);
+            writeNotice(
+              "warn",
+              "model repeatedly returned prose instead of a native tool call — switching this model to the text tool protocol",
+              chalk.yellow(
+                "  ⚠ switching this model to the text tool protocol after repeated non-actionable responses\n",
+              ),
+            );
+            messages.push(
+              recoveryUserMessage(
+                "Native tool calling did not produce an executable call. Continue now with exactly one complete fenced ```tool block. Do not repeat the prior narration.",
+              ),
+            );
+            continue;
+          }
+          if (
+            (wantsAction || unreadResponderResults) &&
+            consecutiveModelOnlyRounds >= 6
+          ) {
+            commitAssistantRetry(assistantText.visible);
+            const stalledMessage =
+              "Stopped a repeated model-only retry cycle after the model returned no executable tool call. Completed work and transcript output were preserved.";
+            writeAssistantMessage(stalledMessage);
+            const remainingCriteria = livePlanAtCompletion
+              ? foregroundRemaining(livePlanAtCompletion).map(
+                  (task) => `[${task.id}] ${task.title}`,
+                )
+              : [];
+            if (unreadResponderResults) {
+              remainingCriteria.push(
+                "Analyze and acknowledge each delivered Responder result.",
+              );
+            }
+            if (remainingCriteria.length === 0) {
+              remainingCriteria.push(
+                "Continue the unfinished work with an executable tool call.",
+              );
+            }
+            outcomeState.outcome.status = "partial";
+            await saveOutcomeState(outcomeState);
+            moveTurn("partial", "repeated model-only responses");
+            return finishTurn(
+              stalledMessage,
+              productiveSteps,
+              "partial",
+              remainingCriteria,
+              "The model returned six consecutive responses without executing a tool.",
+            );
+          }
+          if (unreadResponderResults) {
+            const unread = [...unreadResponderNotificationIds];
+            commitAssistantRetry(assistantText.visible);
+            messages.push(
+              recoveryUserMessage(
+                `You have ${unread.length} delivered Responder result(s) that remain unread: ${unread.join(", ")}. ` +
+                  "If analysis is incomplete, call only the bounded evidence tool needed now. If each result has been analyzed and is satisfactory, you MUST call job.read with its jobId or exact notificationId before giving a final response. job.read does not require an active plan; do not create or update a plan merely to acknowledge a result.",
+              ),
+            );
+            continue;
+          }
           const planNarrated =
             (buildLikeTurn || pentestLikeTurn) &&
             !activePlan &&
@@ -5163,7 +5297,7 @@ export async function runAgentTurn(
             }
             if (action) {
               consumeBudget(recovery, action.budgetKey);
-              pushAssistantHistory(assistantText.visible);
+              commitAssistantRetry(assistantText.visible);
               messages.push(recoveryUserMessage(action.message));
               continue;
             }
@@ -5181,7 +5315,7 @@ export async function runAgentTurn(
                 : " Reply with ONLY a fenced ```tool block for web.search now."),
             );
             consumeBudget(recovery, action.budgetKey);
-            pushAssistantHistory(assistantText.visible);
+            commitAssistantRetry(assistantText.visible);
             messages.push(recoveryUserMessage(action.message));
             continue;
           }
@@ -5198,7 +5332,7 @@ export async function runAgentTurn(
             if (!planAtEnd && !sawPlanCreateOk) {
               const action = recoveryForMissingPlan(toolsAttached);
               consumeBudget(recovery, action.budgetKey);
-              pushAssistantHistory(assistantText.visible);
+              commitAssistantRetry(assistantText.visible);
               messages.push(recoveryUserMessage(action.message));
               continue;
             }
@@ -5217,7 +5351,7 @@ export async function runAgentTurn(
           ) {
             const action = recoveryForMissingFeature(getActiveProjectRoot());
             consumeBudget(recovery, action.budgetKey);
-            pushAssistantHistory(assistantText.visible);
+            commitAssistantRetry(assistantText.visible);
             messages.push(recoveryUserMessage(action.message));
             continue;
           }
@@ -5260,7 +5394,7 @@ export async function runAgentTurn(
               if (codingPlanFinished || freestyleLocalAppDone) {
                 const action = recoveryForRuntimeVerify(getActiveProjectRoot());
                 consumeBudget(recovery, action.budgetKey);
-                pushAssistantHistory(assistantText.visible);
+                commitAssistantRetry(assistantText.visible);
                 messages.push(recoveryUserMessage(action.message));
                 continue;
               }
@@ -5278,7 +5412,7 @@ export async function runAgentTurn(
           ) {
             const action = recoveryForFailedProbe();
             consumeBudget(recovery, action.budgetKey);
-            pushAssistantHistory(assistantText.visible);
+            commitAssistantRetry(assistantText.visible);
             messages.push(recoveryUserMessage(action.message));
             continue;
           }
@@ -5293,7 +5427,7 @@ export async function runAgentTurn(
           ) {
             const action = recoveryForShallowPentest();
             consumeBudget(recovery, action.budgetKey);
-            pushAssistantHistory(assistantText.visible);
+            commitAssistantRetry(assistantText.visible);
             messages.push(recoveryUserMessage(action.message));
             continue;
           }
@@ -5330,7 +5464,7 @@ export async function runAgentTurn(
                 errorFix: errorFixNarration,
               });
               consumeBudget(recovery, action.budgetKey);
-              pushAssistantHistory(assistantText.visible);
+              commitAssistantRetry(assistantText.visible);
               messages.push(recoveryUserMessage(action.message));
               continue;
             }
@@ -5394,6 +5528,7 @@ export async function runAgentTurn(
             outcomeStatus,
             remainingCriteria,
           });
+          writeAssistantMessage(cleaned);
           lastAnswer = cleaned;
           return finishTurn(
             lastAnswer,
@@ -5415,7 +5550,10 @@ export async function runAgentTurn(
           : nativeToolCalls.length
             ? assistantText.visible.trim()
             : textBeforeToolCall(assistantText.visible);
-        if (beforeTool) {
+        if (
+          beforeTool &&
+          !deferredToolCalls.some((entry) => entry.shown)
+        ) {
           writeAssistantMessage(beforeTool);
         }
 
@@ -5651,7 +5789,10 @@ export async function runAgentTurn(
 
         for (const deferred of activeDeferredToolCalls.slice(0, allCalls.length)) {
           if (!deferred.call.name || deferred.call.name === "…") continue;
-          writeToolCall(deferred.eventId, deferred.call, deferred.rendered);
+          if (!deferred.shown || !writesDirectly) {
+            writeToolCall(deferred.eventId, deferred.call, deferred.rendered);
+            deferred.shown = true;
+          }
         }
 
         if (historyNativeCalls.length) {
@@ -5728,6 +5869,7 @@ export async function runAgentTurn(
             blockOrCancel?: boolean | undefined;
           },
         ): void => {
+          consecutiveModelOnlyRounds = 0;
           recordedNativeIds.add(boundCall.id);
           actionSequenceExecuted += 1;
           // A policy-suppressed call is deterministic: replaying it verbatim

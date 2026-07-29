@@ -339,12 +339,11 @@ export function resolveShellExecBackgroundPolicy(input: {
       ? true
       : backgroundMode === "never"
         ? false
-        : persistent || Boolean(costReason) || responderPreference === true;
+        : persistent || responderPreference === true;
   const responder =
     wantsBackground &&
     !persistent &&
-    (responderPreference ??
-      (backgroundMode === "auto" && Boolean(costReason)));
+    responderPreference === true;
   return {
     backgroundMode,
     costReason,

@@ -28,7 +28,7 @@ describe("TOOL-002 shell.exec background mode", () => {
     expect(result.backgroundJob).toBeUndefined();
   });
 
-  it("auto-delegates costly finite commands unless responder:false opts out", async () => {
+  it("keeps costly finite commands foreground unless responder is explicit", async () => {
     const start = vi.spyOn(jobManager, "startJob").mockResolvedValue({
       ok: true,
       output: "launch policy",
@@ -39,23 +39,23 @@ describe("TOOL-002 shell.exec background mode", () => {
       },
     });
 
-    await shellExec({ command: "find / -name definitely-not-here-xyz" }, {});
-    expect(start.mock.calls[0]?.[1]).toMatchObject({
-      responder: true,
-      wakeOnCompletion: true,
-    });
+    const foreground = await shellExec(
+      { command: "find . -maxdepth 0 -name '*'" },
+      {},
+    );
+    expect(foreground.backgroundJob).toBeUndefined();
+    expect(start).not.toHaveBeenCalled();
 
-    start.mockClear();
     await shellExec(
       {
         command: "find / -name definitely-not-here-xyz",
-        responder: false,
+        responder: true,
       },
       {},
     );
     expect(start.mock.calls[0]?.[1]).toMatchObject({
-      responder: false,
-      wakeOnCompletion: false,
+      responder: true,
+      wakeOnCompletion: true,
     });
   });
 
@@ -123,18 +123,21 @@ describe("TOOL-002 shell.exec background mode", () => {
     });
   });
 
-  it("explains that timeoutMs does not apply when auto-backgrounded", async () => {
+  it("explains that timeoutMs does not apply when explicitly delegated", async () => {
+    vi.spyOn(jobManager, "startJob").mockResolvedValue({
+      ok: true,
+      output: "launch policy",
+      backgroundJob: {
+        id: "cost-job",
+        status: "running",
+        artifactPath: "/tmp/cost-job.log",
+      },
+    });
     const result = await shellExec(
-      { command: "find / -name definitely-not-here-xyz", timeoutMs: 1234 },
+      { command: "find / -name definitely-not-here-xyz", timeoutMs: 1234, responder: true },
       {},
     );
-    if (result.backgroundJob) {
-      expect(result.output).toMatch(/timeoutMs=1234 does not apply/i);
-      expect(result.output).toMatch(/background:"never"/);
-      const stop = toolRegistry["shell.stop"];
-      if (stop && result.backgroundJob.id) {
-        await stop({ id: result.backgroundJob.id }, {}).catch(() => undefined);
-      }
-    }
+    expect(result.output).toMatch(/timeoutMs=1234 does not apply/i);
+    expect(result.output).toMatch(/background:"never"/);
   });
 });

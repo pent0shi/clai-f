@@ -2,6 +2,7 @@ import type {
   CompletionRequest,
   CompletionResult,
   ProviderId,
+  ToolCallStreamDelta,
 } from "../types.js";
 import {
   getActiveProviderEndpoint,
@@ -555,10 +556,31 @@ async function tryStreamOnce(
   onToken: (token: string) => void,
   onStatus?: (message: string) => void,
 ): Promise<CompletionResult> {
-  const activeRequest = { ...request, provider: providerId, model };
-  // Count what actually reached the caller so no layer above can
-  // retry transparently into the same assistant message.
   let emittedBytes = 0;
+  let emittedToolArgumentBytes = 0;
+  const onToolCallDelta = request.onToolCallDelta;
+  const activeRequest = {
+    ...request,
+    provider: providerId,
+    model,
+    ...(onToolCallDelta
+      ? {
+          onToolCallDelta: (delta: ToolCallStreamDelta): void => {
+            const argumentBytes = delta.argumentsBytes ?? 0;
+            emittedBytes += Math.max(
+              delta.name?.length ?? 0,
+              argumentBytes - emittedToolArgumentBytes,
+              1,
+            );
+            emittedToolArgumentBytes = Math.max(
+              emittedToolArgumentBytes,
+              argumentBytes,
+            );
+            onToolCallDelta(delta);
+          },
+        }
+      : {}),
+  };
   const emit = (token: string): void => {
     emittedBytes += token.length;
     onToken(token);

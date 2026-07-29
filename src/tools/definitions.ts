@@ -340,7 +340,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   ),
   def(
     "shell.exec",
-    "Run a finite shell command and wait for completion. Default timeoutMs is 40000; choose a larger timeout for builds/installs/scaffolds. Known long installs get a safe automatic budget when omitted. Expensive self-completing scans/searches (broad nmap, wordlist fuzzing, filesystem-wide find) auto-launch as Responder jobs: continue other work and do not poll; their terminal result is delivered automatically. Persistent commands auto-launch as normal background jobs that require shell.tail/shell.jobs plus a readiness probe. Pass background:\"never\" to force foreground and honor timeoutMs, or background:\"always\" to force a normal pollable job. responder:true explicitly delegates a finite background job; responder:false explicitly keeps an auto-backgrounded finite job pollable. Pass cwd instead of cd; use shell.start for persistent servers/watchers/listeners.",
+    "Run a finite shell command and wait for completion. Default timeoutMs is 40000; choose a larger timeout for builds, installs, scaffolds, scans, and searches. Known long installs get a safe automatic budget when omitted. Choose background:\"always\" for a normal pollable finite job or responder:true for a fire-and-continue finite job with automatic terminal delivery. Persistent commands auto-launch as normal background jobs that require shell.tail/shell.jobs plus a readiness probe. Pass background:\"never\" to force foreground and honor timeoutMs. Pass cwd instead of cd; use shell.start for persistent servers/watchers/listeners.",
     {
       type: "object",
       properties: {
@@ -351,12 +351,12 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
           type: "string",
           enum: ["auto", "never", "always"],
           description:
-            "auto (default): background only persistent commands and commands whose arguments show real cost. never: always run in the foreground and honor timeoutMs. always: always run as a durable job.",
+            "auto (default): run finite commands in the foreground and persistent commands in the background. never: always run in the foreground and honor timeoutMs. always: always run as a durable pollable job.",
         },
         responder: {
           type: "boolean",
           description:
-            "Ownership override for a finite background job. true: Responder fire-and-continue with automatic terminal delivery (never poll). false: normal pollable job, including when cost auto-backgrounds it. Omit: costly finite commands auto-delegate; persistent commands remain normal jobs.",
+            "Execution ownership for finite work. true: Responder fire-and-continue with automatic terminal delivery. false or omitted: keep foreground execution unless background:\"always\" explicitly requests a normal pollable job.",
         },
         parentTaskId: {
           type: "string",
@@ -440,7 +440,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   ),
   def(
     "net.scan",
-    "Validated nmap port/service scan. Put only the IP, hostname, or CIDR in target; put a port expression such as 1-1000 in ports without a -p prefix. Use profile for scan behavior: scanType syn/tcp/udp/ping, serviceDetect boolean, scripts as an array of safe NSE names (for -sC use [\"default\"]), timing T0-T5, or topPorts. Broad/deep scans run as Responder jobs: do not poll; continue other work and wait for automatic terminal delivery.",
+    "Validated nmap port/service scan. Put only the IP, hostname, or CIDR in target; put a port expression such as 1-1000 in ports without a -p prefix. Use profile for scan behavior: scanType syn/tcp/udp/ping, serviceDetect boolean, scripts as an array of safe NSE names (for -sC use [\"default\"]), timing T0-T5, or topPorts. Runs synchronously unless background or responder is explicitly selected.",
     {
       type: "object",
       properties: {
@@ -481,7 +481,11 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         },
         background: {
           type: "boolean",
-          description: "Force durable execution; deep/full profiles are durable automatically",
+          description: "Run as a normal pollable durable job",
+        },
+        responder: {
+          type: "boolean",
+          description: "Delegate as a fire-and-continue Responder job",
         },
         parentTaskId: {
           type: "string",
@@ -647,7 +651,11 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         },
         background: {
           type: "boolean",
-          description: "Force durable nmap execution; deep/full scans are durable automatically",
+          description: "Run the nmap step as a normal pollable durable job",
+        },
+        responder: {
+          type: "boolean",
+          description: "Delegate the nmap step as a fire-and-continue Responder job",
         },
         parentTaskId: {
           type: "string",

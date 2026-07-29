@@ -346,6 +346,23 @@ export function applyAppEvent(state: TranscriptState, event: AnyAppEvent): Trans
       const cleaned = closePendingAssistant(
         discardPendingToolFenceStream(closePendingThinking(withSeq)),
       );
+      for (let index = cleaned.order.length - 1; index >= 0; index -= 1) {
+        const existing = cleaned.byId.get(cleaned.order[index]!);
+        if (
+          existing?.kind === "tool" &&
+          existing.turnId === event.turnId &&
+          existing.toolCallId === event.payload.toolCallId
+        ) {
+          return {
+            ...updateItem(cleaned, existing.id, (item) => ({
+              ...(item as ToolItem),
+              name: event.payload.name,
+              argsDisplay: event.payload.argsDisplay,
+            })),
+            runningStatus: withSeq.runningStatus ?? "preparing tools",
+          };
+        }
+      }
       const item: ToolItem = {
         // Occurrence id stays unique even if the agent reuses tool-1 next turn.
         id: `tool-${event.id}`,
