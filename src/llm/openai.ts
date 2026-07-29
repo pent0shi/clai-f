@@ -10,6 +10,7 @@ import {
   openAiCompatibleStream,
   toCompletionResult,
   readJson,
+  ingestOpenAiModelCatalog,
 } from "./http.js";
 
 const baseUrl = "https://api.openai.com/v1";
@@ -26,7 +27,7 @@ export const openaiProvider: LlmProvider = {
       headers: { authorization: `Bearer ${auth.apiKey}` },
     });
     const data = await readJson<{ data?: Array<{ id: string }> }>(response);
-    return data.data?.map((m) => m.id).sort() ?? [];
+    return ingestOpenAiModelCatalog("openai", data);
   },
   async ping(auth: ProviderAuth): Promise<void> {
     if (!auth.apiKey) throw new Error("OpenAI API key is required");

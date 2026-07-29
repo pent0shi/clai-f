@@ -86,7 +86,7 @@ After a tool result, next call or concise final answer. tool.batch for independe
 - Multi-step: create working tasks → implement → automated checks (typecheck/build/tests when applicable) → live verify. Local apps: shell.start, leave running, report URL + job id.
 - Task cycle: in_progress → work → read results → done only when that task's outcome holds → next. Never mark done on hope after firing a command.
 - Debug: repro → localize → hypothesis → minimal fix → re-run the failing check. Never stop at narrating the fix.
-- Pentest: map surface (ports beyond top-N when needed, subdomains, content enum), threat-model, stack-matched tools, real PoCs, residual risk honesty. Background long scans and continue other work. No local dev server for remote targets.
+- Pentest: choose reconnaissance and validation from the target evidence and objective; use directory/content enumeration, port expansion, subdomain work, scanners, or client analysis only when they can resolve a material hypothesis. Pursue real PoCs where safe and end with honest residual risk. No local dev server for remote targets.
 - Images: inspect attachments (vision/OCR); try path + scratch copy before asking the user to re-save.
 - Side effects: emit the tool; clai handles confirmation. Never bypass denials.
 - Background long-lived work; web.search/web.fetch for current facts; cite tool URLs.
@@ -164,7 +164,7 @@ Structured tools are attached by the API. Call them natively — no fenced tool 
 - fs.read: small path-only OK; large files auto-head — follow hasMore next={offset,limit}; use pattern or fs.search for symbols. Never invent unread lines.
 - Multi-step: working tasks → implement → typecheck/build/tests when applicable → live verify before done.
 - Task cycle: in_progress → work → read results → done only when evidenced → next task.
-- Debug: fix and re-verify. Pentest: map surface → threat model → test → PoC → residual risk; no local server for remote targets.
+- Debug: fix and re-verify. Pentest: choose the next test from target evidence and expected impact, adapt when evidence changes, verify real findings, and state residual risk; no local server for remote targets.
 - Background long work; web.search for current facts. Stay in scope for {{os}} / {{shell}}.
 `;
 
@@ -238,18 +238,51 @@ export function floorToLocalHour(now: Date): Date {
 }
 
 
+const STABLE_ENVIRONMENT_VALUES = {
+  os: "see REQUEST ENVIRONMENT",
+  shell: "see REQUEST ENVIRONMENT",
+  cwd: "see REQUEST ENVIRONMENT",
+  datetime: "see REQUEST ENVIRONMENT",
+  scratch: "see REQUEST ENVIRONMENT",
+  tempRoot: "see REQUEST ENVIRONMENT",
+} as const;
+
+function promptEnvironmentValues(stable: boolean): Record<string, string> {
+  if (stable) return { ...STABLE_ENVIRONMENT_VALUES };
+  const system = detectSystem();
+  return {
+    os: `${system.osName} ${system.release} ${system.arch}`,
+    shell: system.shell,
+    cwd: system.cwd,
+    datetime: currentDateTimeContext(),
+    scratch: scratchDirFor(system.cwd),
+    tempRoot: tmpdir(),
+  };
+}
+
+/** Mutable environment facts carried after the cached constitution. */
+export function renderRequestEnvironmentContext(): string {
+  const values = promptEnvironmentValues(false);
+  return [
+    "REQUEST ENVIRONMENT",
+    `OS: ${values.os}`,
+    `Shell: ${values.shell}`,
+    `Working directory: ${values.cwd}`,
+    `Session scratch: ${values.scratch}`,
+    `Temporary root: ${values.tempRoot}`,
+    `Current time: ${values.datetime}`,
+  ].join("\n");
+}
+
 export const _ASK_TEMPLATE = askPrompt;
 export const _AGENT_TEMPLATE = agentPrompt;
 
 export function renderAskSystemPrompt(options?: {
   nativeTools?: boolean;
+  stableEnvironment?: boolean;
 }): string {
-  const system = detectSystem();
   return render(options?.nativeTools ? askPromptNative : askPrompt, {
-    os: `${system.osName} ${system.release} ${system.arch}`,
-    shell: system.shell,
-    cwd: system.cwd,
-    datetime: currentDateTimeContext(),
+    ...promptEnvironmentValues(Boolean(options?.stableEnvironment)),
     tool_list: "none",
   });
 }
@@ -264,9 +297,10 @@ export function renderAgentSystemPrompt(
      * CLAI_SLIM_NATIVE_PROMPT when callers pass nothing).
      */
     slimNative?: boolean;
+    /** Replace mutable environment values with a stable suffix reference. */
+    stableEnvironment?: boolean;
   },
 ): string {
-  const system = detectSystem();
   let template = agentPrompt;
   if (options?.nativeTools) {
     const slim =
@@ -276,12 +310,7 @@ export function renderAgentSystemPrompt(
     template = slim ? agentPromptNativeSlim : agentPromptNative;
   }
   return render(template, {
-    os: `${system.osName} ${system.release} ${system.arch}`,
-    shell: system.shell,
-    cwd: system.cwd,
-    datetime: currentDateTimeContext(),
-    scratch: scratchDirFor(system.cwd),
-    tempRoot: tmpdir(),
+    ...promptEnvironmentValues(Boolean(options?.stableEnvironment)),
     tool_list: toolList,
   });
 }
@@ -289,18 +318,12 @@ export function renderAgentSystemPrompt(
 
 export function renderCompactAgentSystemPrompt(
   toolList: string,
-  options?: { nativeTools?: boolean },
+  options?: { nativeTools?: boolean; stableEnvironment?: boolean },
 ): string {
-  const system = detectSystem();
   return render(
     options?.nativeTools ? compactAgentPromptNative : compactAgentPrompt,
     {
-      os: `${system.osName} ${system.release} ${system.arch}`,
-      shell: system.shell,
-      cwd: system.cwd,
-      datetime: currentDateTimeContext(),
-      scratch: scratchDirFor(system.cwd),
-      tempRoot: tmpdir(),
+      ...promptEnvironmentValues(Boolean(options?.stableEnvironment)),
       tool_list: toolList,
     },
   );
@@ -327,7 +350,7 @@ export function planModeDirective(): string {
     "How to research then plan (give full effort):",
     "- Prefer evidence: workspace/stack inspection, recon, docs, web.search for current APIs/CVEs/techniques when facts may be stale.",
     "- Consider alternatives, risks, edge cases, dependency order, and verification for each step.",
-    "- For pentest: map surface thoroughly — ports (escalate beyond top-N when needed), subdomains, content/API enum, JS harvest, tech fingerprint, auth surfaces (nmap, ffuf, dig, http.fetch, shell.start long scans, …). Background long scans; continue other recon.",
+    "- For pentest: choose research from the engagement objective and current evidence. Consider service, host, route, client, auth, and business-flow investigation as options—not a mandatory checklist—and use long background work only when its expected value justifies it.",
     "- Capture confirmed unauth findings in plan detail as evidence; put remaining auth’d testing, exploit chains, and final report polish in tasks for after accept.",
     "- Do not scaffold, write project files, or run active C2/destructive exploits. Put implement/exploit steps as plan tasks for after accept.",
     "",

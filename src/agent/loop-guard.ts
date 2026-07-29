@@ -70,10 +70,19 @@ export interface LoopDecision {
   reason?: string | undefined;
 }
 
+export interface ActionSequenceDecision {
+  suppress: boolean;
+  terminal: boolean;
+  repetitions: number;
+}
+
 export class LoopGuard {
   private attempts: ToolAttempt[] = [];
   private signatureCount = new Map<string, number>();
   private signatureSuccess = new Map<string, boolean>();
+  private lastActionSequence: string | undefined;
+  private lastActionSequenceEligible = false;
+  private actionSequenceRepetitions = 0;
   /**
    * A successful call with no body is not evidence that repeating the exact
    * call can make progress. Keep only lightweight retry state, never output.
@@ -138,6 +147,63 @@ export class LoopGuard {
       slimmed.command = slimmed.command.trim().replace(/\s+/g, " ");
     }
     return `${name}::${JSON.stringify(slimmed)}`;
+  }
+
+  observeActionSequence(
+    calls: readonly {
+      name: string;
+      args: Record<string, unknown>;
+      stateKey?: string | undefined;
+    }[],
+  ): ActionSequenceDecision {
+    if (calls.length === 0) {
+      this.lastActionSequence = undefined;
+      this.lastActionSequenceEligible = false;
+      this.actionSequenceRepetitions = 0;
+      return { suppress: false, terminal: false, repetitions: 0 };
+    }
+    const signature = calls
+      .map(
+        (call) =>
+          `${this.canonicalize(call.name, call.args)}::state=${call.stateKey ?? ""}`,
+      )
+      .join("\u0000");
+    if (signature !== this.lastActionSequence) {
+      this.lastActionSequence = signature;
+      this.lastActionSequenceEligible = false;
+      this.actionSequenceRepetitions = 0;
+      return { suppress: false, terminal: false, repetitions: 0 };
+    }
+    if (!this.lastActionSequenceEligible) {
+      return { suppress: false, terminal: false, repetitions: 0 };
+    }
+    this.actionSequenceRepetitions += 1;
+    return {
+      suppress: true,
+      terminal:
+        this.actionSequenceRepetitions >= (calls.length > 1 ? 2 : 3),
+      repetitions: this.actionSequenceRepetitions,
+    };
+  }
+
+  completeActionSequence(
+    calls: readonly {
+      name: string;
+      args: Record<string, unknown>;
+      stateKey?: string | undefined;
+    }[],
+    eligible: boolean,
+  ): void {
+    if (calls.length === 0) return;
+    const signature = calls
+      .map(
+        (call) =>
+          `${this.canonicalize(call.name, call.args)}::state=${call.stateKey ?? ""}`,
+      )
+      .join("\u0000");
+    if (signature !== this.lastActionSequence) return;
+    this.lastActionSequenceEligible = eligible;
+    if (!eligible) this.actionSequenceRepetitions = 0;
   }
 
   recordAttempt(
@@ -284,9 +350,18 @@ export class LoopGuard {
     const sig = this.canonicalize(name, args);
     const emptySuccess = this.emptySuccessfulCalls.get(sig);
     if (emptySuccess) {
+      // A probe that reports its own live state is authoritative about whether
+      // re-reading can reveal anything new. Unrelated work finishing in between
+      // must not re-authorize it, or a poll interleaved with real actions
+      // repeats forever.
       if (
-        (retryContext?.stateKey !== undefined &&
-          retryContext.stateKey !== emptySuccess.stateKey) ||
+        retryContext?.stateKey !== undefined &&
+        retryContext.stateKey !== emptySuccess.stateKey
+      ) {
+        return { block: false };
+      }
+      if (
+        emptySuccess.stateKey === undefined &&
         this.lastSuccessfulNonMetaStep > emptySuccess.step
       ) {
         return { block: false };

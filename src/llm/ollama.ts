@@ -4,7 +4,7 @@ import {
   type LlmProvider,
   type ProviderAuth,
 } from "./provider.js";
-import { readJson, readStreamLines } from "./http.js";
+import { imageCapableMessages, readJson, readStreamLines } from "./http.js";
 import {
   parseOllamaToolCalls,
   toOllamaToolMessages,
@@ -71,7 +71,9 @@ export const ollamaProvider: LlmProvider = {
     const model = request.model ?? defaultModels.ollama;
     const body: Record<string, unknown> = {
       model,
-      messages: toOllamaToolMessages(request.messages),
+      messages: toOllamaToolMessages(
+        imageCapableMessages("ollama", model, request.messages),
+      ),
       stream: false,
       options: ollamaOptions(model, {
         ...request,
@@ -128,7 +130,9 @@ export const ollamaProvider: LlmProvider = {
     const model = request.model ?? defaultModels.ollama;
     const body: Record<string, unknown> = {
       model,
-      messages: toOllamaToolMessages(request.messages),
+      messages: toOllamaToolMessages(
+        imageCapableMessages("ollama", model, request.messages),
+      ),
       stream: true,
       options: ollamaOptions(model, {
         ...request,

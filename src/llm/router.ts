@@ -3,7 +3,12 @@ import type {
   CompletionResult,
   ProviderId,
 } from "../types.js";
-import { getConfig, providerCategory } from "../store/config.js";
+import {
+  getActiveProviderEndpoint,
+  getConfig,
+  providerCategory,
+  providerUsesEndpoints,
+} from "../store/config.js";
 import {
   getProviderKeys,
   getProviderSecret,
@@ -12,8 +17,19 @@ import {
 import { anthropicProvider } from "./anthropic.js";
 import { geminiProvider } from "./gemini.js";
 import { groqProvider } from "./groq.js";
-import { ProviderError, isReasoningUnsupportedError } from "./http.js";
-import { markReasoningUnsupported } from "./capabilities.js";
+import {
+  ProviderError,
+  isImageInputUnsupportedError,
+  isReasoningUnsupportedError,
+  stripImagesFromMessages,
+} from "./http.js";
+import {
+  learnModelVisionCapability,
+  markModelUnavailable,
+  markReasoningUnsupported,
+  modelAcceptsImages,
+  visionSubstitutionOrigin,
+} from "./capabilities.js";
 import {
   markStreamEmittedBytes,
   streamAlreadyEmitted,
@@ -38,6 +54,9 @@ import { ollamaProvider } from "./ollama.js";
 import { openaiProvider } from "./openai.js";
 import { openrouterProvider } from "./openrouter.js";
 import { qwenCloudProvider } from "./qwen-cloud.js";
+import { modalProvider } from "./modal.js";
+import { lightningProvider } from "./lightning.js";
+import { tokenrouterProvider } from "./tokenrouter.js";
 import type { LlmProvider, ProviderAuth } from "./provider.js";
 import { maskSecretTail } from "./provider.js";
 import {
@@ -342,6 +361,9 @@ export const providers: Record<ProviderId, LlmProvider> = {
   ollama: ollamaProvider,
   bynara: bynaraProvider,
   "qwen-cloud": qwenCloudProvider,
+  modal: modalProvider,
+  lightning: lightningProvider,
+  tokenrouter: tokenrouterProvider,
 };
 
 const fallbackOrder: ProviderId[] = [
@@ -357,6 +379,9 @@ const fallbackOrder: ProviderId[] = [
   "aws-mantle",
   "ollama",
   "qwen-cloud",
+  "modal",
+  "lightning",
+  "tokenrouter",
 ];
 
 
@@ -386,6 +411,12 @@ export async function providerAuth(
   if (provider === "ollama") {
     return { baseUrl: secret.value };
   }
+  // Endpoint providers carry both: the stored secret plus the active endpoint
+  // URL from config (Modal requires one; Lightning treats it as an override).
+  if (providerUsesEndpoints(provider)) {
+    const baseUrl = getActiveProviderEndpoint(provider);
+    return { apiKey: secret.value, ...(baseUrl ? { baseUrl } : {}) };
+  }
   return { apiKey: secret.value };
 }
 
@@ -395,6 +426,10 @@ function authForSlot(
 ): ProviderAuth {
   if (providerId === "ollama") {
     return { baseUrl: value };
+  }
+  if (providerUsesEndpoints(providerId)) {
+    const baseUrl = getActiveProviderEndpoint(providerId);
+    return { apiKey: value, ...(baseUrl ? { baseUrl } : {}) };
   }
   return { apiKey: value };
 }
@@ -426,7 +461,11 @@ async function tryCompleteOnce(
 ): Promise<CompletionResult> {
   const activeRequest = { ...request, provider: providerId, model };
   try {
-    return await provider.complete(activeRequest, auth);
+    const result = await provider.complete(activeRequest, auth);
+    if (hasImageInput(activeRequest)) {
+      learnModelVisionCapability(providerId, model, true);
+    }
+    return result;
   } catch (error) {
     if (activeRequest.tools?.length && isToolsUnsupportedError(error)) {
       markTextOnlyModel(providerId, model);
@@ -444,8 +483,67 @@ async function tryCompleteOnce(
       markReasoningUnsupported(model);
       return await provider.complete(activeRequest, auth);
     }
+    if (hasImageInput(activeRequest) && isImageInputUnsupportedError(error)) {
+      learnModelVisionCapability(providerId, model, false);
+      return await provider.complete(withoutImages(activeRequest), auth);
+    }
+    const restored = revertVisionSubstitution(providerId, model, activeRequest, error);
+    if (restored) {
+      return await provider.complete(restored.request, auth);
+    }
     throw error;
   }
+}
+
+function hasImageInput(request: CompletionRequest): boolean {
+  return request.messages.some((message) => message.images?.length);
+}
+
+function withoutImages(request: CompletionRequest): CompletionRequest {
+  return { ...request, messages: stripImagesFromMessages(request.messages) };
+}
+
+function isModelNotFoundError(error: unknown): boolean {
+  const status =
+    error && typeof error === "object" && "status" in error
+      ? Number((error as { status?: number }).status)
+      : undefined;
+  if (status !== 404 && status !== 400) return false;
+  const body =
+    error && typeof error === "object" && "body" in error
+      ? String((error as { body?: string }).body ?? "")
+      : "";
+  const message = error instanceof Error ? error.message : String(error);
+  const hay = `${message}\n${body}`.toLowerCase();
+  if (status === 404) return true;
+  return /model[_ ]?not[_ ]?found|no such model|unknown model|model does not exist|invalid model|unavailable[- ]model/.test(
+    hay,
+  );
+}
+
+function revertVisionSubstitution(
+  providerId: ProviderId,
+  model: string,
+  request: CompletionRequest,
+  error: unknown,
+):
+  | { request: CompletionRequest; original: string }
+  | undefined {
+  if (!isModelNotFoundError(error)) return undefined;
+  const original = visionSubstitutionOrigin(providerId, model);
+  if (!original) return undefined;
+  markModelUnavailable(providerId, model);
+  const keepImages = modelAcceptsImages(providerId, original);
+  return {
+    original,
+    request: {
+      ...request,
+      model: original,
+      messages: keepImages
+        ? request.messages
+        : stripImagesFromMessages(request.messages),
+    },
+  };
 }
 
 async function tryStreamOnce(
@@ -465,12 +563,20 @@ async function tryStreamOnce(
     emittedBytes += token.length;
     onToken(token);
   };
+  const learnVisionOnSuccess = (): void => {
+    if (hasImageInput(activeRequest)) {
+      learnModelVisionCapability(providerId, model, true);
+    }
+  };
   try {
     if (provider.stream) {
-      return await provider.stream(activeRequest, auth, emit);
+      const streamed = await provider.stream(activeRequest, auth, emit);
+      learnVisionOnSuccess();
+      return streamed;
     }
     const result = await provider.complete(activeRequest, auth);
     emit(result.text);
+    learnVisionOnSuccess();
     return result;
   } catch (error) {
     if (
@@ -517,6 +623,50 @@ async function tryStreamOnce(
         return result;
       } catch (retryError) {
         throw markStreamEmittedBytes(retryError, emittedBytes);
+      }
+    }
+    if (
+      emittedBytes === 0 &&
+      hasImageInput(activeRequest) &&
+      isImageInputUnsupportedError(error)
+    ) {
+      learnModelVisionCapability(providerId, model, false);
+      onStatus?.(
+        `ℹ ${providerId}/${model} rejected image input — retrying without the attached image(s)`,
+      );
+      const textOnlyRequest = withoutImages(activeRequest);
+      try {
+        if (provider.stream) {
+          return await provider.stream(textOnlyRequest, auth, emit);
+        }
+        const result = await provider.complete(textOnlyRequest, auth);
+        emit(result.text);
+        return result;
+      } catch (retryError) {
+        throw markStreamEmittedBytes(retryError, emittedBytes);
+      }
+    }
+    if (emittedBytes === 0) {
+      const restored = revertVisionSubstitution(
+        providerId,
+        model,
+        activeRequest,
+        error,
+      );
+      if (restored) {
+        onStatus?.(
+          `ℹ ${providerId}/${model} is not available on this account — falling back to ${restored.original}`,
+        );
+        try {
+          if (provider.stream) {
+            return await provider.stream(restored.request, auth, emit);
+          }
+          const result = await provider.complete(restored.request, auth);
+          emit(result.text);
+          return result;
+        } catch (retryError) {
+          throw markStreamEmittedBytes(retryError, emittedBytes);
+        }
       }
     }
     throw markStreamEmittedBytes(error, emittedBytes);
@@ -814,9 +964,15 @@ export async function pingProvider(
   secretOverride?: string,
 ): Promise<void> {
   const provider = providers[providerId];
-  const auth =
+  const resolved = await providerAuth(providerId);
+  const auth: ProviderAuth =
     providerId === "ollama"
-      ? { baseUrl: secretOverride ?? (await providerAuth(providerId)).baseUrl }
-      : { apiKey: secretOverride ?? (await providerAuth(providerId)).apiKey };
+      ? { baseUrl: secretOverride ?? resolved.baseUrl }
+      : providerUsesEndpoints(providerId)
+        ? {
+            apiKey: secretOverride ?? resolved.apiKey,
+            ...(resolved.baseUrl ? { baseUrl: resolved.baseUrl } : {}),
+          }
+        : { apiKey: secretOverride ?? resolved.apiKey };
   await provider.ping(auth);
 }

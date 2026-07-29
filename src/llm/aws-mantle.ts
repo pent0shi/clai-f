@@ -17,6 +17,8 @@ import {
   readStreamLines,
   ProviderError,
   createSseFrameAssembler,
+  imageCapableMessages,
+  ingestOpenAiModelCatalog,
 } from "./http.js";
 import {
   anthropicToolBodyFields,
@@ -26,9 +28,16 @@ import {
   parseAnthropicToolUseBlocks,
   toAnthropicToolMessages,
 } from "./adapters/anthropic-tools.js";
-import { firstSystemPrompt } from "./system-messages.js";
+import {
+  firstSystemPrompt,
+  requestContextSystemPrompts,
+  withoutRequestContextSystemMessages,
+} from "./system-messages.js";
 import { anthropicMaxTokens } from "./anthropic.js";
-import { parseAnthropicUsage } from "./token-usage.js";
+import {
+  mergeAnthropicStreamUsage,
+  parseAnthropicUsage,
+} from "./token-usage.js";
 import type { TokenUsage } from "../types.js";
 
 const baseUrl = "https://bedrock-mantle.ap-south-1.api.aws/anthropic/v1";
@@ -92,11 +101,7 @@ export const mantleProvider: LlmProvider = {
       | Array<{ id?: string } | string>
       | { data?: Array<{ id?: string } | string>; models?: Array<{ id?: string } | string> }
     >(response);
-    const entries = Array.isArray(data) ? data : (data.data ?? data.models ?? []);
-    return entries
-      .map((entry) => typeof entry === "string" ? entry : entry.id)
-      .filter((id): id is string => Boolean(id))
-      .sort();
+    return ingestOpenAiModelCatalog("aws-mantle", data);
   },
   async ping(auth: ProviderAuth): Promise<void> {
     if (!auth.apiKey) throw new Error("Mantle API key is required");
@@ -133,8 +138,17 @@ export const mantleProvider: LlmProvider = {
       });
       return toCompletionResult("aws-mantle", model, payload);
     }
-    const system = firstSystemPrompt(request.messages);
-    const messages = toAnthropicToolMessages(request.messages);
+    const system = [
+      firstSystemPrompt(request.messages),
+      ...requestContextSystemPrompts(request.messages),
+    ]
+      .filter((value): value is string => Boolean(value))
+      .join("\n\n");
+    const messages = toAnthropicToolMessages(
+      withoutRequestContextSystemMessages(
+        imageCapableMessages("aws-mantle", model, request.messages),
+      ),
+    );
     const thinking = anthropicThinkingField(request.thinking, model);
     const response = await fetch(`${baseUrl}/messages`, {
       method: "POST",
@@ -228,8 +242,17 @@ export const mantleProvider: LlmProvider = {
       });
       return toCompletionResult("aws-mantle", model, payload);
     }
-    const system = firstSystemPrompt(request.messages);
-    const messages = toAnthropicToolMessages(request.messages);
+    const system = [
+      firstSystemPrompt(request.messages),
+      ...requestContextSystemPrompts(request.messages),
+    ]
+      .filter((value): value is string => Boolean(value))
+      .join("\n\n");
+    const messages = toAnthropicToolMessages(
+      withoutRequestContextSystemMessages(
+        imageCapableMessages("aws-mantle", model, request.messages),
+      ),
+    );
     const thinking = anthropicThinkingField(request.thinking, model);
     const response = await fetch(`${baseUrl}/messages`, {
       method: "POST",
@@ -326,16 +349,7 @@ export const mantleProvider: LlmProvider = {
           if (parsed.usage) {
             const out = parseAnthropicUsage(parsed.usage);
             if (out) {
-              streamUsage = {
-                promptTokens: streamUsage?.promptTokens ?? out.promptTokens,
-                completionTokens:
-                  out.completionTokens || (streamUsage?.completionTokens ?? 0),
-                totalTokens:
-                  (streamUsage?.promptTokens ?? out.promptTokens) +
-                  (out.completionTokens ||
-                    (streamUsage?.completionTokens ?? 0)),
-                exact: true,
-              };
+              streamUsage = mergeAnthropicStreamUsage(streamUsage, out);
             }
           }
         }

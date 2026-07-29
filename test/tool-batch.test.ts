@@ -1,11 +1,14 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   toolRegistry,
   runToolCall,
   normalizeBatchToolName,
   BATCH_SAFE_TOOLS,
 } from "../src/tools/registry.js";
+import { jobManager } from "../src/tools/jobs.js";
 import { classifyToolCall } from "../src/safety/classifier.js";
+
+afterEach(() => vi.restoreAllMocks());
 
 describe("phase 12 — tool.batch", () => {
   it("is registered and empty batch classifies as safe (handler rejects empty)", () => {
@@ -64,6 +67,56 @@ describe("phase 12 — tool.batch", () => {
     });
     expect(result.ok).toBe(true);
     expect(result.output).toMatch(/#1 tool\.check/);
+  });
+
+  it("applies Responder polling suppression inside tool.batch", async () => {
+    const jobs = vi.spyOn(jobManager, "listJobs").mockReturnValue({
+      ok: true,
+      output: "shell.jobs was not dispatched because running jobs are Responder-owned.",
+      exitCode: 0,
+      suppressedRepeat: true,
+    });
+    const tail = vi.spyOn(jobManager, "tailJob").mockResolvedValue({
+      ok: true,
+      output: "Responder owns job responder-1; shell.tail was not dispatched.",
+      exitCode: 0,
+      suppressedRepeat: true,
+    });
+
+    const result = await runToolCall(
+      {
+        name: "tool.batch",
+        args: {
+          calls: [
+            { name: "shell.jobs", args: {} },
+            { name: "shell.tail", args: { id: "responder-1" } },
+          ],
+        },
+      },
+      { sessionId: "batch-responder" },
+    );
+
+    expect(result.ok).toBe(true);
+    expect(result.suppressedRepeat).toBe(true);
+    expect(result.output).toContain("shell.jobs was not dispatched");
+    expect(result.output).toContain("shell.tail was not dispatched");
+    expect(jobs).toHaveBeenCalledWith("batch-responder");
+    expect(tail).toHaveBeenCalledWith("responder-1", expect.any(Object));
+
+    const mixed = await runToolCall(
+      {
+        name: "tool.batch",
+        args: {
+          calls: [
+            { name: "shell.jobs", args: {} },
+            { name: "sysinfo", args: {} },
+          ],
+        },
+      },
+      { sessionId: "batch-responder" },
+    );
+    expect(mixed.ok).toBe(true);
+    expect(mixed.suppressedRepeat).not.toBe(true);
   });
 
   it("refuses unconfirmed confirm-level shell inside batch", async () => {

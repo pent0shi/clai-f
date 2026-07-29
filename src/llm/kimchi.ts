@@ -10,6 +10,7 @@ import {
   openAiCompatibleStream,
   toCompletionResult,
   readJson,
+  ingestOpenAiModelCatalog,
 } from "./http.js";
 
 // Kimchi exposes an OpenAI-compatible Chat Completions API at
@@ -39,7 +40,7 @@ export const kimchiProvider: LlmProvider = {
         verbose: process.env.CLAI_VERBOSE === "true",
       } as any);
       const data = await readJson<{ data?: Array<{ id: string }> }>(resp);
-      const models = data.data?.map((m) => m.id).sort() ?? [];
+      const models = ingestOpenAiModelCatalog("kimchi", data);
       if (models.length > 0) {
         cachedModels = models;
         lastFetchTime = now;

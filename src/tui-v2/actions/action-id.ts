@@ -98,6 +98,7 @@ export const ACTION_IDS = [
   "pager.export-editor",
   "pager.copy",
   /** Render body as markdown (formatted). */
+  "pager.toggle-follow",
   "pager.format",
   /** Show body as plain/raw text. */
   "pager.raw",
@@ -106,6 +107,7 @@ export const ACTION_IDS = [
   "jobs.up",
   "jobs.down",
   "jobs.tail",
+  "jobs.view-live",
   "jobs.stop",
   "jobs.close",
 ] as const;

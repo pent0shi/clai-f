@@ -21,6 +21,16 @@ export interface ArtifactPagerSource {
   search(query: string, fromOffset?: number, reverse?: boolean): Promise<ArtifactPage | undefined>;
   readAll(): Promise<string>;
   dispose(): void;
+  /** Last page of the file as it is right now. */
+  readTail?(): Promise<ArtifactPage>;
+  /**
+   * Present only on sources backed by something that can still grow. The pager
+   * treats its presence as "offer follow mode" and drives one bounded tail read
+   * per notification, so no polling timer is created.
+   */
+  watch?(onChange: () => void): () => void;
+  /** False once the underlying producer is finished, so follow mode can stop. */
+  isGrowing?(): boolean;
 }
 
 export function createArtifactPagerSource(
@@ -68,10 +78,17 @@ export function createArtifactPagerSource(
     };
   };
 
+  const readTail = async (): Promise<ArtifactPage> => {
+    assertOpen();
+    const info = await stat(path);
+    return readPage(Math.max(0, info.size - boundedPageBytes));
+  };
+
   return {
     path,
     pageBytes: boundedPageBytes,
     readPage,
+    readTail,
     async search(query, fromOffset = 0, reverse = false) {
       assertOpen();
       const needle = Buffer.from(query, "utf8");

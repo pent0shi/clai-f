@@ -6,15 +6,16 @@
 
 Two things make it practical for everyday use:
 
-- **It's cheap-to-free to run.** Point it at Groq, Google Gemini, NVIDIA NIM, OpenRouter, Bynara, Kimchi, or a local Ollama — all have free access — and clai stacks them. Add several keys per provider; when one hits a rate limit, it rotates to the next automatically.
+- **It's cheap-to-free to run.** Point it at Groq, Google Gemini, NVIDIA NIM, OpenRouter, Bynara, Kimchi, or a local Ollama — all have free access — and clai stacks them. Add several keys per provider; when one hits a rate limit, it rotates to the next automatically. Want frontier models instead? Serve **Kimi K3 on your own Modal endpoint** on Modal's **$30/month of free credit**, or start on **Lightning AI's 40M free tokens**.
 - **It's honest.** Findings need real tool output. Builds get typechecked/run before "done." Compaction and history keep long sessions coherent instead of hallucinating progress.
 
 ---
 
 ## Highlights
 
-- **Free-tier first.** 12 providers wired in, 6 cloud free tiers + local Ollama. Default provider is NVIDIA NIM (`openai/gpt-oss-20b`) so a fresh install can run at no cost.
+- **Free-tier first.** 15 providers wired in, 6 cloud free tiers + local Ollama. Default provider is NVIDIA NIM (`openai/gpt-oss-20b`) so a fresh install can run at no cost.
 - **Multi-key smart switching.** Up to 10 keys per provider with a *sticky* active key and circular rotation on rate-limit / auth / quota / transient / 5xx / empty-response errors. Optional cross-provider fallback and a free-only filter.
+- **Bring your own endpoint.** Deploy Kimi K3 (or Qwen / DeepSeek / GLM / GPT-OSS / your own fine-tune) to a [Modal](#modal--run-kimi-k3-on-your-own-endpoint-on-30month-of-free-credit) endpoint and drive it from clai on **$30/month of free compute credit**. Modal, Lightning AI and TokenRouter each keep a list of up to 10 base URLs with a sticky active one, so several deployments live side by side and you switch with one command — same editor, same ★ active row as keys.
 - **Scope-based pentesting.** Opt-in engagement scope with authorized/excluded targets, allowed phases, rate and concurrency ceilings, redirect and DNS-rebinding escape detection, and out-of-scope flagging — designed for authorized pentests and bug-bounty programs.
 - **Real building & debugging.** Scaffolds apps, edits code surgically, installs packages, runs builds/tests, starts dev servers as background jobs, and probes them before reporting success.
 - **Durable plans.** `plan.create` / `task.update` drive a live checklist that survives context compaction and reloads with `/history` — the agent works task-by-task and won't fake completion.
@@ -79,6 +80,8 @@ clai set ollama --url http://localhost:11434
 clai use ollama
 ```
 
+Want a frontier open model on your own hardware budget? Deploy **Kimi K3** to a Modal endpoint and run it on Modal's **$30/month of free compute credit** — see [Modal](#modal--run-kimi-k3-on-your-own-endpoint-on-30month-of-free-credit).
+
 ---
 
 ## Run it on free tiers (and keep it running)
@@ -101,8 +104,72 @@ This is the core of clai's design: assemble capacity from free tiers, then survi
 | AgentRouter | `claude-opus-4-6` | Paid | `AGENTROUTER_API_KEY` |
 | AWS Mantle | `anthropic.claude-haiku-4-5` | Paid | `ANTHROPIC_API_KEY` |
 | Qwen Cloud | `qwen3.7-plus` | Paid (DashScope) | `DASHSCOPE_API_KEY` |
+| Modal | `moonshotai/Kimi-K3` | Usage-based ($30/mo credit) | `MODAL_PROXY_TOKEN_ID` + `MODAL_PROXY_TOKEN_SECRET` |
+| Lightning AI | `openai/gpt-5` | Per token (40M free to start) | `LIGHTNING_API_KEY` |
+| TokenRouter | `kimi-k2p6` | Per token (prepaid) | `TOKENROUTER_API_KEY` |
 
 Several "paid" providers also expose limited free allowances — the tier label reflects what the default keys usually buy you. Flip `freeOnly` off to include paid providers in fallback.
+
+#### Modal — run Kimi K3 on your own endpoint, on $30/month of free credit
+
+[Modal Endpoints](https://modal.com/docs/guide/endpoints) deploy an open-weight model on your own serverless URL that speaks the OpenAI Chat Completions API. That's the cheapest route to a **frontier open model like Kimi K3** from clai: the Starter plan is $0/month and includes **$30 of compute credit every month** once a payment method is on file, endpoints scale to zero so idle time costs nothing, and billing is per-second compute rather than per token.
+
+Kimi K3, start to finish:
+
+```sh
+pip install modal && modal setup                                 # once
+modal endpoint create --model moonshotai/Kimi-K3 --name kimi-k3  # prints an id + dashboard link
+modal endpoint list                                              # copy the endpoint URL from here
+modal workspace proxy-tokens create                              # wk-… id + ws-… secret (shown once)
+
+clai set modal --url <endpoint-url>     # e.g. https://ws--ep-kimi-k3-server.us-west.modal.direct
+clai set modal wk-yourTokenId:ws-yourTokenSecret
+clai use modal                          # model defaults to moonshotai/Kimi-K3
+```
+
+The catalog also covers Qwen, DeepSeek, GLM, Gemma, GPT-OSS, Nemotron and your own fine-tunes — swap `--model` and deploy another endpoint. Two things differ from every other provider: the base URL belongs to your workspace, and auth is a [proxy token](https://modal.com/docs/guide/webhook-proxy-auth) *pair* sent as `Modal-Key` / `Modal-Secret` instead of a bearer key. Endpoints are authenticated by default, and proxy tokens (`wk-`/`ws-`) are not interchangeable with Modal API tokens (`ak-`/`as-`).
+
+Endpoints and token pairs are both multi-entry lists with a sticky active choice, up to 10 each:
+
+```sh
+clai set modal --url <a> --url <b>     # store two deployments; the last becomes active
+clai set modal --url <a>               # re-passing a known URL just activates it
+clai unset modal --url                 # clear the URLs, keep the token pairs
+clai keys                              # every URL listed, ★ marks the active one
+```
+
+Token pairs rotate on failure like any other provider's keys (the pair is stored as one `id:secret` string). Endpoints do **not** auto-rotate: a different Modal endpoint serves a different model, so switching is always an explicit choice. `MODAL_BASE_URL` overrides the stored list entirely.
+
+From inside the console, `/provider modal` walks the same setup in two prompts — endpoint URL first (shown in full, since it isn't a secret), then the token pair — and leaves the active provider untouched if you cancel.
+
+Sticky sessions are on by default — clai sends a `Modal-Session-ID` per run so a whole conversation stays on one warm container, which keeps the prompt cache hot and avoids paying a cold start mid-task (override with `MODAL_SESSION_ID`). The first request after idle still pays container start-up, so clai allows up to 3 minutes for the first token.
+
+`/info modal` prints the whole thing as a walkthrough: numbered setup steps, which credentials go where, the plan limits (Starter also caps you at 3 seats, 100 containers and 10 GPUs of concurrency), and a troubleshooting table.
+
+#### Lightning AI (one key, many vendors)
+
+[Lightning AI Model APIs](https://lightning.ai/docs/platform/inference/model-apis) are an OpenAI-compatible gateway in front of OpenAI, Anthropic, Google and Lightning-hosted open models — one key, billed per token, with **up to 40 million free tokens to start**. Model ids are vendor-namespaced.
+
+```sh
+clai set lightning <your-api-key>      # key: lightning.ai → Model APIs → show API key
+clai use lightning
+/model openai/gpt-5                    # or anthropic/claude-opus-4-8, google/gemini-3.5-flash,
+                                       #    lightning-ai/gpt-oss-120b (cheapest open weights)
+```
+
+`/model` reads the gateway's live catalog (41 ids at last check) and dedupes it. Keys are multi-key with rotation like everywhere else. The base URL defaults to the shared gateway but is overridable the same way as Modal's — point it at a private Lightning Inference deployment with `clai set lightning --url <url>`, or `LIGHTNING_BASE_URL`. Costs vary by orders of magnitude across the catalog, so check `/info lightning` before long agent runs.
+
+#### TokenRouter (frontier open models, one key)
+
+[TokenRouter](https://docs.tokenrouter.me) is an OpenAI-compatible gateway to Kimi, DeepSeek, Qwen, GLM, GPT-OSS and MiniMax — long-context open models aimed at agentic coding, billed per token from a prepaid balance.
+
+```sh
+clai set tokenrouter sk-your-key        # key: your account → API Keys
+clai use tokenrouter                    # model defaults to kimi-k2p6
+/model deepseek-v4-pro                  # 1M context · or kimi-k2p7-code, glm-5p1, minimax-m3
+```
+
+Model ids are short and case-sensitive (`kimi-k2p6`, not `Kimi K2.6`), and `/model` reads the live `/models` list, which is filtered to the channels your key can reach. clai carries the real per-model context windows — 1M for DeepSeek V4, 512K for MiniMax M3, 256K for Kimi/Qwen, 200K for GLM — so the context meter and auto-compaction are accurate instead of guessing 128K. Reasoning arrives as `reasoning_content` and is folded into the normal thinking block, so `/think` and `/variants` work. Base URL defaults to `https://api.tokenrouter.com/v1` and is overridable with `clai set tokenrouter --url <url>` or `TOKENROUTER_BASE_URL` if your account uses a different host.
 
 ### Manage keys
 
@@ -112,13 +179,18 @@ clai set groq gsk_second_key           # add another key for the same provider
 clai set gemini --from-env GEMINI_API_KEY
 echo "gsk_..." | clai set groq --stdin
 clai set ollama --url http://localhost:11434
-clai keys                              # list providers + masked keys, active key marked ★
+clai set modal --url https://ws--ep-kimi-k3-server.us-west.modal.direct   # endpoint (repeatable)
+clai set modal wk-tokenId:ws-tokenSecret   # …then the proxy token pair
+clai set lightning <key>               # Lightning AI Model APIs
+clai set tokenrouter sk-your-key       # TokenRouter
+clai unset modal --url                 # drop stored endpoint URLs, keep the keys
+clai keys                              # providers + masked keys (★ active) + endpoint URLs
 clai use groq                          # set active provider
 clai provider                          # interactive provider/model picker
 clai unset groq                        # remove ALL keys for a provider
 ```
 
-In the console, **`/set`** opens a multi-row key editor: add rows with `+`, remove rows, **Save**, or **Reset all**. **`/keys`** lists them masked; **`/unset`** clears a provider.
+In the console, **`/set`** opens a multi-row editor: add rows with `+`, remove rows, star a row to make it the active one, **Save**, or **Reset all**. Providers with their own base URL (Modal, Lightning AI, TokenRouter) get a second **endpoints** row in the `/set` picker that edits their URL list the same way — URLs are shown in full rather than masked, since they aren't secrets. `/set <provider> https://…` adds and activates one URL directly. **`/keys`** lists keys masked plus the active endpoint; **`/unset`** clears a provider.
 
 ### Smart switching (how it stays up)
 
@@ -245,7 +317,7 @@ Tool cards show the command/input clearly and keep long scan tails in an expanda
 | `/ask` · `/agent` · `/plan` | Switch mode (plan = design-then-approve) |
 | `/implement` · `/discard` | Approve+execute or drop the current plan |
 | `/model [name\|#]` · `/provider [name]` · `/use <provider>` | Pick model / switch provider |
-| `/set [provider]` · `/unset [provider]` · `/keys` · `/info [provider]` | Manage API keys and view provider info |
+| `/set [provider]` · `/unset [provider]` · `/keys` · `/info [provider]` | Manage API keys, endpoint URLs, and view provider setup / pricing info |
 | `/variants [level]` · `/reasoning [level]` | Thinking / reasoning effort |
 | `/freeonly [on\|off]` · `/fallback [on\|off]` | Free-only filter · cross-provider fallback |
 | `/search [provider]` · `/search-provider` | Choose web-search backend |
@@ -269,9 +341,9 @@ clai [prompt...]                       # interactive console, or one-shot with a
   --mode <ask|agent|plan>  --provider <p>  --model <m>
   -y/--yes  --no-history  --classic  --ui <legacy|tui|v2>
 
-clai set <provider> [key]              # --from-env <VAR> | --stdin | --url <url> | --skip-ping
-clai unset <provider>                  # remove all keys for a provider
-clai keys                              # list providers with masked keys
+clai set <provider> [key]              # --from-env <VAR> | --stdin | --url <url> (repeatable) | --skip-ping
+clai unset <provider>                  # remove all keys for a provider (--url = endpoint URLs instead)
+clai keys                              # list providers with masked keys + endpoint URLs
 clai use <provider>                    # set active provider
 clai provider [provider]               # switch provider or open picker
 clai model <model>                     # set model for the active provider
@@ -394,7 +466,7 @@ clai/
 ├─ src/
 │  ├─ index.ts          # CLI entry + subcommands
 │  ├─ agent/            # loop, plans, compaction, resume orientation, tool parsing
-│  ├─ llm/              # 12 providers, streaming, native tools, key rotation + fallback
+│  ├─ llm/              # 15 providers, streaming, native tools, key rotation + fallback
 │  ├─ tools/            # fs, shell, net, http, web, pentest, batch, plan
 │  ├─ safety/           # risk classifier + engagement (scope) policy
 │  ├─ store/            # config, history, keys, plans, scope

@@ -144,12 +144,16 @@ async function oneShot(
   if (resolved.fallbackReason) {
     console.error(chalk.dim(`  ${resolved.fallbackReason}`));
   }
+  for (const issue of resolved.imageIssues) {
+    console.error(chalk.yellow(`  ${issue}`));
+  }
   answer = await runAgent(resolved.prompt, {
     provider: resolved.provider,
     model: resolved.model,
     autoConfirm: options.yes,
     mode: resolved.mode,
     images: [...resolved.images],
+    visionProven: resolved.capability.support === "yes",
   });
   if (!options.noHistory) {
     await saveSession([
@@ -281,12 +285,19 @@ async function main(): Promise<void> {
 
   program
     .command("set")
-    .description("store or append an API key (multi-key) or Ollama URL")
+    .description("store or append an API key (multi-key) or endpoint URL")
     .argument("<provider>", "provider id")
     .argument("[apiKey]", "API key")
     .option("--from-env <envVar>", "import key from environment variable")
     .option("--stdin", "read key from stdin")
-    .option("--url <url>", "Ollama base URL")
+    .option(
+      "--url <url>",
+      "endpoint / base URL (Ollama, Modal, Lightning) — repeatable; last becomes active",
+      (value: string, previous: string[] | undefined) => [
+        ...(previous ?? []),
+        value,
+      ],
+    )
     .option("--skip-ping", "save without pinging provider")
     .action(
       async (
@@ -295,7 +306,7 @@ async function main(): Promise<void> {
         options: {
           fromEnv?: string | undefined;
           stdin?: boolean | undefined;
-          url?: string | undefined;
+          url?: string | string[] | undefined;
           skipPing?: boolean | undefined;
         },
       ) => {
@@ -307,8 +318,9 @@ async function main(): Promise<void> {
     .command("unset")
     .description("remove all stored API keys for a provider")
     .argument("<provider>", "provider id")
-    .action(async (provider: string) => {
-      await unsetProviderKey(provider);
+    .option("--url", "remove the stored endpoint URLs instead of the keys")
+    .action(async (provider: string, options: { url?: boolean | undefined }) => {
+      await unsetProviderKey(provider, options);
     });
 
   program

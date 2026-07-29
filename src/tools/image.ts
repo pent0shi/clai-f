@@ -1,8 +1,14 @@
-import { stat } from "node:fs/promises";
+import { open, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
 import type { ToolResult } from "../types.js";
-import { spawnArgv } from "./shell.js";
+import { detectConvertibleImageFormat } from "../attachments/image-content.js";
+import {
+  LANG_PATTERN,
+  MIN_RELIABLE_CONFIDENCE,
+  meaningfulCharCount,
+  runOcr,
+} from "./ocr.js";
 
 export interface ImageToolRunOptions {
   signal?: AbortSignal | undefined;
@@ -33,13 +39,25 @@ function optionalNumber(
   return typeof value === "number" ? value : undefined;
 }
 
-/** Fast, safe OCR wrapper for image text extraction.
- *
- * This intentionally uses argv (not shell parsing) so paths with spaces or
- * macOS narrow no-break-space screenshot names cannot corrupt the tesseract
- * argument order. It is a fallback for non-vision models only; vision models
- * should inspect images directly for colors/layout/style.
- */
+function optionalBoolean(
+  args: Record<string, unknown>,
+  key: string,
+): boolean | undefined {
+  const value = args[key];
+  return typeof value === "boolean" ? value : undefined;
+}
+
+async function isDecodableImage(path: string): Promise<boolean> {
+  const handle = await open(path, "r");
+  try {
+    const header = Buffer.alloc(64);
+    const { bytesRead } = await handle.read(header, 0, header.length, 0);
+    return detectConvertibleImageFormat(header.subarray(0, bytesRead)) !== undefined;
+  } finally {
+    await handle.close();
+  }
+}
+
 export async function imageOcr(
   args: Record<string, unknown>,
   options: ImageToolRunOptions = {},
@@ -54,7 +72,7 @@ export async function imageOcr(
   }
 
   const lang = optionalString(args, "lang") ?? "eng";
-  if (!/^[A-Za-z0-9_+-]+$/.test(lang)) {
+  if (!LANG_PATTERN.test(lang)) {
     return {
       ok: false,
       output: "image.ocr: lang may contain only letters, digits, _, +, or -",
@@ -62,14 +80,18 @@ export async function imageOcr(
     };
   }
 
-  const psmRaw = optionalNumber(args, "psm") ?? 6;
-  const psm = Math.floor(psmRaw);
-  if (!Number.isFinite(psmRaw) || psm < 0 || psm > 13) {
-    return {
-      ok: false,
-      output: "image.ocr: psm must be an integer from 0 to 13",
-      exitCode: 1,
-    };
+  const psmRaw = optionalNumber(args, "psm");
+  let psmCandidates = [6, 3, 11];
+  if (psmRaw !== undefined) {
+    const psm = Math.floor(psmRaw);
+    if (!Number.isFinite(psmRaw) || psm < 0 || psm > 13) {
+      return {
+        ok: false,
+        output: "image.ocr: psm must be an integer from 0 to 13",
+        exitCode: 1,
+      };
+    }
+    psmCandidates = [psm];
   }
 
   const path = resolve(expandHome(rawPath));
@@ -82,6 +104,20 @@ export async function imageOcr(
         exitCode: 1,
       };
     }
+    if (info.size === 0) {
+      return {
+        ok: false,
+        output: `image.ocr: ${path} is empty (0 bytes)`,
+        exitCode: 1,
+      };
+    }
+    if (!(await isDecodableImage(path))) {
+      return {
+        ok: false,
+        output: `image.ocr: ${path} is not a decodable image (expected PNG, JPEG, GIF, WebP, BMP, TIFF, HEIC or AVIF). For PDFs use pdf.read instead.`,
+        exitCode: 1,
+      };
+    }
   } catch (error) {
     return {
       ok: false,
@@ -90,12 +126,45 @@ export async function imageOcr(
     };
   }
 
-  return spawnArgv({
-    command: "tesseract",
-    argv: [path, "stdout", "-l", lang, "--psm", String(psm)],
+  const result = await runOcr({
+    path,
+    lang,
+    psmCandidates,
     timeoutMs: optionalNumber(args, "timeoutMs") ?? 60_000,
+    preprocess: optionalBoolean(args, "preprocess") ?? true,
     signal: options.signal,
     onOutput: options.onOutput,
-    maxModelBytes: 32_000,
   });
+
+  if (!result.ok) {
+    return {
+      ok: false,
+      output: `image.ocr failed on ${path}: ${result.error ?? "unknown error"}`,
+      exitCode: 1,
+    };
+  }
+
+  if (meaningfulCharCount(result.text) === 0) {
+    return {
+      ok: true,
+      output: `image.ocr: no text was recognized in ${path}. The image may contain no text, or the text may be too small or low-contrast for OCR — if the active model supports vision, inspect the image directly instead.`,
+    };
+  }
+
+  if (!result.reliable) {
+    return {
+      ok: true,
+      output:
+        `image.ocr: no reliable text in ${path} (mean confidence ${result.confidence}%, below the ${MIN_RELIABLE_CONFIDENCE}% threshold). ` +
+        "The candidate output was discarded because it is OCR noise, not text — do NOT guess at the image contents from it. " +
+        "This usually means the image is a photo, diagram or UI capture without clean machine-readable text. " +
+        "If the active model supports vision, inspect the attached image directly instead.",
+    };
+  }
+
+  const header =
+    `[image.ocr ${path} — psm ${result.psm}, confidence ${result.confidence}%` +
+    (result.preprocessed ? ", upscaled for OCR" : "") +
+    "]";
+  return { ok: true, output: `${header}\n\n${result.text}` };
 }

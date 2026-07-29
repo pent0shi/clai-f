@@ -44,6 +44,7 @@ import {
   planModeDirective,
   renderAgentSystemPrompt,
   renderCompactAgentSystemPrompt,
+  renderRequestEnvironmentContext,
   scratchDirFor,
   toolNudge,
 } from "../prompts/index.js";
@@ -483,6 +484,7 @@ export interface AgentRunOptions {
   maxSteps?: number | undefined;
   signal?: AbortSignal | undefined;
   images?: ChatImage[] | undefined;
+  visionProven?: boolean | undefined;
   onToolStart?: ((call: ToolCall) => void) | undefined;
   onToolResult?: ((call: ToolCall, result: ToolResult) => void) | undefined;
   onEvent?: ((event: AgentEvent) => void) | undefined;
@@ -734,7 +736,24 @@ export async function runAgentTurn(
   let suppressOutcomeDiagnostics = false;
   const unreadResponderNotificationIds = new Set<string>();
   const releaseUnreadResponderClaims = (): void => {
+    // No session filter: this helper runs in the outer turn scope, before the
+    // session policy exists, and every id here is already known to belong to
+    // this turn (notification ids are globally unique).
+    const pending = new Map(
+      jobManager
+        .getPendingNotifications()
+        .map((notification) => [notification.id, notification]),
+    );
     for (const notificationId of unreadResponderNotificationIds) {
+      const notification = pending.get(notificationId);
+      if (
+        notification?.deliveryStartedAt &&
+        !notification.readAt &&
+        !notification.analyzedAt &&
+        !notification.acknowledgedAt
+      ) {
+        continue;
+      }
       jobManager.releaseResponderNotificationClaim(notificationId);
     }
   };
@@ -784,7 +803,11 @@ export async function runAgentTurn(
     const confirmPort = options.confirm ?? inquirerConfirmPort;
     const projectContext = await loadProjectContext();
     const hasAttachedImages = Boolean(options.images?.length);
-    const imageOcrEnabled = shouldEnableImageOcr(prompt, hasAttachedImages);
+    const imageOcrEnabled = shouldEnableImageOcr(
+      prompt,
+      hasAttachedImages,
+      options.visionProven !== false,
+    );
     // A vision-capable request already carries the actual image bytes. Hiding
     // image.ocr from the model prevents it from replacing visual inspection
     // with a lossy Tesseract pass (which produced fabricated screenshot text).
@@ -913,79 +936,80 @@ export async function runAgentTurn(
     if (!pinnedProject && discoveredProjects.length === 1) {
       setActiveProjectRootIfValid(discoveredProjects[0]);
     }
-    const buildSystemContent = (native: boolean): string => {
+    // Only long-lived instructions belong in the provider-cached system prefix.
+    // Request, project, workspace, recovery, scope, and plan state are appended
+    // later as system-marked turns so a changing byte cannot invalidate the
+    // constitution (and, on Anthropic, the native tool schemas before it).
+    const buildStableSystemContent = (native: boolean): string => {
       const reliability = getReliabilityPolicy();
-      const sections = [
-        (useCompactSystemPrompt
-          ? renderCompactAgentSystemPrompt
-          : renderAgentSystemPrompt)(toolNames.join(", "), {
-            nativeTools: native,
-            // E6: slim native constitution when API tool schemas are attached.
-            ...(native
-              ? { slimNative: reliability.slimNativePrompt }
-              : {}),
-          }),
-      ];
-      if (projectContext) {
-        sections.push(
-          `Project context from .clai/context.md:\n${projectContext}`,
-        );
-      }
-      const projectRoot = getActiveProjectRoot();
-      if (projectRoot) {
-        sections.push(
-          `ACTIVE PROJECT ROOT: ${projectRoot}\n` +
-          `All relative paths (./src/…, manifests, configs) resolve under this directory — NOT the agent process cwd. ` +
-          `Prefer absolute paths under this root. shell cwd for install / run / build must be this root ` +
-          `(or its parent when creating a NEW named subfolder with a scaffolder). ` +
-          `Never write user app source into the agent package tree.`,
-        );
-      } else if (destinationHint) {
-        sections.push(
-          `USER DESTINATION: create or continue work under "${destinationHint}" (parent folder). ` +
-          `Pick or detect a project subfolder; do not scaffold into the agent working tree unless the user asked for that.`,
-        );
-      }
-      // Stack-agnostic PWD / existing-project snapshot so weak models cannot
-      // skip explore and re-scaffold into non-empty dirs.
-      if (
-        buildLikeTurn &&
-        !informationalQuery &&
-        !idleOrSocialPrompt
-      ) {
-        const guessedName = guessProjectFolderName(
-          [prompt, activePlan?.goal, activePlan?.detail, activePlan?.tasks.map((t) => t.title).join(" ")]
-            .filter(Boolean)
-            .join("\n"),
-        );
-        const extraPaths: string[] = [];
-        if (destinationHint && guessedName) {
-          extraPaths.push(join(destinationHint, guessedName));
-        }
-        const fromText =
-          extractProjectRootFromPlan(activePlan) ??
-          extractProjectRootFromText(prompt);
-        if (fromText) extraPaths.push(fromText);
-        const orientInput: {
-          cwd: string;
-          destinationHint?: string;
-          candidateProject?: string;
-          extraPaths: string[];
-        } = {
-          cwd: safeCwd(),
-          extraPaths,
-        };
-        if (destinationHint) orientInput.destinationHint = destinationHint;
-        const candidate = getActiveProjectRoot() ?? fromText;
-        if (candidate) orientInput.candidateProject = candidate;
-        sections.push(buildWorkspaceOrientation(orientInput));
-      }
-      if (freshWebSearchRequired) {
-        sections.push(freshnessGuardMessage());
-      }
-      return sections.join("\n\n");
+      return (useCompactSystemPrompt
+        ? renderCompactAgentSystemPrompt
+        : renderAgentSystemPrompt)(toolNames.join(", "), {
+          nativeTools: native,
+          stableEnvironment: true,
+          // E6: slim native constitution when API tool schemas are attached.
+          ...(native ? { slimNative: reliability.slimNativePrompt } : {}),
+        });
     };
-    const systemSections = [buildSystemContent(nativeToolsActive)];
+    const systemSections: string[] = [renderRequestEnvironmentContext()];
+    if (projectContext) {
+      systemSections.push(
+        `Project context from .clai/context.md:\n${projectContext}`,
+      );
+    }
+    const projectRoot = getActiveProjectRoot();
+    if (projectRoot) {
+      systemSections.push(
+        `ACTIVE PROJECT ROOT: ${projectRoot}\n` +
+        `All relative paths (./src/…, manifests, configs) resolve under this directory — NOT the agent process cwd. ` +
+        `Prefer absolute paths under this root. shell cwd for install / run / build must be this root ` +
+        `(or its parent when creating a NEW named subfolder with a scaffolder). ` +
+        `Never write user app source into the agent package tree.`,
+      );
+    } else if (destinationHint) {
+      systemSections.push(
+        `USER DESTINATION: create or continue work under "${destinationHint}" (parent folder). ` +
+        `Pick or detect a project subfolder; do not scaffold into the agent working tree unless the user asked for that.`,
+      );
+    }
+    // Stack-agnostic PWD / existing-project snapshot so weak models cannot
+    // skip explore and re-scaffold into non-empty dirs. This is live filesystem
+    // data and therefore must remain outside the cached constitution.
+    if (
+      buildLikeTurn &&
+      !informationalQuery &&
+      !idleOrSocialPrompt
+    ) {
+      const guessedName = guessProjectFolderName(
+        [prompt, activePlan?.goal, activePlan?.detail, activePlan?.tasks.map((t) => t.title).join(" ")]
+          .filter(Boolean)
+          .join("\n"),
+      );
+      const extraPaths: string[] = [];
+      if (destinationHint && guessedName) {
+        extraPaths.push(join(destinationHint, guessedName));
+      }
+      const fromText =
+        extractProjectRootFromPlan(activePlan) ??
+        extractProjectRootFromText(prompt);
+      if (fromText) extraPaths.push(fromText);
+      const orientInput: {
+        cwd: string;
+        destinationHint?: string;
+        candidateProject?: string;
+        extraPaths: string[];
+      } = {
+        cwd: safeCwd(),
+        extraPaths,
+      };
+      if (destinationHint) orientInput.destinationHint = destinationHint;
+      const candidate = getActiveProjectRoot() ?? fromText;
+      if (candidate) orientInput.candidateProject = candidate;
+      systemSections.push(buildWorkspaceOrientation(orientInput));
+    }
+    if (freshWebSearchRequired) {
+      systemSections.push(freshnessGuardMessage());
+    }
     // The live plan is mutable state: it is injected once as a keyed request
     // suffix (upsertPlanContextMessage) instead of being frozen into the stable
     // system prefix, so the model never sees a stale and a fresh plan together.
@@ -1097,7 +1121,7 @@ export async function runAgentTurn(
     }
 
     const promptSections = (): AgentPromptSection[] => {
-      const sections: AgentPromptSection[] = systemSections.slice(1).map((content) => ({
+      const sections: AgentPromptSection[] = systemSections.map((content) => ({
         kind: content.startsWith("ACTIVE PLAN")
           ? "plan"
           : content.startsWith("ENGAGEMENT SCOPE")
@@ -1113,6 +1137,12 @@ export async function runAgentTurn(
         mandatory:
           content.startsWith("ACTIVE PLAN") ||
           content.startsWith("ENGAGEMENT SCOPE") ||
+          content.startsWith("REQUEST ENVIRONMENT") ||
+          content.startsWith("Project context from .clai/context.md:") ||
+          content.startsWith("ACTIVE PROJECT ROOT:") ||
+          content.startsWith("USER DESTINATION:") ||
+          content.startsWith("WORKSPACE STATUS") ||
+          content.startsWith("Freshness guard for this turn:") ||
           content.includes("MODE") ||
           content.includes("OUTCOME"),
       }));
@@ -1148,21 +1178,15 @@ export async function runAgentTurn(
       return sections;
     };
     const composeCurrentSystemPrompt = (native: boolean): string =>
-      composeAgentSystemPrompt({
-        mode: agentMode,
-        nativeToolsActive: native,
-        maxTokens: inputTokenBudget
-          ? Math.min(2_000, Math.floor(inputTokenBudget * 0.4))
-          : undefined,
-        sections: [
-          {
-            kind: "constitution",
-            content: buildSystemContent(native),
-            mandatory: true,
-          },
-          ...promptSections(),
-        ],
-      }).content;
+      buildStableSystemContent(native);
+    const requestContext = composeAgentSystemPrompt({
+      mode: agentMode,
+      nativeToolsActive,
+      maxTokens: inputTokenBudget
+        ? Math.min(2_000, Math.floor(inputTokenBudget * 0.4))
+        : undefined,
+      sections: promptSections(),
+    }).content;
     const fullSystemPrompt = composeCurrentSystemPrompt(nativeToolsActive);
     // Backend-only directives (implement, displayPrompt=null) stay in model
     // history but must never become a YOU bubble on live or /history hydrate.
@@ -1179,6 +1203,10 @@ export async function runAgentTurn(
     const messages: ChatMessage[] = [
       { role: "system", content: fullSystemPrompt },
       ...(options.history ?? []),
+      // Keep all per-request authority after prior history. This preserves the
+      // longest shared prefix for APC providers while single-system dialects
+      // retain it in place as a marked user turn.
+      { role: "system", content: `REQUEST CONTEXT\n${requestContext}` },
       userMessage,
     ];
     liveMessages = messages;
@@ -1634,6 +1662,13 @@ export async function runAgentTurn(
 
     const deferredPostToolMessages: ChatMessage[] = [];
     /**
+     * Successful job.read receipts update the durable ledger only after the
+     * assistant→tool group closes. Inserting the ledger system row inside
+     * executeSingleTool would split native tool protocol and cause repair to
+     * replace the real acknowledgement body with a "No stored body" stub.
+     */
+    const deferredResponderLedgerNotifications: ResponderNotification[] = [];
+    /**
      * Latest plan seen during tool execution. SESSION STATE is refreshed once
      * after the full tool batch is recorded — never mid-group (see
      * executeSingleTool / recordResult).
@@ -1798,6 +1833,29 @@ export async function runAgentTurn(
       const scratchDir = scratchDirFor(safeCwd());
       let call = normalizeToolCall(rawCall);
 
+      const emitVisibleSyntheticReceipt = (
+        result: ToolResult,
+        summary: string,
+      ): void => {
+        if (!alreadyPrintedIds.has(toolEventId)) {
+          const toolCallLine =
+            chalk.cyan(`  ▶ ${call.name}`) +
+            chalk.gray(` ${formatToolArgs(call)}`);
+          writeToolCall(
+            toolEventId,
+            call,
+            styleToolChatter(call, toolCallLine) + "\n",
+          );
+          alreadyPrintedIds.add(toolEventId);
+        }
+        emit({ type: "tool-start", id: toolEventId });
+        const output = result.output.endsWith("\n")
+          ? result.output
+          : `${result.output}\n`;
+        writeToolOutput(toolEventId, output, chalk.dim(`  ${output}`));
+        emitToolResult(toolEventId, result, summary);
+      };
+
       let dispatchedTaskId: string | undefined;
       let delegation: { id: string; taskId?: string } | undefined;
       let engagementLease: PolicyLease | undefined;
@@ -1900,7 +1958,7 @@ export async function runAgentTurn(
           `${call.name} previously failed with identical arguments. Change the command/args and retry.`;
         if (loopCheck.kind === "unchanged-success") {
           const result: ToolResult = { ok: true, output: reason, exitCode: 0 };
-          emitToolResult(toolEventId, result, reason);
+          emitVisibleSyntheticReceipt(result, reason);
           return {
             ok: true,
             call,
@@ -1988,7 +2046,7 @@ export async function runAgentTurn(
                       ? `${call.name} failed: Responder result ${identifier} was not delivered to this model turn. Analyze a delivered result before marking it read.`
                       : `${call.name} failed: read state for Responder result ${identifier} could not be persisted.`;
           if (persistedRead && notification) {
-            upsertResponderResultLedger(messages, notification);
+            deferredResponderLedgerNotifications.push(notification);
             unreadResponderNotificationIds.delete(notification.id);
           } else if (staleWakeSettled && responderWakeNotificationId) {
             unreadResponderNotificationIds.delete(responderWakeNotificationId);
@@ -3038,6 +3096,42 @@ export async function runAgentTurn(
         parentSignal.removeEventListener("abort", onParentAbort);
       }
 
+      if (result.suppressedRepeat) {
+        const contextOutput = result.output;
+        const output = result.output.endsWith("\n")
+          ? result.output
+          : `${result.output}\n`;
+        writeToolOutput(toolEventId, output, "", { replace: true });
+        emitToolResult(toolEventId, result, contextOutput);
+        options.onToolResult?.(call, result);
+        // Record it as an observation-free success so the per-call guard can
+        // stop an identical replay, while a real state change (new job status
+        // or bytes) still produces a fresh stateKey and is allowed through.
+        const suppressedProbeState = probeStateKey(call);
+        loopGuard.recordAttempt(
+          step,
+          call.name,
+          call.args,
+          true,
+          result.exitCode,
+          "",
+          suppressedProbeState ? { stateKey: suppressedProbeState } : undefined,
+        );
+        await auditLog("tool.result", {
+          call,
+          ok: result.ok,
+          exitCode: result.exitCode,
+          output: result.output.slice(0, 4_000),
+          suppressedRepeat: true,
+        });
+        return {
+          ok: result.ok,
+          call,
+          result,
+          contextOutput,
+          suppressedRepeat: true,
+        };
+      }
 
       if (
         (call.name === "shell.exec" || call.name === "shell.start") &&
@@ -5439,11 +5533,108 @@ export async function runAgentTurn(
         // Re-index toRun positions for UI callIds[] (0..n-1 this turn).
         toRun = toRun.map((b, index) => ({ ...b, index }));
         const allCalls = toRun.map((b) => b.call);
+        const actionSequenceCalls = bound.map((entry) => {
+          const candidate = entry.call;
+          const stateKey = probeStateKey(candidate);
+          return {
+            name: candidate.name,
+            args: candidate.args,
+            ...(stateKey ? { stateKey } : {}),
+          };
+        });
         /** Stable call→Bound map (object identity; no indexOf for result ids). */
         const callToBound = new Map<ToolCall, BoundCall>(
           toRun.map((b) => [b.call, b]),
         );
         const runIds = new Set(toRun.map((b) => b.id));
+        const sequenceDecision = loopGuard.observeActionSequence(actionSequenceCalls);
+
+        if (sequenceDecision.suppress) {
+          const reason = sequenceDecision.terminal
+            ? "The model repeated the same action sequence after it was already suppressed. No commands were run again."
+            : "The same action sequence already ran in the previous model round. No commands were run again; reuse the existing results and choose a materially different next action or finish.";
+          writeNotice("warn", reason, chalk.yellow(`  ⚠ ${reason}\n`));
+          const suppressedResults = bound.map((b) => {
+            const duplicate = runIds.has(b.id);
+            const resultReason = duplicate ? reason : deferReason;
+            const result: ToolResult = {
+              ok: false,
+              output: resultReason,
+              exitCode: duplicate ? 409 : 130,
+            };
+            return { b, resultReason, result };
+          });
+          // Sequence suppression happens before the normal queued-card flush.
+          // Complete every card explicitly so streamed queued calls never turn
+          // into empty "done" rows when the repeated sequence is skipped.
+          for (const { b, resultReason, result } of suppressedResults) {
+            const queued = deferredToolCalls[b.index];
+            const eventId = queued?.eventId ?? `tool-${++nextToolEventId}`;
+            const toolCallLine =
+              chalk.cyan(`  ▶ ${b.call.name}`) +
+              chalk.gray(` ${formatToolArgs(b.call)}`);
+            writeToolCall(
+              eventId,
+              b.call,
+              styleToolChatter(b.call, toolCallLine) + "\n",
+            );
+            alreadyPrintedIds.add(eventId);
+            emit({ type: "tool-start", id: eventId });
+            const output = resultReason.endsWith("\n")
+              ? resultReason
+              : `${resultReason}\n`;
+            writeToolOutput(eventId, output, chalk.dim(`  ${output}`));
+            emitToolResult(eventId, result, resultReason);
+          }
+          if (historyNativeCalls.length) {
+            appendAssistantWithTools(
+              messages,
+              beforeTool ?? "",
+              historyNativeCalls,
+              completion.reasoningBlock,
+            );
+            for (const { b, resultReason, result } of suppressedResults) {
+              appendToolResult(
+                messages,
+                b.id,
+                `Tool ${b.call.name} result (exit=${result.exitCode}, ok=false):\n${resultReason}`,
+                b.call.name,
+                false,
+              );
+            }
+          } else {
+            const standardizedContent =
+              (beforeTool ? beforeTool.trim() + "\n\n" : "") +
+              allCalls
+                .map((candidate) => `\`\`\`tool\n${JSON.stringify(candidate)}\n\`\`\``)
+                .join("\n\n");
+            pushAssistantHistory(standardizedContent);
+          }
+          if (sequenceDecision.terminal) {
+            const remainingCriteria = unreadResponderNotificationIds.size > 0
+              ? ["Analyze and acknowledge the delivered Responder result without repeating completed foreground work."]
+              : ["Continue with a materially different action that can produce new evidence."];
+            outcomeState.outcome.status = "partial";
+            await saveOutcomeState(outcomeState);
+            moveTurn("partial", "repeated identical action sequence");
+            return finishTurn(
+              "Stopped an identical action cycle before it could execute again.",
+              productiveSteps,
+              "partial",
+              remainingCriteria,
+              "The model repeated an identical action sequence without a new premise or state change.",
+            );
+          }
+          messages.push(
+            recoveryUserMessage(
+              reason +
+                (unreadResponderNotificationIds.size > 0
+                  ? " A delivered Responder result is still unread: analyze the available result, gather only genuinely necessary bounded evidence, then call job.read before returning to foreground work."
+                  : " Reassess the evidence and select the next action yourself; do not replay completed work."),
+            ),
+          );
+          continue;
+        }
 
         // Notice BEFORE tool cards so the transcript reads:
         // thinking → response → "N tool calls…" → tool cards (not tools then info).
@@ -5515,6 +5706,8 @@ export async function runAgentTurn(
         let planCreatedThisTurn = Boolean(
           activePlan && activePlan.tasks.length > 0,
         );
+        let actionSequenceExecuted = 0;
+        let actionSequenceEligible = allCalls.length > 0;
 
         /**
          * Record a tool result into history. Failures / user declines are
@@ -5536,6 +5729,15 @@ export async function runAgentTurn(
           },
         ): void => {
           recordedNativeIds.add(boundCall.id);
+          actionSequenceExecuted += 1;
+          // A policy-suppressed call is deterministic: replaying it verbatim
+          // returns the identical receipt. It must therefore keep the sequence
+          // eligible, otherwise the tool-level suppression and the sequence
+          // guard cancel each other out and the round can repeat forever.
+          actionSequenceEligible &&=
+            (res.ok || Boolean(res.suppressedRepeat)) &&
+            !res.blockOrCancel &&
+            !res.aborted;
           if (res.ok && res.call.name === "plan.create") {
             planCreatedThisTurn = true;
           }
@@ -5925,9 +6127,40 @@ export async function runAgentTurn(
           );
         }
 
+        loopGuard.completeActionSequence(
+          actionSequenceCalls,
+          actionSequenceEligible &&
+            toRun.length === bound.length &&
+            actionSequenceExecuted === allCalls.length &&
+            !aborted &&
+            !awaitingPlanApproval &&
+            !governorPauseReason,
+        );
+
+        // Keep ledger system rows outside the native assistant→tool group so
+        // protocol repair preserves the real successful job.read body.
+        for (const notification of deferredResponderLedgerNotifications.splice(0)) {
+          upsertResponderResultLedger(messages, notification);
+        }
+
         // SESSION STATE only after the assistant→tool group is closed.
         // Mid-group upserts were the root cause of "No stored body" thrash.
         refreshSessionState(pendingSessionStatePlan);
+
+        if (
+          responderWakeTurn &&
+          unreadResponderNotificationIds.size > 0 &&
+          !allCalls.some(
+            (candidate) =>
+              candidate.name === "job.read" || candidate.name === "task.read",
+          )
+        ) {
+          messages.push(
+            recoveryUserMessage(
+              "The delivered Responder result is still unread. Decide from the evidence already available whether it is understood. If it is, call job.read now; if not, gather only the smallest bounded evidence needed. Do not resume or repeat unrelated foreground work before resolving this receipt.",
+            ),
+          );
+        }
 
         if (deferredPostToolMessages.length > 0) {
           messages.push(...deferredPostToolMessages.splice(0));

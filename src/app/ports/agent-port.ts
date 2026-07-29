@@ -25,6 +25,7 @@ export interface RunTurnRequest {
   readonly history?: readonly ChatMessage[] | undefined;
   readonly attachments?: readonly Attachment[] | undefined;
   readonly images?: readonly ChatImage[] | undefined;
+  readonly visionProven?: boolean | undefined;
   readonly autoConfirm?: boolean | undefined;
   readonly maxSteps?: number | undefined;
   /**

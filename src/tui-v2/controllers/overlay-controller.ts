@@ -42,6 +42,12 @@ export interface PickerRequest {
 export interface SecretRequestView {
   readonly title: string;
   readonly prompt: string;
+  /**
+   * Show the typed value instead of bullets. For inputs that are not secret
+   * but reuse this modal — a Modal endpoint URL or an Ollama host — where
+   * masking a long URL just hides typos.
+   */
+  readonly reveal?: boolean | undefined;
 }
 
 /** Multi-row engagement scope editor (/scope). */
@@ -62,6 +68,13 @@ export interface KeysEditorRequest {
   readonly initialKeys: readonly KeysEditorSlotView[];
   /** Index of the currently-active (sticky) key for rotation. */
   readonly activeIndex?: number | undefined;
+  /**
+   * Singular noun for what a row holds. Defaults to "API key"; endpoint editors
+   * pass "endpoint URL" so the same overlay can manage base URLs.
+   */
+  readonly itemLabel?: string | undefined;
+  /** Short heading chip. Defaults to "KEYS". */
+  readonly heading?: string | undefined;
 }
 
 /**
@@ -169,9 +182,12 @@ export class OverlayController {
       ...(highlightPath ? { highlightPath } : {}),
       ...(markdown ? { markdown } : {}),
     };
-    // Allow pager over any confirm (plan "p" or delete "v") without resolving it.
+    // Allow a pager over any confirm (plan "p" or delete "v") without resolving
+    // it, and over the jobs panel so closing a live output view returns to the
+    // job list rather than dropping the user back in the transcript.
+    const stackable = this.state.kind === "confirm" || this.state.kind === "jobs";
     const opened =
-      this.state.kind === "confirm" && !this.suspended
+      stackable && !this.suspended
         ? this.suspendUnder(pager, "pager")
         : this.open(pager, "pager");
     if (!opened) source?.dispose();

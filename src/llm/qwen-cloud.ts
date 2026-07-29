@@ -10,6 +10,7 @@ import {
   openAiCompatibleStream,
   toCompletionResult,
   readJson,
+  ingestOpenAiModelCatalog,
 } from "./http.js";
 
 // Qwen Cloud documents this OpenAI-compatible endpoint for international
@@ -38,10 +39,7 @@ export const qwenCloudProvider: LlmProvider = {
       headers: { authorization: `Bearer ${auth.apiKey}` },
     });
     const data = await readJson<{ data?: Array<{ id?: string }> }>(response);
-    const models = (data.data ?? [])
-      .map((model) => model.id)
-      .filter((model): model is string => Boolean(model))
-      .sort();
+    const models = ingestOpenAiModelCatalog("qwen-cloud", data);
     if (models.length > 0) {
       cachedModels = models;
       lastFetchTime = now;

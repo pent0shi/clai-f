@@ -10,6 +10,7 @@ export function createCurrentAgentPort(): AgentPort {
         model: request.model,
         history: request.history ? [...request.history] : undefined,
         images: request.images ? [...request.images] : undefined,
+        visionProven: request.visionProven,
         autoConfirm: request.autoConfirm,
         maxSteps: request.maxSteps,
         onEvent: handlers.onEvent,

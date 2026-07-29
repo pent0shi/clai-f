@@ -1437,6 +1437,7 @@ interface BatchOutcome {
   output: string;
   exitCode?: number | undefined;
   error?: string | undefined;
+  suppressedRepeat?: boolean | undefined;
 }
 
 async function runToolBatch(
@@ -1735,6 +1736,7 @@ async function runToolBatch(
             ok: true,
             output: result.output,
             exitCode: result.exitCode,
+            ...(result.suppressedRepeat ? { suppressedRepeat: true } : {}),
           };
           tick(
             `[batch] #${index + 1} ${spec.name} ok` +
@@ -1752,6 +1754,7 @@ async function runToolBatch(
             ok: false,
             output: result.output,
             exitCode: result.exitCode,
+            ...(result.suppressedRepeat ? { suppressedRepeat: true } : {}),
           };
           tick(
             `[batch] #${index + 1} ${spec.name} fail` +
@@ -1894,10 +1897,14 @@ async function runToolBatch(
   // preserved by `partial`, which tells the runner this was a partial result
   // rather than an aborted or hard-failed call.
   const anyOk = finalOutcomes.some((outcome) => outcome.ok);
+  const allSuppressed =
+    finalOutcomes.length > 0 &&
+    finalOutcomes.every((outcome) => outcome.suppressedRepeat);
   return {
     ok: allOk,
     partial: !allOk && anyOk && !parentAborted && !hardTimedOut,
     output,
     exitCode: allOk ? 0 : hardTimedOut ? 124 : parentAborted ? 130 : 1,
+    ...(allSuppressed ? { suppressedRepeat: true } : {}),
   };
 }

@@ -20,6 +20,12 @@ export interface TokenUsage {
   readonly totalTokens: number;
   /** true when values came from the provider API (exact). */
   readonly exact: boolean;
+  /** Prompt tokens served from a provider cache, when reported. */
+  readonly cachedPromptTokens?: number | undefined;
+  /** Prompt tokens written into a provider cache, when reported. */
+  readonly cacheCreationTokens?: number | undefined;
+  /** Reasoning tokens included in completion usage, when reported. */
+  readonly reasoningTokens?: number | undefined;
 }
 
 export interface ContextUsageSnapshot {
@@ -127,6 +133,33 @@ export function parseAnthropicUsage(raw: unknown): TokenUsage | undefined {
     ...(cacheCreate > 0 ? { cacheCreationTokens: cacheCreate } : {}),
     exact: true,
   });
+}
+
+/**
+ * Merge Anthropic streaming usage without losing cache telemetry.
+ * `message_start` carries input/cache counts while `message_delta` normally
+ * carries only output tokens; replacing the former with the latter made real
+ * cache hits appear as zero in the UI and audit log.
+ */
+export function mergeAnthropicStreamUsage(
+  previous: TokenUsage | undefined,
+  current: TokenUsage,
+): TokenUsage {
+  const promptTokens = previous?.promptTokens ?? current.promptTokens;
+  const completionTokens =
+    current.completionTokens || previous?.completionTokens || 0;
+  const cachedPromptTokens =
+    previous?.cachedPromptTokens ?? current.cachedPromptTokens;
+  const cacheCreationTokens =
+    previous?.cacheCreationTokens ?? current.cacheCreationTokens;
+  return {
+    promptTokens,
+    completionTokens,
+    totalTokens: promptTokens + completionTokens,
+    exact: true,
+    ...(cachedPromptTokens !== undefined ? { cachedPromptTokens } : {}),
+    ...(cacheCreationTokens !== undefined ? { cacheCreationTokens } : {}),
+  };
 }
 
 /** Gemini usageMetadata. */
@@ -242,6 +275,17 @@ const PROVIDER_CONTEXT_OVERRIDES: Partial<
   groq: [
     { pattern: /qwen\/qwen3-32b/i, tokens: 5_500 },
     { pattern: /openai\/gpt-oss-20b/i, tokens: 7_500 },
+  ],
+  // TokenRouter publishes the real upstream window per model id, and several
+  // are far larger than the generic family rules below would guess.
+  tokenrouter: [
+    { pattern: /^deepseek-v4-(?:pro|flash)$/i, tokens: 1_000_000 },
+    { pattern: /^minimax-m3$/i, tokens: 524_288 },
+    { pattern: /^minimax-m2p7$/i, tokens: 196_608 },
+    { pattern: /^kimi-k2p\d/i, tokens: 262_144 },
+    { pattern: /^qwen3p\d-plus$/i, tokens: 262_144 },
+    { pattern: /^glm-5p1(?:-fast)?$/i, tokens: 202_752 },
+    { pattern: /^gpt-oss-120b$/i, tokens: 131_072 },
   ],
 };
 

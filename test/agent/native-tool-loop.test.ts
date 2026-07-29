@@ -105,16 +105,30 @@ describe("native tool loop integration", () => {
     const written = await readFile(target, "utf8");
     expect(written).toBe(body);
     expect(answer).toContain("done");
-    // The canonical prompt is recomposed immediately before every provider
-    // round and retains all authority-bearing state even under compact budgets.
+    // The provider-cached head contains only the long-lived constitution.
+    // Per-request authority is a later system-marked suffix after history.
     expect(streamMock).toHaveBeenCalledTimes(2);
     for (const [request] of streamMock.mock.calls as Array<[CompletionRequest]>) {
-      const system = request.messages.find((message) => message.role === "system")?.content ?? "";
-      expect(system).toContain("CURRENT MODE: AGENT");
-      expect(system).toContain("OUTCOME CONTRACT");
-      expect(system).toContain("ACTIVE PLAN");
-      expect(system).toContain("ENGAGEMENT SCOPE");
-      expect(system).toContain("TASK STATE");
+      const system = request.messages[0]?.content ?? "";
+      expect(request.messages[0]?.role).toBe("system");
+      expect(system).toContain("# ROLE");
+      expect(system).not.toContain("OUTCOME CONTRACT");
+      expect(system).not.toContain("TASK STATE");
+      expect(system).not.toContain("WORKSPACE STATUS");
+      expect(system).not.toContain("write hello.ts with n=42");
+
+      const requestContext = request.messages.find(
+        (message, index) =>
+          index > 0 &&
+          message.role === "system" &&
+          message.content.includes("OUTCOME CONTRACT"),
+      )?.content ?? "";
+      expect(requestContext).toContain("CURRENT MODE: AGENT");
+      expect(requestContext).toContain("OUTCOME CONTRACT");
+      expect(requestContext).toContain("PLAN PROTOCOL");
+      expect(requestContext).toContain("ENGAGEMENT SCOPE");
+      expect(requestContext).toContain("TASK STATE");
+      expect(requestContext).toContain("write hello.ts with n=42");
     }
     // No fence protocol required in first model response
     expect(streamMock.mock.calls[0]![0].tools?.length).toBeGreaterThan(0);
@@ -295,6 +309,52 @@ describe("native tool loop integration", () => {
     expect(answer).not.toMatch(/Status:|Required outcome criteria|Remaining:/);
   });
 
+  it("keeps the provider cache head identical across different top-level requests", async () => {
+    streamMock.mockImplementation(
+      async (_request: CompletionRequest, onToken: (token: string) => void) => {
+        onToken("answered");
+        return {
+          text: "answered",
+          provider: "openai",
+          model: "gpt-test",
+          finishReason: "stop",
+        };
+      },
+    );
+
+    const { runAgentLoop } = await import("../../src/agent/runner.js");
+    await runAgentLoop("Explain alpha", {
+      provider: "openai",
+      model: "gpt-4o-mini",
+      mode: "ask",
+    });
+    await runAgentLoop("Explain beta", {
+      provider: "openai",
+      model: "gpt-4o-mini",
+      mode: "ask",
+    });
+
+    const requests = streamMock.mock.calls.map(
+      ([request]) => request as CompletionRequest,
+    );
+    expect(requests).toHaveLength(2);
+    expect(requests[0]!.messages[0]!.content).toBe(
+      requests[1]!.messages[0]!.content,
+    );
+    expect(requests[0]!.messages[0]!.content).not.toContain("Explain alpha");
+    expect(requests[1]!.messages[0]!.content).not.toContain("Explain beta");
+    expect(
+      requests[0]!.messages.some(
+        (message, index) => index > 0 && message.content.includes("Explain alpha"),
+      ),
+    ).toBe(true);
+    expect(
+      requests[1]!.messages.some(
+        (message, index) => index > 0 && message.content.includes("Explain beta"),
+      ),
+    ).toBe(true);
+  });
+
   it("passes exact image bytes, MIME, and mode to the provider", async () => {
     const image: ChatImage = {
       dataBase64: Buffer.from([0, 1, 2, 253, 254, 255]).toString("base64"),
@@ -308,7 +368,14 @@ describe("native tool loop integration", () => {
         expect(Buffer.from(user!.images![0]!.dataBase64, "base64")).toEqual(
           Buffer.from([0, 1, 2, 253, 254, 255]),
         );
-        expect(request.messages[0]?.content).toContain("CURRENT MODE: ASK");
+        expect(
+          request.messages.some(
+            (message, index) =>
+              index > 0 &&
+              message.role === "system" &&
+              message.content.includes("CURRENT MODE: ASK"),
+          ),
+        ).toBe(true);
         return {
           text: "inspected",
           provider: "openai",

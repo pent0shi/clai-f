@@ -8,8 +8,17 @@ import {
   assertProvider,
   getProviderInfoText,
   maskSecret,
+  normalizeEndpointUrl,
 } from "../../../llm/provider.js";
-import { getConfig, updateConfig } from "../../../store/config.js";
+import {
+  MAX_PROVIDER_ENDPOINTS,
+  appendProviderEndpoint,
+  getConfig,
+  getProviderEndpoints,
+  providerUsesEndpoints,
+  setProviderEndpoints,
+  updateConfig,
+} from "../../../store/config.js";
 import {
   appendSearchProviderKey,
   getProviderKeys,
@@ -142,7 +151,7 @@ async function openSetPicker(services: AppServices): Promise<void> {
   const llm = await listProviderStatuses(active);
   const search = await getSearchKeyStatuses();
   const options: PickerOption[] = [
-    ...llm.map((status) => {
+    ...llm.flatMap((status): PickerOption[] => {
       const count = status.keyCount ?? (status.configured ? 1 : 0);
       const keyLabel =
         status.provider === "ollama"
@@ -154,11 +163,23 @@ async function openSetPicker(services: AppServices): Promise<void> {
             : count === 1
               ? `✓ ${status.maskedKey ?? "1 key"}`
               : `✓ ${count} keys`;
-      return {
+      const row: PickerOption = {
         value: `llm:${status.provider}`,
         label: `${status.provider} ${keyLabel}${status.active ? " (active)" : ""}`,
         description: status.model,
       };
+      // Endpoint providers get a second row so the URL list is reachable
+      // directly instead of only via the key editor.
+      if (!status.endpoints) return [row];
+      const urlCount = status.endpoints.length;
+      return [
+        row,
+        {
+          value: `endpoint:${status.provider}`,
+          label: `${status.provider} endpoints ${urlCount === 0 ? "✗ none" : `✓ ${urlCount} URL${urlCount === 1 ? "" : "s"}`}`,
+          description: status.note ?? "endpoint URLs",
+        },
+      ];
     }),
     ...search.map((status) => {
       const count = status.keyCount ?? 0;
@@ -177,12 +198,14 @@ async function openSetPicker(services: AppServices): Promise<void> {
       };
     }),
   ];
-  services.overlay.openPicker({ title: "Set API key for provider", options }, (value) => {
+  services.overlay.openPicker({ title: "Set API key / endpoint", options }, (value) => {
     services.overlay.close();
     void (async () => {
-      const isSearch = value.startsWith("search:");
-      const id = value.split(":")[1]!;
-      if (isSearch) await openSearchKeysEditor(services, id as SearchProviderId);
+      const separator = value.indexOf(":");
+      const kind = value.slice(0, separator);
+      const id = value.slice(separator + 1);
+      if (kind === "search") await openSearchKeysEditor(services, id as SearchProviderId);
+      else if (kind === "endpoint") await openEndpointsEditor(services, id as ProviderId);
       else await openLlmKeysEditor(services, id as ProviderId);
     })();
   });
@@ -193,7 +216,7 @@ async function openUnsetPicker(services: AppServices): Promise<void> {
   const llm = await listProviderStatuses(active);
   const search = await getSearchKeyStatuses();
   const options: PickerOption[] = [
-    ...llm.map((status) => {
+    ...llm.flatMap((status): PickerOption[] => {
       const count = status.keyCount ?? (status.configured ? 1 : 0);
       const keyLabel =
         status.provider === "ollama"
@@ -203,11 +226,20 @@ async function openUnsetPicker(services: AppServices): Promise<void> {
             : count === 1
               ? `✓ ${status.maskedKey ?? "1 key"}`
               : `✓ ${count} keys — reset all`;
-      return {
+      const row: PickerOption = {
         value: `llm:${status.provider}`,
         label: `${status.provider} ${keyLabel}${status.active ? " (active)" : ""}`,
         description: status.model,
       };
+      if (!status.endpoints || status.endpoints.length === 0) return [row];
+      return [
+        row,
+        {
+          value: `endpoint:${status.provider}`,
+          label: `${status.provider} endpoints ✓ ${status.endpoints.length} URL${status.endpoints.length === 1 ? "" : "s"} — clear all`,
+          description: status.note ?? "endpoint URLs",
+        },
+      ];
     }),
     ...search.map((status) => {
       const count = status.keyCount ?? 0;
@@ -226,15 +258,77 @@ async function openUnsetPicker(services: AppServices): Promise<void> {
       };
     }),
   ];
-  services.overlay.openPicker({ title: "Unset API key for provider", options }, (value) => {
+  services.overlay.openPicker({ title: "Unset API key / endpoint", options }, (value) => {
     services.overlay.close();
     void (async () => {
-      const isSearch = value.startsWith("search:");
-      const id = value.split(":")[1]!;
-      if (isSearch) await unsetSearchKey(services, id as SearchProviderId);
-      else await unsetLlmKey(services, id as ProviderId);
+      const separator = value.indexOf(":");
+      const kind = value.slice(0, separator);
+      const id = value.slice(separator + 1);
+      if (kind === "search") await unsetSearchKey(services, id as SearchProviderId);
+      else if (kind === "endpoint") {
+        const count = getProviderEndpoints(id as ProviderId).urls.length;
+        setProviderEndpoints(id as ProviderId, []);
+        notice(services, "info", `unset ${count} endpoint URL(s) for ${id}`);
+      } else await unsetLlmKey(services, id as ProviderId);
     })();
   });
+}
+
+/**
+ * Multi-row editor over a provider's endpoint URLs — the same overlay, sticky
+ * ★ active row and Reset semantics as the key editor, so endpoints and keys
+ * behave identically.
+ */
+async function openEndpointsEditor(
+  services: AppServices,
+  id: ProviderId,
+): Promise<void> {
+  const { urls, activeIndex } = getProviderEndpoints(id);
+  const answer = await services.overlay.openKeysEditor({
+    provider: id,
+    heading: "ENDPOINTS",
+    itemLabel: "endpoint URL",
+    // URLs are not secrets: show them in full so a typo is visible.
+    initialKeys: urls.map((url, index) => ({ id: String(index), masked: url })),
+    activeIndex,
+  });
+  if (!answer) {
+    notice(services, "info", "cancelled");
+    return;
+  }
+  if (answer.action === "reset") {
+    setProviderEndpoints(id, []);
+    notice(services, "info", `unset all endpoint URLs for ${id}`);
+    return;
+  }
+
+  const byId = new Map(urls.map((url, index) => [String(index), url]));
+  const resolved = resolveEditorRows(answer.rows, byId).map(normalizeEndpointUrl);
+  if (resolved.length === 0) {
+    setProviderEndpoints(id, []);
+    notice(services, "info", `unset all endpoint URLs for ${id}`);
+    return;
+  }
+  if (resolved.length > MAX_PROVIDER_ENDPOINTS) {
+    notice(services, "warn", `at most ${MAX_PROVIDER_ENDPOINTS} endpoint URLs per provider`);
+    return;
+  }
+
+  // Keep whatever was active if it survived the edit, mirroring key editing.
+  let nextActive = answer.activeIndex ?? 0;
+  if (answer.activeIndex === undefined) {
+    const previous = urls[activeIndex];
+    const found = previous ? resolved.indexOf(previous) : -1;
+    if (found >= 0) nextActive = found;
+  }
+  const saved = setProviderEndpoints(id, resolved, nextActive);
+  notice(
+    services,
+    "info",
+    saved.urls.length === 1
+      ? `saved ${id} endpoint → ${saved.urls[0]}`
+      : `saved ${saved.urls.length} ${id} endpoints · active #${saved.activeIndex + 1} ${saved.urls[saved.activeIndex]}`,
+  );
 }
 
 async function openLlmKeysEditor(
@@ -245,6 +339,7 @@ async function openLlmKeysEditor(
     const host = await services.overlay.openSecret({
       title: "Ollama host URL",
       prompt: "Enter host URL for Ollama:",
+      reveal: true,
     });
     if (!host) {
       notice(services, "info", "cancelled");
@@ -253,6 +348,12 @@ async function openLlmKeysEditor(
     updateConfig({ ollamaHost: host.trim() });
     notice(services, "info", `saved ollama host → ${host.trim()}`);
     return;
+  }
+
+  // Endpoint providers need both lists; edit URLs first (Esc skips ahead to the
+  // keys), or jump straight to either list from the /set picker.
+  if (providerUsesEndpoints(id)) {
+    await openEndpointsEditor(services, id);
   }
 
   const multi = await getProviderKeys(id);
@@ -395,9 +496,32 @@ async function appendLlmKey(
     notice(services, "info", `saved ollama host → ${keyVal.trim()}`);
     return;
   }
+  // `/set modal https://…` is unambiguous: a URL can only be an endpoint,
+  // never an API key or a `<token-id>:<token-secret>` pair. Appended and made
+  // active, exactly like the CLI's `--url`.
+  if (providerUsesEndpoints(id) && /^https?:\/\//i.test(keyVal.trim())) {
+    const endpoint = normalizeEndpointUrl(keyVal.trim());
+    try {
+      const { endpoints, added } = appendProviderEndpoint(id, endpoint);
+      notice(
+        services,
+        "info",
+        `${added ? "saved" : "activated"} ${id} endpoint #${endpoints.activeIndex + 1}/${endpoints.urls.length} → ${endpoint}`,
+      );
+    } catch (error) {
+      notice(services, "warn", error instanceof Error ? error.message : String(error));
+    }
+    return;
+  }
   const key = keyVal.trim();
   if (!getProvider(id).validateKey(key)) {
-    notice(services, "warn", `invalid API key format for ${id}`);
+    notice(
+      services,
+      "warn",
+      providerUsesEndpoints(id)
+        ? `invalid value for ${id} · expected a key/token, or an https:// URL to add an endpoint`
+        : `invalid API key format for ${id}`,
+    );
     return;
   }
   const { appendProviderKey } = await import("../../../store/keys.js");

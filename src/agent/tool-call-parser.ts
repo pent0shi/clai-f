@@ -1887,12 +1887,12 @@ export function narrowNmapOperationDirective(): string {
  */
 export function pentestWorkflowDirective(): string {
   return [
-    "PENTEST FOCUS (security / pentest / VAPT engagement — find and verify real findings, not theater):",
-    "RECON FIRST (no plan needed): whois.lookup, dns.lookup, net.context, http.fetch GET, tool.batch, net.scan, pentest.recon — plus shell enum/fuzz as needed. Map surface hungrily: subdomains, ports (escalate beyond top-100 when thorough), content/API enum (ffuf/gobuster + wordlist.find), JS harvest, auth entry points.",
-    "LONG SCANNERS ARE AUTO-DELEGATED TO THE RESPONDER: ffuf/nmap/gobuster/feroxbuster/nuclei/sqlmap/masscan/long find run as durable Responder jobs that finish on their own — fire and CONTINUE other recon. Do NOT shell.tail/shell.jobs/sleep/fs.read to watch them; their completion is delivered to you automatically. When it arrives, read ONLY the key result lines (matched status codes / hits / findings) via a filtered shell.tail or grep, never a full read of a noisy log — and frame the command so it keeps those fields (e.g. ffuf -json, real -mc codes).",
-    "Threat model from evidence → actively test high-ROI vectors (authz/IDOR, auth/session/JWT, business logic, real injection sinks, secrets in JS). Confirm with PoC evidence — not port lists alone.",
-    "Preferred shapes: RECON RESPONSE → ANALYSIS + PLAN RESPONSE (standalone plan.create from returned tool output). Incremental tasks as attack surface grows. Report TITLE/SEVERITY/EVIDENCE/REPRO/IMPACT/REMEDIATION + residual/untested.",
-    "Never claim mature posture if major classes were untested. Stay in engagement scope; FLAG out-of-scope hosts. Non-destructive default. No local dev server for remote targets.",
+    "PENTEST FOCUS (security / pentest / VAPT engagement — pursue the real objective with verified evidence, not activity theater):",
+    "Choose each next action from the target, scope, current evidence, and expected impact. Reconnaissance, manual validation, directory/content discovery, service expansion, client analysis, and automated scanners are options rather than a mandatory checklist or sequence. Use only what can resolve a meaningful hypothesis, and pivot when evidence changes.",
+    "When you choose a long self-completing operation, the Responder can run it durably while you continue independent useful work. Do not poll or relaunch a Responder-owned job; analyze its delivered evidence once and acknowledge it with job.read when satisfied.",
+    "Develop a threat model from observed behavior, focus on high-value vectors supported by the surface, and confirm findings with safe PoC evidence. Keep going while an in-scope action can materially improve confidence or impact; never pad work with equivalent tools.",
+    "Use plan.create when a durable roadmap improves the engagement, based on returned tool evidence rather than a fixed recon gate. Add follow-up tasks only for discoveries that require real work. Report findings with severity, evidence, reproduction, impact, remediation, and explicit residual or untested risk.",
+    "Never claim mature posture when material uncertainty remains. Stay in engagement scope; FLAG out-of-scope hosts. Non-destructive default. No local dev server for remote targets.",
   ].join("\n");
 }
 

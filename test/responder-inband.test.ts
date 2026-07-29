@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { AgentEvent } from "../src/agent/events.js";
 import type { CompletionRequest, CompletionResult } from "../src/types.js";
 
 const streamMock = vi.hoisted(() => vi.fn());
@@ -38,9 +39,85 @@ const jobsHarness = vi.hoisted(() => {
     analyzedAt: undefined as string | undefined,
   };
   let ready = false;
+  let responderRunning = false;
+  let normalRunning = false;
+  const runningJob = {
+    id: "running-responder-job",
+    command: "nmap example.test",
+    commandDisplay: "nmap example.test",
+    cwd: "/tmp",
+    status: "running" as const,
+    startedAt: "2026-01-01T00:00:00.000Z",
+    artifactPath: "/tmp/running-responder-job.stdout.log",
+    stdoutArtifact: "/tmp/running-responder-job.stdout.log",
+    stderrArtifact: "/tmp/running-responder-job.stderr.log",
+    artifacts: {
+      stdout: {
+        path: "/tmp/running-responder-job.stdout.log",
+        chunks: [] as string[],
+        bytes: 0,
+        droppedBytes: 0,
+        redacted: false,
+        sha256: "",
+      },
+      stderr: {
+        path: "/tmp/running-responder-job.stderr.log",
+        chunks: [] as string[],
+        bytes: 0,
+        droppedBytes: 0,
+        redacted: false,
+        sha256: "",
+      },
+    },
+    redactionProfile: "provider-secrets-v1",
+    ownerSessionId: "inband-session",
+    responder: true,
+  };
+  const normalJob = {
+    ...runningJob,
+    id: "normal-server-job",
+    command: "npm run dev",
+    commandDisplay: "npm run dev",
+    artifactPath: "/tmp/normal-server-job.stdout.log",
+    stdoutArtifact: "/tmp/normal-server-job.stdout.log",
+    stderrArtifact: "/tmp/normal-server-job.stderr.log",
+    artifacts: {
+      stdout: {
+        ...runningJob.artifacts.stdout,
+        path: "/tmp/normal-server-job.stdout.log",
+      },
+      stderr: {
+        ...runningJob.artifacts.stderr,
+        path: "/tmp/normal-server-job.stderr.log",
+      },
+    },
+    responder: false,
+  };
+  const visibleJobs = () => [
+    ...(responderRunning ? [runningJob] : []),
+    ...(normalRunning ? [normalJob] : []),
+  ];
   const manager = {
-    getRunningJobs: vi.fn(() => []),
-    getRecentJobs: vi.fn(() => []),
+    getRunningJobs: vi.fn(() => visibleJobs()),
+    getRecentJobs: vi.fn(() => visibleJobs()),
+    getJob: vi.fn((id: string) => visibleJobs().find((job) => job.id === id)),
+    registerJob: vi.fn(),
+    updateJobStatus: vi.fn(),
+    listJobs: vi.fn(() => {
+      if (responderRunning && !normalRunning) {
+        return {
+          ok: true,
+          output:
+            "shell.jobs was not dispatched because the only running background job(s) (running-responder-job) are Responder-owned.",
+          exitCode: 0,
+          suppressedRepeat: true,
+        };
+      }
+      return {
+        ok: true,
+        output: "Session background jobs (1 total):\n[normal-server-job] running npm run dev",
+      };
+    }),
     getPendingNotifications: vi.fn(() =>
       ready && !notification.analyzedAt ? [notification] : [],
     ),
@@ -83,17 +160,29 @@ const jobsHarness = vi.hoisted(() => {
     complete: () => {
       ready = true;
     },
+    startRunning: () => {
+      responderRunning = true;
+    },
+    startNormal: () => {
+      normalRunning = true;
+    },
     prepareWake: () => {
       ready = true;
       notification.deliveredAt = "2026-01-01T00:00:03.000Z";
     },
     reset: () => {
       ready = false;
+      responderRunning = false;
+      normalRunning = false;
       notification.deliveredAt = undefined;
       notification.readAt = undefined;
       notification.analyzedAt = undefined;
       manager.getRunningJobs.mockClear();
       manager.getRecentJobs.mockClear();
+      manager.getJob.mockClear();
+      manager.registerJob.mockClear();
+      manager.updateJobStatus.mockClear();
+      manager.listJobs.mockClear();
       manager.getPendingNotifications.mockClear();
       manager.getResponderLeaseId.mockClear();
       manager.claimNextResponderNotification.mockClear();
@@ -162,6 +251,7 @@ describe("ordinary-turn responder delivery", () => {
 
         expect(jobsHarness.notification.deliveryStartedAt).toBeTruthy();
         if (requests.length === 2) {
+          expect(jobsHarness.notification.readAt).toBeUndefined();
           return {
             text: "",
             provider: "openai",
@@ -223,8 +313,23 @@ describe("ordinary-turn responder delivery", () => {
       jobsHarness.notification.id,
       "inband-session",
     );
+    expect(jobsHarness.manager.markRead).toHaveBeenCalledTimes(1);
     expect(jobsHarness.notification.readAt).toBeTruthy();
     expect(jobsHarness.manager.markAnalyzed).not.toHaveBeenCalled();
+    const readReceiptInNextRequest = requests[2]!.messages.find(
+      (message) =>
+        message.role === "tool" && message.toolCallId === "call-read-responder",
+    );
+    expect(readReceiptInNextRequest).toMatchObject({
+      name: "job.read",
+      ok: true,
+    });
+    expect(readReceiptInNextRequest?.content).toContain(
+      "marked delivered and read after model analysis",
+    );
+    expect(readReceiptInNextRequest?.content).not.toMatch(
+      /No stored body|\[context-note\]/i,
+    );
     expect(
       history.find((message) =>
         message.content.startsWith(
@@ -232,6 +337,228 @@ describe("ordinary-turn responder delivery", () => {
         ),
       )?.content,
     ).toContain("notification=completion:inband-job");
+  });
+
+  it("suppresses repeated Responder-only shell.jobs polls with visible receipts", async () => {
+    jobsHarness.startRunning();
+    const events: AgentEvent[] = [];
+    let requestCount = 0;
+    streamMock.mockImplementation(
+      async (
+        _request: CompletionRequest,
+        onToken: (token: string) => void,
+      ): Promise<CompletionResult> => {
+        requestCount += 1;
+        if (requestCount <= 3) {
+          return {
+            text: "",
+            provider: "openai",
+            model: "gpt-test",
+            toolCalls: [
+              {
+                id: `call-jobs-${requestCount}`,
+                name: "shell.jobs",
+                args: {},
+              },
+            ],
+            finishReason: "tool_calls",
+          };
+        }
+        onToken("continued without polling");
+        return {
+          text: "continued without polling",
+          provider: "openai",
+          model: "gpt-test",
+          finishReason: "stop",
+        };
+      },
+    );
+
+    const [{ runAgentTurn }, { createSessionPolicy }] = await Promise.all([
+      import("../src/agent/runner.js"),
+      import("../src/agent/session-policy.js"),
+    ]);
+    const outcome = await runAgentTurn("continue autonomous work", {
+      provider: "openai",
+      model: "gpt-4o-mini",
+      maxSteps: 6,
+      session: createSessionPolicy("inband-session"),
+      onEvent: (event) => events.push(event),
+    });
+
+    expect(outcome.answer).toBe("continued without polling");
+    const calls = events.filter(
+      (event): event is Extract<AgentEvent, { type: "tool-call" }> =>
+        event.type === "tool-call" && event.name === "shell.jobs",
+    );
+    const starts = events.filter(
+      (event) => event.type === "tool-start" && calls.some((call) => call.id === event.id),
+    );
+    const outputs = events.filter(
+      (event): event is Extract<AgentEvent, { type: "tool-output" }> =>
+        event.type === "tool-output" && calls.some((call) => call.id === event.id),
+    );
+    const results = events.filter(
+      (event): event is Extract<AgentEvent, { type: "tool-result" }> =>
+        event.type === "tool-result" && calls.some((call) => call.id === event.id),
+    );
+
+    // Every attempted poll keeps a visible card, but only the first one is
+    // dispatched: the repeats are stopped before reaching the job manager.
+    expect(calls).toHaveLength(3);
+    expect(starts).toHaveLength(3);
+    expect(outputs).toHaveLength(3);
+    expect(results).toHaveLength(3);
+    expect(outputs.every((event) => event.chunk.trim().length > 0)).toBe(true);
+    expect(outputs[0]!.chunk).toContain("was not dispatched");
+    expect(results[0]!.ok).toBe(true);
+    for (const event of outputs.slice(1)) {
+      expect(event.chunk).toMatch(
+        /already ran in the previous model round|empty result and identical arguments/,
+      );
+      expect(event.chunk).not.toContain("running-responder-job) are Responder-owned");
+    }
+  });
+
+  it("keeps a whole-sequence suppressed job probe visible", async () => {
+    jobsHarness.startNormal();
+    const events: AgentEvent[] = [];
+    let requestCount = 0;
+    streamMock.mockImplementation(
+      async (
+        _request: CompletionRequest,
+        onToken: (token: string) => void,
+      ): Promise<CompletionResult> => {
+        requestCount += 1;
+        if (requestCount <= 2) {
+          return {
+            text: "",
+            provider: "openai",
+            model: "gpt-test",
+            toolCalls: [
+              {
+                id: `call-sequence-jobs-${requestCount}`,
+                name: "shell.jobs",
+                args: {},
+              },
+            ],
+            finishReason: "tool_calls",
+          };
+        }
+        onToken("done");
+        return {
+          text: "done",
+          provider: "openai",
+          model: "gpt-test",
+          finishReason: "stop",
+        };
+      },
+    );
+
+    const [{ runAgentTurn }, { createSessionPolicy }] = await Promise.all([
+      import("../src/agent/runner.js"),
+      import("../src/agent/session-policy.js"),
+    ]);
+    await runAgentTurn("check the normal server", {
+      provider: "openai",
+      model: "gpt-4o-mini",
+      maxSteps: 5,
+      session: createSessionPolicy("inband-session"),
+      onEvent: (event) => events.push(event),
+    });
+
+    expect(jobsHarness.manager.listJobs).toHaveBeenCalledTimes(1);
+    const calls = events.filter(
+      (event): event is Extract<AgentEvent, { type: "tool-call" }> =>
+        event.type === "tool-call" && event.name === "shell.jobs",
+    );
+    expect(calls).toHaveLength(2);
+    const secondOutput = events.find(
+      (event): event is Extract<AgentEvent, { type: "tool-output" }> =>
+        event.type === "tool-output" && event.id === calls[1]!.id,
+    );
+    expect(secondOutput?.chunk).toContain("same action sequence");
+  });
+
+  it("keeps a suppressed unchanged normal-job probe visible", async () => {
+    jobsHarness.startNormal();
+    const events: AgentEvent[] = [];
+    let requestCount = 0;
+    streamMock.mockImplementation(
+      async (
+        _request: CompletionRequest,
+        onToken: (token: string) => void,
+      ): Promise<CompletionResult> => {
+        requestCount += 1;
+        if (requestCount === 1) {
+          return {
+            text: "",
+            provider: "openai",
+            model: "gpt-test",
+            toolCalls: [
+              {
+                id: "call-normal-jobs-1",
+                name: "shell.jobs",
+                args: {},
+              },
+              {
+                id: "call-missing-read",
+                name: "fs.read",
+                args: { path: "/definitely/missing/responder-poll-policy" },
+              },
+            ],
+            finishReason: "tool_calls",
+          };
+        }
+        if (requestCount === 2) {
+          return {
+            text: "",
+            provider: "openai",
+            model: "gpt-test",
+            toolCalls: [
+              {
+                id: "call-normal-jobs-2",
+                name: "shell.jobs",
+                args: {},
+              },
+            ],
+            finishReason: "tool_calls",
+          };
+        }
+        onToken("done");
+        return {
+          text: "done",
+          provider: "openai",
+          model: "gpt-test",
+          finishReason: "stop",
+        };
+      },
+    );
+
+    const [{ runAgentTurn }, { createSessionPolicy }] = await Promise.all([
+      import("../src/agent/runner.js"),
+      import("../src/agent/session-policy.js"),
+    ]);
+    await runAgentTurn("check the normal server", {
+      provider: "openai",
+      model: "gpt-4o-mini",
+      maxSteps: 5,
+      session: createSessionPolicy("inband-session"),
+      onEvent: (event) => events.push(event),
+    });
+
+    expect(jobsHarness.manager.listJobs).toHaveBeenCalledTimes(1);
+    const calls = events.filter(
+      (event): event is Extract<AgentEvent, { type: "tool-call" }> =>
+        event.type === "tool-call" && event.name === "shell.jobs",
+    );
+    expect(calls).toHaveLength(2);
+    const secondOutput = events.find(
+      (event): event is Extract<AgentEvent, { type: "tool-output" }> =>
+        event.type === "tool-output" && event.id === calls[1]!.id,
+    );
+    expect(secondOutput?.chunk.trim()).toBeTruthy();
+    expect(secondOutput?.chunk).toMatch(/identical arguments|state change/i);
   });
 });
 

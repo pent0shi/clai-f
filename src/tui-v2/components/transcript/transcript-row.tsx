@@ -36,6 +36,8 @@ export function TranscriptRowImpl(props: {
   expandThinkingGlobal: boolean;
   expandOutputGlobal: boolean;
   expandFileDiffsGlobal: boolean;
+  /** Paint reasoning while it streams (only when thinking is on). */
+  liveThinking?: boolean | undefined;
   /** Chat-pane columns so markdown tables reflow beside the plan pane. */
   contentWidth?: number | undefined;
   /** This item contains at least one match for the current ^R query. */
@@ -55,6 +57,7 @@ export function TranscriptRowImpl(props: {
     expandThinkingGlobal,
     expandOutputGlobal,
     expandFileDiffsGlobal,
+    liveThinking,
     contentWidth,
     searchMatched,
     searchActiveMatch,
@@ -87,6 +90,7 @@ export function TranscriptRowImpl(props: {
           item={item}
           theme={theme}
           expanded={expanded}
+          liveBody={liveThinking}
           onToggle={() => store.toggleItemOverride(item.id, expandThinkingGlobal)}
         />
       );

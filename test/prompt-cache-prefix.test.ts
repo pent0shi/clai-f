@@ -5,6 +5,7 @@ import {
 } from "../src/llm/anthropic.js";
 import { parseAnthropicUsage } from "../src/llm/token-usage.js";
 import { planContextMessage, PLAN_CONTEXT_PREFIX } from "../src/agent/plan-tool.js";
+import { REQUEST_CONTEXT_PREFIX } from "../src/llm/system-messages.js";
 import type { SessionPlan } from "../src/store/plan.js";
 import type { ChatMessage, CompletionRequest } from "../src/types.js";
 
@@ -61,6 +62,36 @@ describe("stable cache prefix and cache telemetry (CTX-007)", () => {
 
     expect(systemOf(first)).toBe(systemOf(second));
     expect(systemOf(first)).not.toContain(PLAN_CONTEXT_PREFIX);
+  });
+
+  it("keeps mutable request context authoritative after the cached system block", () => {
+    const body = JSON.parse(
+      buildAnthropicBody(
+        request([
+          { role: "system", content: CONSTITUTION },
+          { role: "user", content: "prior history" },
+          {
+            role: "system",
+            content: `${REQUEST_CONTEXT_PREFIX}\nOUTCOME CONTRACT\nGoal: current`,
+          },
+          { role: "user", content: "current" },
+        ]),
+        false,
+      ),
+    ) as {
+      system: Array<Record<string, unknown>>;
+      messages: Array<{ content: unknown }>;
+    };
+
+    expect(body.system).toHaveLength(2);
+    expect(body.system[0]).toMatchObject({
+      text: CONSTITUTION,
+      cache_control: { type: "ephemeral" },
+    });
+    expect(body.system[1]).toMatchObject({
+      text: expect.stringContaining("OUTCOME CONTRACT"),
+    });
+    expect(JSON.stringify(body.messages)).not.toContain(REQUEST_CONTEXT_PREFIX);
   });
 
   it("marks the long system prefix as a cache breakpoint", () => {

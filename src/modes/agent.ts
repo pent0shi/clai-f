@@ -25,6 +25,7 @@ export interface AgentOptions {
   requestSecret?: ((request: { title: string; prompt: string }) => Promise<string | undefined>) | undefined;
   session?: SessionPolicy | undefined;
   images?: ChatImage[] | undefined;
+  visionProven?: boolean | undefined;
   onToolStart?: ((call: ToolCall) => void) | undefined;
   onToolResult?:
     | ((

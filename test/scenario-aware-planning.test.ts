@@ -25,28 +25,23 @@ describe("pentestWorkflowDirective", () => {
     expect(directive.toLowerCase()).toContain("finding");
   });
 
-  it("requires a separate evidence-analysis response for plan.create", () => {
+  it("bases plan.create on returned evidence without a fixed recon gate", () => {
     const directive = pentestWorkflowDirective();
-    expect(directive).toContain("RECON RESPONSE");
-    expect(directive).toContain("ANALYSIS + PLAN RESPONSE");
-    expect(directive).toContain("standalone plan.create");
-    expect(directive).toContain("returned tool output");
+    expect(directive).toContain("plan.create");
+    expect(directive).toContain("returned tool evidence");
+    expect(directive).toContain("fixed recon gate");
   });
 
-  it("allows incremental plan updates as attack surface grows", () => {
+  it("adds follow-up work only for evidence-driven discoveries", () => {
     const directive = pentestWorkflowDirective();
-    expect(directive.toLowerCase()).toContain("incremental");
+    expect(directive).toContain("Add follow-up tasks only for discoveries");
   });
 
-  it("permits recon tools before a plan exists", () => {
+  it("leaves reconnaissance and tool selection to model judgment", () => {
     const directive = pentestWorkflowDirective();
-    expect(directive).toContain("whois.lookup");
-    expect(directive).toContain("dns.lookup");
-    expect(directive).toContain("net.context");
-    expect(directive).toContain("http.fetch");
-    expect(directive).toContain("tool.batch");
-    expect(directive).toContain("net.scan");
-    expect(directive).toContain("pentest.recon");
+    expect(directive).toContain("options rather than a mandatory checklist");
+    expect(directive).toContain("Use only what can resolve a meaningful hypothesis");
+    expect(directive).toContain("expected impact");
   });
 
   it("reinforces the engagement scope boundary and out-of-scope flagging", () => {
@@ -86,20 +81,15 @@ describe("looksLikePentestTask", () => {
 });
 
 describe("renderAgentSystemPrompt — pentest planning guidance", () => {
-  it("renders the pentest-specific planning guidance for a pentest tool list", () => {
-    // A tool list that includes the read-only recon tools the pentest
-    // workflow permits before a plan exists.
+  it("renders evidence-driven pentest guidance without a fixed tool sequence", () => {
     const toolList =
       "shell.exec, fs.read, whois.lookup, dns.lookup, net.context, http.fetch, net.scan, pentest.recon, plan.create, task.update";
     const prompt = renderAgentSystemPrompt(toolList);
-    // PLANNING section now distinguishes coding builds from pentest:
-    // recon-first, plan from findings, incremental task additions allowed.
-    expect(prompt.toLowerCase()).toContain("recon");
-    expect(prompt.toLowerCase()).toContain("finding");
-    expect(prompt.toLowerCase()).toContain("incremental");
-    // The PENTEST METHODOLOGY section leads with recon-before-plan.
-    expect(prompt).toContain("RECON BEFORE PLAN");
-    expect(prompt).toMatch(/RECON RESPONSE|ANALYSIS \+ PLAN RESPONSE|standalone plan\.create/i);
+    expect(prompt).toContain("Choose each next action by expected information or access gain");
+    expect(prompt).toContain("candidate dimensions—not a compulsory sequence");
+    expect(prompt).toContain("optional techniques");
+    expect(prompt).toContain("Use plan.create when a durable roadmap adds value");
+    expect(prompt).toContain("Continue while a realistic in-scope action can materially improve the result");
   });
 });
 

@@ -11,6 +11,7 @@ import {
   toCompletionResult,
   readJson,
   ProviderError,
+  ingestOpenAiModelCatalog,
 } from "./http.js";
 
 // AgentRouter is an OpenAI-compatible Chat Completions gateway that proxies
@@ -157,7 +158,7 @@ export const agentrouterProvider: LlmProvider = {
         },
       });
       const data = await readJson<{ data?: Array<{ id: string }> }>(response);
-      return data.data?.map((m) => m.id).sort() ?? [];
+      return ingestOpenAiModelCatalog("agentrouter", data);
     });
     if (models.length > 0) {
       cachedModels = models;

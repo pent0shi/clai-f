@@ -10,6 +10,7 @@ import {
   openAiCompatibleStream,
   toCompletionResult,
   readJson,
+  ingestOpenAiModelCatalog,
 } from "./http.js";
 
 const baseUrl = "https://api.groq.com/openai/v1";
@@ -103,7 +104,7 @@ export const groqProvider: LlmProvider = {
         throw new Error(`HTTP ${response.status} ${response.statusText}`);
       }
       const data = await readJson<{ data?: Array<{ id: string }> }>(response);
-      const models = data.data?.map((m) => m.id).sort() ?? [];
+      const models = ingestOpenAiModelCatalog("groq", data);
       if (models.length > 0) {
         cachedModels = models;
         lastFetchTime = now;

@@ -32,14 +32,14 @@ export interface ComposedPrompt {
 }
 
 const priority: Record<PromptSectionKind, number> = {
-  safety: 0,
-  mode: 1,
-  outcome: 2,
-  plan: 3,
-  scope: 4,
-  recovery: 5,
-  focus: 6,
-  constitution: 7,
+  constitution: 0,
+  safety: 1,
+  mode: 2,
+  recovery: 3,
+  focus: 4,
+  plan: 5,
+  scope: 6,
+  outcome: 7,
   context: 8,
 };
 

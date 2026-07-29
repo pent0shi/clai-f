@@ -34,6 +34,18 @@ export function formatKeyStatus(llm: ProviderStatus[], search: SearchKeyStatus[]
     llmRows.push(
       `  ${mark} ${s.provider.padEnd(13)} ${source} ${String(keySummary).padEnd(13)} ${s.model}${tag}`,
     );
+    // Endpoint providers need a base URL alongside the key, so a key on its own
+    // is not enough to make a request — show where it points.
+    if (s.provider !== "ollama" && s.note) {
+      llmRows.push(`      endpoint: ${s.note}`);
+    }
+    if (s.endpoints && s.endpoints.length > 1) {
+      s.endpoints.forEach((url, i) => {
+        llmRows.push(
+          `      (${i + 1}) ${url}${i === (s.activeEndpointIndex ?? 0) ? " ★ active" : ""}`,
+        );
+      });
+    }
     if (s.maskedKeys && s.maskedKeys.length > 1) {
       let activeIdx = 0;
       if (s.activeMaskedKey) {

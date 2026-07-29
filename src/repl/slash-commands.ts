@@ -283,6 +283,59 @@ export const knownModels: Record<string, string[]> = {
     "qwen3.5-plus",
     "qwen3.5-flash",
   ],
+  // A Modal endpoint serves exactly the model it was deployed with, named by
+  // its source repo id, so the live `/models` list is authoritative. These are
+  // only the documented examples used when the endpoint can't be reached.
+  modal: ["moonshotai/Kimi-K3", "Qwen/Qwen3.5-4B"],
+  // Lightning AI Model APIs; ids are vendor-namespaced. The live catalog at
+  // lightning.ai/api/v1/models is authoritative — this is the offline subset.
+  lightning: [
+    "openai/gpt-5",
+    "openai/gpt-5-mini",
+    "openai/gpt-5-nano",
+    "openai/gpt-5.4-2026-03-05",
+    "openai/gpt-5.4-mini-2026-03-17",
+    "openai/gpt-5.5-2026-04-23",
+    "openai/gpt-5.6-sol",
+    "openai/gpt-5.6-luna",
+    "openai/gpt-4.1",
+    "openai/gpt-4o",
+    "openai/o3",
+    "openai/o3-mini",
+    "anthropic/claude-opus-4-8",
+    "anthropic/claude-opus-4-7",
+    "anthropic/claude-sonnet-4-6",
+    "anthropic/claude-haiku-4-5-20251001",
+    "anthropic/claude-fable-5",
+    "google/gemini-3.5-flash",
+    "google/gemini-3.1-pro-preview",
+    "google/gemini-3-flash-preview",
+    "google/gemini-2.5-pro",
+    "google/gemini-2.5-flash",
+    "lightning-ai/gpt-oss-120b",
+    "lightning-ai/gpt-oss-20b",
+    "lightning-ai/deepseek-v4-pro",
+    "lightning-ai/gemma-4-31B-it",
+    "lightning-ai/nemotron-3-ultra-550b-a55b",
+    "lightning-ai/nemotron-3-nano-omni-30b-a3b-reasoning",
+  ],
+  // TokenRouter ids are short and case-sensitive; /model reads the live list
+  // (which is filtered to the channels your key can reach).
+  tokenrouter: [
+    "kimi-k2p7-code",
+    "kimi-k2p7-code-fast",
+    "kimi-k2p6",
+    "kimi-k2p5",
+    "deepseek-v4-pro",
+    "deepseek-v4-flash",
+    "qwen3p7-plus",
+    "qwen3p6-plus",
+    "glm-5p1",
+    "glm-5p1-fast",
+    "gpt-oss-120b",
+    "minimax-m3",
+    "minimax-m2p7",
+  ],
 };
 
 export function getKnownModels(provider: string): string[] {

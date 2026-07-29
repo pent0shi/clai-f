@@ -42,9 +42,15 @@ interface KeyRow {
 
 let nextRowId = 1;
 
+/** "API key" by default; endpoint editors relabel every row and hint. */
+function itemLabelOf(request: KeysEditorRequest): string {
+  return request.itemLabel ?? "API key";
+}
+
 function rowsFromRequest(request: KeysEditorRequest): KeyRow[] {
+  const label = itemLabelOf(request);
   if (request.initialKeys.length === 0) {
-    return [{ id: nextRowId++, placeholder: "paste API key", text: "" }];
+    return [{ id: nextRowId++, placeholder: `paste ${label}`, text: "" }];
   }
   return [
     ...request.initialKeys.map((k) => ({
@@ -53,12 +59,14 @@ function rowsFromRequest(request: KeysEditorRequest): KeyRow[] {
       placeholder: k.masked,
       text: "",
     })),
-    { id: nextRowId++, placeholder: "paste another API key", text: "" },
+    { id: nextRowId++, placeholder: `paste another ${label}`, text: "" },
   ];
 }
 
 export function KeysModal(props: KeysModalProps): ReactNode {
   const { services, theme, request, docked } = props;
+  const itemLabel = itemLabelOf(request);
+  const itemLabelPlural = `${itemLabel}s`;
   const [rows, setRows] = useState<KeyRow[]>(() => rowsFromRequest(request));
   // Track which key row is marked as active (sticky rotation start).
   // Defaults to the stored activeIndex; clamped to existing-key rows only.
@@ -127,13 +135,13 @@ export function KeysModal(props: KeysModalProps): ReactNode {
     if (nonEmpty.length >= MAX_PROVIDER_KEYS) {
       services.session.notice(
         "warn",
-        `at most ${MAX_PROVIDER_KEYS} API keys per provider`,
+        `at most ${MAX_PROVIDER_KEYS} ${itemLabelPlural} per provider`,
       );
       return;
     }
     const next = [
       ...synced,
-      { id: nextRowId++, placeholder: "paste another API key", text: "" },
+      { id: nextRowId++, placeholder: `paste another ${itemLabel}`, text: "" },
     ];
     setRows(next);
     setFocusIdx(next.length - 1);
@@ -144,7 +152,7 @@ export function KeysModal(props: KeysModalProps): ReactNode {
     if (synced.length <= 1) {
       const only = {
         id: nextRowId++,
-        placeholder: "paste API key",
+        placeholder: `paste ${itemLabel}`,
         text: "",
       };
       setRows([only]);
@@ -240,19 +248,19 @@ export function KeysModal(props: KeysModalProps): ReactNode {
             attributes: TextAttributes.BOLD,
           }}
         >
-          {" KEYS "}
+          {` ${request.heading ?? "KEYS"} `}
         </text>
         <text content=" " />
         <text style={{ fg: theme.muted, attributes: TextAttributes.DIM }}>
-          {request.provider} · multi API keys · empty existing = keep
+          {request.provider} · multi {itemLabelPlural} · empty existing = keep
         </text>
       </box>
 
       <text
         content={
           existingCount > 0
-            ? `${existingCount} stored · type to replace a slot · + adds another (max ${MAX_PROVIDER_KEYS})${showActiveToggle ? " · ★ = active key" : ""}`
-            : `No keys yet · paste one or more keys (max ${MAX_PROVIDER_KEYS})`
+            ? `${existingCount} stored · type to replace a slot · + adds another (max ${MAX_PROVIDER_KEYS})${showActiveToggle ? " · ★ = active" : ""}`
+            : `Nothing stored yet · paste one or more ${itemLabelPlural} (max ${MAX_PROVIDER_KEYS})`
         }
         style={{ fg: theme.muted, attributes: TextAttributes.DIM }}
       />

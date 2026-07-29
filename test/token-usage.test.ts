@@ -3,6 +3,7 @@ import {
   applyUsageToSnapshot,
   formatContextChip,
   formatTokenCount,
+  mergeAnthropicStreamUsage,
   modelContextWindow,
   parseAnthropicUsage,
   parseGeminiUsage,
@@ -51,6 +52,24 @@ describe("token-usage parsers", () => {
     expect(
       parseOllamaUsage({ prompt_eval_count: 40, eval_count: 12 }),
     ).toMatchObject({ promptTokens: 40, completionTokens: 12 });
+  });
+
+  it("preserves Anthropic cache telemetry when the output delta arrives", () => {
+    const started = parseAnthropicUsage({
+      input_tokens: 16,
+      cache_read_input_tokens: 48_000,
+      cache_creation_input_tokens: 2_000,
+      output_tokens: 0,
+    });
+    const delta = parseAnthropicUsage({ output_tokens: 120 });
+    expect(mergeAnthropicStreamUsage(started, delta!)).toEqual({
+      promptTokens: 50_016,
+      completionTokens: 120,
+      totalTokens: 50_136,
+      exact: true,
+      cachedPromptTokens: 48_000,
+      cacheCreationTokens: 2_000,
+    });
   });
 
   it("returns undefined for empty usage", () => {

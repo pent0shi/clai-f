@@ -141,6 +141,8 @@ export const defaultKeymap: readonly KeyBinding[] = [
   binding("ctrl+e", "pager.export-editor", "pager"),
   binding("e", "pager.export-editor", "pager"),
   binding("c", "pager.copy", "pager"),
+  // Follow/pause a live job feed. No-op on static bodies.
+  binding("l", "pager.toggle-follow", "pager"),
   // Markdown view toggle (tool dumps, .md files, mixed bodies).
   binding("f", "pager.format", "pager"),
   binding("r", "pager.raw", "pager"),
@@ -150,7 +152,8 @@ export const defaultKeymap: readonly KeyBinding[] = [
   // jobs
   binding("up", "jobs.up", "jobs"),
   binding("down", "jobs.down", "jobs"),
-  binding("enter", "jobs.tail", "jobs"),
+  binding("enter", "jobs.view-live", "jobs"),
+  binding("v", "jobs.view-live", "jobs"),
   binding("t", "jobs.tail", "jobs"),
   binding("k", "jobs.stop", "jobs"),
   binding("q", "jobs.close", "jobs"),

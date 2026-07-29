@@ -948,13 +948,20 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         path: { type: "string" },
         lang: {
           type: "string",
-          description: "tesseract language code (default eng).",
+          description:
+            "tesseract language code, or codes joined with + (default eng).",
         },
         psm: {
           type: "integer",
           minimum: 0,
           maximum: 13,
-          description: "tesseract page-segmentation mode (default 6).",
+          description:
+            "tesseract page-segmentation mode. Omit to try 6, 3 and 11 and keep the best result.",
+        },
+        preprocess: {
+          type: "boolean",
+          description:
+            "Upscale and grayscale small images before OCR (default true). Set false to OCR the raw file.",
         },
       },
       required: ["path"],
@@ -964,17 +971,33 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   ),
   def(
     "pdf.read",
-    "Extract text from a PDF (OCR fallback for scanned pages).",
+    "Extract text from a PDF. Uses the embedded text layer per page and OCRs only the pages that have none.",
     {
       type: "object",
       properties: {
         path: { type: "string" },
+        firstPage: {
+          type: "integer",
+          minimum: 1,
+          description: "First page to read (1-based, default 1).",
+        },
+        lastPage: {
+          type: "integer",
+          minimum: 1,
+          description: "Last page to read, inclusive.",
+        },
         maxPages: {
           type: "integer",
           minimum: 1,
           maximum: 500,
           description:
-            "Maximum pages to OCR when the PDF is scanned. OCR costs up to 120s per page, so bound this for long scans.",
+            "Maximum pages to read from firstPage. OCR costs up to 120s per scanned page, so bound this for long scans.",
+        },
+        ocr: {
+          type: "string",
+          enum: ["auto", "never", "always"],
+          description:
+            "auto (default) OCRs only pages with no text layer; never returns the text layer alone; always re-OCRs every page.",
         },
         lang: {
           type: "string",
@@ -984,13 +1007,20 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
           type: "integer",
           minimum: 72,
           maximum: 600,
-          description: "Render resolution for OCR pages (default 200).",
+          description: "Render resolution for OCR pages (default 300).",
         },
         psm: {
           type: "integer",
           minimum: 0,
           maximum: 13,
-          description: "tesseract page-segmentation mode (default 6).",
+          description:
+            "tesseract page-segmentation mode. Omit to try 3, 6 and 11 and keep the best result.",
+        },
+        maxChars: {
+          type: "integer",
+          minimum: 1000,
+          maximum: 1000000,
+          description: "Cap on returned characters (default 200000).",
         },
       },
       required: ["path"],

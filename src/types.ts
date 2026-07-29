@@ -11,6 +11,9 @@ export const providerIds = [
   "ollama",
   "bynara",
   "qwen-cloud",
+  "modal",
+  "lightning",
+  "tokenrouter",
 ] as const;
 
 export type ProviderId = (typeof providerIds)[number];
@@ -210,6 +213,10 @@ export interface ProviderStatus {
   activeMaskedKey?: string | undefined;
   model: string;
   note?: string | undefined;
+  /** Stored endpoint URLs, in order, for providers with a user-supplied base URL. */
+  endpoints?: string[] | undefined;
+  /** Index of the sticky active endpoint within `endpoints`. */
+  activeEndpointIndex?: number | undefined;
 }
 
 export interface ToolCall {
@@ -245,6 +252,8 @@ export interface ToolResult {
   outputPath?: string | undefined;
   backgroundJob?: BackgroundJobReceipt | undefined;
   truncated?: boolean | undefined;
+  /** Internal: the tool intentionally returned policy/repeat feedback without polling. */
+  suppressedRepeat?: boolean | undefined;
   /**
    * Set by aggregate tools (tool.batch) when some children succeeded and some
    * failed. `ok` stays false so no layer records a partial run as success,

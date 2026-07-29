@@ -6,6 +6,7 @@ import {
   renderAgentSystemPrompt,
   renderAskSystemPrompt,
   renderCompactAgentSystemPrompt,
+  renderRequestEnvironmentContext,
 } from "../src/prompts/index.js";
 import {
   buildWorkflowDirective,
@@ -26,13 +27,21 @@ function report(label: string, text: string): void {
 const tools =
   "shell.exec, shell.start, fs.read, fs.write, fs.writeMany, fs.edit, plan.create, task.update, web.search, web.fetch, http.fetch, net.scan, dns.lookup, tool.check, tool.batch";
 
-const agent = renderAgentSystemPrompt(tools);
-const agentNative = renderAgentSystemPrompt(tools, { nativeTools: true });
-const compact = renderCompactAgentSystemPrompt(tools);
-const ask = renderAskSystemPrompt();
+const agent = renderAgentSystemPrompt(tools, { stableEnvironment: true });
+const agentNative = renderAgentSystemPrompt(tools, {
+  nativeTools: true,
+  stableEnvironment: true,
+});
+const compact = renderCompactAgentSystemPrompt(tools, {
+  stableEnvironment: true,
+});
+const ask = renderAskSystemPrompt({ stableEnvironment: true });
+const requestEnvironment = renderRequestEnvironmentContext();
 
 const buildTurn =
   agent +
+  "\n\n" +
+  requestEnvironment +
   "\n\n" +
   buildWorkflowDirective() +
   "\n\n" +
@@ -40,6 +49,8 @@ const buildTurn =
 
 const pentestTurn =
   agent +
+  "\n\n" +
+  requestEnvironment +
   "\n\n" +
   pentestWorkflowDirective() +
   "\n\n" +
@@ -52,6 +63,7 @@ report("agent (fence)", agent);
 report("agent (native tools)", agentNative);
 report("agent compact", compact);
 report("ask", ask);
+report("request environment suffix", requestEnvironment);
 report("buildWorkflowDirective", buildWorkflowDirective());
 report("pentestWorkflowDirective", pentestWorkflowDirective());
 report("typical BUILD turn (sys+directives)", buildTurn);

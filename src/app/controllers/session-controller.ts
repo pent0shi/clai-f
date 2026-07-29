@@ -677,6 +677,7 @@ export class SessionController implements Disposable {
       ...(checkpoint ? { previousTurn: checkpoint } : {}),
     });
     if (built.fallbackReason) this.notice("info", built.fallbackReason);
+    for (const issue of built.imageIssues) this.notice("warn", issue);
     const request = built.request;
     const turnGeneration = this.lifecycleGeneration;
     this.activeTurnGeneration = turnGeneration;

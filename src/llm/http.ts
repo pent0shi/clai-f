@@ -8,9 +8,11 @@ import type {
   ToolDefinition,
 } from "../types.js";
 import {
-  modelSupportsVision,
+  modelAcceptsImages,
   modelSupportsThinking,
   isReasoningUnsupported,
+  registerModelCatalog,
+  type CatalogModel,
 } from "./capabilities.js";
 import { resolveSampling } from "./sampling.js";
 import {
@@ -79,6 +81,91 @@ function statusCodeHint(status: number): string {
     return " — upstream provider error; try again or switch with `/provider`";
   }
   return "";
+}
+
+interface RawCatalogEntry {
+  id?: string;
+  vision?: unknown;
+  supports_vision?: unknown;
+  multimodal?: unknown;
+  modalities?: unknown;
+  input_modalities?: unknown;
+  architecture?: { input_modalities?: unknown; modality?: unknown };
+  capabilities?: unknown;
+  features?: unknown;
+}
+
+function modalitiesDeclareImage(value: unknown): boolean | undefined {
+  if (Array.isArray(value)) {
+    const items = value.filter((item): item is string => typeof item === "string");
+    if (items.length === 0) return undefined;
+    return items.some((item) => /image|vision/i.test(item));
+  }
+  if (typeof value === "string") {
+    if (!/text|image|audio|video/i.test(value)) return undefined;
+    return /image|vision/i.test(value);
+  }
+  if (value && typeof value === "object") {
+    const nested = value as { input?: unknown; image?: unknown; vision?: unknown };
+    if (typeof nested.vision === "boolean") return nested.vision;
+    if (typeof nested.image === "boolean") return nested.image;
+    if (nested.input !== undefined) return modalitiesDeclareImage(nested.input);
+  }
+  return undefined;
+}
+
+export function catalogEntryVision(entry: unknown): boolean | undefined {
+  if (!entry || typeof entry !== "object") return undefined;
+  const raw = entry as RawCatalogEntry;
+  for (const flag of [raw.vision, raw.supports_vision, raw.multimodal]) {
+    if (typeof flag === "boolean") return flag;
+  }
+  for (const candidate of [
+    raw.architecture?.input_modalities,
+    raw.architecture?.modality,
+    raw.input_modalities,
+    raw.modalities,
+    raw.capabilities,
+    raw.features,
+  ]) {
+    const declared = modalitiesDeclareImage(candidate);
+    if (declared !== undefined) return declared;
+  }
+  return undefined;
+}
+
+export function ingestModelCatalogEntries(
+  provider: ProviderId,
+  entries: readonly unknown[],
+): string[] {
+  const models: CatalogModel[] = [];
+  const seen = new Set<string>();
+  for (const entry of entries) {
+    const raw = typeof entry === "string" ? entry : (entry as { id?: unknown })?.id;
+    if (typeof raw !== "string") continue;
+    const id = raw.trim();
+    if (id.length === 0 || seen.has(id)) continue;
+    seen.add(id);
+    const vision = typeof entry === "string" ? undefined : catalogEntryVision(entry);
+    models.push(vision === undefined ? { id } : { id, vision });
+  }
+  if (models.length > 0) registerModelCatalog(provider, models);
+  return models.map((model) => model.id).sort();
+}
+
+export function ingestOpenAiModelCatalog(
+  provider: ProviderId,
+  payload: unknown,
+): string[] {
+  const container = payload as { data?: unknown; models?: unknown } | undefined;
+  const entries = Array.isArray(payload)
+    ? payload
+    : Array.isArray(container?.data)
+      ? container.data
+      : Array.isArray(container?.models)
+        ? container.models
+        : [];
+  return ingestModelCatalogEntries(provider, entries);
 }
 
 export async function readJson<T>(response: Response): Promise<T> {
@@ -471,6 +558,7 @@ export type ReasoningStyle =
   | "groq"
   | "openrouter"
   | "agentrouter"
+  | "modal"
   | "none";
 
 
@@ -574,6 +662,12 @@ export function buildReasoningPayload(
       if (!enabled) return {};
       if (!supportsOpenRouterReasoning(model ?? "")) return {};
       return { reasoning: { enabled: true, effort: clampEffort(effort) } };
+    case "modal":
+      // Modal Endpoints expose a single documented boolean toggle
+      // (`reasoning: {enabled}`). Several catalog models think by default, so
+      // "off" must send `false` explicitly rather than omit the field. No
+      // effort knob is documented — sending one risks a hard 400.
+      return { reasoning: { enabled } };
     case "groq": {
       const m = (model ?? "").toLowerCase();
       if (/qwen\/qwen3-32b/.test(m)) {
@@ -703,6 +797,48 @@ export function isReasoningUnsupportedError(error: unknown): boolean {
   );
 }
 
+export function isImageInputUnsupportedError(error: unknown): boolean {
+  const status =
+    error && typeof error === "object" && "status" in error
+      ? Number((error as { status?: number }).status)
+      : undefined;
+  const body =
+    error && typeof error === "object" && "body" in error
+      ? String((error as { body?: string }).body ?? "")
+      : "";
+  const message = error instanceof Error ? error.message : String(error);
+  const hay = `${message}\n${body}`.toLowerCase();
+
+  const mentionsImageInput =
+    /image_url|image url|inlinedata|inline_data|\bimages?\b|multimodal|\bvision\b|media_type|image content|content\[\d+\]|content\.\d+|parts\[\d+\]/.test(
+      hay,
+    );
+  if (!mentionsImageInput) return false;
+  if (status !== undefined && status !== 400 && status !== 415 && status !== 422) {
+    return false;
+  }
+  return /not support|unsupported|does not accept|cannot process|invalid[_ ]?(?:request[_ ]?)?(?:argument|parameter|field|type|value)?|unknown|unrecognized|not a valid|not allowed|only text|text[- ]only|expected a string|must be a string|additional propert/.test(
+    hay,
+  );
+}
+
+export function stripImagesFromMessages(messages: ChatMessage[]): ChatMessage[] {
+  return messages.map((message) => {
+    if (!message.images?.length) return message;
+    const { images: _images, ...rest } = message;
+    return rest;
+  });
+}
+
+export function imageCapableMessages(
+  provider: ProviderId,
+  model: string,
+  messages: ChatMessage[],
+): ChatMessage[] {
+  if (modelAcceptsImages(provider, model)) return messages;
+  return stripImagesFromMessages(messages);
+}
+
 /**
  * legacy Chat Completions sampling knobs: `max_tokens` must be
  * `max_completion_tokens`, and `temperature`/`top_p` must be omitted or left
@@ -825,7 +961,7 @@ export async function openAiCompatibleComplete(options: {
   toolChoice?: ToolChoice | undefined;
   parallelToolCalls?: boolean | undefined;
 }): Promise<OpenAiCompatibleResult> {
-  const supportsVision = modelSupportsVision(options.providerId, options.model);
+  const supportsVision = modelAcceptsImages(options.providerId, options.model);
   const requestBody = buildChatBody({
     model: options.model,
     providerId: options.providerId,
@@ -985,7 +1121,7 @@ export async function openAiCompatibleStream(options: {
   const onCallerAbort = (): void => idleController.abort(options.signal?.reason);
   options.signal?.addEventListener("abort", onCallerAbort, { once: true });
 
-  const supportsVision = modelSupportsVision(options.providerId, options.model);
+  const supportsVision = modelAcceptsImages(options.providerId, options.model);
   const requestBody = buildChatBody({
     model: options.model,
     providerId: options.providerId,
@@ -1136,6 +1272,101 @@ export async function openAiCompatibleStream(options: {
     options.onToken("</think>");
   };
 
+  /**
+   * Reasoning-echo suppression.
+   *
+   * Some gateways/models stream the chain of thought on `reasoning_content` and
+   * then replay it verbatim at the start of `content` before the real answer
+   * (observed with MiniMax M3 and GLM). Untagged, that replay is
+   * indistinguishable from an answer, so it was rendered as the response — the
+   * user saw the model's reasoning as its reply even with thinking off.
+   *
+   * While the leading `content` still matches reasoning we already received, it
+   * is kept inside the `<think>` region: never a visible answer, still visible
+   * under Ctrl+T, and stripped from history. Only the first
+   * ECHO_CONFIRM_CHARS are held back before deciding, so a normal answer is
+   * emitted with no perceptible delay.
+   */
+  const ECHO_CONFIRM_CHARS = 64;
+  let echoState: "idle" | "buffering" | "echoing" | "done" = "idle";
+  let echoBuffer = "";
+  let echoPos = 0;
+
+  const emitVisible = (text: string): void => {
+    if (!text) return;
+    if (inReasoning) exitReasoning();
+    visible += text;
+    full += text;
+    options.onToken(text);
+  };
+  /**
+   * Route replayed text back into the reasoning region. Deliberately does NOT
+   * extend `reasoningSeen`: that string is the comparison baseline, and growing
+   * it with the replay would let the echo match itself past the real reasoning.
+   */
+  const emitReasoningEcho = (text: string): void => {
+    if (!text) return;
+    enterReasoning();
+    full += text;
+    options.onToken(text);
+  };
+  /** Release a still-undecided hold-back as the answer (stream ended early). */
+  const flushEchoBuffer = (): void => {
+    if (!echoBuffer) return;
+    const held = echoBuffer;
+    echoBuffer = "";
+    echoState = "done";
+    emitVisible(held);
+  };
+
+  const handleContentToken = (token: string): void => {
+    if (echoState === "done") {
+      emitVisible(token);
+      return;
+    }
+    if (echoState === "idle") {
+      // A replay is only plausible once a meaningful amount of reasoning came
+      // through the separate channel.
+      if (reasoningSeen.length < ECHO_CONFIRM_CHARS) {
+        echoState = "done";
+        emitVisible(token);
+        return;
+      }
+      echoState = "buffering";
+    }
+    if (echoState === "buffering") {
+      echoBuffer += token;
+      if (reasoningSeen.startsWith(echoBuffer)) {
+        if (echoBuffer.length >= ECHO_CONFIRM_CHARS) {
+          const confirmed = echoBuffer;
+          echoBuffer = "";
+          echoPos = confirmed.length;
+          echoState = "echoing";
+          emitReasoningEcho(confirmed);
+        }
+        return;
+      }
+      flushEchoBuffer();
+      return;
+    }
+    // Confirmed replay: consume the matching run, then hand over the answer.
+    let matched = 0;
+    while (
+      matched < token.length &&
+      reasoningSeen[echoPos + matched] === token[matched]
+    ) {
+      matched += 1;
+    }
+    if (matched > 0) {
+      emitReasoningEcho(token.slice(0, matched));
+      echoPos += matched;
+    }
+    if (matched < token.length) {
+      echoState = "done";
+      emitVisible(token.slice(matched));
+    }
+  };
+
   const cleanup = (): void => {
     if (idleTimer) clearTimeout(idleTimer);
     options.signal?.removeEventListener("abort", onCallerAbort);
@@ -1168,6 +1399,7 @@ export async function openAiCompatibleStream(options: {
         const payload = sseFrames.pushLine(line);
         if (payload === undefined) continue;
         if (payload === "[DONE]") {
+          flushEchoBuffer();
           exitReasoning();
           cleanup();
           const toolCalls = finalizeOpenAiToolCalls(toolCallState);
@@ -1262,10 +1494,7 @@ export async function openAiCompatibleStream(options: {
           }
           const token = delta?.content;
           if (token) {
-            if (inReasoning) exitReasoning();
-            visible += token;
-            full += token;
-            options.onToken(token);
+            handleContentToken(token);
           }
           if (delta?.tool_calls?.length) {
             for (const tc of delta.tool_calls) {
@@ -1296,6 +1525,7 @@ export async function openAiCompatibleStream(options: {
         }
       }
     }
+    flushEchoBuffer();
     exitReasoning();
     cleanup();
     const toolCalls = finalizeOpenAiToolCalls(toolCallState);

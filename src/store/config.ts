@@ -10,6 +10,39 @@ import { fixOwnerSync, handlePermissionError } from "../os/permissions.js";
 
 export type ProviderCategory = "local" | "free-cloud" | "paid-cloud";
 
+/** Endpoint URLs for one provider plus the sticky active choice. */
+export interface ProviderEndpoints {
+  urls: string[];
+  activeIndex: number;
+}
+
+/** Same ceiling as API keys, so both editors behave identically. */
+export const MAX_PROVIDER_ENDPOINTS = 10;
+
+/**
+ * Providers whose base URL is user-supplied. `modal` requires one (endpoints
+ * are per-workspace); `lightning` treats it as an override of the shared
+ * gateway, e.g. to point at a private Lightning Inference deployment.
+ */
+export const endpointProviders: readonly ProviderId[] = [
+  "modal",
+  "lightning",
+  "tokenrouter",
+];
+
+/** Environment override, checked before the stored list. */
+const endpointEnvVars: Partial<Record<ProviderId, string>> = {
+  modal: "MODAL_BASE_URL",
+  lightning: "LIGHTNING_BASE_URL",
+  tokenrouter: "TOKENROUTER_BASE_URL",
+};
+
+export function providerUsesEndpoints(provider: ProviderId): boolean {
+  return endpointProviders.includes(provider);
+}
+
+export type LearnedVisionEntry = boolean | { vision: boolean; at: string };
+
 export interface ClaiConfig {
   defaultProvider: ProviderId;
   defaultModel: string;
@@ -19,6 +52,18 @@ export interface ClaiConfig {
   pentestAuthorized: boolean;
   sandboxRoots: string[];
   ollamaHost: string;
+  /**
+   * @deprecated Superseded by `providerEndpoints.modal`. Still read once so
+   * configs written before multi-endpoint support keep working.
+   */
+  modalBaseUrl: string;
+  /**
+   * Endpoint URLs per provider, with a sticky active index — the same shape as
+   * multi-key storage. Used by providers whose base URL belongs to the user
+   * (Modal, one URL per deployed endpoint) or is overridable (Lightning AI,
+   * whose default is the shared gateway).
+   */
+  providerEndpoints: Partial<Record<ProviderId, ProviderEndpoints>>;
   telemetry: boolean;
   lastUpdateCheck: number;
   thinking: ReasoningPreference;
@@ -44,6 +89,7 @@ export interface ClaiConfig {
   disableKeychain: boolean;
   /** Permissions mode for auto-confirming tool calls ("default" or "allow-all"). */
   permissions?: "default" | "allow-all";
+  learnedVisionCapabilities: Record<string, LearnedVisionEntry>;
   /**
    * Tool calling protocol:
    * - auto (default): native when dialect supports it, text fallback otherwise
@@ -95,6 +141,15 @@ export const providerCategory: Record<ProviderId, ProviderCategory> = {
   "aws-mantle": "paid-cloud",
   bynara: "free-cloud",
   "qwen-cloud": "paid-cloud",
+  // Usage-based compute billing. The Starter plan's $30/month credit makes it
+  // free in practice for light use, but it still spends real money, so
+  // `freeOnly` must keep it out of the fallback chain.
+  modal: "paid-cloud",
+  // Per-token billing after the introductory free-token grant, so keep it out
+  // of `freeOnly` runs.
+  lightning: "paid-cloud",
+  // Prepaid balance, billed per token.
+  tokenrouter: "paid-cloud",
 };
 
 const defaults: ClaiConfig = {
@@ -106,6 +161,8 @@ const defaults: ClaiConfig = {
   pentestAuthorized: false,
   sandboxRoots: [safeCwd()],
   ollamaHost: "http://localhost:11434",
+  modalBaseUrl: "",
+  providerEndpoints: {},
   telemetry: false,
   lastUpdateCheck: 0,
   thinking: { enabled: false, effort: "medium" },
@@ -132,6 +189,7 @@ const defaults: ClaiConfig = {
   freeTierFailThreshold: 2,
   toolResultDedup: true,
   slimNativePrompt: true,
+  learnedVisionCapabilities: {},
 };
 
 const store = (() => {
@@ -168,8 +226,18 @@ function invalidateConfigCache(): void {
 
 /** Fresh mutable view over the cached snapshot; callers may edit their copy. */
 function cloneConfig(config: ClaiConfig): ClaiConfig {
+  const providerEndpoints: Partial<Record<ProviderId, ProviderEndpoints>> = {};
+  for (const [provider, value] of Object.entries(config.providerEndpoints ?? {}) as Array<
+    [ProviderId, ProviderEndpoints]
+  >) {
+    providerEndpoints[provider] = {
+      urls: [...(value?.urls ?? [])],
+      activeIndex: value?.activeIndex ?? 0,
+    };
+  }
   return {
     ...config,
+    providerEndpoints,
     providerModels: { ...config.providerModels },
     allowAlwaysTools: [...config.allowAlwaysTools],
     sandboxRoots: [...config.sandboxRoots],
@@ -234,6 +302,106 @@ export function setProviderModel(
   const sanitized = sanitizeProviderModel(provider, model);
   const providerModels = { ...current.providerModels, [provider]: sanitized };
   return updateConfig({ providerModels, defaultModel: sanitized });
+}
+
+/**
+ * Every stored endpoint URL for a provider plus the sticky active index.
+ * A pre-multi-endpoint `modalBaseUrl` is folded in as the single entry so old
+ * configs keep working without a migration step.
+ */
+export function getProviderEndpoints(provider: ProviderId): ProviderEndpoints {
+  const config = getConfig();
+  const stored = config.providerEndpoints?.[provider];
+  const urls = (stored?.urls ?? []).map((url) => url.trim()).filter(Boolean);
+  if (urls.length === 0 && provider === "modal") {
+    const legacy = config.modalBaseUrl?.trim();
+    if (legacy) urls.push(legacy);
+  }
+  const activeIndex =
+    urls.length > 0
+      ? Math.min(Math.max(stored?.activeIndex ?? 0, 0), urls.length - 1)
+      : 0;
+  return { urls, activeIndex };
+}
+
+/** Replace the whole list (endpoint editor Save). Empty list clears it. */
+export function setProviderEndpoints(
+  provider: ProviderId,
+  urls: readonly string[],
+  activeIndex = 0,
+): ProviderEndpoints {
+  const seen = new Set<string>();
+  const unique: string[] = [];
+  for (const raw of urls) {
+    const url = raw.trim();
+    if (!url || seen.has(url)) continue;
+    seen.add(url);
+    unique.push(url);
+    if (unique.length >= MAX_PROVIDER_ENDPOINTS) break;
+  }
+  const next: ProviderEndpoints = {
+    urls: unique,
+    activeIndex:
+      unique.length > 0 ? Math.min(Math.max(activeIndex, 0), unique.length - 1) : 0,
+  };
+  const providerEndpoints = { ...getConfig().providerEndpoints, [provider]: next };
+  const patch: Partial<ClaiConfig> = { providerEndpoints };
+  // Retire the legacy single field once the list owns the value, so the two
+  // cannot drift apart.
+  if (provider === "modal") patch.modalBaseUrl = "";
+  updateConfig(patch);
+  return next;
+}
+
+/**
+ * Add one endpoint and make it active. Re-adding a known URL just activates it,
+ * which doubles as the CLI's way to switch endpoints.
+ */
+export function appendProviderEndpoint(
+  provider: ProviderId,
+  url: string,
+): { endpoints: ProviderEndpoints; added: boolean } {
+  const trimmed = url.trim();
+  const current = getProviderEndpoints(provider);
+  const existing = current.urls.indexOf(trimmed);
+  if (existing >= 0) {
+    return {
+      endpoints: setProviderEndpoints(provider, current.urls, existing),
+      added: false,
+    };
+  }
+  if (current.urls.length >= MAX_PROVIDER_ENDPOINTS) {
+    throw new Error(
+      `at most ${MAX_PROVIDER_ENDPOINTS} endpoint URLs per provider`,
+    );
+  }
+  const urls = [...current.urls, trimmed];
+  return {
+    endpoints: setProviderEndpoints(provider, urls, urls.length - 1),
+    added: true,
+  };
+}
+
+export function setActiveProviderEndpoint(
+  provider: ProviderId,
+  index: number,
+): ProviderEndpoints {
+  const current = getProviderEndpoints(provider);
+  return setProviderEndpoints(provider, current.urls, index);
+}
+
+/**
+ * The base URL a request should use. The provider's env override wins so a
+ * shell can retarget clai without rewriting config; otherwise the sticky active
+ * entry. Returns "" when nothing is configured — providers that require one
+ * turn that into an actionable error, and Lightning falls back to its gateway.
+ */
+export function getActiveProviderEndpoint(provider: ProviderId): string {
+  const envVar = endpointEnvVars[provider];
+  const fromEnv = envVar ? process.env[envVar]?.trim() : undefined;
+  if (fromEnv) return fromEnv;
+  const { urls, activeIndex } = getProviderEndpoints(provider);
+  return urls[activeIndex] ?? "";
 }
 
 export function getProviderModel(provider: ProviderId): string {

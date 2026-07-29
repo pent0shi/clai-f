@@ -1,4 +1,5 @@
-import type { ChatMessage } from "../types.js";
+import type { ChatImage, ChatMessage } from "../types.js";
+import { readImageDimensions } from "../attachments/image-content.js";
 import { redactSecrets } from "../llm/provider.js";
 import { stripThinking } from "../ui/thinking.js";
 import {
@@ -36,6 +37,21 @@ export function estimateTokens(text: string): number {
   return Math.ceil(text.length / 3.3);
 }
 
+const MIN_IMAGE_TOKENS = 300;
+const MAX_IMAGE_TOKENS = 6_000;
+
+export function estimateImageTokens(image: ChatImage): number {
+  const rawBytes = Math.ceil((image.dataBase64.length * 3) / 4);
+  if (rawBytes <= 0) return MIN_IMAGE_TOKENS;
+  const dimensions = readImageDimensions(
+    Buffer.from(image.dataBase64.slice(0, 8192), "base64"),
+  );
+  const tokens = dimensions
+    ? Math.ceil((dimensions.width * dimensions.height) / 750)
+    : Math.ceil(rawBytes / 900);
+  return Math.min(MAX_IMAGE_TOKENS, Math.max(MIN_IMAGE_TOKENS, tokens));
+}
+
 export function estimateMessagesTokens(messages: ChatMessage[]): number {
   let sum = 0;
   for (const message of messages) {
@@ -49,9 +65,10 @@ export function estimateMessagesTokens(messages: ChatMessage[]): number {
       );
       sum += Math.ceil(toolChars / 3.3);
     }
-    // Images contribute tokens too — a typical image is ~1k tokens.
     if (message.images) {
-      sum += message.images.length * 1000;
+      for (const image of message.images) {
+        sum += estimateImageTokens(image);
+      }
     }
   }
   return sum;

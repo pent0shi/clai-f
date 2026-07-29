@@ -21,9 +21,10 @@ import {
   type ToolResult,
 } from "../types.js";
 import {
-  detectModelImageMediaType,
-  MAX_IMAGE_BYTES,
+  imageBudgetFor,
+  type ImageBudget,
 } from "../attachments/image-content.js";
+import { prepareImageForModel } from "../attachments/image-prepare.js";
 import type { TranscriptItem } from "../tui/state.js";
 import type { PreviousTurnSignal } from "../agent/continue-orient.js";
 import { redactSecrets } from "../llm/provider.js";
@@ -288,36 +289,32 @@ function scrubMessages(messages: ChatMessage[]): ChatMessage[] {
 }
 
 const MAX_RESTORED_IMAGE_COUNT = 6;
-const MAX_RESTORED_IMAGE_BYTES = 15_000_000;
 
 export function materializeHistoryImages(
   messages: readonly ChatMessage[],
+  budget: ImageBudget = imageBudgetFor(""),
 ): ChatMessage[] {
   let imageCount = 0;
   let totalBytes = 0;
+  const maxCount = Math.min(MAX_RESTORED_IMAGE_COUNT, budget.maxCount);
+  const maxTotalBytes = budget.maxTotalBytes;
   return messages.map((message) => {
     if (!message.images?.length) return { ...message };
     const images = message.images.flatMap((image): ChatImage[] => {
       if (image.dataBase64) return [image];
-      if (!image.path || imageCount >= MAX_RESTORED_IMAGE_COUNT) return [];
+      if (!image.path || imageCount >= maxCount) return [];
+      const prepared = prepareImageForModel(image.path, budget);
+      if (!prepared.ok) return [];
+      if (totalBytes + prepared.byteLength > maxTotalBytes) return [];
       try {
-        const size = statSync(image.path).size;
-        if (
-          size > MAX_IMAGE_BYTES ||
-          totalBytes + size > MAX_RESTORED_IMAGE_BYTES
-        ) {
-          return [];
-        }
-        const bytes = readFileSync(image.path);
-        const mediaType = detectModelImageMediaType(bytes);
-        if (!mediaType) return [];
+        const bytes = readFileSync(prepared.path);
         imageCount += 1;
         totalBytes += bytes.length;
         return [
           {
-            mediaType,
+            mediaType: prepared.mediaType,
             dataBase64: bytes.toString("base64"),
-            path: image.path,
+            path: prepared.path,
           },
         ];
       } catch {

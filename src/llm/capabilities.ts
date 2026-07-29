@@ -2,7 +2,11 @@ import { providerIds } from "../types.js";
 import type { ProviderId } from "../types.js";
 import type { ToolDialect, ToolCallingMode } from "./tool-protocol.js";
 import { isTextOnlyModel } from "./tool-protocol.js";
-import { getConfig } from "../store/config.js";
+import {
+  getConfig,
+  updateConfig,
+  type LearnedVisionEntry,
+} from "../store/config.js";
 
 // Patterns of model names that support an explicit reasoning/thinking
 // toggle. The match is case-insensitive substring or regex.
@@ -44,6 +48,40 @@ const reasoningPatterns: Record<ProviderId, RegExp[]> = {
   "aws-mantle": [/claude-(?:opus|sonnet|haiku)-4/i],
   bynara: [/mimo-/i, /deepseek-v4/i, /deepseek-r1/i, /bynara-max/i],
   "qwen-cloud": [/qwen3/i, /qwen2/i],
+  // Modal Endpoints serve the open-weight catalog (Kimi, Qwen, DeepSeek, GLM,
+  // Gemma, GPT-OSS, Nemotron); the thinking families among them are matched by
+  // their repo id, which is also the model name on the wire.
+  modal: [
+    /kimi/i,
+    /qwen3/i,
+    /deepseek/i,
+    /glm-?[45]/i,
+    /gpt-oss/i,
+    /nemotron/i,
+    /gemma-?[34]/i,
+  ],
+  // Lightning AI proxies vendor models under namespaced ids (openai/gpt-5,
+  // anthropic/claude-opus-4-8, google/gemini-3.5-flash, lightning-ai/...).
+  lightning: [
+    /gpt-5/i,
+    /o[134](?:-mini)?\b/i,
+    /claude-(?:opus|sonnet|haiku)-4/i,
+    /claude-fable/i,
+    /gemini-3/i,
+    /gemini-2\.5/i,
+    /deepseek/i,
+    /gpt-oss/i,
+    /nemotron/i,
+  ],
+  // TokenRouter documents reasoning support for every model it serves.
+  tokenrouter: [
+    /kimi/i,
+    /deepseek/i,
+    /qwen3/i,
+    /glm-?5/i,
+    /gpt-oss/i,
+    /minimax/i,
+  ],
 };
 
 // Session-sticky set of models that rejected our reasoning/thinking options at
@@ -78,6 +116,50 @@ export function modelSupportsThinking(
   return patterns.some((pattern) => pattern.test(model));
 }
 
+
+const universalVisionPatterns: RegExp[] = [
+  /(?:^|[-/_.])vision(?:$|[-_.])/i,
+  /(?:^|[-/_.])vl(?:$|[-_.])/i,
+  /multimodal/i,
+  /omni(?:$|[-_.])/i,
+  /llava/i,
+  /bakllava/i,
+  /moondream/i,
+  /minicpm-?v/i,
+  /internvl/i,
+  /pixtral/i,
+  /paligemma/i,
+  /florence-2/i,
+  /molmo/i,
+  /kosmos/i,
+  /fuyu/i,
+  /idefics/i,
+  /aya-vision/i,
+  /granite.*vision/i,
+  /smolvlm/i,
+  /llama-?4/i,
+  /llama-?3\.2-(?:11b|90b)/i,
+  /gemma-?[34](?!\D*\b1b)/i,
+  /qwen-?vl/i,
+  /qwen\d*(?:\.\d+)?-?vl/i,
+  /gpt-4o/i,
+  /gpt-4\.1/i,
+  /gpt-4-turbo/i,
+  /gpt-5/i,
+  /gemini-/i,
+  /claude-3(?:[-.]|$)/i,
+  /claude-(?:opus|sonnet|haiku)-(?:[3-9]|\d{2,})/i,
+  /grok-(?:[4-9]|\d{2,})/i,
+  /mistral-(?:small|medium|large)-3/i,
+  /magistral-(?:small|medium)/i,
+  /phi-(?:4|5)-multimodal/i,
+  /nova-(?:lite|pro|premier)/i,
+  /step-1[ov]/i,
+  /ernie-\d+(?:\.\d+)?-vl/i,
+  /glm-4\.?\d*v/i,
+  /kimi-k2\.\d/i,
+  /kimi-k[3-9]/i,
+];
 
 const visionPatterns: Record<ProviderId, RegExp[]> = {
   groq: [
@@ -158,8 +240,24 @@ const visionPatterns: Record<ProviderId, RegExp[]> = {
     /glm-?5/i,
     /vision/i,
   ],
-  bynara: [/mimo-v2\.5-free/i, /mistral-medium-3-5/i],
+  bynara: [/mimo-v2\.5/i, /mistral-medium-3-5/i, /agnes-\d/i],
   "qwen-cloud": [/qwen3\.7-(?:plus|max)/i, /qwen3\.5-(?:plus|flash)/i, /qwen-vl/i],
+  // Catalog endpoints are text-only apart from the explicitly multimodal repos.
+  modal: [/-vl\b/i, /-vl-/i],
+  // Per TokenRouter's model table: Kimi, Qwen and MiniMax M3 take images;
+  // DeepSeek, GLM and GPT-OSS are text-only there.
+  tokenrouter: [/kimi/i, /qwen3p\d/i, /minimax-m3/i],
+  // Matches the input_modalities reported by lightning.ai/api/v1/models.
+  lightning: [
+    /gpt-4o/i,
+    /gpt-4\.1/i,
+    /gpt-5/i,
+    /o[34]\b/i,
+    /claude-(?:opus|sonnet|haiku)-(?:3|3-5|3-7|4|4-\d)/i,
+    /claude-fable/i,
+    /gemini-/i,
+    /gemma-4/i,
+  ],
 };
 
 const visionCapabilityCache = new Map<
@@ -169,6 +267,89 @@ const visionCapabilityCache = new Map<
 
 const capabilityKey = (provider: ProviderId, model: string): string =>
   `${provider}:${model.trim().toLowerCase()}`;
+
+const providerModelCatalog = new Map<ProviderId, Set<string>>();
+const unavailableModels = new Set<string>();
+const visionSubstitutions = new Map<string, string>();
+
+export function registerProviderModels(
+  provider: ProviderId,
+  models: readonly string[],
+): void {
+  if (models.length === 0) return;
+  providerModelCatalog.set(
+    provider,
+    new Set(models.map((model) => model.trim().toLowerCase())),
+  );
+}
+
+export interface CatalogModel {
+  readonly id: string;
+  readonly vision?: boolean | undefined;
+}
+
+export function registerModelCatalog(
+  provider: ProviderId,
+  models: readonly CatalogModel[],
+): void {
+  registerProviderModels(
+    provider,
+    models.map((model) => model.id).filter((id) => id.length > 0),
+  );
+  for (const model of models) {
+    if (model.vision === undefined || !model.id) continue;
+    registerModelVisionCapability({
+      provider,
+      model: model.id,
+      vision: model.vision,
+      source: "provider",
+    });
+  }
+}
+
+export function providerModelIsKnown(
+  provider: ProviderId,
+  model: string,
+): boolean | undefined {
+  const catalog = providerModelCatalog.get(provider);
+  if (!catalog) return undefined;
+  return catalog.has(model.trim().toLowerCase());
+}
+
+export function markModelUnavailable(provider: ProviderId, model: string): void {
+  unavailableModels.add(capabilityKey(provider, model));
+}
+
+export function isModelUnavailable(
+  provider: ProviderId,
+  model: string,
+): boolean {
+  return unavailableModels.has(capabilityKey(provider, model));
+}
+
+export function recordVisionSubstitution(
+  provider: ProviderId,
+  substitute: string,
+  original: string,
+): void {
+  visionSubstitutions.set(capabilityKey(provider, substitute), original);
+}
+
+export function visionSubstitutionOrigin(
+  provider: ProviderId,
+  substitute: string,
+): string | undefined {
+  const original = visionSubstitutions.get(capabilityKey(provider, substitute));
+  return original && original.trim().toLowerCase() !== substitute.trim().toLowerCase()
+    ? original
+    : undefined;
+}
+
+export function clearProviderModelKnowledge(): void {
+  providerModelCatalog.clear();
+  unavailableModels.clear();
+  visionSubstitutions.clear();
+}
 
 const knownProviderIds = new Set<string>(providerIds);
 const warnedUnknownProviders = new Set<string>();
@@ -210,8 +391,100 @@ export function registerModelVisionCapability(input: {
   });
 }
 
+let learnedLoaded = false;
+
+const NEGATIVE_CAPABILITY_TTL_MS = 14 * 24 * 60 * 60 * 1000;
+const MAX_LEARNED_CAPABILITIES = 400;
+
+function readLearnedEntry(
+  entry: LearnedVisionEntry | undefined,
+): { vision: boolean; at: number } | undefined {
+  if (typeof entry === "boolean") return { vision: entry, at: 0 };
+  if (!entry || typeof entry.vision !== "boolean") return undefined;
+  const at = typeof entry.at === "string" ? Date.parse(entry.at) : Number.NaN;
+  return { vision: entry.vision, at: Number.isFinite(at) ? at : 0 };
+}
+
+function negativeIsStale(at: number): boolean {
+  return Date.now() - at > NEGATIVE_CAPABILITY_TTL_MS;
+}
+
+function loadLearnedVisionCapabilities(): void {
+  if (learnedLoaded) return;
+  learnedLoaded = true;
+  let learned: Record<string, LearnedVisionEntry> | undefined;
+  try {
+    learned = getConfig().learnedVisionCapabilities;
+  } catch {
+    return;
+  }
+  if (!learned) return;
+  for (const [key, raw] of Object.entries(learned)) {
+    if (visionCapabilityCache.has(key)) continue;
+    const entry = readLearnedEntry(raw);
+    if (!entry) continue;
+    if (!entry.vision && negativeIsStale(entry.at)) continue;
+    visionCapabilityCache.set(key, {
+      vision: entry.vision,
+      source: "provider",
+      observedAt: new Date(entry.at).toISOString(),
+    });
+  }
+}
+
+export function learnModelVisionCapability(
+  provider: ProviderId,
+  model: string,
+  vision: boolean,
+): void {
+  loadLearnedVisionCapabilities();
+  const key = capabilityKey(provider, model);
+  const existing = visionCapabilityCache.get(key);
+  registerModelVisionCapability({ provider, model, vision });
+  if (existing?.vision === vision && existing.source === "provider") return;
+  try {
+    const learned = { ...(getConfig().learnedVisionCapabilities ?? {}) };
+    const current = readLearnedEntry(learned[key]);
+    if (current?.vision === vision && (vision || !negativeIsStale(current.at))) {
+      return;
+    }
+    learned[key] = { vision, at: new Date().toISOString() };
+    updateConfig({ learnedVisionCapabilities: pruneLearned(learned) });
+  } catch {
+  }
+}
+
+function pruneLearned(
+  learned: Record<string, LearnedVisionEntry>,
+): Record<string, LearnedVisionEntry> {
+  const live: Record<string, LearnedVisionEntry> = {};
+  for (const [key, raw] of Object.entries(learned)) {
+    const entry = readLearnedEntry(raw);
+    if (!entry) continue;
+    if (!entry.vision && negativeIsStale(entry.at)) continue;
+    live[key] = raw;
+  }
+  const keys = Object.keys(live);
+  if (keys.length <= MAX_LEARNED_CAPABILITIES) return live;
+  const trimmed: Record<string, LearnedVisionEntry> = {};
+  for (const key of keys.slice(keys.length - MAX_LEARNED_CAPABILITIES)) {
+    trimmed[key] = live[key]!;
+  }
+  return trimmed;
+}
+
 export function clearModelVisionCapabilities(): void {
   visionCapabilityCache.clear();
+  learnedLoaded = false;
+}
+
+export function clearLearnedVisionCapabilities(): void {
+  visionCapabilityCache.clear();
+  learnedLoaded = true;
+  try {
+    updateConfig({ learnedVisionCapabilities: {} });
+  } catch {
+  }
 }
 
 export function visionCapabilitySource(
@@ -231,20 +504,51 @@ export function visionCapabilitySource(
  * agent attaches real image bytes to the user message; when false, it falls
  * back to a text note and OCR/inspection tools.
  */
+export type VisionSupport = "yes" | "no" | "unknown";
+
+export type VisionEvidence = "observed" | "pattern" | "none";
+
+export function visionEvidence(
+  provider: ProviderId,
+  model: string,
+): VisionEvidence {
+  loadLearnedVisionCapabilities();
+  if (visionCapabilityCache.has(capabilityKey(provider, model))) {
+    return "observed";
+  }
+  return modelVisionSupport(provider, model) === "yes" ? "pattern" : "none";
+}
+
+export function modelVisionSupport(
+  provider: ProviderId,
+  model: string,
+): VisionSupport {
+  warnOnUnknownProviderId("modelVisionSupport", provider);
+  loadLearnedVisionCapabilities();
+  const cached = visionCapabilityCache.get(capabilityKey(provider, model));
+  if (cached) return cached.vision ? "yes" : "no";
+  const configured = configuredVisionModel(provider);
+  if (configured?.toLowerCase() === model.trim().toLowerCase()) return "yes";
+  const normalizedModel = model.trim().replace(/\s+/g, "-");
+  const matches = (pattern: RegExp): boolean =>
+    pattern.test(model) || pattern.test(normalizedModel);
+  if ((visionPatterns[provider] ?? []).some(matches)) return "yes";
+  if (universalVisionPatterns.some(matches)) return "yes";
+  return "unknown";
+}
+
 export function modelSupportsVision(
   provider: ProviderId,
   model: string,
 ): boolean {
-  warnOnUnknownProviderId("modelSupportsVision", provider);
-  const cached = visionCapabilityCache.get(capabilityKey(provider, model));
-  if (cached) return cached.vision;
-  const configured = configuredVisionModel(provider);
-  if (configured?.toLowerCase() === model.trim().toLowerCase()) return true;
-  const patterns = visionPatterns[provider] ?? [];
-  const normalizedModel = model.trim().replace(/\s+/g, "-");
-  return patterns.some(
-    (pattern) => pattern.test(model) || pattern.test(normalizedModel),
-  );
+  return modelVisionSupport(provider, model) === "yes";
+}
+
+export function modelAcceptsImages(
+  provider: ProviderId,
+  model: string,
+): boolean {
+  return modelVisionSupport(provider, model) !== "no";
 }
 
 
@@ -261,8 +565,15 @@ const preferredVisionModels: Partial<Record<ProviderId, string>> = {
   ollama: "llama3.2-vision",
   bynara: "mimo-v2.5-free",
   "qwen-cloud": "qwen3.7-plus",
+  lightning: "google/gemini-3.5-flash",
+  tokenrouter: "kimi-k2p6",
 };
 
+
+function isSelectableModel(provider: ProviderId, model: string): boolean {
+  if (isModelUnavailable(provider, model)) return false;
+  return providerModelIsKnown(provider, model) !== false;
+}
 
 export function preferredVisionModel(
   provider: ProviderId,
@@ -273,11 +584,14 @@ export function preferredVisionModel(
   if (override && modelSupportsVision(provider, override)) return override;
   const discovered = [...visionCapabilityCache.entries()]
     .filter(([key, value]) => key.startsWith(`${provider}:`) && value.vision)
-    .sort((a, b) => b[1].observedAt.localeCompare(a[1].observedAt))[0];
-  if (discovered) return discovered[0].slice(provider.length + 1);
+    .sort((a, b) => b[1].observedAt.localeCompare(a[1].observedAt))
+    .map(([key]) => key.slice(provider.length + 1))
+    .find((model) => isSelectableModel(provider, model));
+  if (discovered) return discovered;
   const fallback = preferredVisionModels[provider];
   if (!fallback) return undefined;
-  return modelSupportsVision(provider, fallback) ? fallback : undefined;
+  if (!modelSupportsVision(provider, fallback)) return undefined;
+  return isSelectableModel(provider, fallback) ? fallback : undefined;
 }
 
 /** Default wire dialect for each provider. */
@@ -290,6 +604,9 @@ const providerToolDialect: Record<ProviderId, ToolDialect> = {
   kimchi: "openai",
   bynara: "openai",
   "qwen-cloud": "openai",
+  modal: "openai",
+  lightning: "openai",
+  tokenrouter: "openai",
   anthropic: "anthropic",
   "aws-mantle": "openai", // refined by model below
   gemini: "gemini",

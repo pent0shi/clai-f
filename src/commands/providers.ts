@@ -1,11 +1,20 @@
-import { password, select } from "@inquirer/prompts";
+import { input, password, select } from "@inquirer/prompts";
 import chalk from "chalk";
 import { getProvider, pingProvider } from "../llm/router.js";
-import { assertProvider, maskSecret } from "../llm/provider.js";
 import {
+  assertProvider,
+  maskSecret,
+  normalizeEndpointUrl,
+} from "../llm/provider.js";
+import {
+  appendProviderEndpoint,
+  getActiveProviderEndpoint,
   getConfig,
+  getProviderEndpoints,
   getProviderModel,
+  providerUsesEndpoints,
   setDefaultProvider,
+  setProviderEndpoints,
   updateConfig,
 } from "../store/config.js";
 import {
@@ -22,8 +31,26 @@ import type { ProviderId } from "../types.js";
 export interface SetKeyOptions {
   fromEnv?: string | undefined;
   stdin?: boolean | undefined;
-  url?: string | undefined;
+  /** Repeatable for endpoint providers: `--url a --url b` stores both. */
+  url?: string | string[] | undefined;
   skipPing?: boolean | undefined;
+}
+
+function urlList(url: SetKeyOptions["url"]): string[] {
+  if (!url) return [];
+  return (Array.isArray(url) ? url : [url]).map((u) => u.trim()).filter(Boolean);
+}
+
+/** Append (or re-activate) one endpoint URL and report what changed. */
+function addEndpoint(provider: ProviderId, raw: string): void {
+  const url = normalizeEndpointUrl(raw);
+  const { endpoints, added } = appendProviderEndpoint(provider, url);
+  const position = `#${endpoints.activeIndex + 1}/${endpoints.urls.length}`;
+  console.log(
+    added
+      ? `saved ${provider} endpoint ${position} ${url}`
+      : `${provider} endpoint ${position} ${url} is now active`,
+  );
 }
 
 async function readStdin(): Promise<string> {
@@ -35,8 +62,12 @@ async function readStdin(): Promise<string> {
 }
 
 async function promptForSecret(provider: ProviderId): Promise<string> {
+  const message =
+    provider === "modal"
+      ? "Enter Modal proxy token as <token-id>:<token-secret> (input hidden, leave blank to cancel):"
+      : `Enter API key for ${provider} (input hidden, leave blank to cancel):`;
   const raw = await password({
-    message: `Enter API key for ${provider} (input hidden, leave blank to cancel):`,
+    message,
     mask: "•",
   });
   return raw.trim();
@@ -63,6 +94,12 @@ function invalidFormatHint(provider: ProviderId): string {
     return "Bynara keys usually start with sk_nry_ (at least 8 characters)";
   if (provider === "qwen-cloud")
     return "Qwen Cloud keys usually start with sk- (from https://home.qwencloud.com)";
+  if (provider === "modal")
+    return "Modal expects a proxy token pair as <token-id>:<token-secret> (wk-…:ws-…, from `modal workspace proxy-tokens create`)";
+  if (provider === "lightning")
+    return "Lightning AI keys are alphanumeric (from https://lightning.ai/lightning-ai/model-apis/models?showApiKey=true)";
+  if (provider === "tokenrouter")
+    return "TokenRouter keys usually start with sk- (create one under My Account → API Keys)";
   return "Ollama expects a URL such as http://localhost:11434";
 }
 
@@ -89,7 +126,16 @@ export async function setProviderKey(
   const provider = assertProvider(providerValue);
   const providerImpl = getProvider(provider);
 
-  let secret = options.url ?? keyArg;
+  // For endpoint providers `--url` is configuration, not a credential, and it
+  // is repeatable — each URL is appended and the last one becomes active.
+  // Re-passing a known URL just makes that one active.
+  const urls = urlList(options.url);
+  if (providerUsesEndpoints(provider) && urls.length > 0) {
+    for (const url of urls) addEndpoint(provider, url);
+    if (!keyArg && !options.fromEnv && !options.stdin) return;
+  }
+
+  let secret = providerUsesEndpoints(provider) ? keyArg : (urls[0] ?? keyArg);
   if (options.fromEnv) {
     secret = process.env[options.fromEnv];
     if (!secret)
@@ -110,6 +156,13 @@ export async function setProviderKey(
 
   secret = secret.trim();
 
+  // `clai set modal https://…` (and `/set modal https://…`) is unambiguous: a
+  // URL can only be an endpoint, never an API key or a token pair.
+  if (providerUsesEndpoints(provider) && /^https?:\/\//i.test(secret)) {
+    addEndpoint(provider, secret);
+    return;
+  }
+
   if (!providerImpl.validateKey(secret)) {
     process.exitCode = 2;
     throw new Error(
@@ -117,10 +170,15 @@ export async function setProviderKey(
     );
   }
 
+  // A Modal token cannot be verified until we know which endpoint to call, so
+  // store it and tell the user what is still missing instead of failing.
+  const modalEndpointMissing =
+    provider === "modal" && !getActiveProviderEndpoint("modal");
+
   // Validate against the provider BEFORE persisting: a dead key used to stay in
   // the rotation circle and cost an extra failed request plus a switch toast on
   // every later turn.
-  if (!options.skipPing) {
+  if (!options.skipPing && !modalEndpointMissing) {
     try {
       await pingProvider(provider, secret);
     } catch (error) {
@@ -160,9 +218,21 @@ export async function setProviderKey(
         : `saved ${provider} ${maskSecret(secret)}`,
     );
   }
+
+  if (modalEndpointMissing) {
+    console.warn(
+      chalk.yellow(
+        "No Modal endpoint URL yet — the token was stored but requests will fail. " +
+          "Add it with: clai set modal --url https://<workspace>--ep-<endpoint>.<region>.modal.direct",
+      ),
+    );
+  }
 }
 
-export async function unsetProviderKey(providerValue: string): Promise<void> {
+export async function unsetProviderKey(
+  providerValue: string,
+  options: { url?: boolean | undefined } = {},
+): Promise<void> {
   if (
     providerValue === "brave" ||
     providerValue === "tavily" ||
@@ -174,6 +244,22 @@ export async function unsetProviderKey(providerValue: string): Promise<void> {
     return;
   }
   const provider = assertProvider(providerValue);
+  // `--url` targets the endpoint list instead of the credentials, so a bad URL
+  // can be dropped without also throwing away working keys.
+  if (options.url) {
+    if (!providerUsesEndpoints(provider)) {
+      console.log(`${provider} has no endpoint URLs`);
+      return;
+    }
+    const count = getProviderEndpoints(provider).urls.length;
+    setProviderEndpoints(provider, []);
+    console.log(
+      count > 0
+        ? `unset ${count} endpoint URL${count === 1 ? "" : "s"} for ${provider}`
+        : `${provider} had no endpoint URLs`,
+    );
+    return;
+  }
   const multi = await getProviderKeys(provider);
   const count = multi.source === "env" ? 0 : multi.keys.length;
   await unsetProviderSecret(provider);
@@ -205,6 +291,17 @@ export async function printProviderKeys(): Promise<void> {
     console.log(
       `  ${mark} ${s.provider.padEnd(13)} ${source} ${String(keySummary).padEnd(13)} ${s.model}${tag}`,
     );
+    // A key is not enough for endpoint providers — show where it points, and
+    // list every stored endpoint with the active one starred.
+    if (s.provider !== "ollama" && s.note) {
+      console.log(chalk.dim(`      endpoint: ${s.note}`));
+    }
+    if (s.endpoints && s.endpoints.length > 1) {
+      s.endpoints.forEach((url, i) => {
+        const star = i === (s.activeEndpointIndex ?? 0) ? chalk.cyan(" ★ active") : "";
+        console.log(chalk.dim(`      (${i + 1}) ${url}`) + star);
+      });
+    }
     if (s.maskedKeys && s.maskedKeys.length > 1) {
       let activeIdx = 0;
       if (s.activeMaskedKey) {
@@ -223,9 +320,40 @@ export async function printProviderKeys(): Promise<void> {
   await printSearchProviderKeys();
 }
 
+/**
+ * Modal needs two values, so first-run setup asks for both: the endpoint URL
+ * (plain input — it is not a secret and masking a long URL only hides typos)
+ * and then the proxy token pair. Returns false when anything is still missing,
+ * so callers can leave the active provider alone.
+ */
+async function promptModalSetup(): Promise<boolean> {
+  if (!getActiveProviderEndpoint("modal")) {
+    if (!process.stdin.isTTY) return false;
+    const raw = await input({
+      message:
+        "Modal endpoint URL (e.g. https://<workspace>--ep-kimi-k3.us-west.modal.direct, blank to cancel):",
+    });
+    const url = raw.trim();
+    if (!url) return false;
+    addEndpoint("modal", url);
+  }
+  if ((await getProviderSecret("modal")).value || envValue("modal")) return true;
+  if (!process.stdin.isTTY) return false;
+  const entered = await promptForSecret("modal");
+  if (!entered) return false;
+  await setProviderKey("modal", entered, { skipPing: false });
+  // A URL pasted at the token prompt is stored as the endpoint instead, so
+  // re-check rather than assuming a pair landed in storage.
+  return Boolean((await getProviderSecret("modal")).value);
+}
+
 export async function ensureProviderConfigured(
   provider: ProviderId,
 ): Promise<void> {
+  if (provider === "modal") {
+    await promptModalSetup();
+    return;
+  }
   const secret = await getProviderSecret(provider);
   if (secret.value || envValue(provider) || provider === "ollama") return;
   if (!process.stdin.isTTY) return;
@@ -236,6 +364,15 @@ export async function ensureProviderConfigured(
 
 export async function useProvider(providerValue: string): Promise<void> {
   const provider = assertProvider(providerValue);
+  if (provider === "modal") {
+    if (!(await promptModalSetup())) {
+      console.log("provider unchanged");
+      return;
+    }
+    setDefaultProvider(provider);
+    console.log(`now using ${provider} · model=${getProviderModel(provider)}`);
+    return;
+  }
   const secret = await getProviderSecret(provider);
   if (!secret.value && !envValue(provider) && provider !== "ollama") {
     const entered = await promptForSecret(provider);

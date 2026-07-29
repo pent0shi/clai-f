@@ -14,7 +14,7 @@ import { safeCwd } from "../os/cwd.js";
 import { scratchDirFor } from "../prompts/index.js";
 import {
   detectModelImageMediaType,
-  MAX_IMAGE_BYTES,
+  formatByteSize,
 } from "./image-content.js";
 
 export type ClipboardImageCapture =
@@ -27,7 +27,8 @@ export type ClipboardImageCapture =
   | { readonly ok: false; readonly reason: string };
 
 const CAPTURE_TIMEOUT_MS = 4_000;
-const MAX_CAPTURE_BUFFER = MAX_IMAGE_BYTES + 1;
+const MAX_CAPTURE_BYTES = 67_108_864;
+const MAX_CAPTURE_BUFFER = MAX_CAPTURE_BYTES + 1;
 
 function captureCommand(command: string, args: string[]): Buffer | undefined {
   const result = spawnSync(command, args, {
@@ -148,10 +149,10 @@ function validateCapturedPng(destination: string): ClipboardImageCapture {
     if (stat.size === 0) {
       return { ok: false, reason: "The clipboard does not contain an image." };
     }
-    if (stat.size > MAX_IMAGE_BYTES) {
+    if (stat.size > MAX_CAPTURE_BYTES) {
       return {
         ok: false,
-        reason: `Clipboard image exceeds the ${Math.round(MAX_IMAGE_BYTES / 1_000_000)}MB input limit.`,
+        reason: `Clipboard image is ${formatByteSize(stat.size)}, above the ${formatByteSize(MAX_CAPTURE_BYTES)} capture ceiling.`,
       };
     }
     const bytes = readFileSync(destination);

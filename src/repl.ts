@@ -72,11 +72,7 @@ import {
 } from "./ui/thinking.js";
 import { createMarkdownStreamWriter, renderMarkdown } from "./ui/markdown.js";
 import { startThinkingSpinner } from "./ui/spinner.js";
-import {
-  modelSupportsThinking,
-  modelSupportsVision,
-  preferredVisionModel,
-} from "./llm/capabilities.js";
+import { modelSupportsThinking } from "./llm/capabilities.js";
 import {
   clearViewports,
   getLastViewport,
@@ -101,7 +97,7 @@ import {
 } from "./agent/context-manager.js";
 import { isCtrlC, isCtrlO, isCtrlP, isCtrlT, isEscape } from "./ui/keys.js";
 import { imageAttachmentPaths } from "./ui/mentions.js";
-import { imageOcr } from "./tools/image.js";
+import { meaningfulCharCount, runOcr } from "./tools/ocr.js";
 import { jobManager } from "./tools/jobs.js";
 import {
   handleDraftPlanDecision,
@@ -196,12 +192,14 @@ async function buildImageOcrGrounding(
   const sections: string[] = [];
   for (const path of paths) {
     try {
-      const result = await imageOcr({ path });
-      const text = result.output.trim();
-      // tesseract emits noise/garbage on non-text images; only include a
-      // section when there is a meaningful amount of recognized text.
-      const meaningful = (text.match(/[A-Za-z0-9]/g) ?? []).length;
-      if (result.ok && meaningful >= 8) {
+      const result = await runOcr({
+        path,
+        lang: "eng",
+        psmCandidates: [6, 3, 11],
+        timeoutMs: 60_000,
+      });
+      const text = result.text.trim();
+      if (result.ok && result.reliable && meaningfulCharCount(text) >= 8) {
         sections.push(
           `----- OCR of ${path} -----\n${text}\n----- end OCR -----`,
         );
@@ -1993,11 +1991,14 @@ export async function startRepl(options: ReplOptions = {}): Promise<void> {
           baseDir: safeCwd(),
         });
         const requestModel = resolvedInput.model;
-        const visionCapable = modelSupportsVision(state.provider, requestModel);
+        const visionCapable = resolvedInput.capability.vision;
         const expansion = { attachments: resolvedInput.attachments };
         const images = [...resolvedInput.images];
         if (resolvedInput.fallbackReason) {
           console.log(chalk.dim(`  ↳ ${resolvedInput.fallbackReason}`));
+        }
+        for (const issue of resolvedInput.imageIssues) {
+          console.log(chalk.yellow(`  ↳ ${issue}`));
         }
         const hasImageAttachment = expansion.attachments.some(
           (att) => att.kind === "image" && att.sendable !== false,
@@ -2011,6 +2012,7 @@ export async function startRepl(options: ReplOptions = {}): Promise<void> {
         const shouldOcr = shouldRunImageOcr({
           hasImage: hasImageAttachment,
           visionCapable,
+          support: resolvedInput.capability.support,
           prompt: effectiveLine,
         });
         const ocrGrounding = shouldOcr
@@ -2077,6 +2079,7 @@ export async function startRepl(options: ReplOptions = {}): Promise<void> {
               signal,
               session: state.session,
               images,
+              visionProven: resolvedInput.capability.support === "yes",
               mode: state.mode === "plan" ? "plan" : "agent",
               onEvent: classicRenderer.onEvent,
             }),

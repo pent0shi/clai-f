@@ -161,11 +161,12 @@ export function isAbortError(error: unknown, signal?: AbortSignal): boolean {
   );
 }
 
-/** OCR is opt-in when real image pixels are already attached to the model. */
 export function shouldEnableImageOcr(
   prompt: string,
   hasAttachedImages: boolean,
+  visionProven = true,
 ): boolean {
   if (!hasAttachedImages) return true;
+  if (!visionProven) return true;
   return /\b(?:ocr|optical character recognition|tesseract)\b/i.test(prompt);
 }

@@ -6,7 +6,12 @@ import { homedir } from 'node:os';
 import type { ProviderId, ProviderStatus } from '../types.js';
 import { providerIds } from '../types.js';
 import { envVars, getDefaultModel, maskSecret } from '../llm/provider.js';
-import { getConfig } from './config.js';
+import {
+  getActiveProviderEndpoint,
+  getConfig,
+  getProviderEndpoints,
+  providerUsesEndpoints,
+} from './config.js';
 import type { SearchProviderId } from '../tools/web/types.js';
 
 const serviceName = 'clai';
@@ -444,6 +449,15 @@ export function serializeProviderKeysPayload(
 }
 
 export function envValue(provider: ProviderId): string | undefined {
+  // Modal is the one provider whose credential is a *pair*: the proxy token id
+  // and secret travel as separate headers. They are stored (and surfaced here)
+  // as one `id:secret` string so key storage, masking and rotation stay
+  // single-secret everywhere else. A half-set environment counts as unset.
+  if (provider === 'modal') {
+    const id = process.env.MODAL_PROXY_TOKEN_ID?.trim();
+    const secret = process.env.MODAL_PROXY_TOKEN_SECRET?.trim();
+    return id && secret ? `${id}:${secret}` : undefined;
+  }
   const envVar = envVars[provider];
   if (!envVar) {
     return undefined;
@@ -781,6 +795,26 @@ export async function probeKeychain(): Promise<KeychainStatus> {
   }
 }
 
+/**
+ * One-line endpoint summary for providers with a user-supplied base URL.
+ * Modal has no default, so a missing URL is a problem worth naming; Lightning
+ * falls back to its shared gateway.
+ */
+function endpointNote(provider: ProviderId): string | undefined {
+  const { urls, activeIndex } = getProviderEndpoints(provider);
+  const active = getActiveProviderEndpoint(provider);
+  if (urls.length === 0) {
+    if (active) return `${active} (env)`;
+    return provider === 'modal'
+      ? 'no endpoint URL — clai set modal --url <endpoint>'
+      : 'default gateway';
+  }
+  const suffix = active && active !== urls[activeIndex] ? ` · env override ${active}` : '';
+  return urls.length === 1
+    ? `${urls[0]}${suffix}`
+    : `${urls.length} endpoints · active #${activeIndex + 1} ${urls[activeIndex]}${suffix}`;
+}
+
 export async function listProviderStatuses(activeProvider: ProviderId): Promise<ProviderStatus[]> {
   const statuses: ProviderStatus[] = [];
   for (const provider of providerIds) {
@@ -807,7 +841,18 @@ export async function listProviderStatuses(activeProvider: ProviderId): Promise<
           ? maskSecret(activeValue)
           : undefined,
       model: getDefaultModel(provider),
-      note: provider === 'ollama' ? activeValue : undefined,
+      note:
+        provider === 'ollama'
+          ? activeValue
+          : providerUsesEndpoints(provider)
+            ? endpointNote(provider)
+            : undefined,
+      endpoints: providerUsesEndpoints(provider)
+        ? getProviderEndpoints(provider).urls
+        : undefined,
+      activeEndpointIndex: providerUsesEndpoints(provider)
+        ? getProviderEndpoints(provider).activeIndex
+        : undefined,
     });
   }
   return statuses;

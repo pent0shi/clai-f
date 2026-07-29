@@ -1,14 +1,30 @@
-import { mkdtemp, readdir, rm, stat } from "node:fs/promises";
+import { mkdir, mkdtemp, open, readdir, rm, stat } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type { ToolResult } from "../types.js";
 import { commandAvailable } from "../os/pkgmgr.js";
 import { spawnArgv } from "./shell.js";
+import {
+  LANG_PATTERN,
+  meaningfulCharCount,
+  runOcr,
+  stripCommandEcho,
+  tesseractUnavailableReason,
+} from "./ocr.js";
 
 export interface PdfToolRunOptions {
   signal?: AbortSignal | undefined;
   onOutput?: ((chunk: string, stream: "stdout" | "stderr") => void) | undefined;
 }
+
+const MIN_PAGE_MEANINGFUL_CHARS = 12;
+const DEFAULT_DPI = 300;
+const DEFAULT_PSM = 3;
+const DEFAULT_MAX_CHARS = 200_000;
+const MAX_MAX_CHARS = 1_000_000;
+const TEXT_LAYER_TIMEOUT_MS = 120_000;
+const RENDER_TIMEOUT_MS = 300_000;
+const PAGE_OCR_TIMEOUT_MS = 120_000;
 
 function expandHome(path: string): string {
   if (path === "~") return homedir();
@@ -34,35 +50,261 @@ function optionalNumber(
   return typeof value === "number" ? value : undefined;
 }
 
-/**
- * Count the "meaningful" characters in extracted text — letters and digits
- * only. A text PDF returns hundreds; a scanned (image-only) PDF returns a
- * handful of stray glyphs or nothing. We use this to decide whether to fall
- * back to rendering pages and OCR-ing them.
- */
-function meaningfulCharCount(text: string): number {
-  const matches = text.match(/[A-Za-z0-9]/g);
-  return matches ? matches.length : 0;
+function integerArg(
+  args: Record<string, unknown>,
+  key: string,
+  min: number,
+  max: number,
+): { value?: number | undefined; error?: string } {
+  const raw = optionalNumber(args, key);
+  if (raw === undefined) return {};
+  const value = Math.floor(raw);
+  if (!Number.isFinite(raw) || value < min || value > max) {
+    return { error: `pdf.read: ${key} must be an integer from ${min} to ${max}` };
+  }
+  return { value };
 }
 
-// Below this many meaningful characters we treat pdftotext's output as
-// "empty" and switch to the render-then-OCR fallback. Tuned low so a PDF
-// with a tiny bit of real text (a cover page) still triggers OCR when the
-// body is scanned.
-const MIN_MEANINGFUL_CHARS = 16;
+interface PdfMetadata {
+  readonly pageCount?: number | undefined;
+  readonly encrypted: boolean;
+  readonly title?: string | undefined;
+}
 
-/**
- * Read a PDF as text.
- *
- * Strategy (mirrors what a human would do):
- *   1. Run `pdftotext -layout <pdf> -` — fast and exact for born-digital PDFs.
- *   2. If that yields little/no real text the PDF is scanned (image-only), so
- *      render every page to a PNG with `pdftoppm` and OCR each one with
- *      `tesseract`, concatenating the results page by page.
- *
- * Auto-executes (read-only). Returns a helpful error naming the missing
- * binary so the agent can pkg.install it and retry.
- */
+async function readPdfMetadata(
+  path: string,
+  timeoutMs: number,
+  signal: AbortSignal | undefined,
+): Promise<PdfMetadata> {
+  if (!(await commandAvailable("pdfinfo"))) return { encrypted: false };
+  const result = await spawnArgv({
+    command: "pdfinfo",
+    argv: [path],
+    timeoutMs,
+    signal,
+    noArtifact: true,
+    maxModelBytes: 16_000,
+  });
+  const body = stripCommandEcho(result.output);
+  const pages = /^Pages:\s+(\d+)/m.exec(body)?.[1];
+  const encrypted = /^Encrypted:\s+yes/im.test(body);
+  const title = /^Title:\s+(.+)$/m.exec(body)?.[1]?.trim();
+  return {
+    ...(pages ? { pageCount: Number(pages) } : {}),
+    encrypted,
+    ...(title ? { title } : {}),
+  };
+}
+
+function encryptionError(path: string): ToolResult {
+  return {
+    ok: false,
+    output:
+      `pdf.read: ${path} is password-protected, so its text cannot be extracted. ` +
+      "Decrypt it first (qpdf --decrypt --password=<pw> in.pdf out.pdf) and read the decrypted copy.",
+    exitCode: 1,
+  };
+}
+
+async function looksLikePdf(path: string): Promise<boolean> {
+  const handle = await open(path, "r");
+  try {
+    const header = Buffer.alloc(1024);
+    const { bytesRead } = await handle.read(header, 0, header.length, 0);
+    return header.subarray(0, bytesRead).includes("%PDF-");
+  } finally {
+    await handle.close();
+  }
+}
+
+interface TextLayer {
+  readonly pages: string[];
+  readonly extractor: string | undefined;
+  readonly failure?: string | undefined;
+  readonly encrypted?: boolean | undefined;
+}
+
+async function extractTextLayer(
+  path: string,
+  first: number,
+  last: number | undefined,
+  timeoutMs: number,
+  signal: AbortSignal | undefined,
+): Promise<TextLayer> {
+  if (await commandAvailable("pdftotext")) {
+    const argv = ["-layout", "-enc", "UTF-8", "-f", String(first)];
+    if (last !== undefined) argv.push("-l", String(last));
+    argv.push(path, "-");
+    const result = await spawnArgv({
+      command: "pdftotext",
+      argv,
+      timeoutMs,
+      signal,
+      noArtifact: true,
+      maxModelBytes: 2_000_000,
+    });
+    const body = stripCommandEcho(result.output);
+    if (/incorrect password|encrypted/i.test(body)) {
+      return { pages: [], extractor: "pdftotext", encrypted: true };
+    }
+    if (!result.ok && meaningfulCharCount(body) === 0) {
+      return {
+        pages: [],
+        extractor: "pdftotext",
+        failure: body.trim() || `pdftotext exited with code ${result.exitCode ?? 1}`,
+      };
+    }
+    return { pages: splitPages(body), extractor: "pdftotext" };
+  }
+
+  if (await commandAvailable("mutool")) {
+    const argv = ["draw", "-F", "txt", "-o", "-", path];
+    if (last !== undefined) argv.push(`${first}-${last}`);
+    else argv.push(`${first}-`);
+    const result = await spawnArgv({
+      command: "mutool",
+      argv,
+      timeoutMs,
+      signal,
+      noArtifact: true,
+      maxModelBytes: 2_000_000,
+    });
+    const body = stripCommandEcho(result.output);
+    if (/password/i.test(body)) {
+      return { pages: [], extractor: "mutool", encrypted: true };
+    }
+    if (!result.ok && meaningfulCharCount(body) === 0) {
+      return {
+        pages: [],
+        extractor: "mutool",
+        failure: body.trim() || `mutool exited with code ${result.exitCode ?? 1}`,
+      };
+    }
+    return { pages: splitPages(body), extractor: "mutool" };
+  }
+
+  return { pages: [], extractor: undefined };
+}
+
+function splitPages(body: string): string[] {
+  const pages = body.split("\f");
+  if (pages.length > 1 && pages[pages.length - 1] === "") pages.pop();
+  return pages.map((page) => page.replace(/[ \t]+$/gm, "").trim());
+}
+
+function groupConsecutive(pages: readonly number[]): Array<[number, number]> {
+  const groups: Array<[number, number]> = [];
+  for (const page of pages) {
+    const current = groups[groups.length - 1];
+    if (current && page === current[1] + 1) {
+      current[1] = page;
+      continue;
+    }
+    groups.push([page, page]);
+  }
+  return groups;
+}
+
+interface RenderedPage {
+  readonly pageNumber: number;
+  readonly imagePath: string;
+}
+
+async function renderPageRange(
+  path: string,
+  from: number,
+  to: number,
+  dpi: number,
+  outputDir: string,
+  timeoutMs: number,
+  signal: AbortSignal | undefined,
+): Promise<RenderedPage[]> {
+  await mkdir(outputDir, { recursive: true });
+  if (await commandAvailable("pdftoppm")) {
+    const result = await spawnArgv({
+      command: "pdftoppm",
+      argv: [
+        "-png",
+        "-gray",
+        "-r",
+        String(dpi),
+        "-f",
+        String(from),
+        "-l",
+        String(to),
+        path,
+        join(outputDir, "page"),
+      ],
+      timeoutMs,
+      signal,
+      noArtifact: true,
+      maxModelBytes: 8_000,
+    });
+    const rendered = await listRenderedPages(outputDir, from, to, true);
+    if (rendered.length > 0) return rendered;
+    if (!result.ok) return [];
+  }
+  if (await commandAvailable("mutool")) {
+    await spawnArgv({
+      command: "mutool",
+      argv: [
+        "draw",
+        "-F",
+        "png",
+        "-r",
+        String(dpi),
+        "-o",
+        join(outputDir, "page-%d.png"),
+        path,
+        `${from}-${to}`,
+      ],
+      timeoutMs,
+      signal,
+      noArtifact: true,
+      maxModelBytes: 8_000,
+    });
+    return listRenderedPages(outputDir, from, to, false);
+  }
+  return [];
+}
+
+async function listRenderedPages(
+  directory: string,
+  from: number,
+  to: number,
+  namesArePageNumbers: boolean,
+): Promise<RenderedPage[]> {
+  let names: string[];
+  try {
+    names = (await readdir(directory))
+      .filter((name) => name.toLowerCase().endsWith(".png"))
+      .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+  } catch {
+    return [];
+  }
+  return names.flatMap((name, index): RenderedPage[] => {
+    const parsed = namesArePageNumbers
+      ? Number(/(\d+)\.png$/i.exec(name)?.[1])
+      : Number.NaN;
+    const pageNumber =
+      Number.isFinite(parsed) && parsed >= from && parsed <= to
+        ? parsed
+        : from + index;
+    if (pageNumber > to) return [];
+    return [{ pageNumber, imagePath: join(directory, name) }];
+  });
+}
+
+async function missingOcrTooling(): Promise<string[]> {
+  const missing: string[] = [];
+  const hasRenderer =
+    (await commandAvailable("pdftoppm")) || (await commandAvailable("mutool"));
+  if (!hasRenderer) missing.push("pdftoppm (poppler) or mutool (mupdf)");
+  const tesseract = await tesseractUnavailableReason();
+  if (tesseract) missing.push("tesseract");
+  return missing;
+}
+
 export async function pdfRead(
   args: Record<string, unknown>,
   options: PdfToolRunOptions = {},
@@ -77,7 +319,7 @@ export async function pdfRead(
   }
 
   const lang = optionalString(args, "lang") ?? "eng";
-  if (!/^[A-Za-z0-9_+-]+$/.test(lang)) {
+  if (!LANG_PATTERN.test(lang)) {
     return {
       ok: false,
       output: "pdf.read: lang may contain only letters, digits, _, +, or -",
@@ -85,40 +327,53 @@ export async function pdfRead(
     };
   }
 
-  const dpiRaw = optionalNumber(args, "dpi") ?? 200;
-  const dpi = Math.floor(dpiRaw);
-  if (!Number.isFinite(dpiRaw) || dpi < 72 || dpi > 600) {
+  const dpiArg = integerArg(args, "dpi", 72, 600);
+  if (dpiArg.error) return { ok: false, output: dpiArg.error, exitCode: 1 };
+  const dpi = dpiArg.value ?? DEFAULT_DPI;
+
+  const psmArg = integerArg(args, "psm", 0, 13);
+  if (psmArg.error) return { ok: false, output: psmArg.error, exitCode: 1 };
+  const psm = psmArg.value ?? DEFAULT_PSM;
+
+  const maxPagesArg = integerArg(args, "maxPages", 1, 500);
+  if (maxPagesArg.error) {
+    return { ok: false, output: maxPagesArg.error, exitCode: 1 };
+  }
+
+  const firstPageArg = integerArg(args, "firstPage", 1, 100_000);
+  if (firstPageArg.error) {
+    return { ok: false, output: firstPageArg.error, exitCode: 1 };
+  }
+
+  const lastPageArg = integerArg(args, "lastPage", 1, 100_000);
+  if (lastPageArg.error) {
+    return { ok: false, output: lastPageArg.error, exitCode: 1 };
+  }
+
+  const maxCharsArg = integerArg(args, "maxChars", 1_000, MAX_MAX_CHARS);
+  if (maxCharsArg.error) {
+    return { ok: false, output: maxCharsArg.error, exitCode: 1 };
+  }
+  const maxChars = maxCharsArg.value ?? DEFAULT_MAX_CHARS;
+
+  const ocrMode = optionalString(args, "ocr") ?? "auto";
+  if (!["auto", "never", "always"].includes(ocrMode)) {
     return {
       ok: false,
-      output: "pdf.read: dpi must be an integer from 72 to 600",
+      output: 'pdf.read: ocr must be "auto", "never" or "always"',
       exitCode: 1,
     };
   }
 
-  const psmRaw = optionalNumber(args, "psm") ?? 6;
-  const psm = Math.floor(psmRaw);
-  if (!Number.isFinite(psmRaw) || psm < 0 || psm > 13) {
+  const firstPage = firstPageArg.value ?? 1;
+  if (lastPageArg.value !== undefined && lastPageArg.value < firstPage) {
     return {
       ok: false,
-      output: "pdf.read: psm must be an integer from 0 to 13",
+      output: "pdf.read: lastPage must be greater than or equal to firstPage",
       exitCode: 1,
     };
   }
 
-  const maxPagesRaw = optionalNumber(args, "maxPages");  let maxPages: number | undefined;
-  if (maxPagesRaw !== undefined) {
-    maxPages = Math.floor(maxPagesRaw);
-    if (!Number.isFinite(maxPagesRaw) || maxPages < 1 || maxPages > 500) {
-      return {
-        ok: false,
-        output: "pdf.read: maxPages must be an integer from 1 to 500",
-        exitCode: 1,
-      };
-    }
-  }
-
-  // The per-call budget bounds the whole operation, including OCR of every
-  // rendered page, so the model can actually cap a scanned-PDF read.
   const totalTimeoutMs = optionalNumber(args, "timeoutMs");
   const deadline =
     totalTimeoutMs !== undefined ? Date.now() + totalTimeoutMs : undefined;
@@ -139,6 +394,16 @@ export async function pdfRead(
         exitCode: 1,
       };
     }
+    if (info.size === 0) {
+      return { ok: false, output: `pdf.read: ${path} is empty`, exitCode: 1 };
+    }
+    if (!(await looksLikePdf(path))) {
+      return {
+        ok: false,
+        output: `pdf.read: ${path} does not start with a %PDF- header, so it is not a PDF. For images use image.ocr; for office documents convert them first (e.g. libreoffice --convert-to pdf).`,
+        exitCode: 1,
+      };
+    }
   } catch (error) {
     return {
       ok: false,
@@ -147,141 +412,248 @@ export async function pdfRead(
     };
   }
 
-  // Step 1: fast text extraction for born-digital PDFs
-  let textLayerOutput = "";
-  if (await commandAvailable("pdftotext")) {
-    const direct = await spawnArgv({
-      command: "pdftotext",
-      argv: ["-layout", path, "-"],
-      timeoutMs: remainingMs(120_000),
-      signal: options.signal,
-      onOutput: options.onOutput,
-      noArtifact: true,
-      maxModelBytes: 200_000,
-    });
-    // spawnArgv prefixes the output with a "$ pdftotext …" command echo; strip
-    // that first line so the meaningful-char heuristic sees only PDF content.
-    textLayerOutput = direct.output.replace(/^\$ pdftotext[^\n]*\n?/, "");
-    if (meaningfulCharCount(textLayerOutput) >= MIN_MEANINGFUL_CHARS) {
-      return {
-        ok: true,
-        output: textLayerOutput.trim(),
-      };
-    }
-  }
+  const metadata = await readPdfMetadata(path, remainingMs(15_000), options.signal);
+  if (metadata.encrypted) return encryptionError(path);
 
-  if (options.signal?.aborted) {
-    return { ok: false, output: "pdf.read aborted.", exitCode: 130 };
+  let rangeEnd = lastPageArg.value ?? metadata.pageCount;
+  if (maxPagesArg.value !== undefined) {
+    const capped = firstPage + maxPagesArg.value - 1;
+    rangeEnd = rangeEnd === undefined ? capped : Math.min(rangeEnd, capped);
   }
-
-  // Step 2: scanned PDF → render pages then OCR each one
-  const missing: string[] = [];
-  if (!(await commandAvailable("pdftoppm"))) missing.push("pdftoppm (poppler)");
-  if (!(await commandAvailable("tesseract"))) missing.push("tesseract");
-  if (missing.length > 0) {
-    const hint =
-      textLayerOutput.trim().length > 0
-        ? `\n\nPartial text-layer extraction:\n${textLayerOutput.trim()}`
-        : "";
+  if (
+    metadata.pageCount !== undefined &&
+    firstPage > metadata.pageCount
+  ) {
     return {
       ok: false,
-      output:
-        `pdf.read: the PDF has no extractable text layer (it is scanned), and OCR fallback needs: ${missing.join(", ")}. ` +
-        `Install the missing tool(s) (e.g. poppler for pdftoppm, tesseract for OCR) and retry.${hint}`,
+      output: `pdf.read: firstPage ${firstPage} is beyond the document, which has ${metadata.pageCount} page(s).`,
       exitCode: 1,
     };
   }
 
-  const workDir = await mkdtemp(join(tmpdir(), "clai-pdfocr-"));
-  try {
-    const prefix = join(workDir, "page");
-    options.onOutput?.(
-      "\n  text layer empty — rendering pages for OCR…\n",
-      "stdout",
-    );
-    const render = await spawnArgv({
-      command: "pdftoppm",
-      argv: ["-png", "-r", String(dpi), path, prefix],
-      timeoutMs: remainingMs(300_000),
-      signal: options.signal,
-      onOutput: options.onOutput,
-      noArtifact: true,
-    });
-    if (!render.ok && !options.signal?.aborted) {
-      return {
-        ok: false,
-        output: `pdf.read: failed to render PDF pages with pdftoppm.\n${render.output}`,
-        exitCode: render.exitCode ?? 1,
-      };
-    }
+  const textLayer = await extractTextLayer(
+    path,
+    firstPage,
+    rangeEnd,
+    remainingMs(TEXT_LAYER_TIMEOUT_MS),
+    options.signal,
+  );
+  if (textLayer.encrypted) return encryptionError(path);
+  if (options.signal?.aborted) {
+    return { ok: false, output: "pdf.read aborted.", exitCode: 130 };
+  }
 
-    const allEntries = (await readdir(workDir))
-      .filter((name) => name.toLowerCase().endsWith(".png"))
-      .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
-    if (allEntries.length === 0) {
+  let pages = textLayer.pages;
+  if (rangeEnd !== undefined) {
+    pages = pages.slice(0, Math.max(0, rangeEnd - firstPage + 1));
+  }
+
+  const knownPageCount = metadata.pageCount;
+  if (pages.length === 0 && rangeEnd === undefined && knownPageCount === undefined) {
+    if (textLayer.extractor === undefined) {
+      const missing = await missingOcrTooling();
       return {
         ok: false,
         output:
-          "pdf.read: no pages were rendered from the PDF — it may be empty or corrupt.",
-        exitCode: 1,
-      };
-    }
-    // maxPages is advertised in the schema and must actually bound the work:
-    // OCR costs up to 120s per page, so a 100-page scan is hours otherwise.
-    const entries =
-      maxPages !== undefined ? allEntries.slice(0, maxPages) : allEntries;
-    const skippedPages = allEntries.length - entries.length;
-
-    const pageTexts: string[] = [];
-    for (let i = 0; i < entries.length; i += 1) {
-      if (options.signal?.aborted) {
-        return { ok: false, output: "pdf.read aborted.", exitCode: 130 };
-      }
-      if (outOfTime()) {
-        pageTexts.push(
-          `----- page ${i + 1} -----\n(skipped: timeoutMs budget exhausted after ${i} page(s); raise timeoutMs or lower maxPages)`,
-        );
-        break;
-      }
-      const imagePath = join(workDir, entries[i]!);
-      options.onOutput?.(
-        `  OCR page ${i + 1}/${entries.length}…\n`,
-        "stdout",
-      );
-      const ocr = await spawnArgv({
-        command: "tesseract",
-        argv: [imagePath, "stdout", "-l", lang, "--psm", String(psm)],
-        timeoutMs: remainingMs(120_000),
-        signal: options.signal,
-        noArtifact: true,
-        maxModelBytes: 200_000,
-      });
-      // Strip spawnArgv's "$ tesseract …" command echo from each page.
-      const body = ocr.output.replace(/^\$ tesseract[^\n]*\n?/, "").trim();
-      pageTexts.push(
-        `----- page ${i + 1} -----\n${body || "(no text recognized on this page)"}`,
-      );
-    }
-
-    const combined = pageTexts.join("\n\n").trim();
-    if (meaningfulCharCount(combined) === 0) {
-      return {
-        ok: false,
-        output:
-          "pdf.read: OCR ran on all pages but recognized no text. The scan may be too low quality — try a higher dpi.",
+          "pdf.read: no PDF text extractor is installed. Install poppler (pdftotext/pdftoppm) or mupdf (mutool) — e.g. `brew install poppler`, `apt install poppler-utils`" +
+          (missing.length > 0
+            ? `. OCR of scanned pages additionally needs: ${missing.join(", ")}.`
+            : "."),
         exitCode: 1,
       };
     }
     return {
-      ok: true,
-      output:
-        `[scanned PDF — text recovered via OCR of ${entries.length} page(s)` +
-        (skippedPages > 0
-          ? `; ${skippedPages} further page(s) skipped by maxPages=${maxPages}`
-          : "") +
-        `]\n\n${combined}`,
+      ok: false,
+      output: `pdf.read: could not determine the page count of ${path}${textLayer.failure ? ` (${textLayer.failure})` : ""}. Install poppler so pdfinfo can report it, or pass maxPages.`,
+      exitCode: 1,
     };
-  } finally {
-    await rm(workDir, { recursive: true, force: true }).catch(() => undefined);
   }
+
+  const authoritativeEnd = rangeEnd ?? knownPageCount;
+  const textLayerEnd =
+    pages.length > 0 ? firstPage + pages.length - 1 : undefined;
+  const resolvedEnd =
+    authoritativeEnd !== undefined
+      ? textLayerEnd !== undefined
+        ? Math.max(authoritativeEnd, textLayerEnd)
+        : authoritativeEnd
+      : textLayerEnd;
+  const pageCountForRange =
+    resolvedEnd !== undefined ? resolvedEnd - firstPage + 1 : 0;
+  if (pageCountForRange <= 0) {
+    return {
+      ok: false,
+      output: `pdf.read: the requested page range is empty for ${path}.`,
+      exitCode: 1,
+    };
+  }
+  const boundedPageCount = Math.min(pageCountForRange, 500);
+  const pageNumbers = Array.from(
+    { length: boundedPageCount },
+    (_, index) => firstPage + index,
+  );
+  const pageText = new Map<number, string>();
+  for (const [index, number] of pageNumbers.entries()) {
+    pageText.set(number, pages[index] ?? "");
+  }
+
+  const needsOcr =
+    ocrMode === "never"
+      ? []
+      : pageNumbers.filter(
+          (number) =>
+            ocrMode === "always" ||
+            meaningfulCharCount(pageText.get(number) ?? "") <
+              MIN_PAGE_MEANINGFUL_CHARS,
+        );
+
+  const ocredPages: number[] = [];
+  const lowConfidencePages: number[] = [];
+  let ocrNotice: string | undefined;
+  let timedOut = false;
+
+  if (needsOcr.length > 0) {
+    const missing = await missingOcrTooling();
+    if (missing.length > 0) {
+      ocrNotice =
+        `${needsOcr.length} page(s) have no text layer and could not be OCR-ed because these tools are missing: ${missing.join(", ")}. ` +
+        "Install them (e.g. `brew install poppler tesseract` or `apt install poppler-utils tesseract-ocr`) and retry.";
+    } else {
+      const workDir = await mkdtemp(join(tmpdir(), "clai-pdfocr-"));
+      try {
+        options.onOutput?.(
+          `\n  ${needsOcr.length} page(s) without a text layer — rendering at ${dpi} dpi for OCR…\n`,
+          "stdout",
+        );
+        for (const [from, to] of groupConsecutive(needsOcr)) {
+          if (options.signal?.aborted) {
+            return { ok: false, output: "pdf.read aborted.", exitCode: 130 };
+          }
+          if (outOfTime()) {
+            timedOut = true;
+            break;
+          }
+          const groupDir = join(workDir, `range-${from}-${to}`);
+          const rendered = await renderPageRange(
+            path,
+            from,
+            to,
+            dpi,
+            groupDir,
+            remainingMs(RENDER_TIMEOUT_MS),
+            options.signal,
+          );
+          if (rendered.length === 0) {
+            ocrNotice =
+              ocrNotice ??
+              `pages ${from}-${to} could not be rendered for OCR — the PDF may be damaged or use an unsupported filter.`;
+            continue;
+          }
+          for (const { pageNumber, imagePath } of rendered) {
+            if (options.signal?.aborted) {
+              return { ok: false, output: "pdf.read aborted.", exitCode: 130 };
+            }
+            if (outOfTime()) {
+              timedOut = true;
+              break;
+            }
+            options.onOutput?.(`  OCR page ${pageNumber}…\n`, "stdout");
+            const ocr = await runOcr({
+              path: imagePath,
+              lang,
+              psmCandidates: psmArg.value !== undefined ? [psm] : [psm, 6, 11],
+              timeoutMs: remainingMs(PAGE_OCR_TIMEOUT_MS),
+              dpi,
+              preprocess: false,
+              signal: options.signal,
+            });
+            if (!ocr.ok) {
+              ocrNotice = ocrNotice ?? `OCR failed on page ${pageNumber}: ${ocr.error ?? "unknown error"}`;
+              continue;
+            }
+            if (meaningfulCharCount(ocr.text) === 0) continue;
+            if (!ocr.reliable) {
+              lowConfidencePages.push(pageNumber);
+              continue;
+            }
+            pageText.set(pageNumber, ocr.text);
+            ocredPages.push(pageNumber);
+          }
+          if (timedOut) break;
+        }
+      } finally {
+        await rm(workDir, { recursive: true, force: true }).catch(
+          () => undefined,
+        );
+      }
+    }
+  }
+
+  const sections: string[] = [];
+  let extractedChars = 0;
+  for (const number of pageNumbers) {
+    const body = pageText.get(number)?.trim() ?? "";
+    extractedChars += meaningfulCharCount(body);
+    sections.push(
+      `----- page ${number} -----\n${body || "(no text on this page)"}`,
+    );
+  }
+  let combined = sections.join("\n\n").trim();
+
+  if (extractedChars === 0) {
+    const reason =
+      ocrNotice ??
+      (ocrMode === "never"
+        ? "the PDF has no text layer and ocr was set to \"never\""
+        : "OCR ran but recognized no text — the scan may be too low quality, so retry with a higher dpi (e.g. 400) or a different psm");
+    return {
+      ok: false,
+      output: `pdf.read: no text could be extracted from ${path}. ${reason}`,
+      exitCode: 1,
+    };
+  }
+
+  let truncated = false;
+  if (combined.length > maxChars) {
+    combined = combined.slice(0, maxChars);
+    truncated = true;
+  }
+
+  const rangeLabel =
+    pageNumbers.length === 1
+      ? `page ${pageNumbers[0]}`
+      : `pages ${pageNumbers[0]}-${pageNumbers[pageNumbers.length - 1]}`;
+  const headerParts = [
+    `${rangeLabel}${knownPageCount ? ` of ${knownPageCount}` : ""}`,
+  ];
+  if (ocredPages.length > 0) {
+    const shown = ocredPages.slice(0, 12).join(", ");
+    headerParts.push(
+      `OCR used on ${ocredPages.length} page(s)${ocredPages.length <= 12 ? ` (${shown})` : ""} at ${dpi} dpi`,
+    );
+  } else if (needsOcr.length === 0) {
+    headerParts.push("embedded text layer");
+  }
+  if (lowConfidencePages.length > 0) {
+    headerParts.push(
+      `${lowConfidencePages.length} page(s) produced only OCR noise and were left blank rather than guessed (${lowConfidencePages.slice(0, 12).join(", ")}) — retry with a higher dpi if those pages matter`,
+    );
+  }
+  if (metadata.title) headerParts.push(`title: ${metadata.title}`);
+  if (timedOut) {
+    headerParts.push(
+      "stopped early: timeoutMs budget exhausted — raise timeoutMs or lower maxPages",
+    );
+  }
+  if (truncated) {
+    headerParts.push(
+      `truncated at maxChars=${maxChars} — read a narrower firstPage/lastPage range for the rest`,
+    );
+  }
+  if (ocrNotice) headerParts.push(ocrNotice);
+
+  return {
+    ok: true,
+    output: `[pdf.read ${path} — ${headerParts.join(" · ")}]\n\n${combined}`,
+  };
 }

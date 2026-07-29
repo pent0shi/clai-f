@@ -17,6 +17,7 @@ import type { Theme } from "../../rendering/theme.js";
 import { chordFromKeyEvent } from "../../actions/chord-from-key.js";
 import { useTranscriptState } from "../../state/use-transcript-store.js";
 import { useSessionState } from "../../state/use-session-state.js";
+import { getConfig } from "../../../store/config.js";
 import {
   isFileDiffExpanded,
   isItemExpanded,
@@ -89,6 +90,12 @@ export function TranscriptView(props: TranscriptViewProps): ReactNode {
   const state = useTranscriptState(services.transcript);
   const session = useSessionState(services.session);
   const items = useMemo(() => transcriptItems(state), [state]);
+  /**
+   * Whether reasoning paints live. Re-read at each turn boundary rather than
+   * per frame: the transcript re-renders on every streamed token, and this only
+   * changes when the user runs `/variants` between turns.
+   */
+  const liveThinking = useMemo(() => getConfig().thinking.enabled, [session.running]);
   const { width: termWidth } = useTerminalDimensions();
   // Prefer the shell-provided chat width so split/overlay plan never draws
   // the intro card (or markdown tables) wider than the remaining columns.
@@ -643,6 +650,7 @@ export function TranscriptView(props: TranscriptViewProps): ReactNode {
               item.kind === "tool" ? isFileDiffExpanded(state, item.id) : false
             }
             expandThinkingGlobal={state.expandThinkingGlobal}
+            liveThinking={liveThinking}
             expandOutputGlobal={state.expandOutputGlobal}
             expandFileDiffsGlobal={state.expandFileDiffsGlobal}
             theme={theme}

@@ -5,6 +5,7 @@ import {
   geminiBody,
 } from "../src/llm/gemini.js";
 import {
+  REQUEST_CONTEXT_PREFIX,
   SYSTEM_TURN_MARKER,
   normalizeSystemMessages,
 } from "../src/llm/system-messages.js";
@@ -79,6 +80,39 @@ describe("provider wire bodies deliver every system message", () => {
       expect(body).toContain(content);
     }
     expect(JSON.stringify(parsed.messages)).toContain(SYSTEM_TURN_MARKER);
+  });
+
+  it("promotes current request context into Anthropic and Gemini system authority", () => {
+    const messages: ChatMessage[] = [
+      { role: "system", content: "stable constitution" },
+      { role: "user", content: "prior history" },
+      {
+        role: "system",
+        content: `${REQUEST_CONTEXT_PREFIX}\nCURRENT MODE: AGENT`,
+      },
+      { role: "user", content: "current request" },
+    ];
+    const anthropic = JSON.parse(buildAnthropicBody({ messages }, false)) as {
+      system: Array<{ text: string }>;
+      messages: unknown[];
+    };
+    expect(anthropic.system.map((part) => part.text)).toEqual([
+      "stable constitution",
+      `${REQUEST_CONTEXT_PREFIX}\nCURRENT MODE: AGENT`,
+    ]);
+    expect(JSON.stringify(anthropic.messages)).not.toContain(
+      REQUEST_CONTEXT_PREFIX,
+    );
+
+    const gemini = JSON.parse(geminiBody({ messages })) as {
+      systemInstruction: { parts: Array<{ text: string }> };
+      contents: unknown[];
+    };
+    expect(gemini.systemInstruction.parts.map((part) => part.text)).toEqual([
+      "stable constitution",
+      `${REQUEST_CONTEXT_PREFIX}\nCURRENT MODE: AGENT`,
+    ]);
+    expect(JSON.stringify(gemini.contents)).not.toContain(REQUEST_CONTEXT_PREFIX);
   });
 
   it("gemini", () => {

@@ -3,7 +3,10 @@ import type { AgentEvent } from "../agent/events.js";
 import { streamWithProvider } from "../llm/router.js";
 import { resolveToolDialect } from "../llm/capabilities.js";
 import { syntheticToolCallId } from "../llm/tool-protocol.js";
-import { renderAskSystemPrompt } from "../prompts/index.js";
+import {
+  renderAskSystemPrompt,
+  renderRequestEnvironmentContext,
+} from "../prompts/index.js";
 import { getConfig } from "../store/config.js";
 import { ensureProviderConfigured } from "../commands/providers.js";
 import { loadProjectContext } from "../store/project.js";
@@ -138,9 +141,10 @@ async function buildAskMessages(
   const projectContext = await loadProjectContext();
   const native =
     resolveToolDialect(provider, model, config.toolCalling) !== "none";
-  const systemPrompt = projectContext
-    ? `${renderAskSystemPrompt({ nativeTools: native })}\n\nProject context from .clai/context.md:\n${projectContext}`
-    : renderAskSystemPrompt({ nativeTools: native });
+  const systemPrompt = renderAskSystemPrompt({
+    nativeTools: native,
+    stableEnvironment: true,
+  });
   const userMessage: ChatMessage = { role: "user", content: prompt };
   if (options.images && options.images.length > 0) {
     userMessage.images = options.images;
@@ -151,6 +155,16 @@ async function buildAskMessages(
     messages: [
       { role: "system", content: systemPrompt },
       ...(options.history ?? []),
+      {
+        role: "system",
+        content: [
+          "REQUEST CONTEXT",
+          renderRequestEnvironmentContext(),
+          ...(projectContext
+            ? [`Project context from .clai/context.md:\n${projectContext}`]
+            : []),
+        ].join("\n\n"),
+      },
       userMessage,
     ],
   };

@@ -11,6 +11,7 @@ import {
 import {
   ProviderError,
   createSseFrameAssembler,
+  imageCapableMessages,
   readJson,
   readStreamLines,
 } from "./http.js";
@@ -22,8 +23,12 @@ import {
   parseAnthropicToolUseBlocks,
   toAnthropicToolMessages,
 } from "./adapters/anthropic-tools.js";
-import { parseAnthropicUsage } from "./token-usage.js";
-import { firstSystemPrompt } from "./system-messages.js";
+import { mergeAnthropicStreamUsage, parseAnthropicUsage } from "./token-usage.js";
+import {
+  firstSystemPrompt,
+  requestContextSystemPrompts,
+  withoutRequestContextSystemMessages,
+} from "./system-messages.js";
 import { resolveSampling } from "./sampling.js";
 import type { TokenUsage } from "../types.js";
 
@@ -84,28 +89,47 @@ export function anthropicMaxTokens(
 const CACHE_BREAKPOINT_MIN_CHARS = 4_000;
 
 /**
- * Mark the end of the stable system prefix as a cache breakpoint so repeated
- * turns read the constitution from cache instead of re-billing it. Mutable
- * state (plan, session state) is a request suffix, so the prefix is byte-stable.
+ * Mark the end of the stable system prefix as a cache breakpoint. Anthropic's
+ * cache render order is tools → system → messages, so this single breakpoint
+ * caches both unchanged native tool schemas and the constitution. Mutable
+ * request/workspace/plan state is carried only in later messages.
  */
 export function anthropicSystemBlocks(
   system: string | undefined,
+  requestContexts: readonly string[] = [],
 ): string | Array<Record<string, unknown>> | undefined {
-  if (!system) return system;
-  if (system.length < CACHE_BREAKPOINT_MIN_CHARS) return system;
-  return [
-    {
+  if (!system && requestContexts.length === 0) return undefined;
+  if (system && system.length < CACHE_BREAKPOINT_MIN_CHARS && requestContexts.length === 0) {
+    return system;
+  }
+  const blocks: Array<Record<string, unknown>> = [];
+  if (system) {
+    blocks.push({
       type: "text",
       text: system,
-      cache_control: { type: "ephemeral" },
-    },
-  ];
+      ...(system.length >= CACHE_BREAKPOINT_MIN_CHARS
+        ? { cache_control: { type: "ephemeral" } }
+        : {}),
+    });
+  }
+  for (const text of requestContexts) {
+    blocks.push({ type: "text", text });
+  }
+  return blocks;
 }
 
 export function buildAnthropicBody(request: CompletionRequest, stream: boolean): string {
   const model = request.model ?? defaultModels.anthropic;
-  const system = anthropicSystemBlocks(firstSystemPrompt(request.messages));
-  const messages = toAnthropicToolMessages(request.messages);
+  const requestContexts = requestContextSystemPrompts(request.messages);
+  const system = anthropicSystemBlocks(
+    firstSystemPrompt(request.messages),
+    requestContexts,
+  );
+  const messages = toAnthropicToolMessages(
+    withoutRequestContextSystemMessages(
+      imageCapableMessages("anthropic", model, request.messages),
+    ),
+  );
   const thinking = anthropicThinkingField(request.thinking, model);
   return JSON.stringify({
     model,
@@ -303,16 +327,7 @@ export const anthropicProvider: LlmProvider = {
           if (parsed.usage) {
             const out = parseAnthropicUsage(parsed.usage);
             if (out) {
-              streamUsage = {
-                promptTokens: streamUsage?.promptTokens ?? out.promptTokens,
-                completionTokens:
-                  out.completionTokens || (streamUsage?.completionTokens ?? 0),
-                totalTokens:
-                  (streamUsage?.promptTokens ?? out.promptTokens) +
-                  (out.completionTokens ||
-                    (streamUsage?.completionTokens ?? 0)),
-                exact: true,
-              };
+              streamUsage = mergeAnthropicStreamUsage(streamUsage, out);
             }
           }
         }

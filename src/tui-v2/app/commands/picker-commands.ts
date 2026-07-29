@@ -4,7 +4,7 @@
  */
 
 import { getProvider, providerAuth } from "../../../llm/router.js";
-import { defaultModels } from "../../../llm/provider.js";
+import { defaultModels, normalizeEndpointUrl } from "../../../llm/provider.js";
 import { modelSupportsThinking } from "../../../llm/capabilities.js";
 import { assertProvider } from "../../../llm/provider.js";
 import { assertSearchProvider } from "../../../tools/web/providers/provider.js";
@@ -21,6 +21,8 @@ import { providerIds, type ProviderId, type ReasoningEffort } from "../../../typ
 import { getKnownModels } from "../../../repl/slash-commands.js";
 import { clearActiveProjectRoot } from "../../../agent/project-root.js";
 import {
+  appendProviderEndpoint,
+  getActiveProviderEndpoint,
   getConfig,
   getExaSearchType,
   getProviderModel,
@@ -195,16 +197,33 @@ export function handleProvider(services: AppServices, invocation: CommandInvocat
 }
 
 async function activateProvider(services: AppServices, next: ProviderId): Promise<void> {
-  const configured =
-    next === "ollama" || Boolean(envValue(next)) || Boolean((await getProviderSecret(next)).value);
-  if (!configured) {
-    services.overlay.close();
-    const key = await services.overlay.openSecret({
-      title: `${next} API key`,
-      prompt: `No API key is configured for ${next}. Enter it now to activate this provider.`,
-    });
-    if (!key || !getProvider(next).validateKey(key.trim())) return;
-    await setProviderSecret(next, key.trim());
+  // Modal needs two separate things, so it gets its own onboarding.
+  if (next === "modal") {
+    if (!(await ensureModalCredentials(services))) return;
+  } else {
+    const configured =
+      next === "ollama" || Boolean(envValue(next)) || Boolean((await getProviderSecret(next)).value);
+    if (!configured) {
+      services.overlay.close();
+      const key = await services.overlay.openSecret({
+        title: `${next} API key`,
+        prompt: `No API key is configured for ${next}. Enter it now to activate this provider.`,
+      });
+      const value = key?.trim();
+      if (!value) {
+        services.session.notice("info", `cancelled · provider unchanged`);
+        return;
+      }
+      // Silence here used to look like the picker had simply ignored the input.
+      if (!getProvider(next).validateKey(value)) {
+        services.session.notice(
+          "warn",
+          `invalid API key format for ${next} · provider unchanged`,
+        );
+        return;
+      }
+      await setProviderSecret(next, value);
+    }
   }
   const model = getConfig().providerModels[next] ?? defaultModels[next];
   setDefaultProvider(next);
@@ -212,6 +231,73 @@ async function activateProvider(services: AppServices, next: ProviderId): Promis
   services.session.setModel(model);
   services.overlay.close();
   services.session.notice("info", `provider → ${next} · model → ${model}`);
+}
+
+/**
+ * Modal is the only provider that needs two things before it can serve a
+ * request: the workspace endpoint URL (config) and a proxy token pair
+ * (secret). Ask for whichever is missing, endpoint first — that is the value
+ * people reach for, and a URL typed into a token prompt used to fail
+ * `validateKey` and silently abandon the switch.
+ *
+ * Returns false when the user cancelled or entered something unusable, in
+ * which case the active provider is left alone.
+ */
+async function ensureModalCredentials(services: AppServices): Promise<boolean> {
+  const hasToken =
+    Boolean(envValue("modal")) || Boolean((await getProviderSecret("modal")).value);
+
+  if (!getActiveProviderEndpoint("modal")) {
+    services.overlay.close();
+    const answer = await services.overlay.openSecret({
+      title: hasToken ? "Modal endpoint URL" : "Modal endpoint URL (1 of 2)",
+      prompt:
+        "Paste your Modal endpoint URL, e.g. https://<workspace>--ep-<endpoint>.<region>.modal.direct",
+      reveal: true,
+    });
+    const url = answer?.trim();
+    if (!url) {
+      services.session.notice("info", "cancelled · provider unchanged");
+      return false;
+    }
+    const endpoint = normalizeEndpointUrl(url);
+    appendProviderEndpoint("modal", endpoint);
+    services.session.notice("info", `modal endpoint → ${endpoint}`);
+  }
+
+  if (!hasToken) {
+    services.overlay.close();
+    const answer = await services.overlay.openSecret({
+      title: "Modal proxy token (2 of 2)",
+      prompt:
+        "Enter the proxy token pair as <token-id>:<token-secret> — create one with: modal workspace proxy-tokens create",
+    });
+    const token = answer?.trim();
+    if (!token) {
+      services.session.notice("info", "cancelled · provider unchanged");
+      return false;
+    }
+    // Another URL means the user is still answering the previous question.
+    if (/^https?:\/\//i.test(token)) {
+      const endpoint = normalizeEndpointUrl(token);
+      appendProviderEndpoint("modal", endpoint);
+      services.session.notice(
+        "warn",
+        `saved that as the endpoint (${endpoint}) · modal still needs a wk-…:ws-… token pair — run /provider modal again`,
+      );
+      return false;
+    }
+    if (!getProvider("modal").validateKey(token)) {
+      services.session.notice(
+        "warn",
+        "expected a proxy token pair like wk-tokenId:ws-tokenSecret · provider unchanged",
+      );
+      return false;
+    }
+    await setProviderSecret("modal", token);
+  }
+
+  return true;
 }
 
 export function handleSearch(services: AppServices, invocation: CommandInvocation): void {

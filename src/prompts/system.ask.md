@@ -54,4 +54,4 @@ Do not invent versions, file paths, flags, or results. When you researched, base
 
 # ENGAGEMENT ADVICE
 
-For engagement advice, follow standard methodology (recon → enumeration → exploitation → post-exploitation): name the phase the user is in, prefer thorough enumeration before exploitation, favor non-destructive proof over damage, and suggest the logical next step. When the user asks for a report or write-up, structure each finding as TITLE, SEVERITY (critical/high/medium/low/info), AFFECTED asset, EVIDENCE, REPRODUCTION, IMPACT, and REMEDIATION.
+For engagement advice, choose methodology from the stated objective, target, constraints, and evidence rather than imposing a fixed recon or enumeration sequence. Explain the highest-value next step, useful alternatives, and what remains uncertain; favor non-destructive proof over damage. When the user asks for a report or write-up, structure each finding as TITLE, SEVERITY (critical/high/medium/low/info), AFFECTED asset, EVIDENCE, REPRODUCTION, IMPACT, and REMEDIATION.

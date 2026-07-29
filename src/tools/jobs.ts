@@ -5,7 +5,7 @@ import { basename, join, sep } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { StringDecoder } from "node:string_decoder";
 import type { Readable } from "node:stream";
-import type { ToolResult } from "../types.js";
+import type { ToolCall, ToolResult } from "../types.js";
 import { redactSecrets } from "../llm/provider.js";
 import { safeCwd } from "../os/cwd.js";
 import { getJobsDir } from "../store/paths.js";
@@ -80,6 +80,64 @@ export interface BackgroundJob extends JobLinkMetadata {
   authorization?: { target: string; expiresAt?: string | undefined } | undefined;
   /** Accepted when reading legacy registries but never armed or restored. */
   timeoutAt?: string | undefined;
+}
+
+export interface ResponderPollingPolicyInput {
+  call: ToolCall;
+  targetJob?: BackgroundJob | undefined;
+  /** Jobs in the exact shell.jobs display window, in display order. */
+  recentJobs?: readonly BackgroundJob[] | undefined;
+}
+
+/**
+ * Responder-owned jobs are push-delivered and must not be polled. Normal jobs
+ * remain pollable, including mixed sessions with a visible terminal normal job.
+ */
+const LIVE_JOB_STATUSES = new Set<JobStatus>([
+  "starting",
+  "running",
+  "stopping",
+]);
+
+export function responderPollingPolicy(
+  input: ResponderPollingPolicyInput,
+): { blocked: boolean; reason?: string | undefined } {
+  // Only a still-running Responder job can be polled in a loop. Once it is
+  // terminal its output is fixed, so reading it is a normal bounded read and
+  // blocking it would remove the only way to inspect the full result.
+  if (
+    input.call.name === "shell.tail" &&
+    input.targetJob?.responder &&
+    LIVE_JOB_STATUSES.has(input.targetJob.status)
+  ) {
+    return {
+      blocked: true,
+      reason:
+        `Responder owns job ${input.targetJob.id}; shell.tail was not dispatched. ` +
+        "This job is fire-and-continue: its terminal result will be delivered automatically. " +
+        "Continue other work, and call job.read only after analyzing that delivered completion.",
+    };
+  }
+
+  if (input.call.name === "shell.jobs") {
+    const recent = input.recentJobs ?? [];
+    const runningResponderJobs = recent.filter(
+      (job) => job.responder && LIVE_JOB_STATUSES.has(job.status),
+    );
+    const visibleNormalJobs = recent.filter((job) => !job.responder);
+    if (runningResponderJobs.length > 0 && visibleNormalJobs.length === 0) {
+      const ids = runningResponderJobs.map((job) => job.id).join(", ");
+      return {
+        blocked: true,
+        reason:
+          `shell.jobs was not dispatched because the only running background job(s) (${ids}) are Responder-owned. ` +
+          "They are fire-and-continue and their terminal results will be delivered automatically. " +
+          "Continue other work; do not sleep or poll, and call job.read only after analyzing a delivered completion.",
+      };
+    }
+  }
+
+  return { blocked: false };
 }
 
 export function formatJobElapsed(
@@ -1620,6 +1678,22 @@ export class JobManager {
       .sort((a, b) => b.startedAt.localeCompare(a.startedAt));
     const ordered = [...live, ...done];
     const shown = ordered.slice(0, LIST_JOBS_MAX_LINES);
+    // Judge on every job in scope, not just the display window: a normal job
+    // pushed past the window must still keep shell.jobs answerable.
+    const pollingPolicy = responderPollingPolicy({
+      call: { name: "shell.jobs", args: {} },
+      recentJobs: ordered,
+    });
+    if (pollingPolicy.blocked) {
+      return {
+        ok: true,
+        output:
+          pollingPolicy.reason ??
+          "shell.jobs was not dispatched because Responder owns the running jobs.",
+        exitCode: 0,
+        suppressedRepeat: true,
+      };
+    }
     const omitted = ordered.length - shown.length;
     const format = (job: BackgroundJob): string => {
       const health = this.isLive(job)
@@ -1935,6 +2009,20 @@ export class JobManager {
       return { ok: false, output: `Job "${id}" not found. Canonical job IDs: ${known}.`, exitCode: 1 };
     }
     this.refreshJobLiveness(job);
+    const pollingPolicy = responderPollingPolicy({
+      call: { name: "shell.tail", args: { id } },
+      targetJob: job,
+    });
+    if (pollingPolicy.blocked) {
+      return {
+        ok: true,
+        output:
+          pollingPolicy.reason ??
+          `shell.tail was not dispatched because Responder owns job ${job.id}.`,
+        exitCode: 0,
+        suppressedRepeat: true,
+      };
+    }
     const cursor = typeof bytesOrCursor === "number" ? { bytes: bytesOrCursor } : (bytesOrCursor ?? {});
     const stream = cursor.stream ?? "stdout";
     if (stream === "combined" && cursor.offset !== undefined) {

@@ -10,7 +10,14 @@ import {
   type LlmProvider,
   type ProviderAuth,
 } from "./provider.js";
-import { ProviderError, readJson, readStreamLines, createSseFrameAssembler } from "./http.js";
+import {
+  ProviderError,
+  createSseFrameAssembler,
+  imageCapableMessages,
+  readJson,
+  readStreamLines,
+} from "./http.js";
+import { registerProviderModels } from "./capabilities.js";
 import {
   geminiToolBodyFields,
   parseGeminiFunctionCalls,
@@ -18,7 +25,11 @@ import {
 } from "./adapters/gemini-tools.js";
 import { fromWireName } from "./tool-protocol.js";
 import { parseGeminiUsage } from "./token-usage.js";
-import { firstSystemPrompt } from "./system-messages.js";
+import {
+  firstSystemPrompt,
+  requestContextSystemPrompts,
+  withoutRequestContextSystemMessages,
+} from "./system-messages.js";
 import { resolveSampling } from "./sampling.js";
 
 type GeminiPart =
@@ -28,7 +39,9 @@ type GeminiPart =
 function geminiContents(
   messages: ChatMessage[],
 ): Array<{ role: "user" | "model"; parts: GeminiPart[] }> {
-  return toGeminiToolContents(messages) as Array<{
+  return toGeminiToolContents(
+    withoutRequestContextSystemMessages(messages),
+  ) as Array<{
     role: "user" | "model";
     parts: GeminiPart[];
   }>;
@@ -37,8 +50,13 @@ function geminiContents(
 function systemInstruction(
   messages: ChatMessage[],
 ): { parts: Array<{ text: string }> } | undefined {
-  const system = firstSystemPrompt(messages);
-  return system === undefined ? undefined : { parts: [{ text: system }] };
+  const parts = [
+    firstSystemPrompt(messages),
+    ...requestContextSystemPrompts(messages),
+  ]
+    .filter((text): text is string => Boolean(text))
+    .map((text) => ({ text }));
+  return parts.length > 0 ? { parts } : undefined;
 }
 
 function isGemini3Model(model: string): boolean {
@@ -161,7 +179,9 @@ export function geminiBody(request: CompletionRequest): string {
     requestedTemperature: request.temperature,
   });
   const body: Record<string, unknown> = {
-    contents: geminiContents(request.messages),
+    contents: geminiContents(
+      imageCapableMessages("gemini", model, request.messages),
+    ),
     generationConfig: {
       temperature: sampling.temperature,
       ...(sampling.topP !== undefined ? { topP: sampling.topP } : {}),
@@ -205,12 +225,13 @@ export const geminiProvider: LlmProvider = {
         supportedGenerationMethods?: string[];
       }>;
     }>(response);
-    return (
+    const models =
       data.models
         ?.filter((m) => m.name && m.supportedGenerationMethods?.includes("generateContent"))
         .map((m) => m.name!.replace(/^models\//, ""))
-        .sort() ?? []
-    );
+        .sort() ?? [];
+    registerProviderModels("gemini", models);
+    return models;
   },
   async ping(auth: ProviderAuth): Promise<void> {
     if (!auth.apiKey) throw new Error("Gemini API key is required");

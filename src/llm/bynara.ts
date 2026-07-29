@@ -10,6 +10,7 @@ import {
   openAiCompatibleStream,
   toCompletionResult,
   readJson,
+  ingestOpenAiModelCatalog,
 } from "./http.js";
 
 // Bynara Router exposes an OpenAI-compatible Chat Completions API at
@@ -43,7 +44,7 @@ export const bynaraProvider: LlmProvider = {
         headers: key ? { authorization: `Bearer ${key}` } : {},
       });
       const data = await readJson<{ data?: Array<{ id: string }> }>(resp);
-      const models = data.data?.map((m) => m.id).sort() ?? [];
+      const models = ingestOpenAiModelCatalog("bynara", data);
       if (models.length > 0) {
         modelCache.set(key, { models, fetchedAt: now });
       }

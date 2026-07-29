@@ -20,6 +20,11 @@ import type { Theme } from "../../rendering/theme.js";
 import { chordFromKeyEvent } from "../../actions/chord-from-key.js";
 import { useSessionState } from "../../state/use-session-state.js";
 import { responderStatusText } from "../status/status-line.js";
+import {
+  createJobTailPagerSource,
+  isLiveJobStatus,
+  jobTailTitle,
+} from "../../rendering/job-tail-source.js";
 
 export interface JobsPanelProps {
   readonly services: AppServices;
@@ -130,6 +135,30 @@ export function JobsPanel(props: JobsPanelProps): ReactNode {
     services.overlay.openPager(`${job.command} · tail`, result.output);
   }
 
+  /**
+   * Live output view. The pager stays stacked over this panel, so closing it
+   * returns to the job list instead of the transcript.
+   */
+  function viewLive(job: BackgroundJob): void {
+    const source = createJobTailPagerSource({
+      jobs: services.ports.jobs,
+      jobId: job.id,
+    });
+    if (!source) {
+      setNote("This job has no output artifact to view.");
+      return;
+    }
+    const opened = services.overlay.openPager(
+      jobTailTitle(job.commandDisplay || job.command, isLiveJobStatus(job.status)),
+      "",
+      source,
+    );
+    if (!opened) {
+      source.dispose();
+      setNote("Could not open the output view.");
+    }
+  }
+
   useKeyboard((key) => {
     if (key.eventType === "release") return;
     const action = services.router.resolve(chordFromKeyEvent(key), "jobs");
@@ -154,6 +183,9 @@ export function JobsPanel(props: JobsPanelProps): ReactNode {
       case "jobs.tail":
         if (job) void tail(job);
         break;
+      case "jobs.view-live":
+        if (job) viewLive(job);
+        break;
       case "jobs.close":
         services.overlay.close();
         break;
@@ -166,7 +198,7 @@ export function JobsPanel(props: JobsPanelProps): ReactNode {
   // made history/jobs look like broken ids (`sess-mrq…`).
   const titleLine = `Background jobs · session ${services.session.sessionId}`;
   const helpLine =
-    "up/down:select · enter/t:tail · k:kill · q/esc:close";
+    "up/down:select · enter/v:view live · t:snapshot · k:kill · q/esc:close";
   const notificationByJob = new Map(
     services.ports.jobs
       .pendingNotifications(services.session.sessionId)

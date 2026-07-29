@@ -109,6 +109,55 @@ describe("session-scoped jobs", () => {
     await manager.stopJob(idB!, { graceMs: 300 });
   });
 
+  it("suppresses Responder-only list/tail from the exact display snapshot", async () => {
+    const { manager } = await fixture();
+    const responder = await manager.startJob(
+      `${JSON.stringify(process.execPath)} -e "setTimeout(()=>{}, 2000)"`,
+      {
+        ownerSessionId: "policy-session",
+        responder: true,
+        wakeOnCompletion: true,
+      },
+    );
+    const responderId = responder.backgroundJob?.id;
+    expect(responderId).toBeTruthy();
+
+    const responderOnly = manager.listJobs("policy-session");
+    expect(responderOnly).toMatchObject({
+      ok: true,
+      suppressedRepeat: true,
+    });
+    expect(responderOnly.output).toContain("shell.jobs was not dispatched");
+
+    const tail = await manager.tailJob(responderId!);
+    expect(tail).toMatchObject({ ok: true, suppressedRepeat: true });
+    expect(tail.output).toContain("shell.tail was not dispatched");
+
+    const normal = await manager.startJob(
+      `${JSON.stringify(process.execPath)} -e "process.exit(0)"`,
+      { ownerSessionId: "policy-session" },
+    );
+    const normalId = normal.backgroundJob?.id;
+    expect(normalId).toBeTruthy();
+    const deadline = Date.now() + 2_000;
+    while (
+      Date.now() < deadline &&
+      ["starting", "running", "stopping"].includes(
+        manager.getJob(normalId!)?.status ?? "",
+      )
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    expect(manager.getJob(normalId!)?.status).toBe("exited");
+
+    const mixed = manager.listJobs("policy-session");
+    expect(mixed.suppressedRepeat).not.toBe(true);
+    expect(mixed.output).toContain(responderId!);
+    expect(mixed.output).toContain(normalId!);
+
+    await manager.stopJob(responderId!, { graceMs: 300 });
+  });
+
   it("formats live and terminal elapsed time from stable timestamps", () => {
     const now = Date.parse("2026-07-22T13:05:42.700Z");
     const job = ephemeralToolTrack("clock1", "s1", "ffuf");

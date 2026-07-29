@@ -50,6 +50,8 @@ const ACTION_LABELS: Partial<Record<ActionId, string>> = {
   "app.help": "Open command help",
   "app.toggle-plan": "Toggle plan / tasks pane",
   "app.jobs": "Open background jobs",
+  "jobs.view-live": "View selected job output (follows while it runs)",
+  "pager.toggle-follow": "Follow / pause live output",
   "app.cycle-mode": "Cycle mode (ask → agent → plan)",
   "focus.next-region": "Cycle focus (composer → chat → plan)",
   "focus.composer": "Focus composer",
@@ -107,7 +109,7 @@ const ACTION_LABELS: Partial<Record<ActionId, string>> = {
   "pager.close": "Close pager",
   "jobs.up": "Previous job",
   "jobs.down": "Next job",
-  "jobs.tail": "Tail job output",
+  "jobs.tail": "Snapshot of job output",
   "jobs.stop": "Stop job",
   "jobs.close": "Close jobs panel",
 };

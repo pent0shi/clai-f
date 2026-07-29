@@ -1,5 +1,4 @@
-import { execFileSync } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import {
   closeSync,
   copyFileSync,
@@ -9,10 +8,9 @@ import {
   readdirSync,
   readFileSync,
   readSync,
-  rmSync,
   statSync,
 } from "node:fs";
-import { homedir, platform } from "node:os";
+import { homedir } from "node:os";
 import {
   basename,
   dirname,
@@ -25,9 +23,13 @@ import {
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   detectModelImageMediaType,
-  isModelImageMediaType,
-  MAX_IMAGE_BYTES,
+  imageBudgetFor,
+  type ImageBudget,
 } from "../attachments/image-content.js";
+import {
+  describePreparedImage,
+  prepareImageForModel,
+} from "../attachments/image-prepare.js";
 import { safeCwd } from "../os/cwd.js";
 import type { ChatImage } from "../types.js";
 import { scratchDirFor } from "../prompts/index.js";
@@ -216,6 +218,11 @@ export interface MentionExpansion {
   contextBlock: string;
 }
 
+export interface ExpandMentionsOptions {
+  visionCapable?: boolean | undefined;
+  budget?: ImageBudget | undefined;
+}
+
 const IMAGE_MEDIA_TYPES: Record<string, string> = {
   ".png": "image/png",
   ".jpg": "image/jpeg",
@@ -243,48 +250,6 @@ function readCappedText(absPath: string, cap: number): string {
     return bytes.subarray(0, read).toString("utf8");
   } finally {
     closeSync(handle);
-  }
-}
-
-/** Signatures for formats clai can convert, beyond the model-native four. */
-function looksLikeImageBytes(header: Buffer): boolean {
-  if (header.length < 4) return false;
-  if (detectModelImageMediaType(header)) return true;
-  const ascii = header.subarray(0, 2).toString("latin1");
-  if (ascii === "BM") return true;
-  const tiff = header.subarray(0, 4).toString("latin1");
-  if (tiff === "II*\u0000" || tiff === "MM\u0000*") return true;
-  if (
-    header[0] === 0x00 &&
-    header[1] === 0x00 &&
-    header[2] === 0x01 &&
-    header[3] === 0x00
-  ) {
-    return true;
-  }
-  return header.subarray(4, 8).toString("latin1") === "ftyp";
-}
-
-/** Magic-byte inspection, so an extension alone never claims vision input. */
-function inspectImageBytes(
-  absPath: string,
-): { mediaType?: string | undefined; decodable: boolean } {
-  try {
-    const handle = openSync(absPath, "r");
-    try {
-      const header = Buffer.alloc(64);
-      const read = readSync(handle, header, 0, header.length, 0);
-      const bytes = header.subarray(0, read);
-      const mediaType = detectModelImageMediaType(bytes);
-      return {
-        ...(mediaType ? { mediaType } : {}),
-        decodable: looksLikeImageBytes(bytes),
-      };
-    } finally {
-      closeSync(handle);
-    }
-  } catch {
-    return { decodable: false };
   }
 }
 
@@ -715,8 +680,12 @@ function tokenToPath(token: string, baseDir: string): string {
 export function expandMentions(
   line: string,
   baseDir: string = safeCwd(),
-  visionCapable = false,
+  vision: boolean | ExpandMentionsOptions = false,
 ): MentionExpansion {
+  const options: ExpandMentionsOptions =
+    typeof vision === "boolean" ? { visionCapable: vision } : vision;
+  const visionCapable = options.visionCapable === true;
+  const budget = options.budget ?? imageBudgetFor("");
   const tokens = extractMentionTokens(line);
   const attachments: Attachment[] = [];
   const seenPaths = new Set<string>();
@@ -773,32 +742,23 @@ export function expandMentions(
       }
     } else if (kind === "image") {
       const stablePath = stabilizeImagePaths([absPath], baseDir)[0] ?? absPath;
-      // Trust the bytes, not the extension: a mislabelled file must not claim
-      // multimodal input (which would switch models and then send nothing).
-      const inspected = inspectImageBytes(stablePath);
-      const decodable = inspected.decodable || inspectImageBytes(absPath).decodable;
-      let oversized = false;
-      try {
-        oversized = statSync(stablePath).size > MAX_IMAGE_BYTES;
-      } catch {
-        try {
-          oversized = statSync(absPath).size > MAX_IMAGE_BYTES;
-        } catch {
-          oversized = false;
-        }
+      let prepared = prepareImageForModel(stablePath, budget, baseDir);
+      if (!prepared.ok && stablePath !== absPath) {
+        const original = prepareImageForModel(absPath, budget, baseDir);
+        if (original.ok) prepared = original;
       }
       attachments.push({
         raw: token,
-        path: stablePath,
+        path: prepared.ok ? prepared.path : stablePath,
         kind: "image",
-        sendable: decodable && !oversized,
-        note: oversized
-          ? `image is larger than ${Math.round(MAX_IMAGE_BYTES / 1_000_000)}MB and was NOT attached — downscale it first (macOS: sips -Z 1600 "<img>" --out /tmp/small.png; or use magick/ffmpeg), then reference the smaller copy`
-          : !decodable
-            ? "file has an image extension but its bytes are not a supported image — NOT attached; convert it to PNG/JPEG/GIF/WebP first"
-            : visionCapable
-              ? "image file — attached as multimodal input; inspect it directly for text, colors, layout, spacing, and visual style. Stable path used if original may vanish. Prefer vision over OCR unless the user asks for OCR."
-              : "image file — the current model can't view images; switch to a vision model for colors/layout/style, or extract text with OCR if only text is needed (OCR grounding may still be attached)",
+        sendable: prepared.ok,
+        note: !prepared.ok
+          ? prepared.recoverable
+            ? `image ${prepared.reason} — NOT attached`
+            : `file has an image extension but ${prepared.reason} — NOT attached; convert it to PNG/JPEG/GIF/WebP first`
+          : visionCapable
+            ? `image file — ${describePreparedImage(prepared)}, attached as multimodal input; inspect it directly for text, colors, layout, spacing, and visual style. Stable path used if original may vanish. Prefer vision over OCR unless the user asks for OCR.`
+            : `image file — ${describePreparedImage(prepared)}; the current model can't view images, so switch to a vision model for colors/layout/style, or extract text with OCR if only text is needed (OCR grounding may still be attached)`,
       });
     } else if (kind === "document") {
       const isPdf = extname(absPath).toLowerCase() === ".pdf";
@@ -872,30 +832,6 @@ export function imageAttachmentPaths(
   return stabilizeImagePaths(paths, baseDir);
 }
 
-function convertImageToPng(source: string, destination: string): boolean {
-  const attempts: Array<[string, string[]]> = [];
-  if (platform() === "darwin") {
-    attempts.push([
-      "sips",
-      ["-s", "format", "png", source, "--out", destination],
-    ]);
-  }
-  attempts.push(["magick", [source, destination]]);
-  if (platform() !== "win32") attempts.push(["convert", [source, destination]]);
-  for (const [command, args] of attempts) {
-    try {
-      execFileSync(command, args, {
-        stdio: "ignore",
-        timeout: 15_000,
-      });
-      if (existsSync(destination) && statSync(destination).size > 0) return true;
-    } catch {
-      rmSync(destination, { force: true });
-    }
-  }
-  return false;
-}
-
 export function stabilizeImagePaths(
   paths: string[],
   baseDir: string = safeCwd(),
@@ -903,7 +839,14 @@ export function stabilizeImagePaths(
   const output: string[] = [];
   const attachmentDir = join(scratchDirFor(baseDir), "attachments");
   for (const source of paths) {
-    if (!existsSync(source)) {
+    let info;
+    try {
+      info = statSync(source);
+    } catch {
+      output.push(source);
+      continue;
+    }
+    if (!info.isFile()) {
       output.push(source);
       continue;
     }
@@ -914,24 +857,25 @@ export function stabilizeImagePaths(
     try {
       mkdirSync(attachmentDir, { recursive: true });
       const extension = extname(source).toLowerCase();
-      const stem = basename(source, extension)
-        .replace(/[^\w.-]+/g, "_")
-        .replace(/_+/g, "_")
-        .slice(0, 100) || "image";
-      const id = `${Date.now()}-${randomUUID().slice(0, 8)}`;
-      const mediaType = imageMediaType(source);
-      if (!mediaType || !isModelImageMediaType(mediaType)) {
-        const converted = join(attachmentDir, `${id}-${stem}.png`);
-        if (convertImageToPng(source, converted)) {
-          output.push(converted);
-          continue;
-        }
-      }
+      const stem =
+        basename(source, extension)
+          .replace(/[^\w.-]+/g, "_")
+          .replace(/_+/g, "_")
+          .slice(0, 100) || "image";
+      const id = createHash("sha1")
+        .update(`${resolve(source)}|${Math.round(info.mtimeMs)}|${info.size}`)
+        .digest("hex")
+        .slice(0, 12);
       const destination = join(
         attachmentDir,
         `${id}-${stem}${extension || ".img"}`,
       );
-      copyFileSync(source, destination);
+      if (
+        !existsSync(destination) ||
+        statSync(destination).size !== info.size
+      ) {
+        copyFileSync(source, destination);
+      }
       output.push(destination);
     } catch {
       output.push(source);
@@ -940,23 +884,30 @@ export function stabilizeImagePaths(
   return output;
 }
 
-export function loadImagePaths(paths: readonly string[]): ChatImage[] {
+export function loadImagePaths(
+  paths: readonly string[],
+  budget: ImageBudget = imageBudgetFor(""),
+  baseDir: string = safeCwd(),
+): ChatImage[] {
   const images: ChatImage[] = [];
   const seen = new Set<string>();
+  let totalBytes = 0;
   for (const path of paths) {
     if (seen.has(path)) continue;
     seen.add(path);
-    if (classifyPath(path) !== "image") continue;
+    if (images.length >= budget.maxCount) break;
+    const prepared = prepareImageForModel(path, budget, baseDir);
+    if (!prepared.ok) continue;
+    if (totalBytes + prepared.byteLength > budget.maxTotalBytes) continue;
     try {
-      const stat = statSync(path);
-      if (stat.size > MAX_IMAGE_BYTES) continue;
-      const buffer = readFileSync(path);
+      const buffer = readFileSync(prepared.path);
       const mediaType = detectModelImageMediaType(buffer);
       if (!mediaType) continue;
+      totalBytes += buffer.length;
       images.push({
         mediaType,
         dataBase64: buffer.toString("base64"),
-        path,
+        path: prepared.path,
       });
     } catch {
       continue;
@@ -969,7 +920,11 @@ export function loadImageAttachments(
   line: string,
   baseDir: string = safeCwd(),
 ): ChatImage[] {
-  return loadImagePaths(imageAttachmentPaths(line, baseDir));
+  return loadImagePaths(
+    imageAttachmentPaths(line, baseDir),
+    imageBudgetFor(""),
+    baseDir,
+  );
 }
 
 function displayPath(absPath: string, baseDir: string): string {

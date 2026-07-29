@@ -292,15 +292,11 @@ export function recoveryForShallowPentest(): RecoveryAction {
   return {
     kind: "shallow_pentest",
     budgetKey: "shallowPentest",
-    notice: "pentest coverage looks thin — expand surface mapping",
+    notice: "pentest conclusion is not supported by enough evidence",
     message:
-      "Coverage looks thin (ports/headers/robots or early closure without residual risk). " +
-      "Before finalizing: write a short threat model (top hypotheses for this stack), " +
-      "expand attack surface — escalate ports if only top-N was used, " +
-      "subdomain strategy beyond a few digs, content/API discovery (ffuf/gobuster + wordlist.find), " +
-      "JS harvest, then actively test high-value vectors. " +
-      "Background long scans while doing other recon. End with residual/untested honesty — " +
-      "do not claim mature posture if major classes were never attempted.",
+      "The current conclusion is stronger than the evidence. Reassess the engagement objective, observed surface, likely impact, material unknowns, and threat model. " +
+      "Choose the next highest-value in-scope test yourself; do not follow a fixed enumeration or scanner checklist, and do not repeat work that already produced usable evidence. " +
+      "Continue while a safe action can materially improve confidence. Otherwise report the limitation and residual or untested risk honestly instead of claiming a mature posture.",
   };
 }
 

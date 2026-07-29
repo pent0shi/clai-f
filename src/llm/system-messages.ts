@@ -7,6 +7,30 @@ import type { ChatMessage } from "../types.js";
  */
 export const SYSTEM_TURN_MARKER = "[SYSTEM]";
 
+/** Mutable, current-turn authority promoted into provider system fields. */
+export const REQUEST_CONTEXT_PREFIX = "REQUEST CONTEXT";
+
+export function isRequestContextSystemMessage(message: ChatMessage): boolean {
+  return (
+    message.role === "system" &&
+    message.content.startsWith(REQUEST_CONTEXT_PREFIX)
+  );
+}
+
+export function requestContextSystemPrompts(
+  messages: readonly ChatMessage[],
+): string[] {
+  return messages
+    .filter(isRequestContextSystemMessage)
+    .map((message) => message.content);
+}
+
+export function withoutRequestContextSystemMessages(
+  messages: readonly ChatMessage[],
+): ChatMessage[] {
+  return messages.filter((message) => !isRequestContextSystemMessage(message));
+}
+
 /**
  * One shared ordered normalization contract for dialects with a
  * single system slot.

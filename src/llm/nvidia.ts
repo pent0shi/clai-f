@@ -10,6 +10,7 @@ import {
   openAiCompatibleStream,
   toCompletionResult,
   readJson,
+  ingestOpenAiModelCatalog,
 } from "./http.js";
 
 // NVIDIA NIM exposes an OpenAI-compatible Chat Completions API at
@@ -86,7 +87,7 @@ export const nvidiaProvider: LlmProvider = {
         throw new Error(`HTTP ${response.status} ${response.statusText}`);
       }
       const data = await readJson<{ data?: Array<{ id: string }> }>(response);
-      const models = data.data?.map((m) => m.id).sort() ?? [];
+      const models = ingestOpenAiModelCatalog("nvidia", data);
       if (models.length > 0) {
         cachedModels = models;
         lastFetchTime = now;

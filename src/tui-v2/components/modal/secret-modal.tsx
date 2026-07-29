@@ -44,9 +44,12 @@ export function SecretModal(props: SecretModalProps): ReactNode {
   const { services, theme, request, docked } = props;
   const bufferRef = useRef(new SecretBuffer());
   const [mask, setMask] = useState("");
+  // Non-secret values (endpoint URLs, hosts) opt out of masking: a bulleted
+  // 60-character URL is impossible to proofread.
+  const revealed = request.reveal === true;
 
   function refreshMask(): void {
-    setMask(bufferRef.current.masked());
+    setMask(revealed ? bufferRef.current.reveal() : bufferRef.current.masked());
   }
 
   function cancel(): void {
@@ -165,25 +168,31 @@ export function SecretModal(props: SecretModalProps): ReactNode {
             attributes: TextAttributes.BOLD,
           }}
         >
-          {` SECURE · ${request.title.toUpperCase()} `}
+          {revealed
+            ? ` ${request.title.toUpperCase()} `
+            : ` SECURE · ${request.title.toUpperCase()} `}
         </text>
         <text content=" " />
         <text style={{ fg: theme.muted, attributes: TextAttributes.DIM }}>
-          never logged or echoed
+          {revealed ? "not written to history" : "never logged or echoed"}
         </text>
       </box>
       <text style={{ fg: theme.foreground }}>{request.prompt}</text>
       <box style={{ flexDirection: "row", width: "100%" }}>
         <text style={{ fg: ACCENT, attributes: TextAttributes.BOLD }}>
-          password ›{" "}
+          {revealed ? "value › " : "password › "}
         </text>
         <text style={{ fg: theme.foreground }}>
           {mask.length > 0 ? mask : "█"}
         </text>
         <text style={{ fg: theme.muted, attributes: TextAttributes.DIM }}>
           {mask.length > 0
-            ? `  (${String(mask.length)} chars · not shown)`
-            : "  type password — bullets appear as you type"}
+            ? revealed
+              ? ""
+              : `  (${String(mask.length)} chars · not shown)`
+            : revealed
+              ? "  type or paste the value"
+              : "  type password — bullets appear as you type"}
         </text>
       </box>
       <box style={{ flexDirection: "row", width: "100%" }}>

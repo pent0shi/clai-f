@@ -12,6 +12,7 @@ import {
   floorToLocalHour,
   renderAgentSystemPrompt,
   renderCompactAgentSystemPrompt,
+  renderRequestEnvironmentContext,
 } from "../src/prompts/index.js";
 import { hasOrphanToolMessages } from "../src/agent/tool-history.js";
 import type { ChatMessage } from "../src/types.js";
@@ -68,22 +69,22 @@ describe("prompt assembly contract", () => {
     expect(composed.content).toContain("CONSTITUTION_SENTINEL");
   });
 
-  it("orders sections by fixed priority (mode before plan before constitution)", () => {
+  it("orders the stable constitution before dynamic request sections", () => {
     const composed = composeAgentSystemPrompt({
       mode: "agent",
       nativeToolsActive: false,
       sections: [...mandatory].reverse(),
     });
+    const constitutionAt = composed.content.indexOf("CONSTITUTION_SENTINEL");
     const modeAt = composed.content.indexOf("CURRENT MODE:");
-    const outcomeAt = composed.content.indexOf("OUTCOME CONTRACT");
     const planAt = composed.content.indexOf("ACTIVE PLAN");
     const scopeAt = composed.content.indexOf("ENGAGEMENT SCOPE");
-    const constitutionAt = composed.content.indexOf("CONSTITUTION_SENTINEL");
-    expect(modeAt).toBeGreaterThanOrEqual(0);
-    expect(modeAt).toBeLessThan(outcomeAt);
-    expect(outcomeAt).toBeLessThan(planAt);
+    const outcomeAt = composed.content.indexOf("OUTCOME CONTRACT");
+    expect(constitutionAt).toBe(0);
+    expect(constitutionAt).toBeLessThan(modeAt);
+    expect(modeAt).toBeLessThan(planAt);
     expect(planAt).toBeLessThan(scopeAt);
-    expect(scopeAt).toBeLessThan(constitutionAt);
+    expect(scopeAt).toBeLessThan(outcomeAt);
   });
 
   it("never drops mandatory sections under a tight maxTokens budget", () => {
@@ -118,6 +119,17 @@ describe("prompt assembly contract", () => {
     const p = renderCompactAgentSystemPrompt("shell.exec");
     expect(p.length).toBeLessThan(8_000);
     expect(p).not.toMatch(/\{\{[a-z_]+\}\}/);
+  });
+
+  it("keeps mutable environment facts outside the stable constitution", () => {
+    const stable = renderAgentSystemPrompt("shell.exec, fs.read", {
+      nativeTools: true,
+      stableEnvironment: true,
+    });
+    expect(stable).toContain("see REQUEST ENVIRONMENT");
+    expect(stable).not.toContain("ISO hour:");
+    expect(renderRequestEnvironmentContext()).toContain("ISO hour:");
+    expect(renderRequestEnvironmentContext()).toContain("Working directory:");
   });
 
   it("datetime floor is hour-stable across minutes", () => {

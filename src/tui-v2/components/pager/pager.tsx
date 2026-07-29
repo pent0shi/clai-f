@@ -153,6 +153,8 @@ export function Pager(props: PagerProps): ReactNode {
   const [query, setQuery] = useState("");
   const [matchIndex, setMatchIndex] = useState(-1);
   const [scrollHint, setScrollHint] = useState("top");
+  const canFollow = typeof source?.watch === "function";
+  const [following, setFollowing] = useState(canFollow);
   const matches = useMemo(
     () => findPagerMatches(searchLines, query),
     [searchLines, query],
@@ -171,15 +173,68 @@ export function Pager(props: PagerProps): ReactNode {
     }
     let active = true;
     setPageBusy(true);
-    void source.readPage(0).then((page) => {
+    // A followable source opens on its last page so the newest output is
+    // on screen immediately, exactly like `tail -f`.
+    const first = canFollow && source.readTail ? source.readTail() : source.readPage(0);
+    void first.then((page) => {
       if (!active) return;
       setArtifactPage(page);
-      setDisplayBody(page.body || "(no output)");
+      setDisplayBody(page.body || "(no output yet)");
+      if (canFollow) {
+        queueMicrotask(() => {
+          const box = scrollRef.current;
+          if (!box) return;
+          box.scrollTo(Math.max(0, box.scrollHeight - (box.viewport?.height ?? 0)));
+        });
+      }
     }).catch((error) => {
       if (active) setExportError(error instanceof Error ? error.message : String(error));
     }).finally(() => { if (active) setPageBusy(false); });
     return () => { active = false; };
-  }, [body, source]);
+  }, [body, source, canFollow]);
+
+  // Follow mode. Driven purely by the source's change notifications (already
+  // coalesced upstream), so there is no polling timer and at most one bounded
+  // page read per notification. Stops itself when the producer finishes.
+  useEffect(() => {
+    if (!source?.watch || !following) return;
+    let active = true;
+    let reading = false;
+    const pull = (): void => {
+      if (!active || reading || !source.readTail) return;
+      reading = true;
+      void source
+        .readTail()
+        .then((page) => {
+          if (!active) return;
+          setArtifactPage(page);
+          setDisplayBody(page.body || "(no output yet)");
+          queueMicrotask(() => {
+            const box = scrollRef.current;
+            if (!box) return;
+            box.scrollTo(Math.max(0, box.scrollHeight - (box.viewport?.height ?? 0)));
+            refreshScrollHint();
+          });
+        })
+        .catch(() => undefined)
+        .finally(() => {
+          reading = false;
+        });
+    };
+    const unwatch = source.watch(pull);
+    pull();
+    return () => {
+      active = false;
+      unwatch();
+    };
+  }, [source, following]);
+
+  // Leaving follow mode automatically once the job is finished keeps the
+  // footer honest instead of advertising a feed that can no longer move.
+  useEffect(() => {
+    if (!following || !source?.isGrowing) return;
+    if (!source.isGrowing()) setFollowing(false);
+  }, [following, source, artifactPage]);
 
   async function loadArtifactPage(
     offset: number,
@@ -254,7 +309,12 @@ export function Pager(props: PagerProps): ReactNode {
     const sb = scrollRef.current;
     if (!sb) return;
     const max = Math.max(0, sb.scrollHeight - sb.viewport.height);
-    sb.scrollTo(Math.max(0, Math.min(max, sb.scrollTop + delta)));
+    const next = Math.max(0, Math.min(max, sb.scrollTop + delta));
+    // Scrolling away from the end means the user wants to read history, so
+    // stop yanking the viewport back to the newest bytes. Returning to the
+    // bottom resumes following.
+    if (following && delta < 0 && next < max) setFollowing(false);
+    sb.scrollTo(next);
     refreshScrollHint();
   }
 
@@ -473,6 +533,17 @@ export function Pager(props: PagerProps): ReactNode {
         flash("view: raw");
         queueMicrotask(() => scrollRef.current?.scrollTo(0));
         break;
+      case "pager.toggle-follow":
+        if (!canFollow) {
+          flash("this view has no live source");
+          break;
+        }
+        setFollowing((current) => {
+          const next = !current;
+          flash(next ? "following live output" : "follow paused");
+          return next;
+        });
+        break;
       case "pager.close":
         // First Esc clears an active search highlight; second closes the pager.
         if (hasQuery) {
@@ -535,13 +606,30 @@ export function Pager(props: PagerProps): ReactNode {
   const metaLine = padChromeRow(metaLeft, lineCountRight, chromeCols);
 
   const viewLabel = viewMode === "formatted" ? "fmt" : "raw";
+  const growing = source?.isGrowing?.() ?? false;
+  const followLabel = following
+    ? "● following"
+    : growing
+      ? "❙❙ paused (running)"
+      : "finished";
   const footerLeft = exportError
     ? `export failed: ${exportError}`
     : statusFlash
       ? statusFlash
       : hasQuery
         ? "n/N:next  ·  esc:clear-find  ·  q:close"
-        : fitOneLine(
+        : canFollow
+          ? fitOneLine(
+              [
+                `l:${following ? "pause" : "follow"}  ·  ${followLabel}  ·  c:copy  ·  s:scrollback  ·  e:editor`,
+                `l:${following ? "pause" : "follow"}  ·  ${followLabel}  ·  c:copy  ·  e:editor`,
+                `l:${following ? "pause" : "follow"}  ·  ${followLabel}  ·  c:copy`,
+                `l:follow  ·  ${followLabel}`,
+                followLabel,
+              ],
+              Math.max(12, Math.floor(chromeCols * 0.78)),
+            )
+          : fitOneLine(
             [
               `f:format  ·  r:raw  ·  view:${viewLabel}  ·  c:copy  ·  s:scrollback  ·  e:editor`,
               `f:format  ·  r:raw  ·  view:${viewLabel}  ·  c:copy  ·  e:editor`,
