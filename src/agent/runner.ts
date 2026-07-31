@@ -214,8 +214,6 @@ import {
   looksLikeIdleOrSocialPrompt,
   looksLikeActionNarration,
   looksLikeWebActionNarration,
-  looksLikePlanNarration,
-  looksLikeErrorDiagnosisWithFixIntent,
   localHttpProbeIsFailure,
   localHttpProbeIsSuccess,
   requiresFreshWebSearch,
@@ -324,18 +322,8 @@ import {
   budgetRemaining,
   consumeBudget,
   createRecoveryBudgets,
-  freestyleClaimsAppReady,
-  looksLikeShallowPentestReport,
-  recoveryForErrorDiagnosis,
-  recoveryForFailedProbe,
-  recoveryForFreshness,
-  recoveryForMissingFeature,
-  recoveryForMissingPlan,
-  recoveryForNarration,
-  recoveryForPrematureComplete,
-  recoveryForRuntimeVerify,
-  recoveryForShallowPentest,
 } from "./must-continue.js";
+import { chooseFinalizeRecovery } from "./finalize-gate.js";
 import { outOfScopeToolMessage, scopeContextMessage } from "./scope-context.js";
 import {
   EngagementPolicyEngine,
@@ -5410,241 +5398,67 @@ export async function runAgentTurn(
             );
             continue;
           }
-          const planNarrated =
-            (buildLikeTurn || pentestLikeTurn) &&
-            !activePlan &&
-            looksLikePlanNarration(cleaned);
-          // Only force "diagnosed but not fixed" when the model is still
-          // narrating a fix without having applied one this turn. Post-fix
-          // summaries ("I've fixed…", build passed) must never re-enter.
-          const errorFixNarration =
-            !sawSuccessfulMutation &&
-            looksLikeErrorDiagnosisWithFixIntent(cleaned);
-
-          const shouldRetryBeforeFinalizing =
-            productiveSteps === 0 ||
-            planNarrated ||
-            ((narratedAction || narratedWebAction) && !informationalQuery) ||
-            (session.planApproved.value &&
-              planHasOpenWorkNow &&
-              (narratedAction || errorFixNarration)) ||
-            // errorFix only when no mutation yet (gate is in errorFixNarration)
-            (session.planApproved.value && errorFixNarration) ||
-            (buildLikeTurn && errorFixNarration);
-          if (
-            wantsAction &&
-            cleaned.trim().length > 0 &&
-            shouldRetryBeforeFinalizing
-          ) {
-            let action:
-              | ReturnType<typeof recoveryForErrorDiagnosis>
-              | ReturnType<typeof recoveryForNarration>
-              | undefined;
-            if (errorFixNarration && budgetRemaining(recovery, "errorFix")) {
-              action = recoveryForErrorDiagnosis(toolsAttached);
-            } else if (
-              budgetRemaining(recovery, "actionIntent") &&
-              planHasOpenWorkNow &&
-              session.planApproved.value
-            ) {
-              action = recoveryForNarration(toolsAttached, "plan_open");
-            } else if (
-              budgetRemaining(recovery, "actionIntent") &&
-              pentestLikeTurn
-            ) {
-              action = recoveryForNarration(toolsAttached, "pentest");
-            } else if (
-              budgetRemaining(recovery, "actionIntent") &&
-              (freshWebSearchRequired || narratedWebAction)
-            ) {
-              action = recoveryForNarration(toolsAttached, "web");
-            } else if (
-              budgetRemaining(recovery, "actionIntent") &&
-              buildLikeTurn &&
-              (planNarrated || productiveSteps > 0)
-            ) {
-              action = recoveryForNarration(toolsAttached, "build_plan_prose");
-            } else if (
-              budgetRemaining(recovery, "actionIntent") &&
-              buildLikeTurn
-            ) {
-              action = recoveryForNarration(toolsAttached, "build");
-            } else if (budgetRemaining(recovery, "actionIntent")) {
-              action = recoveryForNarration(toolsAttached, "generic");
-            }
-            if (action) {
-              consumeBudget(recovery, action.budgetKey);
-              commitAssistantRetry(assistantText.visible);
-              messages.push(recoveryUserMessage(action.message));
-              continue;
-            }
-          }
-
-          if (
-            freshWebSearchRequired &&
-            !sawFreshWebSearch &&
-            budgetRemaining(recovery, "freshnessUsed")
-          ) {
-            const action = recoveryForFreshness(
-              freshnessGuardMessage() +
-              (toolsAttached
-                ? " Call the web_search tool now."
-                : " Reply with ONLY a fenced ```tool block for web.search now."),
-            );
-            consumeBudget(recovery, action.budgetKey);
-            commitAssistantRetry(assistantText.visible);
-            messages.push(recoveryUserMessage(action.message));
-            continue;
-          }
-
-          if (
-            isPlanMode &&
-            !informationalQuery &&
-            !idleOrSocialPrompt &&
-            budgetRemaining(recovery, "forcePlan")
-          ) {
-            const planAtEnd = await loadPlan(session.sessionId).catch(
-              () => undefined,
-            );
-            if (!planAtEnd && !sawPlanCreateOk) {
-              const action = recoveryForMissingPlan(toolsAttached);
-              consumeBudget(recovery, action.budgetKey);
-              commitAssistantRetry(assistantText.visible);
-              messages.push(recoveryUserMessage(action.message));
-              continue;
-            }
-          }
-
-          if (
-            buildLike &&
-            !pentestLike &&
-            !pentestSession &&
-            session.planApproved.value &&
-            featureAppAsk &&
-            !sawFeatureImplWrite &&
-            (sawScaffoldOk || sawLocalAppMaterialWork) &&
-            productiveSteps > 0 &&
-            budgetRemaining(recovery, "featureImpl")
-          ) {
-            const action = recoveryForMissingFeature(getActiveProjectRoot());
-            consumeBudget(recovery, action.budgetKey);
-            commitAssistantRetry(assistantText.visible);
-            messages.push(recoveryUserMessage(action.message));
-            continue;
-          }
-
-          if (
-            buildLike &&
-            !pentestLike &&
-            !pentestSession &&
-            budgetRemaining(recovery, "runtimeVerify") &&
-            (!featureAppAsk || sawFeatureImplWrite)
-          ) {
-            const runtimePlan = await loadPlan(session.sessionId).catch(
-              () => undefined,
-            );
-            // Durable plan evidence or multi-signal proof this turn is enough
-            const planRuntimeOk = Boolean(
-              runtimePlan && planHasVerifiedRuntime(runtimePlan),
-            );
-            const sessionRuntimeOk =
-              sawServerStart &&
-              (sawServerTail || sawLocalHttpProbe || planRuntimeOk);
-            if (!planRuntimeOk && !sessionRuntimeOk) {
-              const codingPlanFinished = Boolean(
-                runtimePlan &&
-                session.planApproved.value &&
-                runtimePlan.kind !== "pentest" &&
-                runtimePlan.tasks.length > 0 &&
-                runtimePlan.tasks.every(
-                  (task) => task.state === "done" || task.state === "skipped",
-                ),
-              );
-              const freestyleLocalAppDone =
-                !session.planApproved.value &&
-                sawLocalAppMaterialWork &&
-                productiveSteps > 0 &&
-                freestyleClaimsAppReady(cleaned) &&
-                (getActiveProjectRoot() !== undefined ||
-                  /\b(?:npm|pnpm|yarn|bun)\s+run\s+dev\b/i.test(cleaned) ||
-                  /\bopen\s+http:\/\/localhost\b/i.test(cleaned));
-              if (codingPlanFinished || freestyleLocalAppDone) {
-                const action = recoveryForRuntimeVerify(getActiveProjectRoot());
-                consumeBudget(recovery, action.budgetKey);
-                commitAssistantRetry(assistantText.visible);
-                messages.push(recoveryUserMessage(action.message));
-                continue;
-              }
-            }
-          }
-
-          if (
-            buildLike &&
-            !pentestLike &&
-            !pentestSession &&
-            sawFailedLocalHttpProbe &&
-            !sawLocalHttpProbe &&
-            budgetRemaining(recovery, "failedProbe") &&
-            cleaned.trim().length > 0
-          ) {
-            const action = recoveryForFailedProbe();
-            consumeBudget(recovery, action.budgetKey);
-            commitAssistantRetry(assistantText.visible);
-            messages.push(recoveryUserMessage(action.message));
-            continue;
-          }
-
-          if (
-            (pentestLike || pentestSession) &&
-            budgetRemaining(recovery, "shallowPentest") &&
-            looksLikeShallowPentestReport(cleaned, {
-              productiveSteps,
-              sawActiveTest: sawActivePentestTest,
-            })
-          ) {
-            const action = recoveryForShallowPentest();
-            consumeBudget(recovery, action.budgetKey);
-            commitAssistantRetry(assistantText.visible);
-            messages.push(recoveryUserMessage(action.message));
-            continue;
-          }
-
-          if (
+          const deferResponderReport =
             session.planApproved.value &&
             budgetRemaining(recovery, "prematureComplete")
-          ) {
-            const livePlan = await loadPlan(session.sessionId).catch(
-              () => undefined,
-            );
-            const unfinished = livePlan?.tasks.filter(
-              (task) =>
-                !task.responderOwned &&
-                (task.state === "pending" || task.state === "in_progress"),
-            );
-            const deferReport = shouldYieldForDeclaredResponderDependency(
-              livePlan,
-              jobManager.getRunningJobs(session.sessionId),
-              jobManager.getPendingNotifications(session.sessionId),
-              responderWakeNotificationId,
-            );
-            if (
-              livePlan &&
-              unfinished &&
-              unfinished.length > 0 &&
-              !deferReport
-            ) {
-              const next = unfinished[0]!;
-              const action = recoveryForPrematureComplete({
-                unfinished,
-                next,
-                pentest: livePlan.kind === "pentest" || pentestSession,
-                errorFix: errorFixNarration,
-              });
-              consumeBudget(recovery, action.budgetKey);
-              commitAssistantRetry(assistantText.visible);
-              messages.push(recoveryUserMessage(action.message));
-              continue;
-            }
+              ? shouldYieldForDeclaredResponderDependency(
+                  livePlanAtCompletion,
+                  jobManager.getRunningJobs(session.sessionId),
+                  jobManager.getPendingNotifications(session.sessionId),
+                  responderWakeNotificationId,
+                )
+              : false;
+          const finalizeRecovery = chooseFinalizeRecovery({
+            cleaned,
+            recovery,
+            toolsAttached,
+            productiveSteps,
+            planApproved: session.planApproved.value,
+            planHasOpenWork: planHasOpenWorkNow,
+            activePlanExists: Boolean(activePlan),
+            wantsAction,
+            narratedAction,
+            narratedWebAction,
+            isPlanMode,
+            buildLikeTurn,
+            pentestLikeTurn,
+            buildLike,
+            pentestLike,
+            pentestSession,
+            informationalQuery,
+            idleOrSocialPrompt,
+            freshWebSearchRequired,
+            freshnessGuardText: freshWebSearchRequired
+              ? freshnessGuardMessage()
+              : "",
+            sawFreshWebSearch,
+            sawPlanCreateOk,
+            sawFeatureImplWrite,
+            sawScaffoldOk,
+            sawLocalAppMaterialWork,
+            sawServerStart,
+            sawServerTail,
+            sawLocalHttpProbe,
+            sawFailedLocalHttpProbe,
+            sawActivePentestTest,
+            sawSuccessfulMutation,
+            featureAppAsk,
+            projectRoot: getActiveProjectRoot(),
+            plan: livePlanAtCompletion
+              ? {
+                  kind: livePlanAtCompletion.kind,
+                  hasVerifiedRuntime:
+                    planHasVerifiedRuntime(livePlanAtCompletion),
+                  tasks: livePlanAtCompletion.tasks,
+                }
+              : undefined,
+            deferResponderReport,
+          });
+          if (finalizeRecovery) {
+            consumeBudget(recovery, finalizeRecovery.budgetKey);
+            commitAssistantRetry(assistantText.visible);
+            messages.push(recoveryUserMessage(finalizeRecovery.message));
+            continue;
           }
           let outcomeStatus: TurnOutcomeStatus = "succeeded";
           const remainingCriteria: string[] = [];

@@ -1,0 +1,263 @@
+/**
+ * Pure finalize-time gate: pick the recovery nudge that must replace a final
+ * answer, or nothing when the turn may finalize. No I/O, no budget mutation.
+ */
+import {
+  budgetRemaining,
+  freestyleClaimsAppReady,
+  looksLikeShallowPentestReport,
+  recoveryForErrorDiagnosis,
+  recoveryForFailedProbe,
+  recoveryForFreshness,
+  recoveryForMissingFeature,
+  recoveryForMissingPlan,
+  recoveryForNarration,
+  recoveryForPrematureComplete,
+  recoveryForRuntimeVerify,
+  recoveryForShallowPentest,
+  type RecoveryAction,
+  type RecoveryBudgets,
+} from "./must-continue.js";
+import {
+  looksLikeErrorDiagnosisWithFixIntent,
+  looksLikePlanNarration,
+} from "./tool-call-parser.js";
+
+/** Task fields the gate reads. */
+export interface FinalizeGatePlanTask {
+  id: string;
+  title: string;
+  state: string;
+  responderOwned?: boolean | undefined;
+}
+
+/** Plain-data snapshot of the live plan, resolved once by the caller. */
+export interface FinalizeGatePlan {
+  kind: string;
+  hasVerifiedRuntime: boolean;
+  tasks: readonly FinalizeGatePlanTask[];
+}
+
+/** Everything the finalize cascade reads, as data. */
+export interface FinalizeGateInput {
+  cleaned: string;
+  recovery: RecoveryBudgets;
+  toolsAttached: boolean;
+  productiveSteps: number;
+  planApproved: boolean;
+  planHasOpenWork: boolean;
+  activePlanExists: boolean;
+  wantsAction: boolean;
+  narratedAction: boolean;
+  narratedWebAction: boolean;
+  isPlanMode: boolean;
+  buildLikeTurn: boolean;
+  pentestLikeTurn: boolean;
+  buildLike: boolean;
+  pentestLike: boolean;
+  pentestSession: boolean;
+  informationalQuery: boolean;
+  idleOrSocialPrompt: boolean;
+  freshWebSearchRequired: boolean;
+  freshnessGuardText: string;
+  sawFreshWebSearch: boolean;
+  sawPlanCreateOk: boolean;
+  sawFeatureImplWrite: boolean;
+  sawScaffoldOk: boolean;
+  sawLocalAppMaterialWork: boolean;
+  sawServerStart: boolean;
+  sawServerTail: boolean;
+  sawLocalHttpProbe: boolean;
+  sawFailedLocalHttpProbe: boolean;
+  sawActivePentestTest: boolean;
+  sawSuccessfulMutation: boolean;
+  featureAppAsk: boolean;
+  projectRoot: string | undefined;
+  plan: FinalizeGatePlan | undefined;
+  deferResponderReport: boolean;
+}
+
+export function chooseFinalizeRecovery(
+  input: FinalizeGateInput,
+): RecoveryAction | undefined {
+  const { cleaned, recovery, toolsAttached, productiveSteps, plan } = input;
+
+  const planNarrated =
+    (input.buildLikeTurn || input.pentestLikeTurn) &&
+    !input.activePlanExists &&
+    looksLikePlanNarration(cleaned);
+  const errorFixNarration =
+    !input.sawSuccessfulMutation &&
+    looksLikeErrorDiagnosisWithFixIntent(cleaned);
+
+  const shouldRetryBeforeFinalizing =
+    productiveSteps === 0 ||
+    planNarrated ||
+    ((input.narratedAction || input.narratedWebAction) &&
+      !input.informationalQuery) ||
+    (input.planApproved &&
+      input.planHasOpenWork &&
+      (input.narratedAction || errorFixNarration)) ||
+    (input.planApproved && errorFixNarration) ||
+    (input.buildLikeTurn && errorFixNarration);
+  if (
+    input.wantsAction &&
+    cleaned.trim().length > 0 &&
+    shouldRetryBeforeFinalizing
+  ) {
+    let action: RecoveryAction | undefined;
+    if (errorFixNarration && budgetRemaining(recovery, "errorFix")) {
+      action = recoveryForErrorDiagnosis(toolsAttached);
+    } else if (
+      budgetRemaining(recovery, "actionIntent") &&
+      input.planHasOpenWork &&
+      input.planApproved
+    ) {
+      action = recoveryForNarration(toolsAttached, "plan_open");
+    } else if (
+      budgetRemaining(recovery, "actionIntent") &&
+      input.pentestLikeTurn
+    ) {
+      action = recoveryForNarration(toolsAttached, "pentest");
+    } else if (
+      budgetRemaining(recovery, "actionIntent") &&
+      (input.freshWebSearchRequired || input.narratedWebAction)
+    ) {
+      action = recoveryForNarration(toolsAttached, "web");
+    } else if (
+      budgetRemaining(recovery, "actionIntent") &&
+      input.buildLikeTurn &&
+      (planNarrated || productiveSteps > 0)
+    ) {
+      action = recoveryForNarration(toolsAttached, "build_plan_prose");
+    } else if (
+      budgetRemaining(recovery, "actionIntent") &&
+      input.buildLikeTurn
+    ) {
+      action = recoveryForNarration(toolsAttached, "build");
+    } else if (budgetRemaining(recovery, "actionIntent")) {
+      action = recoveryForNarration(toolsAttached, "generic");
+    }
+    if (action) return action;
+  }
+
+  if (
+    input.freshWebSearchRequired &&
+    !input.sawFreshWebSearch &&
+    budgetRemaining(recovery, "freshnessUsed")
+  ) {
+    return recoveryForFreshness(
+      input.freshnessGuardText +
+      (toolsAttached
+        ? " Call the web_search tool now."
+        : " Reply with ONLY a fenced ```tool block for web.search now."),
+    );
+  }
+
+  if (
+    input.isPlanMode &&
+    !input.informationalQuery &&
+    !input.idleOrSocialPrompt &&
+    budgetRemaining(recovery, "forcePlan")
+  ) {
+    if (!plan && !input.sawPlanCreateOk) {
+      return recoveryForMissingPlan(toolsAttached);
+    }
+  }
+
+  if (
+    input.buildLike &&
+    !input.pentestLike &&
+    !input.pentestSession &&
+    input.planApproved &&
+    input.featureAppAsk &&
+    !input.sawFeatureImplWrite &&
+    (input.sawScaffoldOk || input.sawLocalAppMaterialWork) &&
+    productiveSteps > 0 &&
+    budgetRemaining(recovery, "featureImpl")
+  ) {
+    return recoveryForMissingFeature(input.projectRoot);
+  }
+
+  if (
+    input.buildLike &&
+    !input.pentestLike &&
+    !input.pentestSession &&
+    budgetRemaining(recovery, "runtimeVerify") &&
+    (!input.featureAppAsk || input.sawFeatureImplWrite)
+  ) {
+    const planRuntimeOk = Boolean(plan && plan.hasVerifiedRuntime);
+    const sessionRuntimeOk =
+      input.sawServerStart &&
+      (input.sawServerTail || input.sawLocalHttpProbe || planRuntimeOk);
+    if (!planRuntimeOk && !sessionRuntimeOk) {
+      const codingPlanFinished = Boolean(
+        plan &&
+        input.planApproved &&
+        plan.kind !== "pentest" &&
+        plan.tasks.length > 0 &&
+        plan.tasks.every(
+          (task) => task.state === "done" || task.state === "skipped",
+        ),
+      );
+      const freestyleLocalAppDone =
+        !input.planApproved &&
+        input.sawLocalAppMaterialWork &&
+        productiveSteps > 0 &&
+        freestyleClaimsAppReady(cleaned) &&
+        (input.projectRoot !== undefined ||
+          /\b(?:npm|pnpm|yarn|bun)\s+run\s+dev\b/i.test(cleaned) ||
+          /\bopen\s+http:\/\/localhost\b/i.test(cleaned));
+      if (codingPlanFinished || freestyleLocalAppDone) {
+        return recoveryForRuntimeVerify(input.projectRoot);
+      }
+    }
+  }
+
+  if (
+    input.buildLike &&
+    !input.pentestLike &&
+    !input.pentestSession &&
+    input.sawFailedLocalHttpProbe &&
+    !input.sawLocalHttpProbe &&
+    budgetRemaining(recovery, "failedProbe") &&
+    cleaned.trim().length > 0
+  ) {
+    return recoveryForFailedProbe();
+  }
+
+  if (
+    (input.pentestLike || input.pentestSession) &&
+    budgetRemaining(recovery, "shallowPentest") &&
+    looksLikeShallowPentestReport(cleaned, {
+      productiveSteps,
+      sawActiveTest: input.sawActivePentestTest,
+    })
+  ) {
+    return recoveryForShallowPentest();
+  }
+
+  if (input.planApproved && budgetRemaining(recovery, "prematureComplete")) {
+    const unfinished = plan?.tasks.filter(
+      (task) =>
+        !task.responderOwned &&
+        (task.state === "pending" || task.state === "in_progress"),
+    );
+    if (
+      plan &&
+      unfinished &&
+      unfinished.length > 0 &&
+      !input.deferResponderReport
+    ) {
+      const next = unfinished[0]!;
+      return recoveryForPrematureComplete({
+        unfinished,
+        next,
+        pentest: plan.kind === "pentest" || input.pentestSession,
+        errorFix: errorFixNarration,
+      });
+    }
+  }
+
+  return undefined;
+}
