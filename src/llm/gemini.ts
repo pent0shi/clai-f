@@ -16,6 +16,7 @@ import {
   imageCapableMessages,
   readJson,
   readStreamLines,
+  streamIdleBudgets,
 } from "./http.js";
 import { registerProviderModels } from "./capabilities.js";
 import {
@@ -355,6 +356,8 @@ export const geminiProvider: LlmProvider = {
     const sseFrames = createSseFrameAssembler();
     for await (const line of readStreamLines(response, {
       signal: request.signal,
+      ...streamIdleBudgets(Boolean(request.thinking?.enabled)),
+      outputProgress: () => full.length + collectedParts.length,
     })) {
       const payload = sseFrames.pushLine(line);
       if (payload === undefined) continue;

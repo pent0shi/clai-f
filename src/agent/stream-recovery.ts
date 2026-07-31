@@ -45,6 +45,7 @@ export interface StreamRecoveryState {
   context: number;
   /** auth / not-found / unknown share one "structural" bucket. */
   structural: number;
+  progressed: number;
   total: number;
 }
 
@@ -56,6 +57,7 @@ export interface StreamRecoveryLimits {
   readonly maxStall: number;
   readonly maxContext: number;
   readonly maxStructural: number;
+  readonly maxProgressed: number;
   /** Hard cap across every failure class so a turn can never loop forever. */
   readonly maxTotal: number;
   /** Upper bound on any single backoff so the total wait budget stays sane. */
@@ -72,7 +74,8 @@ export const DEFAULT_STREAM_RECOVERY_LIMITS: StreamRecoveryLimits = {
   maxStall: 2,
   maxContext: 2,
   maxStructural: 1,
-  maxTotal: 10,
+  maxProgressed: 6,
+  maxTotal: 16,
   maxDelayMs: 30_000,
 };
 
@@ -212,6 +215,7 @@ export function createStreamRecoveryState(): StreamRecoveryState {
     stall: 0,
     context: 0,
     structural: 0,
+    progressed: 0,
     total: 0,
   };
 }
@@ -224,6 +228,7 @@ export function resetStreamRecoveryState(state: StreamRecoveryState): void {
   state.stall = 0;
   state.context = 0;
   state.structural = 0;
+  state.progressed = 0;
   state.total = 0;
 }
 
@@ -231,8 +236,13 @@ export function resetStreamRecoveryState(state: StreamRecoveryState): void {
 export function recordRecoveryAttempt(
   state: StreamRecoveryState,
   kind: StreamFailureKind,
+  progressed = false,
 ): void {
   state.total += 1;
+  if (progressed) {
+    state.progressed += 1;
+    return;
+  }
   switch (kind) {
     case "empty":
       state.empty += 1;
@@ -275,10 +285,14 @@ export function planStreamRecovery(input: {
   kind?: StreamFailureKind;
   state: StreamRecoveryState;
   limits?: StreamRecoveryLimits;
+  progressed?: boolean | undefined;
 }): StreamRecoveryPlan {
   const limits = input.limits ?? DEFAULT_STREAM_RECOVERY_LIMITS;
   const kind = input.kind ?? classifyStreamFailure(input.error);
   const { state } = input;
+  const progressed = input.progressed === true;
+  const attempt = (used: number, limit: number): number =>
+    progressed ? Math.min(used, Math.max(0, limit - 1)) : used;
 
   const giveUp: StreamRecoveryPlan = {
     action: "give-up",
@@ -292,12 +306,13 @@ export function planStreamRecovery(input: {
   // User cancelled, or we have spent the whole recovery budget: stop now.
   if (kind === "aborted") return giveUp;
   if (state.total >= limits.maxTotal) return giveUp;
+  if (progressed && state.progressed >= limits.maxProgressed) return giveUp;
 
   const cap = limits.maxDelayMs;
 
   switch (kind) {
     case "empty": {
-      const n = state.empty;
+      const n = attempt(state.empty, limits.maxEmpty);
       if (n >= limits.maxEmpty) return giveUp;
       return {
         action: "retry",
@@ -315,7 +330,7 @@ export function planStreamRecovery(input: {
       };
     }
     case "rate-limit": {
-      const n = state.rateLimit;
+      const n = attempt(state.rateLimit, limits.maxRateLimit);
       if (n >= limits.maxRateLimit) return giveUp;
       const delayMs = pick([8_000, 20_000, 30_000], n, cap);
       return {
@@ -332,7 +347,7 @@ export function planStreamRecovery(input: {
       };
     }
     case "server": {
-      const n = state.server;
+      const n = attempt(state.server, limits.maxServer);
       if (n >= limits.maxServer) return giveUp;
       return {
         action: "retry",
@@ -348,7 +363,7 @@ export function planStreamRecovery(input: {
       };
     }
     case "network": {
-      const n = state.network;
+      const n = attempt(state.network, limits.maxNetwork);
       if (n >= limits.maxNetwork) return giveUp;
       return {
         action: "retry",
@@ -362,7 +377,7 @@ export function planStreamRecovery(input: {
       };
     }
     case "stall": {
-      const n = state.stall;
+      const n = attempt(state.stall, limits.maxStall);
       if (n >= limits.maxStall) return giveUp;
       return {
         action: "retry",
@@ -385,7 +400,7 @@ export function planStreamRecovery(input: {
       };
     }
     case "context-overflow": {
-      const n = state.context;
+      const n = attempt(state.context, limits.maxContext);
       if (n >= limits.maxContext) return giveUp;
       return {
         action: "retry",
@@ -405,7 +420,7 @@ export function planStreamRecovery(input: {
     default: {
       // Retrying the same provider/model will not help; give the router one
       // shot at alternate providers/models, then surrender.
-      const n = state.structural;
+      const n = attempt(state.structural, limits.maxStructural);
       if (n >= limits.maxStructural) return giveUp;
       const notice =
         kind === "auth"

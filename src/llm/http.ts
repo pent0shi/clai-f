@@ -287,9 +287,22 @@ async function readBodyCapped(
  */
 export const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 240_000;
 
-export const THINKING_STREAM_IDLE_TIMEOUT_MS = 300_000;
+export const THINKING_STREAM_IDLE_TIMEOUT_MS = 600_000;
 
-export const THINKING_STREAM_INITIAL_IDLE_TIMEOUT_MS = 300_000;
+export const THINKING_STREAM_INITIAL_IDLE_TIMEOUT_MS = 600_000;
+
+export function streamIdleBudgets(reasoningEnabled: boolean): {
+  idleTimeoutMs: number;
+  outputIdleTimeoutMs: number;
+} {
+  const idleTimeoutMs = reasoningEnabled
+    ? THINKING_STREAM_IDLE_TIMEOUT_MS
+    : DEFAULT_STREAM_IDLE_TIMEOUT_MS;
+  return {
+    idleTimeoutMs,
+    outputIdleTimeoutMs: Math.round(idleTimeoutMs * 1.5),
+  };
+}
 
 /**
  * Marker appended to the message of a stall that happened on a **live**
@@ -309,6 +322,8 @@ export interface StreamLineReaderOptions {
   /** If provided, called after every read so callers can reset their own
    *  watchdogs (eg the OpenAI-compatible streamer's existing one). */
   onActivity?: (() => void) | undefined;
+  outputIdleTimeoutMs?: number | undefined;
+  outputProgress?: (() => number) | undefined;
 }
 
 
@@ -352,18 +367,57 @@ export async function* readStreamLines(
 ): AsyncGenerator<string, void, void> {
   if (!response.body) return;
   const idleTimeoutMs = options.idleTimeoutMs ?? DEFAULT_STREAM_IDLE_TIMEOUT_MS;
+  const outputIdleTimeoutMs =
+    options.outputIdleTimeoutMs ?? Math.round(idleTimeoutMs * 1.5);
+  const trackOutput = typeof options.outputProgress === "function";
   const maxBytes = options.maxBytes ?? 16 * 1024 * 1024;
   const idleController = new AbortController();
   let idleTimer: NodeJS.Timeout | undefined;
+  let outputTimer: NodeJS.Timeout | undefined;
   let idleFired = false;
+  let firedWatchdog: "transport" | "output" = "transport";
+  let lastOutputProgress = trackOutput ? options.outputProgress!() : 0;
+  const fireStall = (watchdog: "transport" | "output"): void => {
+    if (idleFired) return;
+    idleFired = true;
+    firedWatchdog = watchdog;
+    idleController.abort();
+  };
+  const clearIdleTimers = (): void => {
+    if (idleTimer) clearTimeout(idleTimer);
+    if (outputTimer) clearTimeout(outputTimer);
+    idleTimer = undefined;
+    outputTimer = undefined;
+  };
+  const armOutputTimer = (): void => {
+    if (!trackOutput) return;
+    if (outputTimer) clearTimeout(outputTimer);
+    outputTimer = setTimeout(
+      () => fireStall("output"),
+      outputIdleTimeoutMs,
+    );
+  };
   const resetIdleTimer = (): void => {
     if (idleTimer) clearTimeout(idleTimer);
-    idleTimer = setTimeout(() => {
-      idleFired = true;
-      idleController.abort();
-    }, idleTimeoutMs);
+    idleTimer = setTimeout(() => fireStall("transport"), idleTimeoutMs);
   };
+  const noteOutputProgress = (): void => {
+    if (!trackOutput) return;
+    const current = options.outputProgress!();
+    if (current <= lastOutputProgress) return;
+    lastOutputProgress = current;
+    armOutputTimer();
+  };
+  const stallError = (): ProviderError =>
+    firedWatchdog === "output"
+      ? new ProviderError(
+          `Provider stream stalled — ${STREAM_STALL_MARKER} for ${Math.round(outputIdleTimeoutMs / 1000)}s.`,
+        )
+      : new ProviderError(
+          `Provider stream stalled — no data for ${Math.round(idleTimeoutMs / 1000)}s.`,
+        );
   resetIdleTimer();
+  armOutputTimer();
   const onCallerAbort = (): void => idleController.abort(options.signal?.reason);
   options.signal?.addEventListener("abort", onCallerAbort, { once: true });
   // A caller abort must surface as an abort error, not as a clean
@@ -373,12 +427,12 @@ export async function* readStreamLines(
     (options.signal?.reason as Error | undefined) ??
     new DOMException("The operation was aborted.", "AbortError");
   if (options.signal?.aborted) {
-    if (idleTimer) clearTimeout(idleTimer);
+    clearIdleTimers();
     throw callerAbortError();
   }
   // If the idle watchdog already fired, bail before starting the loop.
   if (idleController.signal.aborted) {
-    if (idleTimer) clearTimeout(idleTimer);
+    clearIdleTimers();
     return;
   }
 
@@ -396,32 +450,21 @@ export async function* readStreamLines(
 
   try {
     while (true) {
+      noteOutputProgress();
       if (idleController.signal.aborted) {
-        if (idleFired) {
-          throw new ProviderError(
-            `Provider stream stalled — no data for ${Math.round(idleTimeoutMs / 1000)}s.`,
-          );
-        }
+        if (idleFired) throw stallError();
         throw callerAbortError();
       }
       let readResult: ReadableStreamReadResult<Uint8Array>;
       try {
         readResult = await readWithAbort(reader, idleController.signal);
       } catch (error) {
-        if (idleFired) {
-          throw new ProviderError(
-            `Provider stream stalled — no data for ${Math.round(idleTimeoutMs / 1000)}s.`,
-          );
-        }
+        if (idleFired) throw stallError();
         throw error;
       }
       const { done, value } = readResult;
       if (done) {
-        if (idleFired) {
-          throw new ProviderError(
-            `Provider stream stalled — no data for ${Math.round(idleTimeoutMs / 1000)}s.`,
-          );
-        }
+        if (idleFired) throw stallError();
         break;
       }
       if (value) {
@@ -441,7 +484,7 @@ export async function* readStreamLines(
     }
     if (buffer.length > 0) yield buffer;
   } finally {
-    if (idleTimer) clearTimeout(idleTimer);
+    clearIdleTimers();
     options.signal?.removeEventListener("abort", onCallerAbort);
     idleController.signal.removeEventListener("abort", cancelReaderOnAbort);
     

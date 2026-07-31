@@ -163,6 +163,10 @@ import {
 } from "./plan-mode-reminders.js";
 import { LoopGuard } from "./loop-guard.js";
 import {
+  appendInterruptedReasoning,
+  interruptedReasoningBrief,
+} from "./interrupted-reasoning.js";
+import {
   CompactionAttemptLedger,
   compactionAttemptKey,
 } from "./compaction-attempt.js";
@@ -559,6 +563,7 @@ export async function runAgentTurn(
   // at the top of every loop iteration.
   let visibleCommitted = false;
   let interruptedVisible = "";
+  let interruptedReasoning = "";
   const trimExactContinuationOverlap = (
     previous: string,
     current: string,
@@ -4531,12 +4536,14 @@ export async function runAgentTurn(
             // We only rethrow (stop the turn) in the worst case: every approach
             // for that failure class is exhausted or the total budget is spent.
             const failureKind = classifyStreamFailure(streamError);
+            const partialStream =
+              streamAlreadyEmitted(streamError) || accumulatedText.length > 0;
             const plan = planStreamRecovery({
               kind: failureKind,
               state: recoveryState,
+              progressed: partialStream,
             });
 
-            const partialStream = streamAlreadyEmitted(streamError) || accumulatedText.length > 0;
             let continuationNudge = "";
             if (partialStream) {
               spinner.stop();
@@ -4563,6 +4570,12 @@ export async function runAgentTurn(
               if (partial.hasThinking && !hasShownToolCall) {
                 writeThinkingBlock(partial.thinkContent);
               }
+              if (partial.hasThinking) {
+                interruptedReasoning = appendInterruptedReasoning(
+                  interruptedReasoning,
+                  partial.thinkContent,
+                );
+              }
               for (const deferred of deferredToolCalls) {
                 if (!deferred.shown || deferred.call.name === "…") continue;
                 writeToolBlocked(
@@ -4572,8 +4585,14 @@ export async function runAgentTurn(
                   chalk.yellow("  ⚠ incomplete tool call discarded after stream interruption\n"),
                 );
               }
-              continuationNudge =
-                "The provider stream was interrupted after partial output. Continue from the exact stopping point without repeating prior text. Any incomplete tool call was discarded and must be reissued in full.";
+              continuationNudge = [
+                partialVisible
+                  ? "The provider stream was interrupted after partial output. Continue from the exact stopping point without repeating prior text. Any incomplete tool call was discarded and must be reissued in full."
+                  : "The provider stream was interrupted before any answer was produced. Any incomplete tool call was discarded and must be reissued in full. Do not restart your analysis from the beginning.",
+                interruptedReasoningBrief(interruptedReasoning),
+              ]
+                .filter((part): part is string => Boolean(part))
+                .join("\n\n");
               const restartNotice =
                 plan.action === "give-up"
                   ? "partial response preserved before terminal provider failure"
@@ -4588,7 +4607,7 @@ export async function runAgentTurn(
             if (plan.action === "give-up") {
               throw streamError;
             }
-            recordRecoveryAttempt(recoveryState, failureKind);
+            recordRecoveryAttempt(recoveryState, failureKind, partialStream);
 
             if (plan.notice) {
               writeNotice(
@@ -4695,6 +4714,7 @@ export async function runAgentTurn(
           }
           pushAssistantHistory(historyText);
           interruptedVisible = "";
+          interruptedReasoning = "";
         };
 
 
@@ -5648,6 +5668,7 @@ export async function runAgentTurn(
           emit({ type: "assistant-message", text: "" });
         }
         interruptedVisible = "";
+        interruptedReasoning = "";
 
         type BoundCall = {
           index: number;

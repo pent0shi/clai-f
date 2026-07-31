@@ -12,6 +12,7 @@ import {
   openAiCompatiblePing,
   openAiCompatibleStream,
   toCompletionResult,
+  streamIdleBudgets,
   readJson,
   ingestOpenAiModelCatalog,
 } from "./http.js";
@@ -210,13 +211,19 @@ export const modalProvider: LlmProvider = {
       reasoningStyle: "modal",
       // Endpoints scale to zero, so the first request after idle pays a cold
       // start. Give the initial byte a generous budget before declaring a stall.
-      initialIdleTimeoutMs: 240_000,
+      initialIdleTimeoutMs: Math.max(
+        240_000,
+        streamIdleBudgets(Boolean(request.thinking?.enabled)).idleTimeoutMs,
+      ),
       // The mid-stream budget must outlast a whole buffered tool call: the
       // tool-call parser in front of these endpoints emits nothing while it
       // accumulates a large `arguments` string, so a model writing one big file
       // is silent on the wire for the full generation. The old 90s budget
       // aborted those healthy streams at firstToken+90s and retried three times.
-      idleTimeoutMs: 300_000,
+      idleTimeoutMs: Math.max(
+        300_000,
+        streamIdleBudgets(Boolean(request.thinking?.enabled)).idleTimeoutMs,
+      ),
       tools: request.tools,
       toolChoice: request.toolChoice,
       parallelToolCalls: request.parallelToolCalls,

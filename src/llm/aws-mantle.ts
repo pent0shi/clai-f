@@ -19,6 +19,7 @@ import {
   createSseFrameAssembler,
   imageCapableMessages,
   ingestOpenAiModelCatalog,
+  streamIdleBudgets,
 } from "./http.js";
 import {
   anthropicToolBodyFields,
@@ -303,8 +304,12 @@ export const mantleProvider: LlmProvider = {
     };
 
     const sseFrames = createSseFrameAssembler();
+    let outputProgress = 0;
+    const toolArgumentBytes = new Map<number, number>();
     for await (const line of readStreamLines(response, {
       signal: request.signal,
+      ...streamIdleBudgets(Boolean(request.thinking?.enabled)),
+      outputProgress: () => outputProgress + full.length,
     })) {
       const payload = sseFrames.pushLine(line);
       if (payload === undefined) continue;
@@ -367,6 +372,15 @@ export const mantleProvider: LlmProvider = {
             if (inThinking) exitThinking();
             full += deltas.textDelta;
             onToken(deltas.textDelta);
+          }
+          if (deltas.toolCallDelta) {
+            const { index, argumentsBytes } = deltas.toolCallDelta;
+            const seen = toolArgumentBytes.get(index) ?? 0;
+            const next = Math.max(seen, argumentsBytes ?? seen + 1);
+            if (next > seen) {
+              toolArgumentBytes.set(index, next);
+              outputProgress += next - seen;
+            }
           }
           if (deltas.toolCallDelta && request.onToolCallDelta) {
             const d = deltas.toolCallDelta;

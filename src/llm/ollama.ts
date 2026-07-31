@@ -4,7 +4,12 @@ import {
   type LlmProvider,
   type ProviderAuth,
 } from "./provider.js";
-import { imageCapableMessages, readJson, readStreamLines } from "./http.js";
+import {
+  imageCapableMessages,
+  readJson,
+  readStreamLines,
+  streamIdleBudgets,
+} from "./http.js";
 import {
   parseOllamaToolCalls,
   toOllamaToolMessages,
@@ -161,6 +166,8 @@ export const ollamaProvider: LlmProvider = {
 
     for await (const line of readStreamLines(response, {
       signal: request.signal,
+      ...streamIdleBudgets(Boolean(request.thinking?.enabled)),
+      outputProgress: () => full.length + toolCalls.length,
     })) {
       const trimmed = line.trim();
       if (!trimmed) continue;

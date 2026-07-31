@@ -14,6 +14,7 @@ import {
   imageCapableMessages,
   readJson,
   readStreamLines,
+  streamIdleBudgets,
 } from "./http.js";
 import {
   anthropicToolBodyFields,
@@ -279,8 +280,12 @@ export const anthropicProvider: LlmProvider = {
     };
 
     const sseFrames = createSseFrameAssembler();
+    let outputProgress = 0;
+    const toolArgumentBytes = new Map<number, number>();
     for await (const line of readStreamLines(response, {
       signal: request.signal,
+      ...streamIdleBudgets(Boolean(request.thinking?.enabled)),
+      outputProgress: () => outputProgress,
     })) {
       const payload = sseFrames.pushLine(line);
       if (payload === undefined) continue;
@@ -339,12 +344,23 @@ export const anthropicProvider: LlmProvider = {
           if (deltas.thinkingDelta) {
             enterThinking();
             full += deltas.thinkingDelta;
+            outputProgress += deltas.thinkingDelta.length;
             onToken(deltas.thinkingDelta);
           }
           if (deltas.textDelta) {
             if (inThinking) exitThinking();
             full += deltas.textDelta;
+            outputProgress += deltas.textDelta.length;
             onToken(deltas.textDelta);
+          }
+          if (deltas.toolCallDelta) {
+            const { index, argumentsBytes } = deltas.toolCallDelta;
+            const seen = toolArgumentBytes.get(index) ?? 0;
+            const next = Math.max(seen, argumentsBytes ?? seen + 1);
+            if (next > seen) {
+              toolArgumentBytes.set(index, next);
+              outputProgress += next - seen;
+            }
           }
           if (deltas.toolCallDelta && request.onToolCallDelta) {
             const d = deltas.toolCallDelta;

@@ -9,6 +9,7 @@ import {
   openAiCompatiblePing,
   openAiCompatibleStream,
   toCompletionResult,
+  streamIdleBudgets,
   readJson,
   ingestOpenAiModelCatalog,
 } from "./http.js";
@@ -148,8 +149,10 @@ export const nvidiaProvider: LlmProvider = {
       onToolCallDelta: request.onToolCallDelta,
       reasoning: request.thinking,
       reasoningStyle: "nvidia",
-      // Longer first-byte budget for NIM cold starts; shared mid-stream budget.
-      initialIdleTimeoutMs: NVIDIA_FIRST_BYTE_IDLE_TIMEOUT_MS,
+      initialIdleTimeoutMs: Math.max(
+        NVIDIA_FIRST_BYTE_IDLE_TIMEOUT_MS,
+        streamIdleBudgets(Boolean(request.thinking?.enabled)).idleTimeoutMs,
+      ),
       tools: request.tools,
       toolChoice: request.toolChoice,
       parallelToolCalls: request.parallelToolCalls,
