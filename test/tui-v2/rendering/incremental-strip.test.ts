@@ -98,6 +98,11 @@ describe("incremental tool-surface stripping (TUI-003)", () => {
       state,
       seq.build("tool-call", { toolCallId: asToolCallId("c1"), name: "fs.read", argsDisplay: "a" }, turnId),
     );
+    expect(state.assistantStripStreams.size).toBe(1);
+    state = applyAppEvent(
+      state,
+      seq.build("tool-started", { toolCallId: asToolCallId("c1") }, turnId),
+    );
     expect(state.assistantStripStreams.size).toBe(0);
   });
 });

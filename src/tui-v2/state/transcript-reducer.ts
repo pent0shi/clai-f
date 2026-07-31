@@ -336,20 +336,14 @@ export function applyAppEvent(state: TranscriptState, event: AnyAppEvent): Trans
       return withSeq;
 
     case "tool-call": {
-      // Close open streams so cards never interleave under live thinking /
-      // raw fence text. Then append the tool row (thinking → response → tools).
-      // Status starts as "queued" until tool-started — so dns/http don't look
-      // "running" while stuck behind a long pentest.recon/nmap.
-      // A tool call closes the assistant row as well: prose emitted after the
-      // tool must open a new row *below* the card instead of being appended to
-      // the row that was painted above it.
-      const cleaned = closePendingAssistant(
-        discardPendingToolFenceStream(closePendingThinking(withSeq)),
+      const cleaned = discardPendingToolFenceStream(
+        closePendingThinking(withSeq),
       );
       for (let index = cleaned.order.length - 1; index >= 0; index -= 1) {
         const existing = cleaned.byId.get(cleaned.order[index]!);
         if (
           existing?.kind === "tool" &&
+          existing.status === "queued" &&
           existing.turnId === event.turnId &&
           existing.toolCallId === event.payload.toolCallId
         ) {
@@ -389,20 +383,23 @@ export function applyAppEvent(state: TranscriptState, event: AnyAppEvent): Trans
     }
 
     case "tool-started": {
+      const started = closePendingAssistant(
+        discardPendingToolFenceStream(closePendingThinking(withSeq)),
+      );
       let startedName: string | undefined;
-      for (let i = withSeq.order.length - 1; i >= 0; i -= 1) {
-        const it = withSeq.byId.get(withSeq.order[i]!);
+      for (let i = started.order.length - 1; i >= 0; i -= 1) {
+        const it = started.byId.get(started.order[i]!);
         if (it?.kind === "tool" && it.toolCallId === event.payload.toolCallId) {
           startedName = it.name;
           break;
         }
       }
       return {
-        ...updateToolItem(withSeq, event.payload.toolCallId, (item) => ({
+        ...updateToolItem(started, event.payload.toolCallId, (item) => ({
           ...item,
           status: item.status === "queued" ? "running" : item.status,
         })),
-        runningStatus: startedName ?? withSeq.runningStatus,
+        runningStatus: startedName ?? started.runningStatus,
       };
     }
 

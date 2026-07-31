@@ -557,6 +557,42 @@ export async function runAgentTurn(
   // the normal tool path already surfaced, which would render it twice. Reset
   // at the top of every loop iteration.
   let visibleCommitted = false;
+  let interruptedVisible = "";
+  const trimExactContinuationOverlap = (
+    previous: string,
+    current: string,
+    minLength = 32,
+  ): string => {
+    if (previous.length > 0 && current.startsWith(previous)) {
+      return current.slice(previous.length);
+    }
+    const maxLength = Math.min(previous.length, current.length);
+    if (maxLength < minLength) return current;
+    const pattern = current.slice(0, maxLength);
+    const fallback = new Uint32Array(maxLength);
+    for (let index = 1, matched = 0; index < maxLength; index += 1) {
+      while (matched > 0 && pattern[index] !== pattern[matched]) {
+        matched = fallback[matched - 1]!;
+      }
+      if (pattern[index] === pattern[matched]) matched += 1;
+      fallback[index] = matched;
+    }
+    let matched = 0;
+    for (
+      let index = previous.length - maxLength;
+      index < previous.length;
+      index += 1
+    ) {
+      while (matched > 0 && previous[index] !== pattern[matched]) {
+        matched = fallback[matched - 1]!;
+      }
+      if (previous[index] === pattern[matched]) matched += 1;
+      if (matched === maxLength && index < previous.length - 1) {
+        matched = fallback[matched - 1]!;
+      }
+    }
+    return matched >= minLength ? current.slice(matched) : current;
+  };
   const noopSpinner: ThinkingSpinner = {
     setLabel: () => { },
     bumpReasoning: () => { },
@@ -764,6 +800,7 @@ export async function runAgentTurn(
     status: TurnOutcomeStatus = "succeeded",
     remainingCriteria: readonly string[] = [],
     reason?: string,
+    displayAnswer?: string,
   ): import("./turn-outcome.js").TurnOutcome => {
     releaseUnreadResponderClaims();
     const outcome = createTurnOutcome(
@@ -775,13 +812,22 @@ export async function runAgentTurn(
         reason,
       }),
     );
-    const rendered = renderTurnOutcome(outcome, {
+    const renderOptions = {
       diagnostics: !suppressOutcomeDiagnostics,
-    });
-    writeAssistantMessage(rendered);
+    };
+    const rendered = renderTurnOutcome(outcome, renderOptions);
+    const displayRendered =
+      displayAnswer === undefined
+        ? rendered
+        : renderTurnOutcome({ ...outcome, answer: displayAnswer }, renderOptions);
+    if (displayRendered.trim()) {
+      writeAssistantMessage(displayRendered);
+    } else if (!writesDirectly) {
+      emit({ type: "assistant-message", text: "" });
+    }
     if (options.onMessages) {
       try {
-        options.onMessages(buildTurnHistory(liveMessages, rendered));
+        options.onMessages(buildTurnHistory(liveMessages, displayRendered));
       } catch {
         // Persisting history must never break the turn.
       }
@@ -4118,6 +4164,7 @@ export async function runAgentTurn(
         thinkContent: string;
         hasThinking: boolean;
       };
+      let canonicalAssistantVisible = "";
       let recoveredFromBareJson = false;
 
       if (pendingCalls.length > 0) {
@@ -4475,16 +4522,20 @@ export async function runAgentTurn(
               const hasShownToolCall = deferredToolCalls.some(
                 (entry) => entry.shown,
               );
-              const partialVisible = textBeforeToolCall(
+              const rawPartialVisible = textBeforeToolCall(
                 stripThinking(collapseRepeatedText(accumulatedText)).visible,
-              ).trim();
+              );
+              const normalizedPartialVisible = trimExactContinuationOverlap(
+                interruptedVisible,
+                rawPartialVisible,
+              );
+              const partialVisible = normalizedPartialVisible.trim();
               if (partialVisible) {
-                if (!hasShownToolCall) {
-                  writeAssistantMessage(partialVisible);
-                }
+                writeAssistantMessage(partialVisible);
                 pushAssistantHistory(partialVisible);
-              } else if (!writesDirectly && !hasShownToolCall) {
-                emit({ type: "assistant-message", text: partial.visible });
+                interruptedVisible += normalizedPartialVisible;
+              } else if (!writesDirectly) {
+                emit({ type: "assistant-message", text: "" });
               }
               if (partial.hasThinking && !hasShownToolCall) {
                 writeThinkingBlock(partial.thinkContent);
@@ -4591,12 +4642,20 @@ export async function runAgentTurn(
           (toolsAttached && !isTextOnlyModel(provider, model));
 
         const assistantTextResult = rememberThinkingFromText(completion.text);
-        assistantText = assistantTextResult;
+        const continuedVisible = trimExactContinuationOverlap(
+          interruptedVisible,
+          assistantTextResult.visible,
+        );
+        canonicalAssistantVisible = interruptedVisible + continuedVisible;
+        assistantText = {
+          ...assistantTextResult,
+          visible: continuedVisible,
+        };
         const commitAssistantRetry = (historyText: string): void => {
           const hasShownToolCall = deferredToolCalls.some((entry) => entry.shown);
           if (!hasShownToolCall) {
             const displayText = textBeforeToolCall(
-              stripThinking(collapseRepeatedText(completion.text)).visible,
+              collapseRepeatedText(assistantText.visible),
             ).trim();
             if (displayText) {
               writeAssistantMessage(displayText);
@@ -4611,6 +4670,7 @@ export async function runAgentTurn(
             }
           }
           pushAssistantHistory(historyText);
+          interruptedVisible = "";
         };
 
 
@@ -4819,7 +4879,7 @@ export async function runAgentTurn(
         }
 
 
-        if (!assistantText.visible.trim() && !call) {
+        if (!canonicalAssistantVisible.trim() && !call) {
           emptyVisibleRetries += 1;
           if (emptyVisibleRetries <= 3) {
             if (assistantText.hasThinking) {
@@ -4840,9 +4900,7 @@ export async function runAgentTurn(
               );
             }
             if (assistantText.hasThinking) retryWithoutThinking = true;
-            commitAssistantRetry(
-              stripThinking(collapseRepeatedText(completion.text)).visible,
-            );
+            commitAssistantRetry(assistantText.visible);
             // Keep nudges SHORT — cheap models lose the key instruction in long text.
             const buildNudge =
               freshWebSearchRequired && !sawFreshWebSearch
@@ -5133,8 +5191,11 @@ export async function runAgentTurn(
             // Exhausted retries — fall through to the normal path.
           }
 
-          const cleaned = collapseRepeatedText(
+          const displayCleaned = collapseRepeatedText(
             stripSentinelTokens(assistantText.visible),
+          );
+          const cleaned = collapseRepeatedText(
+            stripSentinelTokens(canonicalAssistantVisible),
           );
 
           const narratedAction = looksLikeActionNarration(cleaned);
@@ -5539,6 +5600,7 @@ export async function runAgentTurn(
               : outcomeStatus === "partial"
                 ? "Required outcome criteria remain unsupported by current evidence."
                 : undefined,
+            displayCleaned,
           );
         }
 
@@ -5549,12 +5611,12 @@ export async function runAgentTurn(
           : nativeToolCalls.length
             ? assistantText.visible.trim()
             : textBeforeToolCall(assistantText.visible);
-        if (
-          beforeTool &&
-          !deferredToolCalls.some((entry) => entry.shown)
-        ) {
+        if (beforeTool) {
           writeAssistantMessage(beforeTool);
+        } else if (deltaParser) {
+          emit({ type: "assistant-message", text: "" });
         }
+        interruptedVisible = "";
 
         type BoundCall = {
           index: number;

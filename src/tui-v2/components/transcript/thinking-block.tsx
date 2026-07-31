@@ -18,6 +18,7 @@
 import { useMemo, type ReactNode } from "react";
 import { TextAttributes, type MouseEvent } from "@opentui/core";
 import { useTerminalDimensions } from "@opentui/react";
+import stringWidth from "string-width";
 import type { ThinkingItem } from "../../state/transcript-types.js";
 import type { Theme } from "../../rendering/theme.js";
 import { SELECTABLE_LINE_STYLE } from "./selectable-line.js";
@@ -71,7 +72,8 @@ export function ThinkingBlock(props: {
     return source
       .replace(/\r\n/g, "\n")
       .split("\n")
-      .flatMap((line) => wrapPagerLine(line, wrapWidth));
+      .flatMap((line) => wrapPagerLine(line, wrapWidth))
+      .map((line) => line + " ".repeat(Math.max(0, wrapWidth - stringWidth(line))));
   }, [showBody, item.content, item.streaming, wrapWidth]);
 
   return (
@@ -92,24 +94,19 @@ export function ThinkingBlock(props: {
           style={{
             flexDirection: "column",
             paddingLeft: BODY_INDENT,
-            width: "100%",
-            // Reasoning is the only body whose source text is unbounded, so
-            // clip here as well as pre-wrapping: a stray overlong token must
-            // never paint into cells outside this pane, which the renderer
-            // does not repaint and would leave streaked with fragments.
+            width: wrapWidth + BODY_INDENT,
             overflow: "hidden",
           }}
         >
           {bodyLines.map((content, index) => (
-            // Pre-wrapped above, so OpenTUI must not re-wrap: its own wrap uses
-            // the measured box which overflowed the pane by a few columns.
             <text
               key={index}
-              content={content.length === 0 ? " " : content}
+              content={content}
               selectable
               wrapMode="none"
               style={{
                 ...SELECTABLE_LINE_STYLE,
+                width: wrapWidth,
                 fg: theme.thinking,
                 attributes: TextAttributes.ITALIC,
               }}

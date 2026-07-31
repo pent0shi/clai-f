@@ -388,11 +388,10 @@ describe("transcript reducer (V2-050)", () => {
     expect((items[1] as ThinkingItem).streaming).toBe(false);
   });
 
-  it("opens a new assistant row below the tool card for post-tool prose", () => {
+  it("keeps pre-tool prose open through preview and closes it when execution starts", () => {
     const seq = buildSequencer();
     const turnId = asTurnId("turn-1");
     let state = EMPTY_TRANSCRIPT_STATE;
-    // Pre-tool prose is still streaming when the tool call arrives.
     state = applyAppEvent(
       state,
       seq.build("assistant-delta", { text: "I'll inspect the config." }, turnId),
@@ -402,6 +401,23 @@ describe("transcript reducer (V2-050)", () => {
       seq.build(
         "tool-call",
         { toolCallId: asToolCallId("c1"), name: "fs.read", argsDisplay: "config.json" },
+        turnId,
+      ),
+    );
+    expect(state.pendingAssistantId).toBeDefined();
+    state = applyAppEvent(
+      state,
+      seq.build(
+        "assistant-delta",
+        { text: " Checking the active value." },
+        turnId,
+      ),
+    );
+    state = applyAppEvent(
+      state,
+      seq.build(
+        "tool-started",
+        { toolCallId: asToolCallId("c1") },
         turnId,
       ),
     );
@@ -421,7 +437,9 @@ describe("transcript reducer (V2-050)", () => {
 
     const items = transcriptItems(state);
     expect(items.map((item) => item.kind)).toEqual(["assistant", "tool", "assistant"]);
-    expect((items[0] as AssistantItem).text).toBe("I'll inspect the config.");
+    expect((items[0] as AssistantItem).text).toBe(
+      "I'll inspect the config. Checking the active value.",
+    );
     expect((items[0] as AssistantItem).streaming).toBe(false);
     expect((items[2] as AssistantItem).text).toBe("The setting is enabled.");
   });
@@ -567,23 +585,35 @@ describe("transcript reducer (V2-050)", () => {
 
   it("gives repeated legacy tool ids unique transcript rows", () => {
     const seq = buildSequencer();
+    const turnId = asTurnId("turn-1");
     let state = EMPTY_TRANSCRIPT_STATE;
     state = applyAppEvent(
       state,
-      seq.build("tool-call", { toolCallId: asToolCallId("tool-1"), name: "fs.read", argsDisplay: "first" }, asTurnId("turn-1")),
+      seq.build("tool-call", { toolCallId: asToolCallId("tool-1"), name: "fs.read", argsDisplay: "first" }, turnId),
     );
     state = applyAppEvent(
       state,
-      seq.build("tool-result", { toolCallId: asToolCallId("tool-1"), ok: true, summary: "done" }, asTurnId("turn-1")),
+      seq.build("tool-blocked", { toolCallId: asToolCallId("tool-1"), name: "fs.read", reason: "interrupted" }, turnId),
     );
     state = applyAppEvent(
       state,
-      seq.build("tool-call", { toolCallId: asToolCallId("tool-1"), name: "fs.read", argsDisplay: "second" }, asTurnId("turn-2")),
+      seq.build("assistant-delta", { text: "Retrying with complete arguments." }, turnId),
+    );
+    state = applyAppEvent(
+      state,
+      seq.build("tool-call", { toolCallId: asToolCallId("tool-1"), name: "fs.read", argsDisplay: "second" }, turnId),
+    );
+    state = applyAppEvent(
+      state,
+      seq.build("tool-started", { toolCallId: asToolCallId("tool-1") }, turnId),
     );
 
-    const tools = transcriptItems(state).filter((item): item is ToolItem => item.kind === "tool");
+    const items = transcriptItems(state);
+    const tools = items.filter((item): item is ToolItem => item.kind === "tool");
+    expect(items.map((item) => item.kind)).toEqual(["tool", "assistant", "tool"]);
     expect(tools).toHaveLength(2);
     expect(new Set(tools.map((item) => item.id)).size).toBe(2);
+    expect(tools.map((item) => item.status)).toEqual(["blocked", "running"]);
     expect(() => normalizeSemanticDocument(extractTranscriptSemanticDocument(state))).not.toThrow();
   });
 
