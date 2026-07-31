@@ -16,6 +16,8 @@ import { getToolDefinitions } from "../tools/definitions.js";
 import {
   appendAssistantWithTools,
   appendToolResult,
+  ensureUniqueToolCallIds,
+  toolCallIdsInHistory,
 } from "../agent/tool-history.js";
 
 
@@ -431,17 +433,23 @@ async function resolveAskAnswer(
       // was already streamed to the display.
       return text;
     }
+    const historyNativeCalls = roundResult.toolCalls?.length
+      ? ensureUniqueToolCallIds(
+          roundResult.toolCalls.map((c, index) => ({
+            id: nativeIds[index] ?? syntheticToolCallId(index),
+            name: c.name,
+            args: c.args,
+          })),
+          toolCallIdsInHistory(messages),
+        )
+      : [];
     // Record the model's tool-call turn, then run the read-only tools and
     // feed their outputs back so the next round can synthesize.
-    if (roundResult.toolCalls?.length) {
+    if (historyNativeCalls.length) {
       appendAssistantWithTools(
         messages,
         stripToolCallSyntax(text),
-        roundResult.toolCalls.map((c, i) => ({
-          id: nativeIds[i] ?? syntheticToolCallId(i),
-          name: c.name,
-          args: c.args,
-        })),
+        historyNativeCalls,
       );
     } else {
       messages.push({ role: "assistant", content: text });
@@ -484,10 +492,10 @@ async function resolveAskAnswer(
       });
       const resultBody = `Result of ${call.name}(${JSON.stringify(call.args)}):\n${truncateToolOutput(output, call.name)}`;
       if (resultImages?.length) viewedImages.push(...resultImages);
-      if (roundResult.toolCalls?.length) {
+      if (historyNativeCalls.length) {
         appendToolResult(
           messages,
-          nativeIds[sourceIndex] ?? syntheticToolCallId(callIndex),
+          historyNativeCalls[sourceIndex]?.id ?? syntheticToolCallId(callIndex),
           resultBody,
           call.name,
           ok,
@@ -499,7 +507,7 @@ async function resolveAskAnswer(
         });
       }
     }
-    if (roundResult.toolCalls?.length) {
+    if (historyNativeCalls.length) {
       for (const [sourceIndex, omitted] of allCalls.entries()) {
         if (completedNativeCallIndices.has(sourceIndex)) continue;
         const reason = ASK_RESEARCH_TOOLS.has(omitted.name)
@@ -507,7 +515,7 @@ async function resolveAskAnswer(
           : `Skipped ${omitted.name}: it is not a read-only research tool and cannot be combined with this research tool-call group.`;
         appendToolResult(
           messages,
-          nativeIds[sourceIndex] ?? syntheticToolCallId(sourceIndex),
+          historyNativeCalls[sourceIndex]?.id ?? syntheticToolCallId(sourceIndex),
           reason,
           omitted.name,
           false,

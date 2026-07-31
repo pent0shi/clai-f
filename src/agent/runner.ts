@@ -99,6 +99,7 @@ import {
 import {
   appendAssistantWithTools,
   ensureUniqueToolCallIds,
+  toolCallIdsInHistory,
   appendToolResult,
   assertValidToolProtocol,
   fillMissingToolResults,
@@ -4849,21 +4850,28 @@ export async function runAgentTurn(
                     );
                     // Pair assistant tool_calls with synthetic results so the
                     // next turn is not orphaned, then nudge for append.
+                    const salvageHistoryCalls = ensureUniqueToolCallIds(
+                      nativeToolCalls,
+                      toolCallIdsInHistory(messages),
+                    );
+                    const salvagedCallIndex = nativeToolCalls.indexOf(writeTc);
+                    const salvagedCallId =
+                      salvageHistoryCalls[salvagedCallIndex]?.id ?? writeTc.id;
                     appendAssistantWithTools(
                       messages,
                       assistantText.visible,
-                      nativeToolCalls,
+                      salvageHistoryCalls,
                       completion.reasoningBlock,
                     );
-                    for (const tc of nativeToolCalls) {
+                    for (const tc of salvageHistoryCalls) {
                       appendToolResult(
                         messages,
                         tc.id,
-                        tc.id === writeTc.id
+                        tc.id === salvagedCallId
                           ? `Tool ${tc.name} result (exit=0, ok=true):\nSalvaged partial write: ${lineCount} lines to ${salvaged.path}`
                           : `Tool ${tc.name} result (exit=1, ok=false):\nCancelled — sibling write was truncated and salvaged.`,
                         tc.name,
-                        tc.id === writeTc.id,
+                        tc.id === salvagedCallId,
                       );
                     }
                     const priorBytes = writeResult.bytesOnDisk;
@@ -5738,6 +5746,7 @@ export async function runAgentTurn(
         // → model thrash-retries tools that already succeeded in the UI.
         const historyNativeCalls = ensureUniqueToolCallIds(
           bound.map((b) => b.native),
+          toolCallIdsInHistory(messages),
         );
         for (let i = 0; i < bound.length; i++) {
           const fixed = historyNativeCalls[i]!;

@@ -3,24 +3,113 @@ import { syntheticToolCallId } from "../llm/tool-protocol.js";
 import { slimToolArgs } from "./message-slim.js";
 import { isSessionStateMessage } from "./session-state.js";
 
+function nextUniqueToolCallId(index: number, seen: Set<string>): string {
+  let id = syntheticToolCallId(index);
+  while (seen.has(id)) id = syntheticToolCallId(index);
+  return id;
+}
+
+/** All non-empty native tool-call ids already reserved by a transcript. */
+export function toolCallIdsInHistory(
+  messages: readonly ChatMessage[],
+): Set<string> {
+  const ids = new Set<string>();
+  for (const message of messages) {
+    if (message.role !== "assistant" || !message.toolCalls?.length) continue;
+    for (const call of message.toolCalls) {
+      const id = typeof call.id === "string" ? call.id.trim() : "";
+      if (id) ids.add(id);
+    }
+  }
+  return ids;
+}
+
 /**
  * Ensure every tool call has a unique non-empty id before history append.
- * Empty/duplicate ids make results look orphaned, then repair injects
- * placeholders and models thrash re-running successful tools.
+ * `reservedIds` closes the provider-reuse case: some gateways reuse ids across
+ * separate assistant turns even though the wire protocol requires transcript-
+ * wide uniqueness.
  */
 export function ensureUniqueToolCallIds(
   calls: readonly NativeToolCall[],
+  reservedIds: ReadonlySet<string> = new Set<string>(),
 ): NativeToolCall[] {
-  const seen = new Set<string>();
+  const seen = new Set(
+    [...reservedIds]
+      .map((id) => id.trim())
+      .filter(Boolean),
+  );
   return calls.map((tc, index) => {
     let id = typeof tc.id === "string" ? tc.id.trim() : "";
-    if (!id || seen.has(id)) {
-      id = syntheticToolCallId(index);
-      while (seen.has(id)) id = syntheticToolCallId(index);
-    }
+    if (!id || seen.has(id)) id = nextUniqueToolCallId(index, seen);
     seen.add(id);
     return id === tc.id ? tc : { ...tc, id };
   });
+}
+
+/**
+ * Chronologically rebind later duplicate/empty call ids and only the tool rows
+ * belonging to that assistant group. This makes already-persisted poisoned
+ * histories resumable without dropping successful tool bodies.
+ */
+function rewriteConflictingToolCallIds(messages: ChatMessage[]): number {
+  const reserved = new Set<string>();
+  let bindings = new Map<string, Array<{ id: string; name: string }>>();
+  let groupOpen = false;
+  let repairs = 0;
+
+  for (let index = 0; index < messages.length; index += 1) {
+    const message = messages[index]!;
+    if (message.role === "assistant" && message.toolCalls?.length) {
+      bindings = new Map();
+      groupOpen = true;
+      const fixed = ensureUniqueToolCallIds(message.toolCalls, reserved);
+      for (let callIndex = 0; callIndex < message.toolCalls.length; callIndex += 1) {
+        const original = message.toolCalls[callIndex]!;
+        const replacement = fixed[callIndex]!;
+        const originalId = typeof original.id === "string" ? original.id : "";
+        const queue = bindings.get(originalId) ?? [];
+        queue.push({ id: replacement.id, name: replacement.name });
+        bindings.set(originalId, queue);
+        reserved.add(replacement.id);
+        if (replacement.id !== original.id) repairs += 1;
+      }
+      if (fixed.some((call, callIndex) => call !== message.toolCalls![callIndex])) {
+        messages[index] = { ...message, toolCalls: fixed };
+      }
+      continue;
+    }
+
+    if (message.role === "tool" && groupOpen) {
+      const originalId = message.toolCallId ?? "";
+      const queue = bindings.get(originalId);
+      if (queue?.length) {
+        const namedIndex = message.name
+          ? queue.findIndex((binding) => binding.name === message.name)
+          : -1;
+        const [binding] = queue.splice(namedIndex >= 0 ? namedIndex : 0, 1);
+        if (binding && binding.id !== originalId) {
+          messages[index] = { ...message, toolCallId: binding.id };
+          repairs += 1;
+        }
+      }
+      continue;
+    }
+
+    if (
+      groupOpen &&
+      message.role === "system" &&
+      typeof message.content === "string" &&
+      isSessionStateMessage(message.content)
+    ) {
+      continue;
+    }
+
+    groupOpen = false;
+    bindings = new Map();
+  }
+
+  return repairs;
 }
 
 /**
@@ -306,10 +395,11 @@ export function formatProtocolPlaceholder(name: string, id: string): string {
  */
 export function repairToolProtocol(messages: ChatMessage[]): number {
   if (messages.length === 0) return 0;
-  if (validateToolProtocol(messages).length === 0) return 0;
+  const idRepairs = rewriteConflictingToolCallIds(messages);
+  if (validateToolProtocol(messages).length === 0) return idRepairs;
 
   const out: ChatMessage[] = [];
-  let repairs = 0;
+  let repairs = idRepairs;
   /** Open tool call ids → name (best-effort). */
   let pending = new Map<string, string | undefined>();
   /**
