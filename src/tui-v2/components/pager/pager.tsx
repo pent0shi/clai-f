@@ -766,7 +766,12 @@ export function Pager(props: PagerProps): ReactNode {
         onMouseScroll={() => refreshScrollHint()}
       >
         {!useDiffGutters ? (
-          <text content=" " style={{ height: 1 }} />
+          // Full-width opaque spacer — a one-cell row leaves the rest of the
+          // line unpainted, so scrolled-away glyphs survive at the edge.
+          <text
+            content=" "
+            style={{ height: 1, width: "100%", bg: theme.background }}
+          />
         ) : null}
         {lines.flatMap((line, index) => {
           const row = display.lines[index];
@@ -847,7 +852,10 @@ export function Pager(props: PagerProps): ReactNode {
           ));
         })}
         {!useDiffGutters ? (
-          <text content=" " style={{ height: 1 }} />
+          <text
+            content=" "
+            style={{ height: 1, width: "100%", bg: theme.background }}
+          />
         ) : null}
       </scrollbox>
 

@@ -20,7 +20,7 @@ import {
   renderStreamingMarkdown,
   type MarkdownStreamCache,
 } from "../../rendering/streaming-markdown.js";
-import { SELECTABLE_LINE_STYLE } from "./selectable-line.js";
+import { selectableRowStyle } from "./selectable-line.js";
 
 export function AssistantMessage(props: {
   item: AssistantItem;
@@ -83,8 +83,10 @@ export function AssistantMessage(props: {
               content={content ?? " "}
               selectable
               wrapMode="none"
-              // Full-row hit target — shrink-wrapped text was nearly unselectable.
-              style={SELECTABLE_LINE_STYLE}
+              // Full-row hit target — shrink-wrapped text was nearly
+              // unselectable — and an opaque fill so short rows (prose, and
+              // content-sized code panels) repaint the cells to their right.
+              style={selectableRowStyle(theme.background)}
             />
           ))}
         </box>

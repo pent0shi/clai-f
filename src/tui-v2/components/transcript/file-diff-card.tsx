@@ -93,6 +93,9 @@ function DiffCodeRow(props: {
         width: "100%",
         height: 1,
         flexShrink: 0,
+        // Opaque row: context lines are shorter than the card, and an unpainted
+        // tail keeps glyphs from whatever previously held that screen line.
+        backgroundColor: bg ?? theme.statusBackground,
       }}
     >
       <text selectable={false} style={{ height: 1 }}>

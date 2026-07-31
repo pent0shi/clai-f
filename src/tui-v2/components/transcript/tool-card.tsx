@@ -47,7 +47,7 @@ import { DiffActionButton, FileDiffBody } from "./file-diff-card.js";
 import { renderMarkdownLines } from "../../rendering/render-markdown-lines.js";
 import { shouldDefaultFormattedView } from "../../rendering/pager-view-policy.js";
 import { extractFsReadFileBody } from "../../rendering/pager-markdown.js";
-import { SELECTABLE_LINE_STYLE } from "./selectable-line.js";
+import { selectableRowStyle } from "./selectable-line.js";
 
 /** Border / status accent: green ok · yellow running · red failed. */
 const STATUS_COLOR: Record<ToolItem["status"], keyof Theme> = {
@@ -84,8 +84,13 @@ function OutputLines(props: {
       {lines.map((line, i) => {
         const isGap = line.startsWith("···");
         return (
-          // Full-width row so drag-select does not require pixel-perfect aim.
-          <text key={i} selectable style={{ height: 1, width: "100%" }}>
+          // Full-width row so drag-select does not require pixel-perfect aim,
+          // opaque so a short line repaints the cells to its right.
+          <text
+            key={i}
+            selectable
+            style={{ height: 1, width: "100%", bg: theme.statusBackground }}
+          >
             <span style={{ fg: isGap ? theme.muted : gutterFg }}>{"│ "}</span>
             <span
               style={{
@@ -636,7 +641,7 @@ export function ToolCard(props: {
                 content={content ?? " "}
                 selectable
                 wrapMode="none"
-                style={SELECTABLE_LINE_STYLE}
+                style={selectableRowStyle(theme.statusBackground)}
               />
             ))
           ) : (

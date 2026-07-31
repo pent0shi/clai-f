@@ -44,6 +44,10 @@ export function stripPagerLineGutters(body: string): string {
   return body
     .split("\n")
     .map((line) => {
+      // formatModalPlainText writes blank rows as a bare gutter (`     │`,
+      // no trailing space). Without this the pipe survives into format mode
+      // and paints as a stray vertical bar under the header.
+      if (/^[\d ]{0,8} │\s*$/.test(line)) return "";
       // formatModalPlainText: `<lineno> │ [+/-/ ]body`
       const withMark = /^(?:[\d ]{0,8}) │ ([+\-−] )?(.*)$/.exec(line);
       if (withMark) {

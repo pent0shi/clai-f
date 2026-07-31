@@ -21,7 +21,7 @@ import { useTerminalDimensions } from "@opentui/react";
 import stringWidth from "string-width";
 import type { ThinkingItem } from "../../state/transcript-types.js";
 import type { Theme } from "../../rendering/theme.js";
-import { SELECTABLE_LINE_STYLE } from "./selectable-line.js";
+import { selectableRowStyle } from "./selectable-line.js";
 import { liveThinkingTail } from "../../rendering/thinking-tail.js";
 import { wrapPagerLine } from "../../rendering/pager-chrome.js";
 
@@ -96,6 +96,9 @@ export function ThinkingBlock(props: {
             paddingLeft: BODY_INDENT,
             width: wrapWidth + BODY_INDENT,
             overflow: "hidden",
+            // Paints the indent strip too, so nothing shows through the gap
+            // between the pane edge and the first glyph.
+            backgroundColor: theme.background,
           }}
         >
           {bodyLines.map((content, index) => (
@@ -105,7 +108,7 @@ export function ThinkingBlock(props: {
               selectable
               wrapMode="none"
               style={{
-                ...SELECTABLE_LINE_STYLE,
+                ...selectableRowStyle(theme.background),
                 width: wrapWidth,
                 fg: theme.thinking,
                 attributes: TextAttributes.ITALIC,

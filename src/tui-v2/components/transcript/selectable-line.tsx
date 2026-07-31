@@ -16,6 +16,22 @@ export const SELECTABLE_LINE_STYLE = {
   height: 1 as const,
 };
 
+/**
+ * Row style that also repaints its full width.
+ *
+ * A row narrower than its container leaves the cells to its right untouched,
+ * so glyphs from whatever previously occupied that screen line survive — text
+ * appears to duplicate down the column while scrolling. Pass the colour of the
+ * surface the row sits on (chat pane vs card) so the fill is invisible.
+ */
+export function selectableRowStyle(surface: string): {
+  width: "100%";
+  height: 1;
+  bg: string;
+} {
+  return { ...SELECTABLE_LINE_STYLE, bg: surface };
+}
+
 export function SelectableLine(props: {
   content?: string | undefined;
   children?: ReactNode;
