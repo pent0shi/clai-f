@@ -10,15 +10,15 @@
  * and slicing mid-cluster orphans marks that then trail at the pane edge.
  */
 
-import stringWidth from "string-width";
+import { renderColumns } from "../../ui/text-width.js";
 
 const GRAPHEME_SEGMENTER = new Intl.Segmenter(undefined, {
   granularity: "grapheme",
 });
 
-/** Terminal columns occupied by `text`. */
+/** Columns to reserve for `text` — see renderColumns for why not string-width. */
 function columns(text: string): number {
-  return stringWidth(text);
+  return renderColumns(text);
 }
 
 function graphemes(text: string): string[] {

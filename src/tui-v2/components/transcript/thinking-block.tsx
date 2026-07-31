@@ -18,7 +18,7 @@
 import { useMemo, type ReactNode } from "react";
 import { TextAttributes, type MouseEvent } from "@opentui/core";
 import { useTerminalDimensions } from "@opentui/react";
-import stringWidth from "string-width";
+import { renderColumns } from "../../../ui/text-width.js";
 import type { ThinkingItem } from "../../state/transcript-types.js";
 import type { Theme } from "../../rendering/theme.js";
 import { selectableRowStyle } from "./selectable-line.js";
@@ -73,7 +73,7 @@ export function ThinkingBlock(props: {
       .replace(/\r\n/g, "\n")
       .split("\n")
       .flatMap((line) => wrapPagerLine(line, wrapWidth))
-      .map((line) => line + " ".repeat(Math.max(0, wrapWidth - stringWidth(line))));
+      .map((line) => line + " ".repeat(Math.max(0, wrapWidth - renderColumns(line))));
   }, [showBody, item.content, item.streaming, wrapWidth]);
 
   return (
