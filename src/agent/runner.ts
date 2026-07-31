@@ -1008,6 +1008,10 @@ export async function runAgentTurn(
     // Request, project, workspace, recovery, scope, and plan state are appended
     // later as system-marked turns so a changing byte cannot invalidate the
     // constitution (and, on Anthropic, the native tool schemas before it).
+    // The red-team methodology block is ~940 tokens on every request. Attach it
+    // only when this turn is actually a remote-security engagement.
+    const pentestPromptTurn =
+      pentestLikeTurn || activePlan?.kind === "pentest";
     const buildStableSystemContent = (native: boolean): string => {
       const reliability = getReliabilityPolicy();
       const visionAvailable = modelSupportsVision(provider, model);
@@ -1019,6 +1023,7 @@ export async function runAgentTurn(
           imageView: visionAvailable,
           // E6: slim native constitution when API tool schemas are attached.
           ...(native ? { slimNative: reliability.slimNativePrompt } : {}),
+          ...(pentestPromptTurn ? { pentest: true } : {}),
         });
     };
     const systemSections: string[] = [renderRequestEnvironmentContext()];

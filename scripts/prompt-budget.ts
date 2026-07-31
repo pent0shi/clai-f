@@ -32,6 +32,15 @@ const agentNative = renderAgentSystemPrompt(tools, {
   nativeTools: true,
   stableEnvironment: true,
 });
+const agentPentest = renderAgentSystemPrompt(tools, {
+  stableEnvironment: true,
+  pentest: true,
+});
+const agentNativePentest = renderAgentSystemPrompt(tools, {
+  nativeTools: true,
+  stableEnvironment: true,
+  pentest: true,
+});
 const compact = renderCompactAgentSystemPrompt(tools, {
   stableEnvironment: true,
 });
@@ -48,7 +57,7 @@ const buildTurn =
   formatTaskAnalysisHint(analyzeTask("create a react todo app on Desktop"));
 
 const pentestTurn =
-  agent +
+  agentPentest +
   "\n\n" +
   requestEnvironment +
   "\n\n" +
@@ -60,7 +69,9 @@ const pentestTurn =
 
 console.log("clai prompt budget (chars/4 ≈ tokens)\n");
 report("agent (fence)", agent);
+report("agent (fence, pentest)", agentPentest);
 report("agent (native tools)", agentNative);
+report("agent (native tools, pentest)", agentNativePentest);
 report("agent compact", compact);
 report("ask", ask);
 report("request environment suffix", requestEnvironment);
@@ -92,8 +103,29 @@ for (const section of mandatorySections) {
   }
 }
 
-const MAX_CORE_AGENT_CHARS = 38_000;
-if (agent.length > MAX_CORE_AGENT_CHARS || agentNative.length > MAX_CORE_AGENT_CHARS) {
-  throw new Error(`Prompt budget exceeded: core agent must be <= ${MAX_CORE_AGENT_CHARS} chars`);
+// Per-variant ceilings. The everyday paths (no pentest methodology attached)
+// are held tightest because they are what most turns actually pay for.
+for (const [label, text, limit] of [
+  ["fence", agent, 33_000],
+  ["fence+pentest", agentPentest, 37_000],
+  ["native", agentNative, 22_000],
+  ["native+pentest", agentNativePentest, 26_000],
+] as const) {
+  if (text.length > limit) {
+    throw new Error(
+      `Prompt budget exceeded: core agent (${label}) is ${text.length} chars, must be <= ${limit}`,
+    );
+  }
+}
+
+// The methodology block must be attached for a pentest turn and absent otherwise.
+if (!agentPentest.includes("# PENTEST METHODOLOGY")) {
+  throw new Error("Prompt contract failure: pentest turn lost the methodology block");
+}
+if (agent.includes("# PENTEST METHODOLOGY")) {
+  throw new Error("Prompt budget failure: non-pentest turn still carries the methodology block");
+}
+if (!agentNativePentest.includes("# PENTEST METHODOLOGY")) {
+  throw new Error("Prompt contract failure: native pentest turn lost the methodology block");
 }
 console.log(`Mandatory prompt sections                    ${mandatorySections.length}/6 present`);

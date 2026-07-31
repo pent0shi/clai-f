@@ -81,15 +81,39 @@ describe("looksLikePentestTask", () => {
 });
 
 describe("renderAgentSystemPrompt — pentest planning guidance", () => {
+  const toolList =
+    "shell.exec, fs.read, whois.lookup, dns.lookup, net.context, http.fetch, net.scan, pentest.recon, plan.create, task.update";
+
   it("renders evidence-driven pentest guidance without a fixed tool sequence", () => {
-    const toolList =
-      "shell.exec, fs.read, whois.lookup, dns.lookup, net.context, http.fetch, net.scan, pentest.recon, plan.create, task.update";
-    const prompt = renderAgentSystemPrompt(toolList);
+    const prompt = renderAgentSystemPrompt(toolList, { pentest: true });
     expect(prompt).toContain("Choose each next action by expected information or access gain");
     expect(prompt).toContain("candidate dimensions—not a compulsory sequence");
     expect(prompt).toContain("optional techniques");
     expect(prompt).toContain("Use plan.create when a durable roadmap adds value");
     expect(prompt).toContain("Continue while a realistic in-scope action can materially improve the result");
+  });
+
+  it("keeps the methodology out of a non-pentest turn", () => {
+    const coding = renderAgentSystemPrompt(toolList);
+    expect(coding).not.toContain("# PENTEST METHODOLOGY");
+    expect(coding).not.toContain("Choose each next action by expected information or access gain");
+    // Everything else the constitution guarantees must survive the slice.
+    expect(coding).toContain("# OPERATING RULES");
+    expect(coding).toContain("# CROSS-OS AWARENESS");
+    expect(coding.length).toBeLessThan(
+      renderAgentSystemPrompt(toolList, { pentest: true }).length,
+    );
+  });
+
+  it("attaches the methodology on the native-tool pentest path too", () => {
+    const native = renderAgentSystemPrompt(toolList, {
+      nativeTools: true,
+      pentest: true,
+    });
+    expect(native).toContain("# PENTEST METHODOLOGY");
+    expect(
+      renderAgentSystemPrompt(toolList, { nativeTools: true }),
+    ).not.toContain("# PENTEST METHODOLOGY");
   });
 });
 

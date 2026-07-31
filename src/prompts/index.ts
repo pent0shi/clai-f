@@ -115,6 +115,28 @@ const agentToolsCatalog = (() => {
   return agentPrompt.slice(start, end);
 })();
 
+/**
+ * Red-team methodology block. A coding turn carried the whole encyclopedia for
+ * nothing, so it is sliced out of the constitution and re-attached only for
+ * remote-security turns. Staying inside the constitution (rather than becoming a
+ * separate suffix section) keeps the cacheable prefix byte-stable per turn kind.
+ */
+const agentPentestMethodology = (() => {
+  const start = agentPrompt.indexOf("# PENTEST METHODOLOGY");
+  const end = agentPrompt.indexOf("# CROSS-OS AWARENESS");
+  if (start < 0 || end < 0 || end <= start) return "";
+  return agentPrompt.slice(start, end);
+})();
+
+function withPentestMethodology(template: string, include: boolean): string {
+  if (!agentPentestMethodology) return template;
+  if (include) return template;
+  return template.replace(agentPentestMethodology, "");
+}
+
+/** Exposed so the budget script can price both turn kinds. */
+export const _PENTEST_METHODOLOGY = agentPentestMethodology;
+
 const agentNativeToolsHeader = `# TOOLS
 
 You have structured tools provided by the API. Call them via the platform tool interface. Do not invent tool names. Prefer the most specific tool. Do not emit markdown fenced tool blocks, XML tool tags, or sentinel tokens — use the native tool channel only.
@@ -342,6 +364,11 @@ export function renderAgentSystemPrompt(
     stableEnvironment?: boolean;
     /** Advertise image.view only for a route with affirmative vision evidence. */
     imageView?: boolean;
+    /**
+     * Attach the red-team methodology block. Off by default: a coding turn has
+     * no use for it and it costs ~940 tokens on every request.
+     */
+    pentest?: boolean;
   },
 ): string {
   let template = agentPrompt;
@@ -352,6 +379,7 @@ export function renderAgentSystemPrompt(
         : true;
     template = slim ? agentPromptNativeSlim : agentPromptNative;
   }
+  template = withPentestMethodology(template, options?.pentest === true);
   const rendered = render(template, {
     ...promptEnvironmentValues(Boolean(options?.stableEnvironment)),
     tool_list: toolList,
