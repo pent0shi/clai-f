@@ -23,4 +23,5 @@ docs/v2/
 debug-test.ts
 improvements/
 audit/
+semantic-review/
 prompt.txt
