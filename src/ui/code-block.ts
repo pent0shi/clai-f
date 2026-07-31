@@ -205,6 +205,36 @@ export function codeBlockWidth(wrapWidth: number): number {
   return Math.max(MIN_WIDTH, Math.min(Math.floor(wrapWidth), MAX_WIDTH));
 }
 
+/** Drop blank lines at the block edges so the panel hugs its code. */
+export function trimCodeBlockBody(lines: readonly string[]): string[] {
+  let start = 0;
+  let end = lines.length;
+  while (start < end && lines[start]!.trim().length === 0) start += 1;
+  while (end > start && lines[end - 1]!.trim().length === 0) end -= 1;
+  return lines.slice(start, end);
+}
+
+/**
+ * Panel width that fits the widest code line, so a one-line snippet is not
+ * stretched across the whole pane. Falls back to `available` when the code is
+ * wider than the pane, which is when wrapping takes over.
+ */
+export function codeBlockFitWidth(
+  lines: readonly string[],
+  label: string,
+  available: number,
+): number {
+  let widest = 0;
+  for (const line of lines) {
+    const width = stringWidth(expandTabs(line.replace(/\s+$/, "")));
+    if (width > widest) widest = width;
+  }
+  // `╭─ label ─╮` needs the label plus six columns of chrome.
+  const labelNeeds = label ? stringWidth(label) + 6 : 0;
+  const wanted = Math.max(widest + CODE_BLOCK_CHROME, labelNeeds);
+  return codeBlockWidth(Math.min(codeBlockWidth(available), wanted));
+}
+
 function rule(count: number): string {
   return "─".repeat(Math.max(0, count));
 }

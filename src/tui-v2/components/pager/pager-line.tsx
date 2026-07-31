@@ -119,12 +119,14 @@ export function PagerLine(props: {
     if (!hasQuery && styled) {
       return (
         // Pre-wrapped by renderMarkdown — no second wrap (would clip styles).
+        // Opaque background: rows narrower than the pane must repaint their
+        // tail, or scrolled-away glyphs stay in the cells to the right.
         <text
           id={`pager-line-${index}`}
           content={styled}
           selectable
           wrapMode="none"
-          style={{ width: "100%" }}
+          style={{ width: "100%", bg: theme.background }}
         />
       );
     }
@@ -148,7 +150,7 @@ export function PagerLine(props: {
               }
             : isMatchLine
               ? { bg: theme.selection }
-              : {}),
+              : { bg: theme.background }),
         }}
       />
     );
@@ -190,6 +192,9 @@ export function PagerLine(props: {
           width: "100%",
           height: 1,
           flexShrink: 0,
+          // Opaque row: a short code line must repaint the cells to its right,
+          // otherwise glyphs scrolled out of view linger at the pane edge.
+          backgroundColor: bg ?? theme.background,
         }}
       >
         <text selectable={false} style={{ height: 1, flexShrink: 0 }}>
@@ -270,7 +275,7 @@ export function PagerLine(props: {
         style={{
           width: "100%",
           fg: baseFg,
-          ...(isActiveLine ? { bg: theme.rowA } : {}),
+          bg: isActiveLine ? theme.rowA : theme.background,
         }}
       >
         {line || " "}
@@ -286,7 +291,7 @@ export function PagerLine(props: {
       style={{
         width: "100%",
         fg: baseFg,
-        ...(isActiveLine ? { bg: theme.rowA } : {}),
+        bg: isActiveLine ? theme.rowA : theme.background,
       }}
     >
       {segments.map((seg, i) => {

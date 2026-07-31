@@ -2,12 +2,14 @@ import chalk from "chalk";
 import stringWidth from "string-width";
 import {
   codeBlockBottom,
+  codeBlockFitWidth,
   codeBlockRows,
   codeBlockTop,
   codeBlockWidth,
   isCodeFenceClose,
   matchCodeFenceOpen,
   openCodeFence,
+  trimCodeBlockBody,
   type CodeFenceState,
 } from "./code-block.js";
 
@@ -175,6 +177,28 @@ function closeFencePanel(state: BlockState): string {
   state.inFence = false;
   state.fence = undefined;
   return codeBlockBottom(panelWidth(state));
+}
+
+/**
+ * Render a complete fence as a content-sized panel. Used by the one-shot
+ * renderer (chat + pager), which can see the whole block before it paints.
+ * An unterminated fence still gets a footer so a streaming reply reads as a
+ * finished box.
+ */
+function renderCodeBlock(
+  open: { marker: string; info: string },
+  bodyLines: readonly string[],
+  wrapWidth: number,
+): string[] {
+  const fence = openCodeFence(open.marker, open.info);
+  const body = trimCodeBlockBody(bodyLines);
+  const width = codeBlockFitWidth(body, fence.label, wrapWidth);
+  const out = [codeBlockTop(fence.label, width)];
+  for (const line of body) {
+    out.push(...codeBlockRows(line, fence, width));
+  }
+  out.push(codeBlockBottom(width));
+  return out;
 }
 
 /** Fence lines and code bodies as complete panel rows (may be empty). */
@@ -956,6 +980,24 @@ export function renderMarkdown(text: string, width?: number): string {
   let i = 0;
   while (i < lines.length) {
     const line = lines[i]!;
+
+    // Fenced code is consumed as a whole block so the panel can be sized to
+    // its widest line instead of stretching a one-liner across the pane.
+    // Also keeps table/`<br>` heuristics away from code bodies entirely.
+    const fenceOpen = matchCodeFenceOpen(line);
+    if (fenceOpen) {
+      let j = i + 1;
+      const body: string[] = [];
+      while (j < lines.length && !isCodeFenceClose(lines[j]!, fenceOpen.marker)) {
+        body.push(lines[j]!);
+        j += 1;
+      }
+      for (const rendered of renderCodeBlock(fenceOpen, body, wrapWidth)) {
+        resultLines.push(`${OUTPUT_INDENT}${rendered}`);
+      }
+      i = j < lines.length ? j + 1 : j;
+      continue;
+    }
 
     // A table is a row line immediately followed by a separator line.
     if (
