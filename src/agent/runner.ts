@@ -5528,7 +5528,6 @@ export async function runAgentTurn(
             outcomeStatus,
             remainingCriteria,
           });
-          writeAssistantMessage(cleaned);
           lastAnswer = cleaned;
           return finishTurn(
             lastAnswer,
