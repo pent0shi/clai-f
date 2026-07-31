@@ -7,7 +7,7 @@
  */
 
 import chalk from "chalk";
-import { renderColumns } from "./text-width.js";
+import stringWidth from "string-width";
 import { detectThemeHint } from "../tui-v2/bootstrap/capabilities.js";
 import { themeFor } from "../tui-v2/rendering/theme.js";
 import {
@@ -226,11 +226,11 @@ export function codeBlockFitWidth(
 ): number {
   let widest = 0;
   for (const line of lines) {
-    const width = renderColumns(expandTabs(line.replace(/\s+$/, "")));
+    const width = stringWidth(expandTabs(line.replace(/\s+$/, "")));
     if (width > widest) widest = width;
   }
   // `╭─ label ─╮` needs the label plus six columns of chrome.
-  const labelNeeds = label ? renderColumns(label) + 6 : 0;
+  const labelNeeds = label ? stringWidth(label) + 6 : 0;
   const wanted = Math.max(widest + CODE_BLOCK_CHROME, labelNeeds);
   return codeBlockWidth(Math.min(codeBlockWidth(available), wanted));
 }
@@ -244,7 +244,7 @@ function truncateLabel(label: string, maxWidth: number): string {
   let text = "";
   let width = 0;
   for (const cluster of graphemes(label)) {
-    const clusterWidth = renderColumns(cluster);
+    const clusterWidth = stringWidth(cluster);
     if (width + clusterWidth > maxWidth) break;
     text += cluster;
     width += clusterWidth;
@@ -256,7 +256,7 @@ export function codeBlockTop(label: string, width: number): string {
   const { border, label: paintLabel } = palette();
   const span = codeBlockWidth(width) - 2;
   const room = span - 4;
-  const labelWidth = renderColumns(label);
+  const labelWidth = stringWidth(label);
   const text =
     room < 1
       ? ""
@@ -267,7 +267,7 @@ export function codeBlockTop(label: string, width: number): string {
   return (
     border("╭─") +
     paintLabel(` ${text} `) +
-    border(`${rule(span - 3 - renderColumns(text))}╮`)
+    border(`${rule(span - 3 - stringWidth(text))}╮`)
   );
 }
 
@@ -308,7 +308,7 @@ function expandTabs(line: string): string {
       continue;
     }
     out += ch;
-    col += renderColumns(ch);
+    col += stringWidth(ch);
   }
   return out;
 }
@@ -325,7 +325,7 @@ function toCells(spans: readonly SyntaxSpan[]): Cell[] {
     cells.push({
       ch: segment,
       kind: kinds[index] ?? "plain",
-      w: renderColumns(segment),
+      w: stringWidth(segment),
     });
   }
   return cells;

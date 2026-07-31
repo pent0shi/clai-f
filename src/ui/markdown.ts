@@ -1,5 +1,5 @@
 import chalk from "chalk";
-import { renderColumns } from "./text-width.js";
+import stringWidth from "string-width";
 import {
   codeBlockBottom,
   codeBlockFitWidth,
@@ -285,7 +285,7 @@ const OUTPUT_INDENT = "  ";
 // ✅/⚠️/❓, which desynced column math and let table borders drift and get
 // clipped by the TUI's width-aware truncation.
 export function visibleWidth(str: string): number {
-  return renderColumns(str);
+  return stringWidth(str);
 }
 
 type Token = { type: "space" | "ansi" | "char"; value: string; width: number };
