@@ -165,6 +165,7 @@ import { LoopGuard } from "./loop-guard.js";
 import {
   appendInterruptedReasoning,
   interruptedReasoningBrief,
+  isMeaningfulResumptionYield,
 } from "./interrupted-reasoning.js";
 import {
   CompactionAttemptLedger,
@@ -564,6 +565,7 @@ export async function runAgentTurn(
   let visibleCommitted = false;
   let interruptedVisible = "";
   let interruptedReasoning = "";
+  let lowYieldResumptions = 0;
   const trimExactContinuationOverlap = (
     previous: string,
     current: string,
@@ -4223,6 +4225,28 @@ export async function runAgentTurn(
         let accumulatedText = "";
         const callIds: string[] = [];
         let streamedCallsCount = 0;
+        // A model can think silently for minutes. Without a heartbeat the UI
+        // shows a frozen label and the turn looks hung, so surface elapsed time
+        // and the current phase on a timer rather than only on token arrival.
+        const streamStartedAt = Date.now();
+        const streamPhase = (): string => {
+          const seconds = Math.round((Date.now() - streamStartedAt) / 1000);
+          const elapsed =
+            seconds < 60
+              ? `${seconds}s`
+              : `${Math.floor(seconds / 60)}m${String(seconds % 60).padStart(2, "0")}s`;
+          if (generatedTokens > 0 && !inThinking) {
+            return `generating response · ${generatedTokens} tokens · ${elapsed}`;
+          }
+          if (sawReasoning) return `thinking · ${elapsed}`;
+          return `waiting for model · ${elapsed}`;
+        };
+        const heartbeat = setInterval(() => {
+          const text = streamPhase();
+          if (writesDirectly) spinner.setLabel(text);
+          else emit({ type: "status", text });
+        }, 10_000);
+        (heartbeat as unknown as { unref?: () => void }).unref?.();
 
         const deferredToolCalls: {
           eventId: string;
@@ -4510,6 +4534,7 @@ export async function runAgentTurn(
           resetStreamRecoveryState(recoveryState);
           allowModelFallback = false;
           preferModelFallback = false;
+          lowYieldResumptions = 0;
           } catch (streamError) {
             // User cancelled (double-Esc) — never try to recover, just stop.
             if (options.signal?.aborted) throw streamError;
@@ -4538,33 +4563,61 @@ export async function runAgentTurn(
             const failureKind = classifyStreamFailure(streamError);
             const partialStream =
               streamAlreadyEmitted(streamError) || accumulatedText.length > 0;
+            const partial = rememberThinkingFromText(accumulatedText);
+            const rawPartialVisible = partialStream
+              ? textBeforeToolCall(
+                  stripThinking(collapseRepeatedText(accumulatedText)).visible,
+                )
+              : "";
+            const normalizedPartialVisible = trimExactContinuationOverlap(
+              interruptedVisible,
+              rawPartialVisible,
+            );
+            const partialVisible = normalizedPartialVisible.trim();
+            // A route that drops after a handful of characters is not making
+            // progress, however many times it is retried. Only a substantial
+            // yield unlocks the generous resumption budget; anything less is
+            // charged to the failure class and escalates to another route.
+            const meaningfulProgress =
+              partialStream &&
+              isMeaningfulResumptionYield(
+                normalizedPartialVisible.length + partial.thinkContent.length,
+              );
+            if (partialStream) {
+              lowYieldResumptions = meaningfulProgress
+                ? 0
+                : lowYieldResumptions + 1;
+            }
             const plan = planStreamRecovery({
               kind: failureKind,
               state: recoveryState,
-              progressed: partialStream,
+              progressed: meaningfulProgress,
             });
+            const terminalFailure = plan.action === "give-up";
 
             let continuationNudge = "";
             if (partialStream) {
               spinner.stop();
               deltaParser?.finish();
-              const partial = rememberThinkingFromText(accumulatedText);
               const hasShownToolCall = deferredToolCalls.some(
                 (entry) => entry.shown,
               );
-              const rawPartialVisible = textBeforeToolCall(
-                stripThinking(collapseRepeatedText(accumulatedText)).visible,
-              );
-              const normalizedPartialVisible = trimExactContinuationOverlap(
-                interruptedVisible,
-                rawPartialVisible,
-              );
-              const partialVisible = normalizedPartialVisible.trim();
               if (partialVisible) {
-                writeAssistantMessage(partialVisible);
-                pushAssistantHistory(partialVisible);
+                // Finalizing here would close the streaming card and split one
+                // answer across a card per interruption. Keep it open and let
+                // the single commit below paint the stitched text; only a
+                // terminal failure has to flush it now.
+                if (terminalFailure) {
+                  writeAssistantMessage(interruptedVisible + normalizedPartialVisible);
+                } else {
+                  visibleCommitted = true;
+                }
+                messages.push({
+                  role: "assistant",
+                  content: sanitizeAssistantText(partialVisible),
+                });
                 interruptedVisible += normalizedPartialVisible;
-              } else if (!writesDirectly) {
+              } else if (terminalFailure && !writesDirectly) {
                 emit({ type: "assistant-message", text: "" });
               }
               if (partial.hasThinking && !hasShownToolCall) {
@@ -4593,9 +4646,10 @@ export async function runAgentTurn(
               ]
                 .filter((part): part is string => Boolean(part))
                 .join("\n\n");
-              const restartNotice =
-                plan.action === "give-up"
-                  ? "partial response preserved before terminal provider failure"
+              const restartNotice = terminalFailure
+                ? "partial response preserved before terminal provider failure"
+                : lowYieldResumptions > 1
+                  ? `route is dropping after almost no output (${lowYieldResumptions} in a row) — switching model`
                   : "partial response preserved — resuming from the interruption";
               writeNotice(
                 "warn",
@@ -4604,10 +4658,14 @@ export async function runAgentTurn(
               );
             }
 
-            if (plan.action === "give-up") {
+            if (terminalFailure) {
               throw streamError;
             }
-            recordRecoveryAttempt(recoveryState, failureKind, partialStream);
+            recordRecoveryAttempt(recoveryState, failureKind, meaningfulProgress);
+            if (lowYieldResumptions > 1) {
+              allowModelFallback = true;
+              preferModelFallback = true;
+            }
 
             if (plan.notice) {
               writeNotice(
@@ -4639,6 +4697,7 @@ export async function runAgentTurn(
           }
         } finally {
           // Always clear the spinner — abort, network error, or success.
+          clearInterval(heartbeat);
           spinner.stop();
         }
         if (responderDelivery) {
@@ -4698,7 +4757,7 @@ export async function runAgentTurn(
           const hasShownToolCall = deferredToolCalls.some((entry) => entry.shown);
           if (!hasShownToolCall) {
             const displayText = textBeforeToolCall(
-              collapseRepeatedText(assistantText.visible),
+              collapseRepeatedText(canonicalAssistantVisible),
             ).trim();
             if (displayText) {
               writeAssistantMessage(displayText);
@@ -4715,6 +4774,7 @@ export async function runAgentTurn(
           pushAssistantHistory(historyText);
           interruptedVisible = "";
           interruptedReasoning = "";
+          lowYieldResumptions = 0;
         };
 
 
@@ -5669,6 +5729,7 @@ export async function runAgentTurn(
         }
         interruptedVisible = "";
         interruptedReasoning = "";
+        lowYieldResumptions = 0;
 
         type BoundCall = {
           index: number;

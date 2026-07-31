@@ -2,6 +2,12 @@ export const INTERRUPTED_REASONING_LIMIT = 4_000;
 
 export const INTERRUPTED_REASONING_MIN = 160;
 
+export const MIN_RESUMPTION_YIELD = 240;
+
+export function isMeaningfulResumptionYield(producedChars: number): boolean {
+  return producedChars >= MIN_RESUMPTION_YIELD;
+}
+
 function normalize(reasoning: string): string {
   return reasoning.replace(/\r/g, "").replace(/[ \t]+$/gm, "").trim();
 }

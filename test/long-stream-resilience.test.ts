@@ -8,8 +8,10 @@ import {
 } from "../src/llm/http.js";
 import {
   INTERRUPTED_REASONING_LIMIT,
+  MIN_RESUMPTION_YIELD,
   appendInterruptedReasoning,
   interruptedReasoningBrief,
+  isMeaningfulResumptionYield,
 } from "../src/agent/interrupted-reasoning.js";
 import {
   DEFAULT_STREAM_RECOVERY_LIMITS,
@@ -162,6 +164,48 @@ describe("interrupted reasoning continuity", () => {
     expect(carried.length).toBeLessThanOrEqual(INTERRUPTED_REASONING_LIMIT);
     expect(carried).toContain("attempt-11");
     expect(carried).not.toContain("attempt-0 ");
+  });
+});
+
+describe("resumption yield", () => {
+  it("treats a few trickled characters as no progress", () => {
+    expect(isMeaningfulResumptionYield(0)).toBe(false);
+    expect(isMeaningfulResumptionYield(1)).toBe(false);
+    expect(isMeaningfulResumptionYield("colliders".length)).toBe(false);
+    expect(isMeaningfulResumptionYield(MIN_RESUMPTION_YIELD - 1)).toBe(false);
+  });
+
+  it("treats a substantial chunk as progress", () => {
+    expect(isMeaningfulResumptionYield(MIN_RESUMPTION_YIELD)).toBe(true);
+    expect(isMeaningfulResumptionYield(8_000)).toBe(true);
+  });
+
+  it("abandons a route that only ever trickles, instead of burning the resume budget", () => {
+    const state = createStreamRecoveryState();
+    let attempts = 0;
+    for (let round = 0; round < 20; round += 1) {
+      const progressed = isMeaningfulResumptionYield("c".length);
+      const plan = planStreamRecovery({ kind: "network", state, progressed });
+      if (plan.action === "give-up") break;
+      attempts += 1;
+      recordRecoveryAttempt(state, "network", progressed);
+    }
+    expect(attempts).toBe(DEFAULT_STREAM_RECOVERY_LIMITS.maxNetwork);
+    expect(state.progressed).toBe(0);
+  });
+
+  it("keeps resuming a route that delivers real chunks each time", () => {
+    const state = createStreamRecoveryState();
+    let attempts = 0;
+    for (let round = 0; round < 20; round += 1) {
+      const progressed = isMeaningfulResumptionYield(6_000);
+      const plan = planStreamRecovery({ kind: "network", state, progressed });
+      if (plan.action === "give-up") break;
+      attempts += 1;
+      recordRecoveryAttempt(state, "network", progressed);
+    }
+    expect(attempts).toBeGreaterThan(DEFAULT_STREAM_RECOVERY_LIMITS.maxNetwork);
+    expect(attempts).toBe(DEFAULT_STREAM_RECOVERY_LIMITS.maxProgressed);
   });
 });
 
