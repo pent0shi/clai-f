@@ -5,6 +5,10 @@
 // render so goldens stay exact.
 
 import {
+  isCodeFenceClose,
+  matchCodeFenceOpen,
+} from "../../ui/code-block.js";
+import {
   renderMarkdownLines,
   type RenderMarkdownLinesOptions,
 } from "./render-markdown-lines.js";
@@ -18,8 +22,15 @@ const BLOCK_CONTINUATION = /^(?:[ \t]*(?:[-*+][ \t]|\d+[.)][ \t]|\||>)|[ \t]{4,}
 const MIN_STABLE_CHARS = 512;
 
 function fencesBalanced(text: string): boolean {
-  const matches = text.match(/^[ \t]*```/gm);
-  return (matches?.length ?? 0) % 2 === 0;
+  let marker: string | undefined;
+  for (const line of text.split("\n")) {
+    if (marker) {
+      if (isCodeFenceClose(line, marker)) marker = undefined;
+      continue;
+    }
+    marker = matchCodeFenceOpen(line)?.marker;
+  }
+  return marker === undefined;
 }
 
 export interface MarkdownSplit {

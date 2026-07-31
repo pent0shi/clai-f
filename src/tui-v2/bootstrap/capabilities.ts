@@ -85,7 +85,7 @@ function detectUnicode(env: CapabilityEnv["env"]): boolean {
   return /utf-?8/i.test(locale);
 }
 
-function detectThemeHint(env: CapabilityEnv["env"]): ThemeHint {
+export function detectThemeHint(env: CapabilityEnv["env"]): ThemeHint {
   const explicit = (env.CLAI_THEME ?? "").toLowerCase();
   if (explicit === "dark" || explicit === "light") return explicit;
   const colorfgbg = env.COLORFGBG;

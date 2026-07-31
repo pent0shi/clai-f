@@ -1,30 +1,23 @@
 import chalk from "chalk";
 import stringWidth from "string-width";
+import {
+  codeBlockBottom,
+  codeBlockRows,
+  codeBlockTop,
+  codeBlockWidth,
+  isCodeFenceClose,
+  matchCodeFenceOpen,
+  openCodeFence,
+  type CodeFenceState,
+} from "./code-block.js";
 
 // Lightweight terminal markdown renderer that styles **bold**, *italic*,
 // `code`, links, headings, lists, blockquotes, hrules, and ```fenced```
 // code blocks. Designed to work both for one-shot strings and for
 // token-streaming inputs (line-buffered).
 
-const FENCE_OPEN = chalk.dim;
-const FENCE_LINE = chalk.cyan;
-/** Continuation gutter for soft-wrapped code lines (keeps block readable). */
-const FENCE_CONT = chalk.dim("│ ");
-
 function repeat(char: string, count: number): string {
   return char.repeat(Math.max(0, count));
-}
-
-function renderFenceHeader(lang: string, width = 60): string {
-  const label = lang || "code";
-  const head = `─── ${label} `;
-  const barWidth = Math.max(8, Math.min(width, 120));
-  return FENCE_OPEN(head + repeat("─", Math.max(0, barWidth - head.length)));
-}
-
-function renderFenceFooter(width = 60): string {
-  const barWidth = Math.max(8, Math.min(width, 120));
-  return FENCE_OPEN(repeat("─", barWidth));
 }
 
 // Walk inline markdown tokens and convert them to ANSI styles. Designed to
@@ -161,30 +154,43 @@ export function renderInlineMarkdown(text: string): string {
 
 interface BlockState {
   inFence: boolean;
-  fenceLang: string;
-  /** Fence header/footer width matches the wrap budget so long code stays inside the bar. */
+  /** Code panel width follows the wrap budget so long code stays inside it. */
   fenceWidth?: number;
+  fence?: CodeFenceState | undefined;
+}
+
+const DEFAULT_FENCE_WIDTH = 60;
+
+function panelWidth(state: BlockState): number {
+  return codeBlockWidth(state.fenceWidth ?? DEFAULT_FENCE_WIDTH);
+}
+
+function openFencePanel(state: BlockState, marker: string, info: string): string {
+  state.inFence = true;
+  state.fence = openCodeFence(marker, info);
+  return codeBlockTop(state.fence.label, panelWidth(state));
+}
+
+function closeFencePanel(state: BlockState): string {
+  state.inFence = false;
+  state.fence = undefined;
+  return codeBlockBottom(panelWidth(state));
+}
+
+/** Fence lines and code bodies as complete panel rows (may be empty). */
+function fencePanelRows(line: string, state: BlockState): string[] | undefined {
+  if (state.inFence && state.fence) {
+    if (isCodeFenceClose(line, state.fence.marker)) {
+      return [closeFencePanel(state)];
+    }
+    return codeBlockRows(line, state.fence, panelWidth(state));
+  }
+  const open = matchCodeFenceOpen(line);
+  if (!open) return undefined;
+  return [openFencePanel(state, open.marker, open.info)];
 }
 
 function renderBlockLine(line: string, state: BlockState): string {
-  const fenceWidth = state.fenceWidth ?? 60;
-  // Code fence open/close
-  const fenceMatch = line.match(/^(\s*)```(\w*)\s*(.*)$/);
-  if (fenceMatch) {
-    if (state.inFence) {
-      state.inFence = false;
-      state.fenceLang = "";
-      return renderFenceFooter(fenceWidth);
-    }
-    state.inFence = true;
-    state.fenceLang = fenceMatch[2] ?? "";
-    return renderFenceHeader(state.fenceLang, fenceWidth);
-  }
-
-  if (state.inFence) {
-    return FENCE_LINE(line);
-  }
-
   // Headings
   const heading = line.match(/^(#{1,6})\s+(.*)$/);
   if (heading) {
@@ -631,22 +637,10 @@ function wrapMarkdownLine(
   wrapWidth: number,
   state: BlockState,
 ): string[] {
-  // Keep fence chrome + content within wrapWidth (never truncate with …).
+  // Keep panel chrome + code within wrapWidth (never truncate with …).
   state.fenceWidth = wrapWidth;
-  if (/^(\s*)```/.test(line)) {
-    return [renderBlockLine(line, state)];
-  }
-
-  // Soft-wrap long code lines so they stay inside the fence border.
-  // Never truncate with ellipsis — split by columns and keep every character.
-  if (state.inFence) {
-    // Budget 2 cols for the continuation gutter on wrap lines.
-    const budget = Math.max(10, wrapWidth - 2);
-    const chunks = wrapAnsiLine(line, budget);
-    return chunks.map((chunk, idx) =>
-      idx === 0 ? FENCE_LINE(chunk) : FENCE_CONT + FENCE_LINE(chunk),
-    );
-  }
+  const fenceRows = fencePanelRows(line, state);
+  if (fenceRows) return fenceRows;
 
   // If it's a horizontal rule, don't wrap it
   if (/^\s*[-*_]{3,}\s*$/.test(line)) {
@@ -951,13 +945,13 @@ function renderTableBlock(rawLines: string[], availWidth: number): string[] {
 
 export function renderMarkdown(text: string, width?: number): string {
   if (!text) return text;
-  const state: BlockState = { inFence: false, fenceLang: "" };
+  const state: BlockState = { inFence: false };
   const lines = text.split("\n");
   const resultLines: string[] = [];
 
   const hasWidth = typeof width === "number";
   const cols = width ?? (process.stdout.columns || 80);
-  const wrapWidth = hasWidth ? Math.max(20, cols - 2) : Math.max(40, cols - 6);
+  const wrapWidth = hasWidth ? Math.max(12, cols - 2) : Math.max(40, cols - 6);
 
   let i = 0;
   while (i < lines.length) {
@@ -997,24 +991,37 @@ export function renderMarkdown(text: string, width?: number): string {
     }
     i++;
   }
+
+  // A fence still open at the end means the reply is mid-stream or the model
+  // never closed it — footer it so the panel always reads as a finished box.
+  if (state.inFence) {
+    resultLines.push(`${OUTPUT_INDENT}${closeFencePanel(state)}`);
+  }
   return resultLines.join("\n");
 }
 
 // Streaming variant: buffers tokens and emits ANSI-rendered output
-// whenever a complete line arrives. Inside a fenced code block, lines
-// are emitted as cyan text with header/footer borders.
+// whenever a complete line arrives. Fenced code blocks stream as a bordered,
+// syntax-highlighted panel.
 export function createMarkdownStreamWriter(write: (chunk: string) => void): {
   push(token: string): void;
   finish(): void;
 } {
-  const state: BlockState = { inFence: false, fenceLang: "" };
+  const state: BlockState = { inFence: false };
   let buffer = "";
+  let outputEndsWithNewline = true;
   // Table rows are buffered until the block ends so columns can be
   // sized across every row before anything is emitted.
   let tableBuffer: string[] = [];
 
   const cols = process.stdout.columns || 80;
   const wrapWidth = Math.max(40, cols - 6);
+
+  const emit = (chunk: string): void => {
+    if (!chunk) return;
+    write(chunk);
+    outputEndsWithNewline = chunk.endsWith("\n");
+  };
 
   const emitLine = (line: string, withNewline: boolean): void => {
     const pieces =
@@ -1024,9 +1031,9 @@ export function createMarkdownStreamWriter(write: (chunk: string) => void): {
       const lastPiece = p === pieces.length - 1;
       const physical = wrapMarkdownLine(piece, wrapWidth, state);
       for (let q = 0; q < physical.length; q++) {
-        write(`${OUTPUT_INDENT}${physical[q]!}`);
+        emit(`${OUTPUT_INDENT}${physical[q]!}`);
         const isVeryLast = lastPiece && q === physical.length - 1;
-        if (!isVeryLast || withNewline) write("\n");
+        if (!isVeryLast || withNewline) emit("\n");
       }
     }
   };
@@ -1039,7 +1046,7 @@ export function createMarkdownStreamWriter(write: (chunk: string) => void): {
       isTableSeparatorLine(tableBuffer[1]!);
     if (looksLikeTable) {
       for (const rendered of renderTableBlock(tableBuffer, wrapWidth)) {
-        write(`${OUTPUT_INDENT}${rendered}\n`);
+        emit(`${OUTPUT_INDENT}${rendered}\n`);
       }
     } else {
       for (const line of tableBuffer) emitLine(line, true);
@@ -1080,8 +1087,9 @@ export function createMarkdownStreamWriter(write: (chunk: string) => void): {
       }
       flushTable();
       if (state.inFence) {
-        // Emit a closing rule so unterminated fences still look tidy.
-        write("\n" + renderFenceFooter());
+        // Close the panel without inserting a blank row after completed lines.
+        const separator = outputEndsWithNewline ? "" : "\n";
+        emit(`${separator}${OUTPUT_INDENT}${closeFencePanel(state)}`);
       }
     },
   };
