@@ -5,7 +5,7 @@ import {
   streamEmittedBytes,
 } from "../src/llm/stream-progress.js";
 import { providers, streamWithProvider } from "../src/llm/router.js";
-import { ProviderError } from "../src/llm/http.js";
+import { ProviderError, STREAM_STALL_MARKER } from "../src/llm/http.js";
 import { getConfig, updateConfig } from "../src/store/config.js";
 import type { LlmProvider } from "../src/llm/provider.js";
 
@@ -75,14 +75,16 @@ describe("LLM-003 — router refuses transparent retry after emission", () => {
     expect(tokens.join("")).toContain("Here is the plan.");
   });
 
-  it("still retries a stall that emitted nothing", async () => {
+  it("still retries a route that never delivered a byte", async () => {
     let calls = 0;
     providers.nvidia = {
       ...originalNvidia,
       async stream() {
         calls += 1;
         if (calls === 1) {
-          throw new ProviderError("Provider stream stalled — no model output");
+          throw new ProviderError(
+            "nvidia request timed out before any response (120s) — no data arrived on the connection.",
+          );
         }
         return { text: "ok", provider: "nvidia" as const, model: "z-ai/glm-5.2" };
       },
@@ -94,5 +96,30 @@ describe("LLM-003 — router refuses transparent retry after emission", () => {
     );
     expect(result.text).toBe("ok");
     expect(calls).toBe(2);
+  });
+
+  // A stall on a live connection means the generation already happened and the
+  // runtime was buffering it. A transparent same-route retry would replay the
+  // whole thing and stall identically, so the router surfaces it and lets the
+  // agent's recovery layer retry with a "smaller tool calls" nudge instead.
+  it("does not transparently retry a stall on a live connection", async () => {
+    let calls = 0;
+    providers.nvidia = {
+      ...originalNvidia,
+      async stream() {
+        calls += 1;
+        throw new ProviderError(
+          `nvidia stream stalled — ${STREAM_STALL_MARKER} for 240s after it had already started responding.`,
+        );
+      },
+    } as LlmProvider;
+
+    await expect(
+      streamWithProvider(
+        { provider: "nvidia", model: "z-ai/glm-5.2", messages: [{ role: "user", content: "hi" }] },
+        () => {},
+      ),
+    ).rejects.toThrow(/stalled|No provider could stream/i);
+    expect(calls).toBe(1);
   });
 });

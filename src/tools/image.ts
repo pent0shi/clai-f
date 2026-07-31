@@ -1,8 +1,18 @@
 import { open, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
-import type { ToolResult } from "../types.js";
-import { detectConvertibleImageFormat } from "../attachments/image-content.js";
+import type { ChatImage, ProviderId, ToolResult } from "../types.js";
+import {
+  detectConvertibleImageFormat,
+  detectModelImageMediaType,
+  formatByteSize,
+} from "../attachments/image-content.js";
+import {
+  describePreparedImage,
+  imageBudgetFor,
+  prepareImageForModel,
+} from "../attachments/image-prepare.js";
+import { modelSupportsVision } from "../llm/capabilities.js";
 import {
   LANG_PATTERN,
   MIN_RELIABLE_CONFIDENCE,
@@ -13,6 +23,9 @@ import {
 export interface ImageToolRunOptions {
   signal?: AbortSignal | undefined;
   onOutput?: ((chunk: string, stream: "stdout" | "stderr") => void) | undefined;
+  /** Active route — decides vision support and the per-image size budget. */
+  llmProvider?: ProviderId | undefined;
+  llmModel?: string | undefined;
 }
 
 function expandHome(path: string): string {
@@ -167,4 +180,174 @@ export async function imageOcr(
     (result.preprocessed ? ", upscaled for OCR" : "") +
     "]";
   return { ok: true, output: `${header}\n\n${result.text}` };
+}
+
+/** Hard ceiling on one image.view call, independent of the provider budget. */
+const MAX_VIEW_IMAGES = 4;
+
+function viewPaths(args: Record<string, unknown>): string[] | string {
+  const raw = args.paths ?? args.path;
+  const list = Array.isArray(raw) ? raw : raw === undefined ? [] : [raw];
+  const paths: string[] = [];
+  for (const entry of list) {
+    if (typeof entry !== "string" || entry.trim().length === 0) {
+      return "image.view: every path must be a non-empty string";
+    }
+    const resolved = resolve(expandHome(entry.trim()));
+    if (!paths.includes(resolved)) paths.push(resolved);
+  }
+  if (paths.length === 0) {
+    return 'image.view expects { "path": "/path/to/image.png" } or { "paths": [...] }';
+  }
+  if (paths.length > MAX_VIEW_IMAGES) {
+    return `image.view accepts at most ${MAX_VIEW_IMAGES} images per call (got ${paths.length})`;
+  }
+  return paths;
+}
+
+/**
+ * Put real image bytes in front of a vision-capable model.
+ *
+ * The agent could previously only reach an image through `image.ocr`, so a
+ * model that had just captured a screenshot to verify its own work had no way
+ * to actually look at it — it got a Tesseract transcript of whatever text
+ * happened to be legible, which is useless for "does this render correctly"
+ * and actively misleading for photos, 3D scenes and charts.
+ *
+ * Tool results are text-only on every provider wire, so this tool returns the
+ * prepared bytes on {@link ToolResult.images} and the agent replays them as a
+ * follow-up user turn — the same path a user attachment takes, which every
+ * multimodal adapter (OpenAI, Anthropic, Gemini, Ollama) already serializes.
+ */
+export async function imageView(
+  args: Record<string, unknown>,
+  options: ImageToolRunOptions = {},
+): Promise<ToolResult> {
+  const paths = viewPaths(args);
+  if (typeof paths === "string") {
+    return { ok: false, output: paths, exitCode: 1 };
+  }
+
+  const provider = options.llmProvider;
+  const model = options.llmModel ?? "";
+  // Tool exposure and execution both require affirmative capability evidence.
+  // Unknown routes are not safe to accept here: the returned bytes would be
+  // replayed only after the tool result, where a text-only fallback could no
+  // longer make the inspection claim true.
+  if (!provider || !model || !modelSupportsVision(provider, model)) {
+    return {
+      ok: false,
+      output:
+        `image.view: ${model || "the active model"} is not known to accept image input, so it cannot look at ` +
+        `${paths.length === 1 ? "this image" : "these images"}. ` +
+        "Use image.ocr to extract any text instead, or switch to a proven vision model with /model.",
+      exitCode: 1,
+    };
+  }
+
+  const budget = imageBudgetFor(provider, model);
+  const images: ChatImage[] = [];
+  const notes: string[] = [];
+  const failures: string[] = [];
+  let totalBytes = 0;
+
+  for (const path of paths) {
+    options.signal?.throwIfAborted();
+    const prepared = prepareImageForModel(path, budget);
+    if (!prepared.ok) {
+      failures.push(`${path} — ${prepared.reason}`);
+      continue;
+    }
+    if (totalBytes + prepared.byteLength > budget.maxTotalBytes) {
+      failures.push(
+        `${path} — skipped, this call already carries ${formatByteSize(totalBytes)} and the ` +
+          `${budget.label} request limit is ${formatByteSize(budget.maxTotalBytes)}`,
+      );
+      continue;
+    }
+    let bytes: Buffer;
+    try {
+      // Open once, then stat and read through the same descriptor. This closes
+      // the path-replacement/symlink race between preparation and ingestion.
+      const handle = await open(prepared.path, "r");
+      try {
+        const current = await handle.stat();
+        if (!current.isFile()) {
+          failures.push(`${path} — prepared path is no longer a regular file`);
+          continue;
+        }
+        if (current.size > budget.hardMaxBytes) {
+          failures.push(
+            `${path} — changed to ${formatByteSize(current.size)}, above the ` +
+              `${formatByteSize(budget.hardMaxBytes)} per-image limit for ${budget.label} models`,
+          );
+          continue;
+        }
+        bytes = await handle.readFile();
+      } finally {
+        await handle.close();
+      }
+    } catch (error) {
+      failures.push(
+        `${path} — could not be read (${error instanceof Error ? error.message : String(error)})`,
+      );
+      continue;
+    }
+    if (bytes.byteLength > budget.hardMaxBytes) {
+      failures.push(
+        `${path} — changed to ${formatByteSize(bytes.byteLength)}, above the ` +
+          `${formatByteSize(budget.hardMaxBytes)} per-image limit for ${budget.label} models`,
+      );
+      continue;
+    }
+    if (totalBytes + bytes.byteLength > budget.maxTotalBytes) {
+      failures.push(
+        `${path} — skipped, the actual bytes would bring this call to ` +
+          `${formatByteSize(totalBytes + bytes.byteLength)}, above the ${budget.label} ` +
+          `request limit of ${formatByteSize(budget.maxTotalBytes)}`,
+      );
+      continue;
+    }
+    const actualMediaType = detectModelImageMediaType(bytes);
+    if (!actualMediaType || actualMediaType !== prepared.mediaType) {
+      failures.push(`${path} — image bytes changed after preparation; inspect the file and try again`);
+      continue;
+    }
+    totalBytes += bytes.byteLength;
+    images.push({
+      mediaType: actualMediaType,
+      dataBase64: bytes.toString("base64"),
+      path: prepared.sourcePath,
+    });
+    notes.push(
+      `${prepared.sourcePath} — ${describePreparedImage({ ...prepared, byteLength: bytes.byteLength })}`,
+    );
+  }
+
+  if (images.length === 0) {
+    return {
+      ok: false,
+      output:
+        `image.view could not attach ${paths.length === 1 ? "the image" : "any image"}:\n` +
+        failures.map((line) => `  - ${line}`).join("\n"),
+      exitCode: 1,
+    };
+  }
+
+  const header =
+    images.length === 1
+      ? "1 image is attached to the next message — look at it directly."
+      : `${images.length} images are attached to the next message, in this order — look at them directly.`;
+  const output = [
+    `[image.view] ${header}`,
+    ...notes.map((line, index) => `  ${index + 1}. ${line}`),
+    ...(failures.length
+      ? ["", "Not attached:", ...failures.map((line) => `  - ${line}`)]
+      : []),
+    "",
+    "Do not OCR these and do not describe them from memory or from the filenames: " +
+      "answer from what the pixels actually show.",
+  ].join("\n");
+
+  return { ok: true, output, images };
 }

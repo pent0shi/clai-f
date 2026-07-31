@@ -355,6 +355,75 @@ describe("native tool loop integration", () => {
     ).toBe(true);
   });
 
+  it("returns an image.view payload to the model as a protocol-safe user image turn", async () => {
+    const screenshot = join(cwd, "screen.png");
+    // 1x1 transparent PNG.
+    const png = Buffer.from(
+      "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000a49444154789c6360000002000100ffff03000006000557bfabd40000000049454e44ae426082",
+      "hex",
+    );
+    await writeFile(screenshot, png);
+    let turn = 0;
+    streamMock.mockImplementation(
+      async (request: CompletionRequest): Promise<CompletionResult> => {
+        turn += 1;
+        if (turn === 1) {
+          expect(request.tools?.some((tool) => tool.name === "image.view")).toBe(true);
+          return {
+            text: "",
+            provider: "openai",
+            model: "gpt-4o-mini",
+            toolCalls: [
+              {
+                id: "call_view",
+                name: "image.view",
+                args: { path: screenshot },
+              },
+            ],
+            finishReason: "tool_calls",
+          };
+        }
+
+        const assistantIndex = request.messages.findIndex(
+          (message) =>
+            message.role === "assistant" &&
+            message.toolCalls?.some((call) => call.id === "call_view"),
+        );
+        expect(assistantIndex).toBeGreaterThanOrEqual(0);
+        expect(request.messages[assistantIndex + 1]).toMatchObject({
+          role: "tool",
+          toolCallId: "call_view",
+          name: "image.view",
+        });
+        const imageTurn = request.messages.find(
+          (message, index) => index > assistantIndex && message.images?.length,
+        );
+        expect(imageTurn).toMatchObject({ role: "user", internal: true });
+        expect(imageTurn?.images?.[0]).toMatchObject({
+          mediaType: "image/png",
+          path: screenshot,
+        });
+        expect(Buffer.from(imageTurn!.images![0]!.dataBase64, "base64")).toEqual(png);
+        return {
+          text: "The rendered pixel is transparent.",
+          provider: "openai",
+          model: "gpt-4o-mini",
+          finishReason: "stop",
+        };
+      },
+    );
+
+    const { runAgentLoop } = await import("../../src/agent/runner.js");
+    await expect(
+      runAgentLoop("inspect the screenshot you generated", {
+        provider: "openai",
+        model: "gpt-4o-mini",
+        maxSteps: 5,
+      }),
+    ).resolves.toContain("transparent");
+    expect(streamMock).toHaveBeenCalledTimes(2);
+  });
+
   it("passes exact image bytes, MIME, and mode to the provider", async () => {
     const image: ChatImage = {
       dataBase64: Buffer.from([0, 1, 2, 253, 254, 255]).toString("base64"),

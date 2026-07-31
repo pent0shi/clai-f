@@ -273,11 +273,32 @@ async function readBodyCapped(
   return collected;
 }
 
-export const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 90_000;
+/**
+ * Mid-stream silence budget.
+ *
+ * This is deliberately generous because "no bytes" does **not** mean "dead
+ * socket" on an OpenAI-compatible endpoint. Most self-hosted runtimes (vLLM /
+ * SGLang and the tool-call parsers layered on top of them) buffer an entire
+ * `tool_calls` delta before emitting it, so a model writing a large file goes
+ * completely silent on the wire for as long as the generation takes. A 90s
+ * budget aborted those healthy streams at `firstToken + 90s`, reported the
+ * abort as a network failure, and burned three identical retries that each
+ * re-generated the same prefix before one happened to finish inside the window.
+ */
+export const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 240_000;
 
-export const THINKING_STREAM_IDLE_TIMEOUT_MS = 120_000;
+export const THINKING_STREAM_IDLE_TIMEOUT_MS = 300_000;
 
 export const THINKING_STREAM_INITIAL_IDLE_TIMEOUT_MS = 300_000;
+
+/**
+ * Marker appended to the message of a stall that happened on a **live**
+ * connection (bytes/keepalives were still arriving, or output had already
+ * started and simply stopped). Such a stall is not a transport failure, so the
+ * recovery layer must not classify it as `network` and retry the identical
+ * request against the identical route.
+ */
+export const STREAM_STALL_MARKER = "no model output";
 
 
 
@@ -1070,10 +1091,16 @@ export async function openAiCompatibleStream(options: {
         argumentsBytes?: number;
       }) => void)
     | undefined;
-  /** Abort a stream that produces no bytes for this long. Default 30s. */
+  /** Abort a stream that delivers no bytes for this long (mid-stream). */
   idleTimeoutMs?: number | undefined;
   
   initialIdleTimeoutMs?: number | undefined;
+  /**
+   * Abort a stream that delivers bytes but no model output for this long.
+   * Bounds a keepalive-only stream. Defaults to 1.5x the largest byte budget so
+   * it always outlasts the transport watchdog.
+   */
+  outputIdleTimeoutMs?: number | undefined;
 }): Promise<OpenAiCompatibleResult> {
   // Combine the caller's abort signal with an idle watchdog so a stuck
   // connection can't wedge the REPL forever. Thinking models get a much
@@ -1091,21 +1118,75 @@ export async function openAiCompatibleStream(options: {
     (reasoningOn
       ? THINKING_STREAM_INITIAL_IDLE_TIMEOUT_MS
       : idleTimeoutMs);
+  // "No bytes" and "no output" are different failures and need separate
+  // budgets. The transport watchdog is re-armed by every read, so an SSE
+  // keepalive comment, a `delta:{}` heartbeat, a role-only opening delta, or a
+  // multi-line frame still being assembled all count as proof that the
+  // connection is healthy. The output watchdog is re-armed only by real model
+  // progress, so a stream that keepalives forever without ever producing
+  // anything still fails instead of hanging.
+  const outputIdleTimeoutMs =
+    options.outputIdleTimeoutMs ??
+    Math.round(Math.max(idleTimeoutMs, initialIdleTimeoutMs) * 1.5);
   const idleController = new AbortController();
-  let idleTimer: NodeJS.Timeout | undefined;
+  let transportTimer: NodeJS.Timeout | undefined;
+  let outputTimer: NodeJS.Timeout | undefined;
   let idleFired = false;
-  
+  let firedWatchdog: "transport" | "output" | undefined;
+  /** Budget of whichever watchdog fired, for the error message. */
+  let firedBudgetMs = initialIdleTimeoutMs;
+  /**
+   * Any bytes at all read off the socket, whether or not the frame carried
+   * model output. Separates "the route never answered" (retry the request) from
+   * "the model was working and went quiet" (a retry replays all of that work).
+   */
+  let sawTransportActivity = false;
+  /** Model-visible progress: content, reasoning, tool-call delta, or usage. */
   let sawStreamProgress = false;
-  let activeIdleTimeoutMs = initialIdleTimeoutMs;
-  const resetIdleTimer = (): void => {
-    if (idleTimer) clearTimeout(idleTimer);
-    activeIdleTimeoutMs = sawStreamProgress ? idleTimeoutMs : initialIdleTimeoutMs;
-    idleTimer = setTimeout(() => {
-      idleFired = true;
-      idleController.abort();
-    }, activeIdleTimeoutMs);
+  const fireStall = (
+    watchdog: "transport" | "output",
+    budgetMs: number,
+  ): void => {
+    // The two timers can expire in the same event-loop turn. Preserve the first
+    // cause so a transport outage is never relabeled by the output watchdog.
+    if (idleFired) return;
+    idleFired = true;
+    firedWatchdog = watchdog;
+    firedBudgetMs = budgetMs;
+    idleController.abort();
   };
-  resetIdleTimer();
+  const armTransportTimer = (budgetMs: number): void => {
+    if (transportTimer) clearTimeout(transportTimer);
+    transportTimer = setTimeout(
+      () => fireStall("transport", budgetMs),
+      budgetMs,
+    );
+  };
+  /** Bytes arrived — the connection is alive; re-arm the mid-stream budget. */
+  const noteTransportActivity = (): void => {
+    sawTransportActivity = true;
+    armTransportTimer(idleTimeoutMs);
+  };
+  const resetIdleTimer = (): void => {
+    sawStreamProgress = true;
+    noteTransportActivity();
+    if (outputTimer) clearTimeout(outputTimer);
+    outputTimer = setTimeout(
+      () => fireStall("output", outputIdleTimeoutMs),
+      outputIdleTimeoutMs,
+    );
+  };
+  armTransportTimer(initialIdleTimeoutMs);
+  outputTimer = setTimeout(
+    () => fireStall("output", outputIdleTimeoutMs),
+    outputIdleTimeoutMs,
+  );
+  const clearIdleTimers = (): void => {
+    if (transportTimer) clearTimeout(transportTimer);
+    if (outputTimer) clearTimeout(outputTimer);
+    transportTimer = undefined;
+    outputTimer = undefined;
+  };
   const onCallerAbort = (): void => idleController.abort(options.signal?.reason);
   options.signal?.addEventListener("abort", onCallerAbort, { once: true });
 
@@ -1140,17 +1221,17 @@ export async function openAiCompatibleStream(options: {
       verbose: process.env.CLAI_VERBOSE === "true",
     } as any);
   } catch (error) {
-    if (idleTimer) clearTimeout(idleTimer);
+    clearIdleTimers();
     options.signal?.removeEventListener("abort", onCallerAbort);
     if (idleFired) {
       throw new ProviderError(
-        `${options.provider} request timed out before any response (${Math.round(activeIdleTimeoutMs / 1000)}s)`,
+        `${options.provider} request timed out before any response (${Math.round(firedBudgetMs / 1000)}s)`,
       );
     }
     throw error;
   }
   if (!response.ok) {
-    if (idleTimer) clearTimeout(idleTimer);
+    clearIdleTimers();
     options.signal?.removeEventListener("abort", onCallerAbort);
     try {
       await readJson<unknown>(response);
@@ -1167,14 +1248,14 @@ export async function openAiCompatibleStream(options: {
     }
   }
   if (!response.body) {
-    if (idleTimer) clearTimeout(idleTimer);
+    clearIdleTimers();
     options.signal?.removeEventListener("abort", onCallerAbort);
     throw new ProviderError(`${options.provider} returned no stream body`);
   }
 
   const contentType = response.headers.get("content-type") ?? "";
   if (response.status === 202 || /\bapplication\/json\b/i.test(contentType)) {
-    if (idleTimer) clearTimeout(idleTimer);
+    clearIdleTimers();
     options.signal?.removeEventListener("abort", onCallerAbort);
     const data = await readJson<{
       id?: string;
@@ -1356,7 +1437,7 @@ export async function openAiCompatibleStream(options: {
   };
 
   const cleanup = (): void => {
-    if (idleTimer) clearTimeout(idleTimer);
+    clearIdleTimers();
     options.signal?.removeEventListener("abort", onCallerAbort);
     idleController.signal.removeEventListener("abort", cancelReaderOnAbort);
   };
@@ -1380,6 +1461,10 @@ export async function openAiCompatibleStream(options: {
         throw new Error("Stream aborted");
       }
       if (done) break;
+      // Bytes off the wire re-arm the watchdog before anything is parsed.
+      // Keepalives and empty deltas are proof of a live connection, so they
+      // must not be allowed to age out a stream that is merely quiet.
+      if (value && value.byteLength > 0) noteTransportActivity();
       buffer += decoder.decode(value, { stream: true });
       const lines = buffer.split("\n");
       buffer = lines.pop() ?? "";
@@ -1481,7 +1566,6 @@ export async function openAiCompatibleStream(options: {
             token ||
             toolProgress
           ) {
-            sawStreamProgress = true;
             resetIdleTimer();
           }
           if (choice?.finish_reason) finishReason = choice.finish_reason;
@@ -1553,8 +1637,32 @@ export async function openAiCompatibleStream(options: {
     };
   } catch (error) {
     if (idleFired) {
+      const seconds = Math.round(firedBudgetMs / 1000);
+      // Preserve the actual watchdog source. Any byte proves the route admitted
+      // the request, but a later byte-silence timeout is still a transport
+      // failure; only the output watchdog denotes a live keepalive-only/model
+      // stall and receives STREAM_STALL_MARKER.
+      if (firedWatchdog === "transport" || !sawTransportActivity) {
+        if (!sawTransportActivity) {
+          // Keep the established wording: both the router's transparent-retry
+          // check and classifyStreamFailure key off this phrase to treat a route
+          // that never answered as a retriable transport failure.
+          throw new ProviderError(
+            `${options.provider} request timed out before any response (${seconds}s) — no data arrived on the connection.`,
+          );
+        }
+        throw new ProviderError(
+          `${options.provider} stream transport timeout (${seconds}s) — no data arrived on the connection after it had started.`,
+        );
+      }
       throw new ProviderError(
-        `${options.provider} stream stalled — no model output for ${Math.round(activeIdleTimeoutMs / 1000)}s. Try a smaller model or disable thinking with /variants off.`,
+        `${options.provider} stream stalled — ${STREAM_STALL_MARKER} for ${seconds}s` +
+          (sawStreamProgress
+            ? " after it had already started producing output. " +
+              "The connection stayed open, so the model was most likely buffering one very large tool call. " +
+              "Split large writes into smaller sequential calls, or try a smaller model / disable thinking with /variants off."
+            : " — the connection stayed open but the model never produced anything. " +
+              "Try another model, or disable thinking with /variants off."),
       );
     }
     throw error;

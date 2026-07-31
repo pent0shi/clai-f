@@ -21,6 +21,7 @@ describe("tool registry", () => {
     expect(names).toContain("sysinfo");
     expect(names).toContain("pentest.recon");
     expect(names).toContain("image.ocr");
+    expect(names).toContain("image.view");
     expect(names).toContain("pdf.read");
   });
 

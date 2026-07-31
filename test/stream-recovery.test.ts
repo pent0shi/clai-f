@@ -63,6 +63,34 @@ describe("classifyStreamFailure", () => {
     ).toBe("network");
   });
 
+  it("separates a live-connection stall from a transport failure", () => {
+    // Bytes were flowing; the model just stopped producing. Retrying the same
+    // request on the same route replays the whole generation.
+    expect(
+      classifyStreamFailure(
+        new ProviderError(
+          "Modal stream stalled — no model output for 300s after it had already started producing output.",
+        ),
+      ),
+    ).toBe("stall");
+    // Survives the router's fallback-chain wrapping.
+    expect(
+      classifyStreamFailure(
+        new Error(
+          "No provider could stream the request. — modal: Modal stream stalled — no model output for 300s.",
+        ),
+      ),
+    ).toBe("stall");
+    // A route that never answered is still a plain transport failure.
+    expect(
+      classifyStreamFailure(
+        new ProviderError(
+          "Modal request timed out before any response (240s) — no data arrived on the connection.",
+        ),
+      ),
+    ).toBe("network");
+  });
+
   it("classifies auth and not-found", () => {
     expect(classifyStreamFailure(new ProviderError("nope", 401))).toBe("auth");
     expect(classifyStreamFailure(new ProviderError("gone", 404))).toBe(
@@ -168,6 +196,21 @@ describe("planStreamRecovery — bounded escalation", () => {
     expect(plan.delayMs).toBeLessThanOrEqual(1_000);
   });
 
+  it("retries a stall on another route straight away and asks for smaller writes", () => {
+    const state = createStreamRecoveryState();
+    const first = planStreamRecovery({ kind: "stall", state });
+    expect(first.action).toBe("retry");
+    // The transport is fine, so there is nothing to wait out.
+    expect(first.delayMs).toBeLessThanOrEqual(1_000);
+    // The same route buffers the same way, so switch immediately.
+    expect(first.allowModelFallback).toBe(true);
+    expect(first.preferModelFallback).toBe(true);
+    expect(first.nudge).toMatch(/small|split|append/i);
+
+    state.stall = DEFAULT_STREAM_RECOVERY_LIMITS.maxStall;
+    expect(planStreamRecovery({ kind: "stall", state }).action).toBe("give-up");
+  });
+
   it("gives up once the overall recovery budget is spent, even mid-class", () => {
     const state = createStreamRecoveryState();
     // Spend the whole total budget on cheap network retries.
@@ -187,6 +230,7 @@ describe("recordRecoveryAttempt / resetStreamRecoveryState", () => {
       "rate-limit",
       "server",
       "network",
+      "stall",
       "context-overflow",
       "auth",
       "not-found",
@@ -197,6 +241,7 @@ describe("recordRecoveryAttempt / resetStreamRecoveryState", () => {
     expect(state.rateLimit).toBe(1);
     expect(state.server).toBe(1);
     expect(state.network).toBe(1);
+    expect(state.stall).toBe(1);
     expect(state.context).toBe(1);
     // auth + not-found + unknown share the structural bucket.
     expect(state.structural).toBe(3);

@@ -26,6 +26,7 @@ interface TranscriptSelectionOptions {
 interface PointerState {
   readonly clicks: 1 | 2 | 3;
   readonly moved: boolean;
+  readonly anchor: SemanticAnchor;
 }
 
 interface ClickState {
@@ -36,9 +37,9 @@ interface ClickState {
 
 export interface TranscriptSelectionBinding {
   readonly onMouseDown: (event: MouseEvent) => void;
-  readonly onMouseDrag: (event: MouseEvent) => void;
+  readonly onMouseDrag: (event: Pick<MouseEvent, "x" | "y">) => void;
   readonly onMouseUp: (event: MouseEvent) => void;
-  readonly onMouseDragEnd: (event: MouseEvent) => void;
+  readonly onMouseDragEnd: () => void;
   handleKey(key: KeyEvent, chord: string): boolean;
 }
 
@@ -97,13 +98,17 @@ export function useTranscriptSelection(
     if (!anchor) return;
     const clicks = nextClickCount(clickRef.current, anchor);
     clickRef.current = { at: Date.now(), anchor, count: clicks };
-    pointerRef.current = { clicks, moved: false };
-    services.selection.beginDrag("transcript", anchor, event);
+    pointerRef.current = { clicks, moved: false, anchor };
+    const granularity = clicks === 1 ? "character" : clicks === 2 ? "word" : "line";
+    services.selection.click("transcript", anchor, granularity);
   }
 
-  function onMouseDrag(event: MouseEvent): void {
+  function onMouseDrag(event: Pick<MouseEvent, "x" | "y">): void {
     const pointer = pointerRef.current;
     if (!pointer) return;
+    if (!pointer.moved) {
+      services.selection.beginDrag("transcript", pointer.anchor, event);
+    }
     const anchor = anchorAtPointer(documentRef.current, scrollRef.current, event.x, event.y);
 
     if (anchor) services.selection.dragTo("transcript", anchor, event);
@@ -118,16 +123,11 @@ export function useTranscriptSelection(
     }
     const pointer = pointerRef.current;
     if (!pointer) return;
-    const anchor = anchorAtPointer(documentRef.current, scrollRef.current, event.x, event.y);
-    if (!pointer.moved && anchor) {
-      const granularity = pointer.clicks === 1 ? "character" : pointer.clicks === 2 ? "word" : "line";
-      services.selection.click("transcript", anchor, granularity);
-    }
     services.selection.finishDrag();
     pointerRef.current = undefined;
   }
 
-  function onMouseDragEnd(_event: MouseEvent): void {
+  function onMouseDragEnd(): void {
     if (!pointerRef.current) return;
     services.selection.finishDrag();
     pointerRef.current = undefined;

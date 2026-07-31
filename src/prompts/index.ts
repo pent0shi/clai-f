@@ -87,7 +87,7 @@ After a tool result, next call or concise final answer. tool.batch for independe
 - Task cycle: in_progress → work → read results → done only when that task's outcome holds → next. Never mark done on hope after firing a command.
 - Debug: repro → localize → hypothesis → minimal fix → re-run the failing check. Never stop at narrating the fix.
 - Pentest: choose reconnaissance and validation from the target evidence and objective; use directory/content enumeration, port expansion, subdomain work, scanners, or client analysis only when they can resolve a material hypothesis. Pursue real PoCs where safe and end with honest residual risk. No local dev server for remote targets.
-- Images: inspect attachments (vision/OCR); try path + scratch copy before asking the user to re-save.
+- Images: inspect user attachments directly when present. For an image or screenshot created/found during the task, use image.view so the next model turn receives the real pixels; use image.ocr only for text extraction or when vision is unavailable. Try path + scratch copy before asking the user to re-save.
 - Side effects: emit the tool; clai handles confirmation. Never bypass denials.
 - Background long-lived work; web.search/web.fetch for current facts; cite tool URLs.
 - Fail → understand → fix → retry. Report blockers plainly.
@@ -205,6 +205,44 @@ function render(template: string, values: Record<string, string>): string {
   );
 }
 
+/** Remove image.view instructions when the concrete route lacks proven vision. */
+export function applyImageViewAvailability(
+  prompt: string,
+  available: boolean,
+): string {
+  if (available) return prompt;
+  return prompt
+    .split("\n")
+    .flatMap((line) => {
+      if (!line.includes("image.view")) return [line];
+      if (/^Available tool(?: names)?s?:\s*/.test(line)) {
+        const separator = line.indexOf(":");
+        const label = line.slice(0, separator + 1);
+        const names = line
+          .slice(separator + 1)
+          .split(",")
+          .map((name) => name.trim())
+          .filter((name) => name && name !== "image.view");
+        return [`${label} ${names.join(", ")}`];
+      }
+      if (/^- image\.view(?::|\s)/.test(line)) return [];
+      if (/^- image\.ocr(?::|\s)/.test(line)) {
+        return [
+          line
+            .replace(/;\s*never substitute OCR.*$/i, ".")
+            .replace(/\s+when image\.view is available\.?$/i, "."),
+        ];
+      }
+      if (/^- Images:/.test(line)) {
+        return [
+          "- Images: this route has no proven visual-input support. Use image.ocr only for explicit text extraction; do not claim visual or layout inspection.",
+        ];
+      }
+      return [];
+    })
+    .join("\n");
+}
+
 /**
  * Environment clock for system prompts.
  *
@@ -280,11 +318,14 @@ export const _AGENT_TEMPLATE = agentPrompt;
 export function renderAskSystemPrompt(options?: {
   nativeTools?: boolean;
   stableEnvironment?: boolean;
+  /** Advertise image.view only for a route with affirmative vision evidence. */
+  imageView?: boolean;
 }): string {
-  return render(options?.nativeTools ? askPromptNative : askPrompt, {
+  const rendered = render(options?.nativeTools ? askPromptNative : askPrompt, {
     ...promptEnvironmentValues(Boolean(options?.stableEnvironment)),
     tool_list: "none",
   });
+  return applyImageViewAvailability(rendered, options?.imageView !== false);
 }
 
 export function renderAgentSystemPrompt(
@@ -299,6 +340,8 @@ export function renderAgentSystemPrompt(
     slimNative?: boolean;
     /** Replace mutable environment values with a stable suffix reference. */
     stableEnvironment?: boolean;
+    /** Advertise image.view only for a route with affirmative vision evidence. */
+    imageView?: boolean;
   },
 ): string {
   let template = agentPrompt;
@@ -309,24 +352,30 @@ export function renderAgentSystemPrompt(
         : true;
     template = slim ? agentPromptNativeSlim : agentPromptNative;
   }
-  return render(template, {
+  const rendered = render(template, {
     ...promptEnvironmentValues(Boolean(options?.stableEnvironment)),
     tool_list: toolList,
   });
+  return applyImageViewAvailability(rendered, options?.imageView !== false);
 }
 
 
 export function renderCompactAgentSystemPrompt(
   toolList: string,
-  options?: { nativeTools?: boolean; stableEnvironment?: boolean },
+  options?: {
+    nativeTools?: boolean;
+    stableEnvironment?: boolean;
+    imageView?: boolean;
+  },
 ): string {
-  return render(
+  const rendered = render(
     options?.nativeTools ? compactAgentPromptNative : compactAgentPrompt,
     {
       ...promptEnvironmentValues(Boolean(options?.stableEnvironment)),
       tool_list: toolList,
     },
   );
+  return applyImageViewAvailability(rendered, options?.imageView !== false);
 }
 
 /** Dual-mode recovery nudge wording. */

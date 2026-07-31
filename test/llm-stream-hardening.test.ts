@@ -152,3 +152,138 @@ describe("multi-line SSE frames", () => {
     expect(frames.pushLine(": keepalive comment")).toBeUndefined();
   });
 });
+
+/**
+ * A model writing a large file produces one very large `tool_calls` argument
+ * string, and the tool-call parsers in front of self-hosted runtimes buffer that
+ * whole string before emitting it. The stream therefore delivers prose, then
+ * goes quiet for as long as the generation takes.
+ *
+ * The watchdog used to be re-armed only by content deltas, so it aborted these
+ * healthy streams at `firstToken + idleTimeoutMs`, reported the abort as a
+ * network failure, and burned three identical retries that each re-generated
+ * the same prefix before one happened to land inside the window.
+ */
+describe("openAiCompatibleStream stall watchdog", () => {
+  /** Emits `frames`, spacing them with SSE keepalive comments. */
+  function drip(
+    frames: string[],
+    gapMs: number,
+    keepaliveMs?: number,
+  ): Response {
+    const encoder = new TextEncoder();
+    let keepalive: ReturnType<typeof setInterval> | undefined;
+    const body = new ReadableStream<Uint8Array>({
+      async start(controller) {
+        if (keepaliveMs !== undefined) {
+          keepalive = setInterval(() => {
+            try {
+              controller.enqueue(encoder.encode(": keepalive\n\n"));
+            } catch {
+              // stream already closed
+            }
+          }, keepaliveMs);
+        }
+        for (const frame of frames) {
+          await new Promise((resolve) => setTimeout(resolve, gapMs));
+          controller.enqueue(encoder.encode(frame));
+        }
+        if (keepalive) clearInterval(keepalive);
+        controller.close();
+      },
+      cancel() {
+        if (keepalive) clearInterval(keepalive);
+      },
+    });
+    return new Response(body, {
+      status: 200,
+      headers: { "content-type": "text/event-stream" },
+    });
+  }
+
+  it("keeps a stream alive while keepalives arrive between content deltas", async () => {
+    stubFetch(
+      drip(
+        [
+          'data: {"choices":[{"delta":{"content":"Writing the full main.js now."}}]}\n\n',
+          // Long silence in model output while the runtime buffers the tool call.
+          'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"fs_write","arguments":"{\\"path\\":\\"a\\"}"}}]}}]}\n\n',
+          "data: [DONE]\n\n",
+        ],
+        60,
+        5,
+      ),
+    );
+    const result = await openAiCompatibleStream({
+      ...baseOptions,
+      onToken: () => {},
+      // Byte budget far shorter than the gap between content deltas: only the
+      // keepalives can carry the stream across it.
+      initialIdleTimeoutMs: 40,
+      idleTimeoutMs: 40,
+      outputIdleTimeoutMs: 60_000,
+    });
+    expect(result.toolCalls?.[0]?.name).toBe("fs.write");
+  });
+
+  it("survives a long byte-silent buffered tool call within the configured budget", async () => {
+    stubFetch(
+      drip(
+        [
+          'data: {"choices":[{"delta":{"content":"Writing the full main.js now."}}]}\n\n',
+          'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"fs_write","arguments":"{\\"path\\":\\"main.js\\"}"}}]}}]}\n\n',
+          "data: [DONE]\n\n",
+        ],
+        70,
+      ),
+    );
+    const result = await openAiCompatibleStream({
+      ...baseOptions,
+      onToken: () => {},
+      // The 70ms body silence is longer than the old scaled 40ms budget but
+      // below the new buffered-generation allowance represented by 120ms.
+      initialIdleTimeoutMs: 120,
+      idleTimeoutMs: 120,
+      outputIdleTimeoutMs: 1_000,
+    });
+    expect(result.toolCalls?.[0]?.name).toBe("fs.write");
+  });
+
+  it("reports a stall on a live connection as a stall, not a dropped connection", async () => {
+    stubFetch(
+      drip(
+        [
+          'data: {"choices":[{"delta":{"content":"Writing the full main.js now."}}]}\n\n',
+          "data: [DONE]\n\n",
+        ],
+        400,
+        5,
+      ),
+    );
+    await expect(
+      openAiCompatibleStream({
+        ...baseOptions,
+        onToken: () => {},
+        initialIdleTimeoutMs: 1_000,
+        idleTimeoutMs: 1_000,
+        // Output budget expires while the keepalives still flow.
+        outputIdleTimeoutMs: 120,
+      }),
+    ).rejects.toThrow(/stream stalled — no model output/i);
+  });
+
+  it("reports a route that never answered as a transport timeout", async () => {
+    stubFetch(
+      drip(['data: {"choices":[{"delta":{"content":"late"}}]}\n\n'], 300),
+    );
+    await expect(
+      openAiCompatibleStream({
+        ...baseOptions,
+        onToken: () => {},
+        initialIdleTimeoutMs: 40,
+        idleTimeoutMs: 40,
+        outputIdleTimeoutMs: 60_000,
+      }),
+    ).rejects.toThrow(/request timed out before any response/i);
+  });
+});

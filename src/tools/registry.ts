@@ -5,7 +5,7 @@ import {
   commandAvailable,
 } from "../os/pkgmgr.js";
 import { safeCwd } from "../os/cwd.js";
-import type { ToolCall, ToolResult } from "../types.js";
+import type { ChatImage, ToolCall, ToolResult } from "../types.js";
 import {
   fsEdit,
   fsDelete,
@@ -23,7 +23,7 @@ import { shellExec, spawnArgv } from "./shell.js";
 import {
   isLongQuietInstallOrScaffoldCommand,
 } from "../agent/task-evidence.js";
-import { imageOcr } from "./image.js";
+import { imageOcr, imageView } from "./image.js";
 import { pdfRead } from "./pdf.js";
 import { webFetch } from "./web/fetch.js";
 import { webSearch } from "./web/search.js";
@@ -981,6 +981,9 @@ export const toolRegistry: Record<string, ToolHandler> = {
   async "image.ocr"(args, options) {
     return imageOcr(args, options);
   },
+  async "image.view"(args, options) {
+    return imageView(args, options);
+  },
   async "pdf.read"(args, options) {
     return pdfRead(args, options);
   },
@@ -1271,6 +1274,7 @@ export const BATCH_SAFE_TOOLS = new Set([
   "tool.check",
   "wordlist.find",
   "image.ocr",
+  "image.view",
   "pdf.read",
   "web.search",
   "web.fetch",
@@ -1432,6 +1436,12 @@ interface BatchOutcome {
   exitCode?: number | undefined;
   error?: string | undefined;
   suppressedRepeat?: boolean | undefined;
+  /**
+   * Images a child wants the model to look at (image.view). Without this the
+   * aggregate result would drop the bytes while still telling the model an
+   * image was attached.
+   */
+  images?: ChatImage[] | undefined;
 }
 
 async function runToolBatch(
@@ -1684,6 +1694,8 @@ async function runToolBatch(
                 ? { engagementAuthorization: options.engagementAuthorization }
                 : {}),
               ...(options?.sessionId ? { sessionId: options.sessionId } : {}),
+              ...(options?.llmProvider ? { llmProvider: options.llmProvider } : {}),
+              ...(options?.llmModel ? { llmModel: options.llmModel } : {}),
               ...(options?.taskId ? { taskId: options.taskId } : {}),
               ...(options?.parentTaskId ? { parentTaskId: options.parentTaskId } : {}),
               ...(options?.delegationId ? { delegationId: options.delegationId } : {}),
@@ -1731,6 +1743,7 @@ async function runToolBatch(
             output: result.output,
             exitCode: result.exitCode,
             ...(result.suppressedRepeat ? { suppressedRepeat: true } : {}),
+            ...(result.images?.length ? { images: result.images } : {}),
           };
           tick(
             `[batch] #${index + 1} ${spec.name} ok` +
@@ -1894,11 +1907,16 @@ async function runToolBatch(
   const allSuppressed =
     finalOutcomes.length > 0 &&
     finalOutcomes.every((outcome) => outcome.suppressedRepeat);
+  // Children run in index order in the sectioned body, so keep the same order
+  // here: the model is told "attached in this order" and must be able to match
+  // each image back to the section that requested it.
+  const batchImages = finalOutcomes.flatMap((outcome) => outcome.images ?? []);
   return {
     ok: allOk,
     partial: !allOk && anyOk && !parentAborted && !hardTimedOut,
     output,
     exitCode: allOk ? 0 : hardTimedOut ? 124 : parentAborted ? 130 : 1,
     ...(allSuppressed ? { suppressedRepeat: true } : {}),
+    ...(batchImages.length ? { images: batchImages } : {}),
   };
 }

@@ -645,6 +645,10 @@ export function classifyToolCall(
     return { level: "safe", reason: "Read-only local image OCR" };
   }
 
+  if (call.name === "image.view") {
+    return { level: "safe", reason: "Read-only local image read" };
+  }
+
   if (call.name === "pdf.read") {
     return {
       level: "safe",

@@ -23,14 +23,17 @@ import {
   isImageInputUnsupportedError,
   isReasoningUnsupportedError,
   stripImagesFromMessages,
+  STREAM_STALL_MARKER,
 } from "./http.js";
 import {
   learnModelVisionCapability,
   markModelUnavailable,
   markReasoningUnsupported,
   modelAcceptsImages,
+  modelSupportsVision,
   visionSubstitutionOrigin,
 } from "./capabilities.js";
+import { applyImageViewAvailability } from "../prompts/index.js";
 import {
   markStreamEmittedBytes,
   streamAlreadyEmitted,
@@ -126,6 +129,11 @@ function isRetriableError(error: unknown): boolean {
   // second attempt would append to the same assistant message.
   if (streamAlreadyEmitted(error)) return false;
   const message = error instanceof Error ? error.message : String(error);
+  // A stall on a *live* connection means the model already did the work and the
+  // runtime was buffering it. A transparent same-route retry just replays the
+  // whole generation and stalls again, so leave it to the agent's recovery
+  // layer, which retries with a nudge to emit smaller tool calls.
+  if (new RegExp(STREAM_STALL_MARKER, "i").test(message)) return false;
   // Mid-stream stalls used to be non-retriable (to avoid infinite hangs).
   // One quick retry on the same provider recovers flaky thinking pauses
   // without waiting forever — MAX_RETRIES still bounds the loop.
@@ -236,6 +244,9 @@ export function formatProviderFailureForUser(error: unknown): string {
     )
   ) {
     return `${message} — connection dropped mid-request (common on free/unstable routes). Retry or switch model; long contexts increase disconnect risk.`;
+  }
+  if (new RegExp(STREAM_STALL_MARKER, "i").test(message)) {
+    return `${message}`;
   }
   if (/stream stalled|request timed out before any response/i.test(message)) {
     return `${message} — no tokens arrived in time. Free models and large contexts fail more often; retry or use a more reliable model.`;
@@ -390,6 +401,7 @@ export function buildFallbackChain(
   requested: ProviderId,
   freeOnly: boolean,
   enabled = false,
+  preferAlternates = false,
 ): ProviderId[] {
   if (!enabled) return [requested];
   const filtered = freeOnly
@@ -398,7 +410,14 @@ export function buildFallbackChain(
           provider === requested || providerCategory[provider] !== "paid-cloud",
       )
     : fallbackOrder;
-  return [requested, ...filtered.filter((provider) => provider !== requested)];
+  const alternates = filtered.filter((provider) => provider !== requested);
+  // A live-connection stall has already spent one full generation on the
+  // selected route. Retrying it first creates the duplicate partial bubbles in
+  // the reported failure. Try configured alternates first for that recovery
+  // attempt, but retain the user's selected provider as the final fallback.
+  return preferAlternates
+    ? [...alternates, requested]
+    : [requested, ...alternates];
 }
 
 export function getProvider(provider: ProviderId): LlmProvider {
@@ -496,6 +515,38 @@ async function tryCompleteOnce(
   }
 }
 
+function requestForRoute(
+  request: CompletionRequest,
+  provider: ProviderId,
+  model: string,
+): CompletionRequest {
+  if (modelSupportsVision(provider, model)) return request;
+
+  const tools = request.tools?.filter((tool) => tool.name !== "image.view");
+  const forcedImageView =
+    typeof request.toolChoice === "object" &&
+    request.toolChoice.name === "image.view";
+  const messages = request.messages.map((message) =>
+    message.role === "system" && message.content.includes("image.view")
+      ? {
+          ...message,
+          content: applyImageViewAvailability(message.content, false),
+        }
+      : message,
+  );
+  return {
+    ...request,
+    messages,
+    ...(request.tools ? { tools } : {}),
+    ...(forcedImageView
+      ? { toolChoice: tools?.length ? ("auto" as const) : undefined }
+      : {}),
+    ...(!tools?.length && request.tools
+      ? { parallelToolCalls: undefined }
+      : {}),
+  };
+}
+
 function hasImageInput(request: CompletionRequest): boolean {
   return request.messages.some((message) => message.images?.length);
 }
@@ -535,15 +586,16 @@ function revertVisionSubstitution(
   if (!original) return undefined;
   markModelUnavailable(providerId, model);
   const keepImages = modelAcceptsImages(providerId, original);
+  const restoredRequest: CompletionRequest = {
+    ...request,
+    model: original,
+    messages: keepImages
+      ? request.messages
+      : stripImagesFromMessages(request.messages),
+  };
   return {
     original,
-    request: {
-      ...request,
-      model: original,
-      messages: keepImages
-        ? request.messages
-        : stripImagesFromMessages(request.messages),
-    },
+    request: requestForRoute(restoredRequest, providerId, original),
   };
 }
 
@@ -851,6 +903,7 @@ export async function completeWithProvider(
     requested,
     config.freeOnly,
     fallbackEnabled,
+    request.preferModelFallback === true,
   );
   const failures: ProviderFailure[] = [];
   const emitKey = makeKeyEmitter(options?.onStatus, options?.onKeyEvent);
@@ -869,12 +922,13 @@ export async function completeWithProvider(
       providerId === requested
         ? (request.model ?? provider.defaultModel)
         : provider.defaultModel;
+    const routeRequest = requestForRoute(request, providerId, model);
 
     try {
       return await runWithKeyRotation<CompletionResult>({
         providerId,
         provider,
-        request,
+        request: routeRequest,
         model,
         emitKey,
         mode: "complete",
@@ -922,6 +976,7 @@ export async function streamWithProvider(
     requested,
     config.freeOnly,
     fallbackEnabled,
+    request.preferModelFallback === true,
   );
   const failures: ProviderFailure[] = [];
   const emitStatus = options.onStatus ?? ((message) => onToken(message));
@@ -940,12 +995,13 @@ export async function streamWithProvider(
       providerId === requested
         ? (request.model ?? provider.defaultModel)
         : provider.defaultModel;
+    const routeRequest = requestForRoute(request, providerId, model);
 
     try {
       return await runWithKeyRotation<CompletionResult>({
         providerId,
         provider,
-        request,
+        request: routeRequest,
         model,
         emitKey,
         mode: "stream",

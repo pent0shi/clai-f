@@ -65,6 +65,13 @@ describe("phase 7 — free-only provider categories", () => {
     expect(chain).toContain("anthropic");
   });
 
+  it("can prefer alternates after a live-stream stall while retaining the selected route", () => {
+    const chain = buildFallbackChain("modal", false, true, true);
+    expect(chain[0]).not.toBe("modal");
+    expect(chain.at(-1)).toBe("modal");
+    expect(new Set(chain).size).toBe(chain.length);
+  });
+
   it("provider fallback defaults to the selected provider only", () => {
     expect(buildFallbackChain("groq", false)).toEqual(["groq"]);
   });

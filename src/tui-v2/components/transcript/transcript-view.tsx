@@ -8,8 +8,15 @@
  * to the bottom or a new user prompt re-engages. We still call pinToBottom on
  * content changes as a belt-and-suspenders for layout races.
  */
-
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/react";
 import type { MouseEvent, ScrollBoxRenderable } from "@opentui/core";
 import type { AppServices } from "../../bootstrap/composition-root.js";
@@ -41,7 +48,6 @@ import {
 } from "./transcript-scroll-port.js";
 import { useNativeSelectionCopy } from "./use-native-selection-copy.js";
 import { useTranscriptSelection } from "./use-transcript-selection.js";
-
 export interface TranscriptViewProps {
   readonly services: AppServices;
   readonly theme: Theme;
@@ -52,25 +58,21 @@ export interface TranscriptViewProps {
    */
   readonly contentWidth?: number | undefined;
 }
-
 /** Hide OpenTUI's native scrollbar chrome. */
 const HIDDEN_SCROLLBARS = {
   visible: false,
   showArrows: false,
 } as const;
-
 /** Max scrollTop for a ScrollBox (not scrollHeight — that overshoots). */
 function maxScrollTop(sb: ScrollBoxRenderable): number {
   const vh = sb.viewport?.height ?? 0;
   return Math.max(0, sb.scrollHeight - vh);
 }
-
 function isNearBottom(sb: ScrollBoxRenderable, slack = 2): boolean {
   const max = maxScrollTop(sb);
   if (max <= 0) return true;
   return sb.scrollTop >= max - slack;
 }
-
 /** Classic status badges: ▲ lines above · ▼ lines below the viewport. */
 function publishScrollRemainder(sb: ScrollBoxRenderable | null): void {
   if (!sb) {
@@ -84,7 +86,6 @@ function publishScrollRemainder(sb: ScrollBoxRenderable | null): void {
     linesBelow: Math.max(0, max - top),
   });
 }
-
 export function TranscriptView(props: TranscriptViewProps): ReactNode {
   const { services, theme, focused, contentWidth } = props;
   const state = useTranscriptState(services.transcript);
@@ -110,6 +111,13 @@ export function TranscriptView(props: TranscriptViewProps): ReactNode {
    */
   const followBottom = useRef(true);
   const wasRunning = useRef(false);
+  const dragPointer = useRef<{ x: number; y: number } | undefined>(undefined);
+  const dragFrame = useRef<number | undefined>(undefined);
+  const pointerGestureActive = useRef(false);
+  const copySemanticOnRelease = useRef(false);
+  const scrollSnapshot = useRef<
+    { scrollTop: number; scrollHeight: number; viewportHeight: number } | undefined
+  >(undefined);
 
   /**
    * Bumps when anything visible can grow: new rows, streaming tails on the
@@ -171,12 +179,9 @@ export function TranscriptView(props: TranscriptViewProps): ReactNode {
       : undefined;
   const searchActive = query.trim().length > 0;
 
-  // Drag-select on response/thinking text → OSC 52 copy on release.
   useNativeSelectionCopy(services);
   const renderer = useRenderer();
 
-  // Keyboard selection (select-all / copy / clear) goes through the pane
-  // selection controller; mouse drag stays on OpenTUI's native selection.
   const selection = useTranscriptSelection({
     services,
     state,
@@ -185,30 +190,139 @@ export function TranscriptView(props: TranscriptViewProps): ReactNode {
     focused,
   });
 
-  /**
-   * Click/touch in the chat pane: claim keyboard so ↑/↓ scroll the transcript
-   * instead of walking prompt history. Child handlers (YOU bubble, tool card)
-   * use selectable={false} + preventDefault so clicks open modals without
-   * starting a selection.
-   */
+  function clearNativeSelection(): boolean {
+    if (!renderer.hasSelection) return false;
+    try {
+      renderer.clearSelection();
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  function isAutoScrollEdge(sb: ScrollBoxRenderable, pointerY: number): boolean {
+    const relativeY = pointerY - sb.y;
+    return relativeY <= 3 || sb.height - relativeY <= 3;
+  }
+
+  function canAutoScroll(sb: ScrollBoxRenderable, pointerY: number): boolean {
+    const relativeY = pointerY - sb.y;
+    if (relativeY <= 3) return sb.scrollTop > 0;
+    if (sb.height - relativeY <= 3) return sb.scrollTop < maxScrollTop(sb);
+    return false;
+  }
+
+  function stopDragRefresh(): void {
+    dragPointer.current = undefined;
+    if (dragFrame.current !== undefined) cancelAnimationFrame(dragFrame.current);
+    dragFrame.current = undefined;
+  }
+
+  function refreshSemanticDrag(): void {
+    dragFrame.current = undefined;
+    const pointer = dragPointer.current;
+    const sb = scrollRef.current;
+    if (!pointer || !sb) {
+      stopDragRefresh();
+      return;
+    }
+    selection.onMouseDrag(pointer);
+    if (!isAutoScrollEdge(sb, pointer.y)) {
+      stopDragRefresh();
+      return;
+    }
+    dragFrame.current = requestAnimationFrame(refreshSemanticDrag);
+  }
+
+  function updateTranscriptDrag(x: number, y: number): void {
+    const pointer = { x, y };
+    selection.onMouseDrag(pointer);
+    followBottom.current = false;
+    const sb = scrollRef.current;
+    if (!sb) return;
+    if (isAutoScrollEdge(sb, y)) {
+      if (canAutoScroll(sb, y) && clearNativeSelection()) {
+        copySemanticOnRelease.current = true;
+      }
+      dragPointer.current = pointer;
+      if (dragFrame.current === undefined) {
+        dragFrame.current = requestAnimationFrame(refreshSemanticDrag);
+      }
+    } else {
+      stopDragRefresh();
+    }
+    sb.updateAutoScroll(x, y);
+  }
+
+  function copyHandedOffSelection(): void {
+    if (!copySemanticOnRelease.current) return;
+    copySemanticOnRelease.current = false;
+    void services.selection.copy().then((result) => {
+      if (result.status === "copied") {
+        services.toast.success("Copied to clipboard", {
+          key: "clipboard",
+          durationMs: 1600,
+        });
+      } else if (result.status === "failed") {
+        services.toast.error("Copy failed", {
+          key: "clipboard",
+          durationMs: 2200,
+        });
+      }
+    });
+  }
+
+  useLayoutEffect(() => {
+    const sb = scrollRef.current;
+    if (!sb) return;
+    const current = {
+      scrollTop: sb.scrollTop,
+      scrollHeight: sb.scrollHeight,
+      viewportHeight: sb.viewport.height,
+    };
+    const previous = scrollSnapshot.current;
+    if (previous && renderer.hasSelection) {
+      const previousMax = Math.max(0, previous.scrollHeight - previous.viewportHeight);
+      const wasAtBottom = previousMax === 0 || previous.scrollTop >= previousMax - 2;
+      const moved = current.scrollTop !== previous.scrollTop;
+      const grewAtBottom = current.scrollHeight !== previous.scrollHeight && wasAtBottom;
+      if (moved || grewAtBottom) {
+        if (clearNativeSelection() && pointerGestureActive.current) {
+          copySemanticOnRelease.current = true;
+        }
+      }
+    }
+    scrollSnapshot.current = current;
+  });
+
   function onTranscriptMouseDown(event: MouseEvent): void {
     if (event.button !== 0) return;
     if (event.defaultPrevented) return;
+    stopDragRefresh();
+    pointerGestureActive.current = true;
+    copySemanticOnRelease.current = false;
+    selection.onMouseDown(event);
     services.focus.focusRegion("transcript");
-    // Claim chat focus so composer chrome dims and draft wheel is disabled.
-    // Selecting = leave sticky follow so content can scroll with the drag.
     followBottom.current = false;
   }
 
   function onTranscriptMouseDrag(event: MouseEvent): void {
-    if (!event.isDragging) return;
-    followBottom.current = false;
-    const sb = scrollRef.current;
-    if (!sb) return;
-    sb.updateAutoScroll(event.x, event.y);
+    updateTranscriptDrag(event.x, event.y);
   }
 
-  function onTranscriptMouseUp(): void {
+  function onTranscriptMouseUp(event: MouseEvent): void {
+    stopDragRefresh();
+    pointerGestureActive.current = false;
+    selection.onMouseUp(event);
+    copyHandedOffSelection();
+    scrollRef.current?.stopAutoScroll();
+  }
+
+  function onTranscriptMouseDragEnd(): void {
+    stopDragRefresh();
+    pointerGestureActive.current = false;
+    selection.onMouseDragEnd();
+    copyHandedOffSelection();
     scrollRef.current?.stopAutoScroll();
   }
 
@@ -217,7 +331,10 @@ export function TranscriptView(props: TranscriptViewProps): ReactNode {
     const sb = scrollRef.current;
     if (!sb) return;
     const go = (): void => {
-      sb.scrollTo(maxScrollTop(sb));
+      const next = maxScrollTop(sb);
+      if (sb.scrollTop === next) return;
+      clearNativeSelection();
+      sb.scrollTo(next);
     };
     go();
     requestAnimationFrame(() => {
@@ -299,6 +416,7 @@ export function TranscriptView(props: TranscriptViewProps): ReactNode {
   // lands on the focused textarea and walks prompt history instead.
   useEffect(() => {
     return registerTranscriptScrollPort((dy) => {
+      clearNativeSelection();
       const sb = scrollRef.current;
       if (!sb) return;
       const max = maxScrollTop(sb);
@@ -313,6 +431,7 @@ export function TranscriptView(props: TranscriptViewProps): ReactNode {
   useEffect(() => {
     return registerTranscriptJumpHandlers(
       () => {
+        clearNativeSelection();
         const sb = scrollRef.current;
         if (!sb) return;
         sb.scrollTo(0);
@@ -344,17 +463,22 @@ export function TranscriptView(props: TranscriptViewProps): ReactNode {
   // Selection drag often ends over the composer; App forwards pointer coords
   // here so edge-autoscroll continues when selecting downward past the pane.
   useEffect(() => {
-    return registerTranscriptAutoScroll({
+    const unregister = registerTranscriptAutoScroll({
       update(x, y) {
-        const sb = scrollRef.current;
-        if (!sb) return;
-        followBottom.current = false;
-        sb.updateAutoScroll(x, y);
+        updateTranscriptDrag(x, y);
       },
       stop() {
+        stopDragRefresh();
+        pointerGestureActive.current = false;
+        selection.onMouseDragEnd();
+        copyHandedOffSelection();
         scrollRef.current?.stopAutoScroll();
       },
     });
+    return () => {
+      stopDragRefresh();
+      unregister();
+    };
   }, []);
 
   function jumpToBottom(): void {
@@ -405,6 +529,7 @@ export function TranscriptView(props: TranscriptViewProps): ReactNode {
     setMatchIndex(index);
     const match = matches[index];
     if (!match) return;
+    clearNativeSelection();
     followBottom.current = false;
     // Defer until after paint so the row id exists in the scroll tree.
     queueMicrotask(() => {
@@ -487,6 +612,7 @@ export function TranscriptView(props: TranscriptViewProps): ReactNode {
    */
   function onWheelScroll(event: MouseEvent): void {
     if (!event.scroll) return;
+    clearNativeSelection();
     event.stopPropagation();
     services.focus.focusRegion("transcript");
     // Keep followBottom in sync after the native ScrollBox applies the delta.
@@ -563,22 +689,26 @@ export function TranscriptView(props: TranscriptViewProps): ReactNode {
       const max = maxScrollTop(sb);
       if (chord === "up" || chord === "k") {
         key.preventDefault();
+        clearNativeSelection();
         sb.scrollTo(Math.max(0, sb.scrollTop - 1));
         followBottom.current = false;
         publishScrollRemainder(sb);
       } else if (chord === "down" || chord === "j") {
         key.preventDefault();
+        clearNativeSelection();
         const next = Math.min(max, sb.scrollTop + 1);
         sb.scrollTo(next);
         followBottom.current = next >= max - 1;
         publishScrollRemainder(sb);
       } else if (chord === "pageup") {
         key.preventDefault();
+        clearNativeSelection();
         sb.scrollTo(Math.max(0, sb.scrollTop - page));
         followBottom.current = false;
         publishScrollRemainder(sb);
       } else if (chord === "pagedown") {
         key.preventDefault();
+        clearNativeSelection();
         const next = Math.min(max, sb.scrollTop + page);
         sb.scrollTo(next);
         followBottom.current = next >= max - 1;
@@ -591,6 +721,7 @@ export function TranscriptView(props: TranscriptViewProps): ReactNode {
       } else if (chord === "home" || chord === "ctrl+u") {
         // ^U / Home — absolute top of the chat (intro card).
         key.preventDefault();
+        clearNativeSelection();
         sb.scrollTo(0);
         followBottom.current = false;
         publishScrollRemainder(sb);
@@ -604,7 +735,7 @@ export function TranscriptView(props: TranscriptViewProps): ReactNode {
       onMouseDown={onTranscriptMouseDown}
       onMouseDrag={onTranscriptMouseDrag}
       onMouseUp={onTranscriptMouseUp}
-      onMouseDragEnd={onTranscriptMouseUp}
+      onMouseDragEnd={onTranscriptMouseDragEnd}
       onMouseScroll={onWheelScroll}
     >
       {searchOpen || searchActive ? (

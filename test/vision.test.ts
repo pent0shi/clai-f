@@ -5,6 +5,7 @@ import { join } from "node:path";
 import {
   modelSupportsVision,
   preferredVisionModel,
+  registerModelVisionCapability,
 } from "../src/llm/capabilities.js";
 import { toOpenAiMessages } from "../src/llm/http.js";
 import {
@@ -14,6 +15,7 @@ import {
 } from "../src/ui/mentions.js";
 import type { ChatMessage } from "../src/types.js";
 import { shouldEnableImageOcr } from "../src/agent/runner.js";
+import { imageView } from "../src/tools/image.js";
 
 // 1x1 transparent PNG.
 const PNG_HEX =
@@ -97,6 +99,58 @@ describe("toOpenAiMessages multimodal", () => {
       },
     ]);
     expect(out[0]!.content).toBe("ok");
+  });
+});
+
+describe("image.view direct vision", () => {
+  const dirs: string[] = [];
+  afterEach(() => {
+    for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
+    dirs.length = 0;
+  });
+
+  it("returns the exact prepared pixels for a vision-capable model", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "clai-view-"));
+    dirs.push(dir);
+    const png = join(dir, "shot.png");
+    const expected = Buffer.from(PNG_HEX, "hex");
+    writeFileSync(png, expected);
+
+    const result = await imageView(
+      { path: png },
+      { llmProvider: "openai", llmModel: "gpt-4o-mini" },
+    );
+
+    expect(result.ok).toBe(true);
+    expect(result.images).toHaveLength(1);
+    expect(result.images?.[0]).toMatchObject({
+      mediaType: "image/png",
+      path: png,
+    });
+    expect(Buffer.from(result.images![0]!.dataBase64, "base64")).toEqual(expected);
+    expect(result.output).toMatch(/actual|pixels|look at it directly/i);
+  });
+
+  it("refuses a model observed to be text-only instead of pretending it can see", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "clai-view-"));
+    dirs.push(dir);
+    const png = join(dir, "shot.png");
+    writeFileSync(png, Buffer.from(PNG_HEX, "hex"));
+    const textOnlyModel = "observed-text-only-for-image-view-test";
+    registerModelVisionCapability({
+      provider: "openai",
+      model: textOnlyModel,
+      vision: false,
+    });
+
+    const result = await imageView(
+      { path: png },
+      { llmProvider: "openai", llmModel: textOnlyModel },
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.images).toBeUndefined();
+    expect(result.output).toMatch(/cannot accept image input|vision model/i);
   });
 });
 

@@ -1,9 +1,16 @@
-import type { ToolResult } from "../types.js";
+import type { ProviderId, ToolResult } from "../types.js";
 import type { JobMonitorMetadata } from "./jobs.js";
 
 export interface ToolRunOptions {
   signal?: AbortSignal | undefined;
   onOutput?: ((chunk: string, stream: "stdout" | "stderr") => void) | undefined;
+  /**
+   * Provider/model driving this turn. Only needed by tools whose result depends
+   * on model capability — image.view checks vision support and sizes images to
+   * the provider's per-image budget.
+   */
+  llmProvider?: ProviderId | undefined;
+  llmModel?: string | undefined;
   requestSecret?: ((request: { title: string; prompt: string }) => Promise<string | undefined>) | undefined;
   confirmed?: boolean | undefined;
   userPrompt?: string | undefined;

@@ -1,7 +1,7 @@
 import type { ChatMessage, ChatImage, ProviderId, ToolCall } from "../types.js";
 import type { AgentEvent } from "../agent/events.js";
 import { streamWithProvider } from "../llm/router.js";
-import { resolveToolDialect } from "../llm/capabilities.js";
+import { modelSupportsVision, resolveToolDialect } from "../llm/capabilities.js";
 import { syntheticToolCallId } from "../llm/tool-protocol.js";
 import {
   renderAskSystemPrompt,
@@ -77,6 +77,8 @@ function researchResultSummary(call: ToolCall, ok: boolean): string {
       return "listed";
     case "fs.search":
       return "searched";
+    case "image.view":
+      return "image attached for visual inspection";
     default:
       return "done";
   }
@@ -91,6 +93,7 @@ const ASK_RESEARCH_TOOLS = new Set([
   "fs.read",
   "fs.list",
   "fs.search",
+  "image.view",
 ]);
 
 /** Max research rounds before forcing a final answer (each round may run several tools). */
@@ -144,6 +147,7 @@ async function buildAskMessages(
   const systemPrompt = renderAskSystemPrompt({
     nativeTools: native,
     stableEnvironment: true,
+    imageView: modelSupportsVision(provider, model),
   });
   const userMessage: ChatMessage = { role: "user", content: prompt };
   if (options.images && options.images.length > 0) {
@@ -204,7 +208,13 @@ async function streamAskRound(
   request: AskBaseRequest,
   messages: ChatMessage[],
   onToken: (token: string) => void,
-): Promise<{ text: string; toolCalls?: ToolCall[]; nativeIds?: string[] }> {
+): Promise<{
+  text: string;
+  provider: ProviderId;
+  model: string;
+  toolCalls?: ToolCall[];
+  nativeIds?: string[];
+}> {
   let full = "";
   let forwardedLen = 0;
   let suppressed = false;
@@ -232,6 +242,8 @@ async function streamAskRound(
   if (completion.toolCalls?.length) {
     return {
       text,
+      provider: completion.provider,
+      model: completion.model,
       toolCalls: completion.toolCalls.map((tc) => ({
         name: tc.name,
         args: tc.args,
@@ -239,7 +251,11 @@ async function streamAskRound(
       nativeIds: completion.toolCalls.map((tc) => tc.id),
     };
   }
-  return { text };
+  return {
+    text,
+    provider: completion.provider,
+    model: completion.model,
+  };
 }
 
 
@@ -253,28 +269,59 @@ async function resolveAskAnswer(
 ): Promise<string> {
   const config = getConfig();
   const maxTokens = config.thinking?.enabled ? 8_192 : 4_096;
-  const native =
-    resolveToolDialect(provider, model, config.toolCalling) !== "none";
-  // Research tools + agent.handoff (meta; not executed as research — action UX).
-  const askDefs = native
-    ? [
-        ...getToolDefinitions({ askMode: true }).filter((d) =>
-          ASK_RESEARCH_TOOLS.has(d.name),
-        ),
-        ...getToolDefinitions({ names: ["agent.handoff"] }),
-      ]
-    : undefined;
-  const baseRequest: AskBaseRequest = {
-    provider,
-    model,
-    temperature: 0.2,
-    maxTokens,
-    thinking: config.thinking,
-    ...(options.signal ? { signal: options.signal } : {}),
-    ...(askDefs?.length
-      ? { tools: askDefs, toolChoice: "auto" as const }
-      : {}),
+  const askDefinitions = (
+    routeProvider: ProviderId,
+    routeModel: string,
+  ): ReturnType<typeof getToolDefinitions> | undefined => {
+    const native =
+      resolveToolDialect(routeProvider, routeModel, config.toolCalling) !== "none";
+    if (!native) return undefined;
+    return [
+      ...getToolDefinitions({ askMode: true }).filter(
+        (definition) =>
+          ASK_RESEARCH_TOOLS.has(definition.name) &&
+          (definition.name !== "image.view" ||
+            modelSupportsVision(routeProvider, routeModel)),
+      ),
+      ...getToolDefinitions({ names: ["agent.handoff"] }),
+    ];
   };
+  const buildBaseRequest = (
+    routeProvider: ProviderId,
+    routeModel: string,
+  ): AskBaseRequest => {
+    const definitions = askDefinitions(routeProvider, routeModel);
+    return {
+      provider: routeProvider,
+      model: routeModel,
+      temperature: 0.2,
+      maxTokens,
+      thinking: config.thinking,
+      ...(options.signal ? { signal: options.signal } : {}),
+      ...(definitions?.length
+        ? { tools: definitions, toolChoice: "auto" as const }
+        : {}),
+    };
+  };
+  const updateSystemPromptForRoute = (
+    routeProvider: ProviderId,
+    routeModel: string,
+  ): void => {
+    if (messages[0]?.role !== "system") return;
+    const native =
+      resolveToolDialect(routeProvider, routeModel, config.toolCalling) !== "none";
+    messages[0] = {
+      ...messages[0],
+      content: renderAskSystemPrompt({
+        nativeTools: native,
+        stableEnvironment: true,
+        imageView: modelSupportsVision(routeProvider, routeModel),
+      }),
+    };
+  };
+  let activeProvider = provider;
+  let activeModel = model;
+  let baseRequest = buildBaseRequest(activeProvider, activeModel);
 
   // Surface research activity (web.search/web.fetch/…) to the UI as tool
   // events so the user can see what's being searched/fetched.
@@ -319,6 +366,10 @@ async function resolveAskAnswer(
   for (let round = 0; round < ASK_MAX_RESEARCH_ROUNDS; round += 1) {
     options.signal?.throwIfAborted();
     const roundResult = await streamAskRound(baseRequest, messages, onToken);
+    activeProvider = roundResult.provider;
+    activeModel = roundResult.model;
+    baseRequest = buildBaseRequest(activeProvider, activeModel);
+    updateSystemPromptForRoute(activeProvider, activeModel);
     const text = roundResult.text;
 
     
@@ -334,8 +385,10 @@ async function resolveAskAnswer(
     const nativeIds =
       roundResult.nativeIds ??
       allCalls.map((_, i) => syntheticToolCallId(i));
-    const calls = allCalls.filter((call) => ASK_RESEARCH_TOOLS.has(call.name));
-    if (calls.length === 0) {
+    const researchCalls = allCalls
+      .map((call, sourceIndex) => ({ call, sourceIndex }))
+      .filter(({ call }) => ASK_RESEARCH_TOOLS.has(call.name));
+    if (researchCalls.length === 0) {
       
       const actionCalls = allCalls.filter(
         (call) => !ASK_RESEARCH_TOOLS.has(call.name),
@@ -393,9 +446,12 @@ async function resolveAskAnswer(
     } else {
       messages.push({ role: "assistant", content: text });
     }
-    for (const [callIndex, call] of calls
+    const viewedImages: ChatImage[] = [];
+    const completedNativeCallIndices = new Set<number>();
+    for (const [callIndex, { call, sourceIndex }] of researchCalls
       .slice(0, ASK_MAX_TOOLS_PER_ROUND)
       .entries()) {
+      completedNativeCallIndices.add(sourceIndex);
       options.signal?.throwIfAborted();
       const id = `ask-${(toolSeq += 1)}`;
       emit({
@@ -406,12 +462,16 @@ async function resolveAskAnswer(
       });
       let output: string;
       let ok = true;
+      let resultImages: ChatImage[] | undefined;
       try {
         const toolResult = await runToolCall(call, {
           ...(options.signal ? { signal: options.signal } : {}),
+          llmProvider: activeProvider,
+          llmModel: activeModel,
         });
         output = toolResult.output;
         ok = toolResult.ok;
+        resultImages = toolResult.images;
       } catch (err) {
         output = `error: ${err instanceof Error ? err.message : String(err)}`;
         ok = false;
@@ -423,8 +483,8 @@ async function resolveAskAnswer(
         summary: researchResultSummary(call, ok),
       });
       const resultBody = `Result of ${call.name}(${JSON.stringify(call.args)}):\n${truncateToolOutput(output, call.name)}`;
+      if (resultImages?.length) viewedImages.push(...resultImages);
       if (roundResult.toolCalls?.length) {
-        const sourceIndex = allCalls.indexOf(call);
         appendToolResult(
           messages,
           nativeIds[sourceIndex] ?? syntheticToolCallId(callIndex),
@@ -438,6 +498,34 @@ async function resolveAskAnswer(
           content: resultBody,
         });
       }
+    }
+    if (roundResult.toolCalls?.length) {
+      for (const [sourceIndex, omitted] of allCalls.entries()) {
+        if (completedNativeCallIndices.has(sourceIndex)) continue;
+        const reason = ASK_RESEARCH_TOOLS.has(omitted.name)
+          ? `Skipped ${omitted.name}: Ask mode executes at most ${ASK_MAX_TOOLS_PER_ROUND} read-only tools per research round.`
+          : `Skipped ${omitted.name}: it is not a read-only research tool and cannot be combined with this research tool-call group.`;
+        appendToolResult(
+          messages,
+          nativeIds[sourceIndex] ?? syntheticToolCallId(sourceIndex),
+          reason,
+          omitted.name,
+          false,
+        );
+      }
+    }
+    // Native tool-result messages must stay contiguous with the assistant's
+    // tool_calls. Replay image.view bytes only after the complete result group,
+    // as an internal user turn — the same multimodal path as user attachments.
+    if (viewedImages.length > 0) {
+      messages.push({
+        role: "user",
+        internal: true,
+        content:
+          `${viewedImages.length === 1 ? "The image" : `The ${viewedImages.length} images`} requested through image.view ` +
+          `${viewedImages.length === 1 ? "is" : "are"} attached now. Inspect the actual pixels before answering.`,
+        images: viewedImages,
+      });
     }
   }
 

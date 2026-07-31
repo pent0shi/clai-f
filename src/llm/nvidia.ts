@@ -56,12 +56,13 @@ let lastFetchTime = 0;
 const CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour cache TTL
 
 // NVIDIA NIM cold-starts less-popular models on first request, so the first
-// token can lag well past the shared 60s stall budget while the model spins
-// up (popular models like gpt-oss stay warm and answer immediately). Give the
+// token can lag well past the shared stall budget while the model spins up
+// (popular models like gpt-oss stay warm and answer immediately). Give the
 // first byte a longer budget to avoid abort/retry churn that itself triggers
-// another cold start; keep the mid-stream silence budget at the shared 60s.
+// another cold start. The mid-stream budget falls back to the shared default,
+// which must outlast a fully buffered tool call — see
+// DEFAULT_STREAM_IDLE_TIMEOUT_MS.
 const NVIDIA_FIRST_BYTE_IDLE_TIMEOUT_MS = 120_000;
-const NVIDIA_STREAM_IDLE_TIMEOUT_MS = 60_000;
 
 export const nvidiaProvider: LlmProvider = {
   id: "nvidia",
@@ -147,9 +148,8 @@ export const nvidiaProvider: LlmProvider = {
       onToolCallDelta: request.onToolCallDelta,
       reasoning: request.thinking,
       reasoningStyle: "nvidia",
-      // Longer first-byte budget for NIM cold starts; 60s mid-stream stall.
+      // Longer first-byte budget for NIM cold starts; shared mid-stream budget.
       initialIdleTimeoutMs: NVIDIA_FIRST_BYTE_IDLE_TIMEOUT_MS,
-      idleTimeoutMs: NVIDIA_STREAM_IDLE_TIMEOUT_MS,
       tools: request.tools,
       toolChoice: request.toolChoice,
       parallelToolCalls: request.parallelToolCalls,

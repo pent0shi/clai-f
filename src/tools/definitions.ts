@@ -978,6 +978,25 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     { readOnly: true, askMode: true },
   ),
   def(
+    "image.view",
+    "Look at an image yourself. Attaches the real image bytes to your next turn so you see the actual pixels — use this for screenshots, renders, charts, diagrams and photos, and to verify UI work you just produced. Prefer this over image.ocr whenever you need to see anything other than plain text.",
+    {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "Image file to look at." },
+        paths: {
+          type: "array",
+          items: { type: "string" },
+          maxItems: 4,
+          description:
+            "Several images to look at in one call (e.g. before/after screenshots). Use instead of path.",
+        },
+      },
+      additionalProperties: false,
+    },
+    { readOnly: true, askMode: true },
+  ),
+  def(
     "pdf.read",
     "Extract text from a PDF. Uses the embedded text layer per page and OCRs only the pages that have none.",
     {
@@ -1256,6 +1275,8 @@ export function getToolDefinitions(filter?: {
       "wordlist.find",
       "sysinfo",
       "tool.check",
+      "image.view",
+      "image.ocr",
       "plan.create",
       "task.add",
       "task.move",

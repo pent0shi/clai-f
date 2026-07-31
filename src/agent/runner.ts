@@ -20,7 +20,7 @@ import {
   createStreamRecoveryState,
   resetStreamRecoveryState,
 } from "./stream-recovery.js";
-import { resolveToolDialect } from "../llm/capabilities.js";
+import { modelSupportsVision, resolveToolDialect } from "../llm/capabilities.js";
 import {
   syntheticToolCallId,
   isTextOnlyModel,
@@ -855,12 +855,20 @@ export async function runAgentTurn(
       hasAttachedImages,
       options.visionProven !== false,
     );
-    // A vision-capable request already carries the actual image bytes. Hiding
-    // image.ocr from the model prevents it from replacing visual inspection
-    // with a lossy Tesseract pass (which produced fabricated screenshot text).
-    const toolNames = availableToolNames().filter(
-      (name) => name !== "image.ocr" || imageOcrEnabled,
-    );
+    const initialProvider = options.provider ?? config.defaultProvider;
+    const initialModel = options.model ?? config.defaultModel;
+    // image.view is different from optimistic user-attachment handling: once
+    // the tool succeeds, the model must actually receive and inspect its bytes.
+    // Offer it only with affirmative capability evidence for the active route.
+    const routeToolNames = (routeProvider: ProviderId, routeModel: string): string[] =>
+      availableToolNames().filter((name) => {
+        if (name === "image.ocr") return imageOcrEnabled;
+        if (name === "image.view") {
+          return modelSupportsVision(routeProvider, routeModel);
+        }
+        return true;
+      });
+    const toolNames = routeToolNames(initialProvider, initialModel);
     // Build / scaffold / continuation turns must NEVER be diverted into a
     // web.search for "current info". The /implement directive ("Execute it
     // now…") and prompts like "create a react app" contain words such as
@@ -890,9 +898,9 @@ export async function runAgentTurn(
       !idleOrSocialPrompt &&
       toolNames.includes("web.search") &&
       requiresFreshWebSearch(prompt);
-    let provider = options.provider ?? config.defaultProvider;
+    let provider = initialProvider;
     await ensureProviderConfigured(provider);
-    let model = options.model ?? config.defaultModel;
+    let model = initialModel;
     // Some Groq free-tier models have a per-request/per-minute input budget
     // below the normal agent prompt alone. Select a purpose-built compact
     // instruction set before the request is made, rather than treating the
@@ -914,12 +922,17 @@ export async function runAgentTurn(
     const selectToolDefs = (
       native: boolean,
       compact: boolean,
+      routeProvider: ProviderId = provider,
+      routeModel: string = model,
     ): ToolDefinition[] | undefined => {
       if (!native) return undefined;
       const base = compact
         ? getCompactToolDefinitions()
         : getToolDefinitions();
-      const allow = new Set([...toolNames, ...RUNNER_META_TOOL_NAMES]);
+      const allow = new Set([
+        ...routeToolNames(routeProvider, routeModel),
+        ...RUNNER_META_TOOL_NAMES,
+      ]);
       return base.filter((d) => allow.has(d.name));
     };
     let lastAnswer = "";
@@ -989,11 +1002,13 @@ export async function runAgentTurn(
     // constitution (and, on Anthropic, the native tool schemas before it).
     const buildStableSystemContent = (native: boolean): string => {
       const reliability = getReliabilityPolicy();
+      const visionAvailable = modelSupportsVision(provider, model);
       return (useCompactSystemPrompt
         ? renderCompactAgentSystemPrompt
-        : renderAgentSystemPrompt)(toolNames.join(", "), {
+        : renderAgentSystemPrompt)(routeToolNames(provider, model).join(", "), {
           nativeTools: native,
           stableEnvironment: true,
+          imageView: visionAvailable,
           // E6: slim native constitution when API tool schemas are attached.
           ...(native ? { slimNative: reliability.slimNativePrompt } : {}),
         });
@@ -1426,6 +1441,7 @@ export async function runAgentTurn(
     // reset on any successful stream so each failure episode gets a fresh
     // budget and we only give up in the worst case.
     let allowModelFallback = false;
+    let preferModelFallback = false;
     const recoveryState = createStreamRecoveryState();
 
     // Track tool calls truncated by the token limit so we can ask the model
@@ -2961,6 +2977,10 @@ export async function runAgentTurn(
           },
           confirmed: true,
           userPrompt: prompt,
+          // image.view needs the active route to check vision support and size
+          // images to the provider's per-image budget.
+          llmProvider: provider,
+          llmModel: model,
           sessionId: session.sessionId,
           ...(delegation?.taskId ? { taskId: delegation.taskId } : {}),
           ...(delegation ? { delegationId: delegation.id } : {}),
@@ -4303,6 +4323,7 @@ export async function runAgentTurn(
               model,
 
               allowModelFallback,
+              preferModelFallback,
               messages,
 
               // Sampling is provider/model policy (llm/sampling.ts).
@@ -4482,6 +4503,7 @@ export async function runAgentTurn(
           // starts fresh (and we never give up while making progress).
           resetStreamRecoveryState(recoveryState);
           allowModelFallback = false;
+          preferModelFallback = false;
           } catch (streamError) {
             // User cancelled (double-Esc) — never try to recover, just stop.
             if (options.signal?.aborted) throw streamError;
@@ -4576,6 +4598,7 @@ export async function runAgentTurn(
             }
             if (plan.disableThinking) retryWithoutThinking = true;
             if (plan.allowModelFallback) allowModelFallback = true;
+            if (plan.preferModelFallback) preferModelFallback = true;
             if (plan.forceCompact) {
               await maybeAutoCompact(`stream-recovery:${failureKind}`, true);
             }
@@ -5992,6 +6015,24 @@ export async function runAgentTurn(
             messages.push({
               role: "tool",
               content: toolContent,
+            });
+          }
+          // image.view hands back real image bytes. Tool results are text-only
+          // on every provider wire, and images are only serialized on user
+          // turns, so the bytes ride a deferred internal user message that
+          // lands after the assistant→tool group is closed — inserting it here
+          // would orphan the remaining tool results.
+          if (res.result.images?.length) {
+            deferredPostToolMessages.push({
+              role: "user",
+              internal: true,
+              content:
+                `[${res.call.name}] The ${res.result.images.length === 1 ? "image" : `${res.result.images.length} images`} you asked to look at ` +
+                `${res.result.images.length === 1 ? "is" : "are"} attached to this message` +
+                `${res.result.images.length === 1 ? "" : ", in the order you requested them"}: ` +
+                `${res.result.images.map((image) => image.path ?? "(unnamed)").join(", ")}. ` +
+                "Judge them from the pixels and continue the task.",
+              images: res.result.images,
             });
           }
           // Reset retry counters — they track consecutive failures, not cumulative.

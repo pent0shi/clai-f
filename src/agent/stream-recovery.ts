@@ -13,7 +13,7 @@
  * worst case" guarantee are unit-testable without a live provider.
  */
 
-import { ProviderError } from "../llm/http.js";
+import { ProviderError, STREAM_STALL_MARKER } from "../llm/http.js";
 import { isEmptyCompletionError } from "../llm/router.js";
 
 export type StreamFailureKind =
@@ -22,7 +22,16 @@ export type StreamFailureKind =
   | "context-overflow"
   | "rate-limit"
   | "server"
+  /** Transport died: the socket dropped or never delivered a byte. */
   | "network"
+  /**
+   * The connection stayed healthy but the model stopped producing output —
+   * almost always a runtime buffering one very large `tool_calls` argument
+   * string. Distinct from `network` because the request was accepted and the
+   * work was done: retrying the identical request on the identical route
+   * replays the whole generation and stalls again the same way.
+   */
+  | "stall"
   | "auth"
   | "not-found"
   | "unknown";
@@ -32,6 +41,7 @@ export interface StreamRecoveryState {
   rateLimit: number;
   server: number;
   network: number;
+  stall: number;
   context: number;
   /** auth / not-found / unknown share one "structural" bucket. */
   structural: number;
@@ -43,6 +53,7 @@ export interface StreamRecoveryLimits {
   readonly maxRateLimit: number;
   readonly maxServer: number;
   readonly maxNetwork: number;
+  readonly maxStall: number;
   readonly maxContext: number;
   readonly maxStructural: number;
   /** Hard cap across every failure class so a turn can never loop forever. */
@@ -56,6 +67,9 @@ export const DEFAULT_STREAM_RECOVERY_LIMITS: StreamRecoveryLimits = {
   maxRateLimit: 3,
   maxServer: 3,
   maxNetwork: 3,
+  // A stall costs a full generation per attempt, so the budget is tight and
+  // each attempt changes something (smaller writes, then another route).
+  maxStall: 2,
   maxContext: 2,
   maxStructural: 1,
   maxTotal: 10,
@@ -74,6 +88,8 @@ export interface StreamRecoveryPlan {
   readonly disableThinking: boolean;
   /** Let the router fall back to another provider/model on the retry. */
   readonly allowModelFallback: boolean;
+  /** Try alternates before replaying the selected route (stall recovery only). */
+  readonly preferModelFallback?: boolean | undefined;
   /** Optional trailing user nudge (empty-admission recovery). */
   readonly nudge?: string | undefined;
   /** Human-facing one-liner; only set on the FIRST retry of a class (low noise). */
@@ -84,6 +100,12 @@ const EMPTY_NUDGE =
   "Your previous response was empty. Continue the task now: emit your next tool call, " +
   "or give your final answer if every required step is already complete and verified. " +
   "Do not reply with an empty message.";
+
+const STALL_NUDGE =
+  "The previous attempt stopped while the provider was buffering a large tool-call payload; the incomplete call was discarded. " +
+  "Keep each call small from here on: write or edit at most ~150 lines per call. For a new large file, use one initial " +
+  "fs.write followed by sequential fs.append calls; for an existing file, use several bounded fs.edit / fs.replaceLines calls. " +
+  "Continue from the preserved progress without restarting the task or repeating prior prose.";
 
 function errorStatus(error: unknown): number {
   if (error instanceof ProviderError) return error.status ?? 0;
@@ -144,8 +166,13 @@ export function classifyStreamFailure(error: unknown): StreamFailureKind {
     return "server";
   }
 
+  // A stall on a live connection must be checked BEFORE the network patterns:
+  // its message also contains "stream stalled", but the transport was fine and
+  // the fix is different (shrink the tool call / change route, not just retry).
+  if (new RegExp(STREAM_STALL_MARKER, "i").test(msg)) return "stall";
+
   if (
-    /connection glitch|socket connection was closed|econnreset|etimedout|econnrefused|enotfound|fetch failed|network error|premature close|stream stalled|unexpected end of file|request timed out|connection dropped|timed out before any response/.test(
+    /connection glitch|socket connection was closed|econnreset|etimedout|econnrefused|enotfound|fetch failed|network error|premature close|stream stalled|transport timeout|unexpected end of file|request timed out|connection dropped|timed out before any response/.test(
       msg,
     )
   ) {
@@ -182,6 +209,7 @@ export function createStreamRecoveryState(): StreamRecoveryState {
     rateLimit: 0,
     server: 0,
     network: 0,
+    stall: 0,
     context: 0,
     structural: 0,
     total: 0,
@@ -193,6 +221,7 @@ export function resetStreamRecoveryState(state: StreamRecoveryState): void {
   state.rateLimit = 0;
   state.server = 0;
   state.network = 0;
+  state.stall = 0;
   state.context = 0;
   state.structural = 0;
   state.total = 0;
@@ -216,6 +245,9 @@ export function recordRecoveryAttempt(
       break;
     case "network":
       state.network += 1;
+      break;
+    case "stall":
+      state.stall += 1;
       break;
     case "context-overflow":
       state.context += 1;
@@ -327,6 +359,29 @@ export function planStreamRecovery(input: {
         // If the same route keeps dropping, let the router try another one.
         allowModelFallback: n >= 1,
         notice: n === 0 ? "connection dropped — retrying" : undefined,
+      };
+    }
+    case "stall": {
+      const n = state.stall;
+      if (n >= limits.maxStall) return giveUp;
+      return {
+        action: "retry",
+        kind,
+        // The transport is healthy, so there is nothing to wait out. Retry
+        // promptly and spend the budget on changing the request instead.
+        delayMs: pick([1_000, 3_000], n, cap),
+        forceCompact: false,
+        // Thinking multiplies the silent window before a tool call appears.
+        disableThinking: n >= 1,
+        // The same route will buffer the same way. Prefer a configured
+        // alternate first, but keep the selected route as the final fallback.
+        allowModelFallback: true,
+        preferModelFallback: true,
+        nudge: STALL_NUDGE,
+        notice:
+          n === 0
+            ? "provider stopped streaming mid-response — retrying with smaller tool calls"
+            : undefined,
       };
     }
     case "context-overflow": {

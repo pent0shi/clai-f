@@ -155,6 +155,14 @@ export interface CompletionRequest {
    * user's turn without an answer.
    */
   allowModelFallback?: boolean | undefined;
+  /**
+   * On a recovery attempt, try configured alternate providers before replaying
+   * the selected route. Used only after a live-connection stall: that route has
+   * already repeated expensive partial work, while ordinary requests still
+   * honor the selected provider first. The selected route remains last in the
+   * chain so recovery still works when no alternate is configured.
+   */
+  preferModelFallback?: boolean | undefined;
   messages: ChatMessage[];
   temperature?: number | undefined;
   maxTokens?: number | undefined;
@@ -266,4 +274,13 @@ export interface ToolResult {
    * UI renders Cursor-style green/red hunks; model history uses `output` only.
    */
   fileChanges?: import("./tools/file-diff.js").FileChange[] | undefined;
+  /**
+   * Images the tool wants the model to actually look at (image.view).
+   *
+   * Tool-result messages are text-only on every provider wire we support, so
+   * the agent replays these as a follow-up user turn carrying the real bytes —
+   * the same path user attachments already take. Providers without vision drop
+   * them and the `output` text still explains what was inspected.
+   */
+  images?: ChatImage[] | undefined;
 }

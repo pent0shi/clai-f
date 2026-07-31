@@ -234,8 +234,8 @@ export const agentrouterProvider: LlmProvider = {
           onToolCallDelta: request.onToolCallDelta,
           reasoning: request.thinking,
           reasoningStyle: "agentrouter",
-          // Unified 60s stall budget (see DEFAULT_STREAM_IDLE_TIMEOUT_MS).
-          idleTimeoutMs: 60_000,
+          // 60s first byte, but the mid-stream budget has to survive a fully
+          // buffered tool call (see DEFAULT_STREAM_IDLE_TIMEOUT_MS).
           initialIdleTimeoutMs: 60_000,
           headers,
           tools: request.tools,

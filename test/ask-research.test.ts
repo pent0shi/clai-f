@@ -75,6 +75,52 @@ describe("ask mode read-only research loop", () => {
     expect(stream).toHaveBeenCalledTimes(2);
   });
 
+  it("feeds image.view pixels back as a user image turn before synthesis", async () => {
+    const image = {
+      mediaType: "image/png",
+      dataBase64: "iVBORw0KGgo=",
+      path: "/tmp/render.png",
+    };
+    stream
+      .mockImplementationOnce(
+        streamReply('```tool\n{"name":"image.view","args":{"path":"/tmp/render.png"}}\n```'),
+      )
+      .mockImplementationOnce((request: { messages: Array<{ role: string; images?: unknown[]; content: string }> }, onToken: (text: string) => void) => {
+        const imageTurn = request.messages.find((message) => message.images?.length);
+        expect(imageTurn).toMatchObject({
+          role: "user",
+          images: [image],
+        });
+        expect(imageTurn?.content).toMatch(/actual pixels|attached now/i);
+        onToken("The render is visible.");
+        return Promise.resolve({
+          text: "The render is visible.",
+          provider: "openai",
+          model: "gpt-4o-mini",
+        });
+      });
+    runTool.mockResolvedValueOnce({
+      ok: true,
+      output: "image attached",
+      images: [image],
+    });
+
+    const out = await runAsk("inspect /tmp/render.png", {
+      provider: "openai",
+      model: "gpt-4o-mini",
+    });
+
+    expect(out).toBe("The render is visible.");
+    expect(runTool).toHaveBeenCalledWith(
+      expect.objectContaining({ name: "image.view" }),
+      expect.objectContaining({
+        llmProvider: "nvidia",
+        llmModel: "test-model",
+      }),
+    );
+    expect(stream).toHaveBeenCalledTimes(2);
+  });
+
   it("pre-runs web.search for explicit current web-search prompts", async () => {
     stream.mockImplementationOnce(streamReply("Current answer with citation."));
     runTool.mockResolvedValueOnce({ ok: true, output: "fresh search results" });
