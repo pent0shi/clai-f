@@ -274,6 +274,9 @@ export interface ToolResult {
    * UI renders Cursor-style green/red hunks; model history uses `output` only.
    */
   fileChanges?: import("./tools/file-diff.js").FileChange[] | undefined;
+  interactiveSession?:
+    | import("./interactive-session/types.js").InteractiveSessionToolResult
+    | undefined;
   /**
    * Images the tool wants the model to actually look at (image.view).
    *

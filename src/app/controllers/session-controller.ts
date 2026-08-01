@@ -33,7 +33,9 @@ import { EventSequencer, type Clock, type IdFactory } from "../events/sequencer.
 import { OutputSpool } from "../events/event-buffer.js";
 import type { AgentPort, RunTurnRequest } from "../ports/agent-port.js";
 import type { JobsPort } from "../ports/jobs-port.js";
+import type { InteractiveSessionsPort } from "../ports/interactive-sessions-port.js";
 import type { PersistencePort } from "../ports/persistence-port.js";
+import { mergeCancelAllResult } from "./cancel-all-result.js";
 import type { ConfirmationPort } from "../ports/confirm-port.js";
 import type { SecretPort } from "../ports/secret-port.js";
 import { TurnController, type TurnResult } from "./turn-controller.js";
@@ -72,6 +74,7 @@ export interface SessionControllerDeps {
   readonly agent: AgentPort;
   readonly persistence: PersistencePort;
   readonly jobs?: JobsPort | undefined;
+  readonly interactiveSessions?: InteractiveSessionsPort | undefined;
   readonly emit: (event: AnyAppEvent) => void;
   readonly sessionId?: string | undefined;
   readonly provider?: ProviderId | undefined;
@@ -167,6 +170,7 @@ export class SessionController implements Disposable {
     this.model = deps.model;
     this.mode = deps.mode ?? "agent";
     this.policy = createSessionPolicy(this.sessionIdValue);
+    void this.deps.interactiveSessions?.activateOwner(this.sessionIdValue).catch(() => undefined);
     // Isolate scratch + tool outputs for this session immediately.
     beginSessionWorkspace();
     this.sequencer = new EventSequencer(
@@ -366,10 +370,15 @@ export class SessionController implements Disposable {
       this.refreshEstimatedContext();
     }
     if (options.sessionId) {
-      this.sessionIdValue = asSessionId(options.sessionId);
+      const nextSessionId = asSessionId(options.sessionId);
+      if (nextSessionId !== this.sessionIdValue) {
+        this.fenceInteractiveOwner(this.sessionIdValue);
+      }
+      this.sessionIdValue = nextSessionId;
       this.sequencer.rebind(this.sessionIdValue);
       this.policy = createSessionPolicy(this.sessionIdValue);
       this.persistence.rebind(options.persistenceRevision);
+      void this.deps.interactiveSessions?.activateOwner(this.sessionIdValue).catch(() => undefined);
     }
     // Rebind (or mint) the per-session workspace so scratch + outputs
     // continue under the same folder when resuming history.
@@ -413,9 +422,11 @@ export class SessionController implements Disposable {
     this.contextUsage = undefined;
     this.spool.clear();
     if (options.mintNewId) {
+      this.fenceInteractiveOwner(this.sessionIdValue);
       this.sessionIdValue = asSessionId(mintSessionId());
       this.sequencer.rebind(this.sessionIdValue);
       this.persistence.newSession();
+      void this.deps.interactiveSessions?.activateOwner(this.sessionIdValue).catch(() => undefined);
       // Fresh session identity → fresh isolated workspace.
       beginSessionWorkspace();
     }
@@ -581,13 +592,20 @@ export class SessionController implements Disposable {
   async cancelAll(): Promise<ToolResult> {
     this.responder?.invalidateWake();
     this.turn.abort();
-    this.compactAbort?.abort(); // cancel in-flight /compact alongside the turn
+    this.compactAbort?.abort();
     this.prompts.clear(true);
     this.notifyState();
-    if (!this.deps.jobs) {
-      return { ok: true, output: "Turn cancelled; no background-job service is configured." };
-    }
-    return this.deps.jobs.cancelAll(this.sessionIdValue);
+    const [jobs, interactive] = await Promise.all([
+      this.deps.jobs?.cancelAll(this.sessionIdValue),
+      this.deps.interactiveSessions?.cancelOwner(this.sessionIdValue),
+    ]);
+    return mergeCancelAllResult(jobs, interactive);
+  }
+
+  private fenceInteractiveOwner(ownerId: string): void {
+    void this.deps.interactiveSessions
+      ?.beginCloseOwner(ownerId)
+      .catch(() => undefined);
   }
 
   enqueue(prompt: string, opts?: TurnDisplayOptions): void {
@@ -760,6 +778,7 @@ export class SessionController implements Disposable {
 
   dispose(): void {
     this.beginLifecycleGeneration();
+    this.fenceInteractiveOwner(this.sessionIdValue);
     this.turnEndListeners.clear();
     this.stateListeners.clear();
     this.disposables.dispose();

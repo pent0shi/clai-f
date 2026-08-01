@@ -2,6 +2,10 @@ import net from "node:net";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
 import type { RiskLevel, ToolCall } from "../types.js";
+import type {
+  SessionInput,
+  SessionTransportKind,
+} from "../interactive-session/types.js";
 import {
   destructiveCommandPatterns,
   exfiltrationPatterns,
@@ -102,7 +106,7 @@ const URL_HOSTNAME_RE = /\bhttps?:\/\/([^\/\s:?#]+)/gi;
 // don't pick up file paths like `wordlists/common.txt`. The right side
 // stays at \b so trailing punctuation doesn't trip us up.
 const BARE_HOSTNAME_RE =
-  /(?:^|\s)((?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63})\b/g;
+  /(?:^|[\s'"=(,])((?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63})\b/g;
 
 function extractHostnameTokens(command: string): string[] {
   const tokens: string[] = [];
@@ -190,9 +194,22 @@ export function isPentestToolCall(call: ToolCall): boolean {
     const method = (stringArg(call.args, "method") ?? "GET").toUpperCase();
     return method !== "GET" && method !== "HEAD" && method !== "OPTIONS";
   }
-  if (call.name !== "shell.exec" && call.name !== "shell.start") return false;
-  const command = stringArg(call.args, "command") ?? "";
-  return commandContainsNetworkScanner(command);
+  if (
+    call.name !== "shell.exec" &&
+    call.name !== "shell.start" &&
+    call.name !== "terminal.start" &&
+    call.name !== "terminal.send"
+  ) {
+    return false;
+  }
+  const command =
+    call.name === "terminal.send"
+      ? stringArg(call.args, "text") ?? ""
+      : stringArg(call.args, "command") ?? "";
+  return (
+    commandContainsNetworkScanner(command) ||
+    (call.name === "terminal.send" && containsPublicTarget(command))
+  );
 }
 
 // Absolute roots whose contents are part of the OS / shared system. A
@@ -314,25 +331,28 @@ export interface ClassifyOptions {
  * scope. Falls back to the trailing token of the command if no obvious
  * target argument is found.
  */
-function extractScanTarget(command: string): string | undefined {
-  // URL-style targets first (eg `ffuf -u https://example.com/FUZZ`,
-  // `nuclei -u https://example.com`). The hostname is what scope cares about.
+function extractScanTarget(
+  command: string,
+  includeFirstToken = false,
+): string | undefined {
   const urlMatch = /\bhttps?:\/\/([^\/\s:?#]+)/i.exec(command);
   if (urlMatch?.[1]) {
     return urlMatch[1].replace(/[\[\]]/g, "").split(":")[0];
   }
   const tokens = command.trim().split(/\s+/).filter(Boolean);
-  // Drop the first token (binary) and any leading flags.
-  const args = tokens.slice(1).filter((token) => !token.startsWith("-"));
-  // Many scanners take target as the trailing positional.
+  const args = tokens
+    .slice(includeFirstToken ? 0 : 1)
+    .filter((token) => !token.startsWith("-"));
   for (let i = args.length - 1; i >= 0; i -= 1) {
     const arg = args[i]!;
+    const hostPort = /^([^\[\]:]+|\[[^\]]+\]):\d{1,5}$/.exec(arg);
+    const candidate = hostPort?.[1]?.replace(/^\[|\]$/g, "") ?? arg;
     if (
-      /^[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?$/.test(arg) ||
-      net.isIP(arg) ||
-      /^[0-9./]+$/.test(arg)
+      /^[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?$/.test(candidate) ||
+      net.isIP(candidate) ||
+      /^[0-9./]+$/.test(candidate)
     ) {
-      return arg;
+      return candidate;
     }
   }
   return undefined;
@@ -358,15 +378,24 @@ export function scopeTargetForToolCall(call: ToolCall): string | undefined {
     }
   }
 
-  if (call.name === "shell.exec" || call.name === "shell.start") {
-    const command = stringArg(call.args, "command") ?? "";
+  if (
+    call.name === "shell.exec" ||
+    call.name === "shell.start" ||
+    call.name === "terminal.start" ||
+    call.name === "terminal.send"
+  ) {
+    const command =
+      call.name === "terminal.send"
+        ? stringArg(call.args, "text") ?? ""
+        : stringArg(call.args, "command") ?? "";
+    const targetsInteractiveHost = call.name === "terminal.send";
     if (
-      !commandContainsNetworkScanner(command) ||
+      (!commandContainsNetworkScanner(command) && !targetsInteractiveHost) ||
       !containsPublicTarget(command)
     ) {
       return undefined;
     }
-    const target = extractScanTarget(command);
+    const target = extractScanTarget(command, call.name === "terminal.send");
     return target && isPublicTarget(target)
       ? normalizeScopeTarget(target)
       : undefined;
@@ -486,6 +515,81 @@ export function classifyShellCommand(
   return { level: "safe", reason: "Non-mutating command" };
 }
 
+export interface InteractiveInputPolicyContext {
+  readonly ownerId: string;
+  readonly sessionId: string;
+  readonly transport: SessionTransportKind;
+  readonly input: SessionInput;
+  readonly scope?: EngagementScope | undefined;
+}
+
+const RECOGNIZED_INTERACTIVE_ANSWER =
+  /^(y|n|yes|no|q|quit|exit|:q|:q!|help|\?|\d+(\.\d+)?|true|false|none|null)$/i;
+const DESTRUCTIVE_INTERACTIVE_INPUT = [
+  /\bshutil\s*\.\s*rmtree\b/i,
+  /\bos\s*\.\s*(remove|unlink|rmdir)\b/i,
+  /\bfs\s*\.\s*(unlink|rm|rmdir)Sync?\b/i,
+  /\bDROP\s+(TABLE|DATABASE|SCHEMA)\b/i,
+  /\bTRUNCATE\s+TABLE\b/i,
+  /\bDELETE\s+FROM\b(?![\s\S]*\bWHERE\b)/i,
+  /\bRemove-Item\b[\s\S]*-Recurse/i,
+] as const;
+const MUTATING_INTERACTIVE_INPUT = [
+  /\bos\s*\.\s*system\b/i,
+  /\bsubprocess\s*\.\s*(run|call|Popen|check_output)\b/i,
+  /\bchild_process\b/i,
+  /\brequire\s*\(\s*['"]fs['"]\s*\)/i,
+  /\b(eval|exec)\s*\(/i,
+  /\bopen\s*\([^)]*['"][wa]\+?['"]/i,
+  /\bInvoke-(Expression|WebRequest|RestMethod)\b/i,
+  /\b(UPDATE|INSERT\s+INTO|ALTER\s+TABLE|GRANT|REVOKE)\b/i,
+  /\bpip\s+install\b|\bnpm\s+(install|i)\b/i,
+] as const;
+const EXFILTRATING_INTERACTIVE_INPUT = [
+  /\b(curl|wget)\b[\s\S]*\|\s*(sh|bash|zsh|python)/i,
+  /\bbase64\b[\s\S]*\|\s*(curl|wget|nc)\b/i,
+] as const;
+
+export function classifyInteractiveInput(
+  context: InteractiveInputPolicyContext,
+): RiskDecision {
+  const { input } = context;
+  if (input.kind === "eof") {
+    return { level: "safe", reason: "Closing session input has no command effect" };
+  }
+  if (input.kind === "control") {
+    return { level: "safe", reason: "Terminal control input" };
+  }
+  if (input.kind === "secret") {
+    return { level: "safe", reason: "Secret terminal input" };
+  }
+  const text = input.text;
+  if (text.trim().length === 0) {
+    return { level: "safe", reason: "Whitespace-only input has no command effect" };
+  }
+  if (EXFILTRATING_INTERACTIVE_INPUT.some((pattern) => pattern.test(text))) {
+    return {
+      level: "block",
+      reason: "Input pipes remote content into an interpreter or exports local data",
+    };
+  }
+  if (DESTRUCTIVE_INTERACTIVE_INPUT.some((pattern) => pattern.test(text))) {
+    return { level: "block", reason: "Input matches a destructive REPL pattern" };
+  }
+  const shellDecision = classifyShellCommand(
+    text,
+    context.scope ? { scope: context.scope } : {},
+  );
+  if (shellDecision.level !== "safe") return shellDecision;
+  if (MUTATING_INTERACTIVE_INPUT.some((pattern) => pattern.test(text))) {
+    return { level: "confirm", reason: "Input mutates state through an interpreter" };
+  }
+  if (RECOGNIZED_INTERACTIVE_ANSWER.test(text.trim())) {
+    return { level: "safe", reason: "Recognized prompt answer" };
+  }
+  return { level: "safe", reason: "Non-mutating interactive input" };
+}
+
 export function classifyToolCall(
   call: ToolCall,
   options: ClassifyOptions = {},
@@ -581,6 +685,39 @@ export function classifyToolCall(
   if (call.name === "shell.exec") {
     const command = stringArg(call.args, "command") ?? "";
     return classifyShellCommand(command, options);
+  }
+
+  if (call.name === "terminal.start") {
+    const command = stringArg(call.args, "command") ?? "";
+    return classifyShellCommand(command, options);
+  }
+
+  if (call.name === "terminal.send") {
+    const kind = stringArg(call.args, "kind");
+    if (kind === "text") {
+      return classifyInteractiveInput({
+        ownerId: "tool",
+        sessionId: stringArg(call.args, "id") ?? "unknown",
+        transport: "pipe",
+        input: {
+          kind: "text",
+          text: stringArg(call.args, "text") ?? "",
+          submit: call.args.submit === "none" ? "none" : "enter",
+        },
+        ...(options.scope ? { scope: options.scope } : {}),
+      });
+    }
+    return { level: "safe", reason: "Terminal control input" };
+  }
+
+  if (
+    call.name === "terminal.read" ||
+    call.name === "terminal.status" ||
+    call.name === "terminal.list" ||
+    call.name === "terminal.resize" ||
+    call.name === "terminal.close"
+  ) {
+    return { level: "safe", reason: "Interactive session management" };
   }
 
   if (call.name === "net.scan") {

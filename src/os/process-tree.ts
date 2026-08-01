@@ -18,6 +18,16 @@ export function processAlive(pid: number | undefined): boolean {
   }
 }
 
+export function processGroupAlive(processGroupId: number | undefined): boolean {
+  if (!processGroupId || process.platform === "win32") return false;
+  try {
+    process.kill(-processGroupId, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
 function windowsTaskkill(pid: number, force: boolean): TreeSignalOutcome {
   try {
     const args = ["/PID", String(pid), "/T"];

@@ -5,6 +5,7 @@ import {
   engagementActionForToolCall,
   engagementActionsForToolCall,
   evaluateEngagementAction,
+  evaluateInteractiveEngagementInput,
 } from "../src/safety/engagement-policy.js";
 import type { EngagementScope } from "../src/store/scope.js";
 
@@ -22,6 +23,26 @@ const scope: EngagementScope = {
 };
 
 describe("engagement target-aware policy matrix", () => {
+  it("carries REPL target and port state into effect-time authorization", () => {
+    const restricted = {
+      ...scope,
+      authorizedTargets: ["10.0.0.5"],
+      allowedPorts: [443],
+      allowedPhases: ["exploitation" as const],
+    };
+    const target = evaluateInteractiveEngagementInput(restricted, {}, "set RHOSTS 10.0.0.5");
+    const port = evaluateInteractiveEngagementInput(restricted, target.state, "set RPORT 8443");
+    const run = evaluateInteractiveEngagementInput(restricted, port.state, "run");
+    expect(run.effectful).toBe(true);
+    expect(run.decision).toMatchObject({ allowed: false, reason: expect.stringMatching(/port/) });
+    const expired = evaluateInteractiveEngagementInput(
+      { ...restricted, expiresAt: "2020-01-01T00:00:00.000Z" },
+      port.state,
+      "run",
+      Date.parse("2026-01-01T00:00:00Z"),
+    );
+    expect(expired.decision).toMatchObject({ allowed: false, reason: expect.stringMatching(/time window/) });
+  });
   it("enforces target, exclusion, phase, port, path, and method", () => {
     expect(evaluateEngagementAction(scope, actionFromUrl({ url: "https://app.test/api/users", method: "POST" })).allowed).toBe(true);
     expect(evaluateEngagementAction(scope, actionFromUrl({ url: "https://admin.app.test/api" })).reason).toMatch(/excluded|not authorized/);

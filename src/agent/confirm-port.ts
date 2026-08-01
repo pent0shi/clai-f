@@ -1,4 +1,4 @@
-import { confirm } from "@inquirer/prompts";
+import { confirm, password } from "@inquirer/prompts";
 import chalk from "chalk";
 import { getConfig } from "../store/config.js";
 import { isPentestToolCall } from "../safety/classifier.js";
@@ -87,6 +87,17 @@ export const inquirerConfirmPort: ConfirmPort = {
     });
   },
 };
+
+export async function inquirerSecretRequester(request: {
+  title: string;
+  prompt: string;
+}): Promise<string | undefined> {
+  try {
+    return await password({ message: request.prompt || request.title });
+  } finally {
+    restoreInteractiveStdin();
+  }
+}
 
 export async function ensurePentestAuthorization(
   call: ToolCall,

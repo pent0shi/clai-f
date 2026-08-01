@@ -1376,6 +1376,9 @@ export function formatFsReadLineRange(
 }
 
 export function formatToolArgs(call: ToolCall): string {
+  if (call.name === "terminal.send") {
+    return `id=${String(call.args.id ?? "")} kind=${String(call.args.kind ?? "")}`;
+  }
   if (call.name === "shell.exec") return String(call.args.command ?? "");
   if (call.name === "net.scan")
     return `${call.args.target ?? ""}${call.args.ports ? ` -p ${call.args.ports}` : ""}${call.args.flags ? ` ${call.args.flags}` : ""}`;

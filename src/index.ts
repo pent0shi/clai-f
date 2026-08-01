@@ -6,6 +6,7 @@ import type { Mode, ProviderId } from "./types.js";
 /** Absolute path to this module — used to re-exec under Bun for OpenTUI. */
 const CLAI_ENTRY = fileURLToPath(import.meta.url);
 import { runAgent } from "./modes/agent.js";
+import { interactiveSessionManager } from "./interactive-session/manager.js";
 import { resolveTurnInput } from "./attachments/service.js";
 import { startRepl } from "./repl.js";
 import {
@@ -147,19 +148,32 @@ async function oneShot(
   for (const issue of resolved.imageIssues) {
     console.error(chalk.yellow(`  ${issue}`));
   }
-  answer = await runAgent(resolved.prompt, {
-    provider: resolved.provider,
-    model: resolved.model,
-    autoConfirm: options.yes,
-    mode: resolved.mode,
-    images: [...resolved.images],
-    visionProven: resolved.capability.support === "yes",
-  });
-  if (!options.noHistory) {
-    await saveSession([
-      { role: "user", content: prompt },
-      { role: "assistant", content: answer },
-    ]);
+  try {
+    answer = await runAgent(resolved.prompt, {
+      provider: resolved.provider,
+      model: resolved.model,
+      autoConfirm: options.yes,
+      mode: resolved.mode,
+      images: [...resolved.images],
+      visionProven: resolved.capability.support === "yes",
+    });
+    if (!options.noHistory) {
+      await saveSession([
+        { role: "user", content: prompt },
+        { role: "assistant", content: answer },
+      ]);
+    }
+  } finally {
+    const cleanup = await interactiveSessionManager
+      .closeAll("app-shutdown")
+      .catch(() => undefined);
+    for (const failure of cleanup?.failures ?? []) {
+      console.error(
+        chalk.dim(
+          `  interactive-session cleanup: [${failure.code}] ${failure.message}`,
+        ),
+      );
+    }
   }
   process.exit(0);
 }

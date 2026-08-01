@@ -352,6 +352,7 @@ import {
 } from "./workspace-orient.js";
 import {
   inquirerConfirmPort,
+  inquirerSecretRequester,
   restoreInteractiveStdin,
   ensurePentestAuthorization,
   confirmToolExecution,
@@ -2368,10 +2369,18 @@ export async function runAgentTurn(
         !isScratchOnlyWrite(call, scratchDir)
       ) {
         const cmd =
-          typeof call.args.command === "string" ? call.args.command : "";
+          call.name === "terminal.send"
+            ? typeof call.args.text === "string"
+              ? call.args.text
+              : ""
+            : typeof call.args.command === "string"
+              ? call.args.command
+              : "";
         const shellBlocked =
-          (call.name === "shell.exec" || call.name === "shell.start") &&
-          !isPlanModeAllowedShellCommand(cmd);
+          call.name === "terminal.start" ||
+          call.name === "terminal.send" ||
+          ((call.name === "shell.exec" || call.name === "shell.start") &&
+            !isPlanModeAllowedShellCommand(cmd));
         const allowed = isPlanModeAllowedTool(call.name) && !shellBlocked;
         if (!allowed) {
           const reason =
@@ -2970,7 +2979,7 @@ export async function runAgentTurn(
       const runToolWithForcedSettle = (): Promise<ToolResult> => {
         const work = runToolCall(call, {
           signal: toolAc.signal,
-          requestSecret: options.requestSecret,
+          requestSecret: options.requestSecret ?? inquirerSecretRequester,
           onOutput: (chunk) => {
             if (toolAc.signal.aborted) return;
             resetStallTimer();

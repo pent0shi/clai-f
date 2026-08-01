@@ -124,6 +124,30 @@ describe("agent plan gate enforcement", () => {
     expect(shellCalls.length).toBe(0);
   });
 
+  it("blocks interactive terminal starts and sends before plan approval", async () => {
+    stream
+      .mockImplementationOnce(
+        streamReply(
+          '```tool\n{"name":"terminal.start","args":{"command":"python3 -i"}}\n```',
+        ),
+      )
+      .mockImplementationOnce(
+        streamReply(
+          '```tool\n{"name":"terminal.send","args":{"id":"its_1","kind":"text","text":"import os"}}\n```',
+        ),
+      )
+      .mockImplementation(streamReply("Plan is ready for acceptance."));
+
+    await runAgent("prepare an interactive workflow", {
+      session: session("terminal-plan-gate"),
+      maxSteps: 4,
+      autoConfirm: true,
+      mode: "plan",
+    });
+
+    expect(runTool).not.toHaveBeenCalled();
+  });
+
   it("allows safe read-only tool calls when no active plan exists", async () => {
     stream
       .mockImplementationOnce(

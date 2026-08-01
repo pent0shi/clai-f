@@ -117,6 +117,16 @@ export async function startTuiV2(
         await services.session.persistNow().catch(() => undefined);
       },
       restoreConsole,
+      async () => {
+        const result = await services.ports.interactiveSessions
+          .closeAll("app-shutdown")
+          .catch(() => undefined);
+        for (const failure of result?.failures ?? []) {
+          process.stderr.write(
+            `clai interactive-session cleanup: [${failure.code}] ${failure.message}\n`,
+          );
+        }
+      },
     ],
     // Ctrl+C / SIGINT: first signal aborts a live turn (or arms quit via the
     // App handler path when the key event arrives). A second SIGINT within

@@ -99,6 +99,7 @@ import { isCtrlC, isCtrlO, isCtrlP, isCtrlT, isEscape } from "./ui/keys.js";
 import { imageAttachmentPaths } from "./ui/mentions.js";
 import { meaningfulCharCount, runOcr } from "./tools/ocr.js";
 import { jobManager } from "./tools/jobs.js";
+import { interactiveSessionManager } from "./interactive-session/manager.js";
 import {
   handleDraftPlanDecision,
   IMPLEMENT_DIRECTIVE,
@@ -152,8 +153,15 @@ export function resetClassicSessionContext(
   sessionId?: string,
   workspace?: { folderName?: string | undefined; code?: string | undefined },
 ): void {
+  const previousSessionId = state.session.sessionId;
+  if (!sessionId || sessionId !== previousSessionId) {
+    void interactiveSessionManager
+      .beginCloseOwner(previousSessionId, "conversation-teardown")
+      .catch(() => undefined);
+  }
   clearActiveProjectRoot();
   state.session = createSessionPolicy(sessionId);
+  void interactiveSessionManager.activateOwner(state.session.sessionId).catch(() => undefined);
   // Isolate scratch + tool outputs per session (restore on history resume).
   beginSessionWorkspace(
     workspace?.folderName
@@ -1765,8 +1773,9 @@ export async function startRepl(options: ReplOptions = {}): Promise<void> {
         abortPressCount += 1;
         currentAbortController.abort();
         void jobManager.cancelAll(state.session.sessionId);
+        void interactiveSessionManager.cancelOwner(state.session.sessionId);
         process.stdout.write(
-          chalk.yellow("\n  ⏹ cancelling turn + session background jobs…\n"),
+          chalk.yellow("\n  ⏹ cancelling turn + session processes…\n"),
         );
       } else {
         lastEscapeAt = now;
@@ -1816,6 +1825,14 @@ export async function startRepl(options: ReplOptions = {}): Promise<void> {
   const shutdown = async (code: number): Promise<void> => {
     if (shuttingDown) return;
     shuttingDown = true;
+    const cleanup = await interactiveSessionManager
+      .closeAll("app-shutdown")
+      .catch(() => undefined);
+    for (const failure of cleanup?.failures ?? []) {
+      process.stderr.write(
+        `clai interactive-session cleanup: [${failure.code}] ${failure.message}\n`,
+      );
+    }
     await finalizeSession();
     // Force exit so lingering handles (timers, watchers, bg jobs) don't keep
     // the process alive after the user chose to quit.
