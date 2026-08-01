@@ -31,7 +31,7 @@ export interface TokenUsage {
 export interface ContextUsageSnapshot {
   /** Tokens currently filling the context window (last prompt or estimate). */
   readonly contextTokens: number;
-  /** Model context window limit (tokens). */
+  /** Explicit session model-window limit, or 0 when no override is set. */
   readonly contextLimit: number;
   /** Last completion output tokens (0 if unknown). */
   readonly lastCompletionTokens: number;
@@ -249,6 +249,10 @@ const CONTEXT_WINDOW_RULES: ReadonlyArray<{
   { pattern: /qwen3/i, tokens: 128_000 },
   { pattern: /qwen2\.5/i, tokens: 128_000 },
   { pattern: /qwen/i, tokens: 128_000 },
+  // Kimi-K3 is a 1M-window model. Keep this before generic Kimi/K2 rules so
+  // Modal and gateway model IDs such as `moonshotai/Kimi-K3` are not clamped
+  // to the legacy 128k family window.
+  { pattern: /kimi-k3/i, tokens: 1_000_000 },
   { pattern: /kimi-k2/i, tokens: 256_000 },
   { pattern: /kimi/i, tokens: 128_000 },
   { pattern: /glm-?5/i, tokens: 200_000 },
@@ -322,7 +326,8 @@ export function formatTokenCount(n: number, compact = false): string {
 
 /**
  * Footer chip: current session context fill (not cumulative session billing).
- * Exact: `ctx:12,450` · estimated: `ctx:~12.5k` (compact when narrow).
+ * An optional denominator is an explicit session model window, never a guessed
+ * model limit or auto-compaction trigger.
  */
 export function formatContextChip(
   snapshot: ContextUsageSnapshot,
@@ -332,8 +337,6 @@ export function formatContextChip(
   const used = formatTokenCount(snapshot.contextTokens, compact);
   const approx = snapshot.exact ? "" : "~";
   const limit = snapshot.contextLimit;
-  // The denominator is the auto-compaction trigger, so the percentage tells the
-  // user how close the next request is to being compacted.
   if (!limit || limit <= 0) return `ctx:${approx}${used}`;
   const percent = Math.min(999, Math.round((snapshot.contextTokens / limit) * 100));
   const budget = formatTokenCount(limit, true);

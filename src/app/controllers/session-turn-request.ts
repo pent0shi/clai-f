@@ -13,6 +13,7 @@ export interface TurnRequestInput {
   readonly materializeImages: boolean;
   readonly displayPrompt?: string | null | undefined;
   readonly previousTurn?: PreviousTurnSignal | undefined;
+  readonly contextLimitTokens?: number | undefined;
 }
 
 export interface BuiltTurnRequest {
@@ -47,6 +48,9 @@ export function buildTurnRequest(input: TurnRequestInput): BuiltTurnRequest {
       ? { displayPrompt: input.displayPrompt }
       : {}),
     ...(input.previousTurn ? { previousTurn: input.previousTurn } : {}),
+    ...(input.contextLimitTokens
+      ? { contextLimitTokens: input.contextLimitTokens }
+      : {}),
   };
   return {
     request,

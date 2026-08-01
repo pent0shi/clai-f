@@ -142,6 +142,7 @@ describe("token-usage format + context window", () => {
     expect(modelContextWindow("claude-sonnet-4-20250514")).toBe(200_000);
     expect(modelContextWindow("gpt-4o")).toBe(128_000);
     expect(modelContextWindow("gemini-2.0-flash")).toBe(1_048_576);
+    expect(modelContextWindow("moonshotai/Kimi-K3")).toBe(1_000_000);
     expect(modelContextWindow("unknown-model-xyz")).toBe(128_000);
   });
 

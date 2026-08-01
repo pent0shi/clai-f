@@ -14,6 +14,15 @@ class NoopAgentPort implements AgentPort {
   }
 }
 
+class CapturingAgentPort extends NoopAgentPort {
+  lastRequest: RunTurnRequest | undefined;
+
+  override async runTurn(request: RunTurnRequest, handlers: RunTurnHandlers): Promise<TurnOutcome> {
+    this.lastRequest = request;
+    return super.runTurn(request, handlers);
+  }
+}
+
 function fakePersistence(): PersistencePort {
   return {
     async saveSession() {},
@@ -25,15 +34,29 @@ function fakePersistence(): PersistencePort {
   };
 }
 
-function buildSession(): SessionController {
+function buildSession(agent: AgentPort = new NoopAgentPort()): SessionController {
   return new SessionController({
-    agent: new NoopAgentPort(),
+    agent,
     persistence: fakePersistence(),
+    emit: () => {},
     sessionId: "sess-queue",
   });
 }
 
 describe("SessionController queued-draft management (INPUT-007)", () => {
+  it("passes a provider/model session context limit to the agent and clears it", async () => {
+    const agent = new CapturingAgentPort();
+    const session = buildSession(agent);
+
+    session.setContextLimitTokens(1_000_000);
+    await session.submit("first");
+    expect(agent.lastRequest?.contextLimitTokens).toBe(1_000_000);
+
+    session.setContextLimitTokens(undefined);
+    await session.submit("second");
+    expect(agent.lastRequest?.contextLimitTokens).toBeUndefined();
+  });
+
   it("edits a queued draft in place", () => {
     const session = buildSession();
     session.enqueue("first");

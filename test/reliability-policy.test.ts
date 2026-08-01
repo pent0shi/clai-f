@@ -25,15 +25,43 @@ afterEach(() => {
 });
 
 describe("reliability policy (E1–E6)", () => {
-  it("E1: soft early compact trigger defaults to 120k, clamped by the default model window", () => {
+  it("E1: soft early compact defaults to 180k for every provider/model", () => {
     const p = getReliabilityPolicy();
     expect(p.softEarlyCompact).toBe(true);
     expect(p.softCompactTokenBudget).toBe(DEFAULT_SOFT_COMPACT_TOKEN_BUDGET);
-    expect(DEFAULT_SOFT_COMPACT_TOKEN_BUDGET).toBe(120_000);
-    // No model window can serve the full 120k plus output reserve, so the
-    // effective trigger is clamped to what the default model window allows.
-    expect(autoCompactTriggerTokens(p)).toBeLessThanOrEqual(120_000);
-    expect(autoCompactTriggerTokens(p)).toBeLessThanOrEqual(HARD_COMPACT_TOKEN_BUDGET);
+    expect(DEFAULT_SOFT_COMPACT_TOKEN_BUDGET).toBe(180_000);
+    expect(autoCompactTriggerTokens(p)).toBe(180_000);
+    expect(autoCompactTriggerTokens(p)).toBe(HARD_COMPACT_TOKEN_BUDGET);
+    expect(
+      autoCompactTriggerTokens(p, {
+        provider: "nvidia",
+        model: "openai/gpt-oss-20b",
+      }),
+    ).toBe(180_000);
+    expect(
+      autoCompactTriggerTokens(p, {
+        provider: "modal",
+        model: "moonshotai/Kimi-K3",
+      }),
+    ).toBe(180_000);
+  });
+
+  it("E1: a session model window compacts at exactly 70%", () => {
+    const p = getReliabilityPolicy();
+    expect(
+      autoCompactTriggerTokens(p, {
+        provider: "tokenrouter",
+        model: "custom-1m",
+        contextLimitTokens: 1_000_000,
+      }),
+    ).toBe(700_000);
+    expect(
+      autoCompactTriggerTokens(p, {
+        provider: "tokenrouter",
+        model: "custom-253k",
+        contextLimitTokens: 253_000,
+      }),
+    ).toBe(177_100);
   });
 
   it("E1: soft compact trigger can be lowered via env", () => {
@@ -43,7 +71,7 @@ describe("reliability policy (E1–E6)", () => {
     expect(autoCompactTriggerTokens(p)).toBeLessThan(HARD_COMPACT_TOKEN_BUDGET);
   });
 
-  it("E1: soft early compact can be disabled → hard budget only (clamped by model window)", () => {
+  it("E1: soft early compact can be disabled → hard budget only", () => {
     process.env.CLAI_SOFT_EARLY_COMPACT = "0";
     const p = getReliabilityPolicy();
     expect(p.softEarlyCompact).toBe(false);

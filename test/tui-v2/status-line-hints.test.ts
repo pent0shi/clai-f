@@ -5,6 +5,7 @@ import {
   busyCancelHint,
   contextChipForDensity,
   idleHintIds,
+  parseContextLimitInput,
   statusDensityForWidth,
   type StatusDensity,
 } from "../../src/tui-v2/components/status/status-line.js";
@@ -41,10 +42,10 @@ describe("status line hints and Esc semantics", () => {
     expect(statusDensityForWidth(100)).toBe("lg");
   });
 
-  it("shows only the raw context count at every density", () => {
+  it("shows only the raw count without an override and the explicit window when set", () => {
     const usage = {
       contextTokens: 54_000,
-      contextLimit: 80_000,
+      contextLimit: 0,
       lastCompletionTokens: 80,
       sessionPromptTokens: 54_000,
       sessionCompletionTokens: 80,
@@ -52,7 +53,18 @@ describe("status line hints and Esc semantics", () => {
     };
     for (const density of DENSITIES) {
       expect(contextChipForDensity(usage, density)).toBe("ctx 54,000");
+      expect(
+        contextChipForDensity({ ...usage, contextLimit: 1_000_000 }, density),
+      ).toBe("ctx 54,000/1M");
     }
+  });
+
+  it("accepts human-friendly session context limits", () => {
+    expect(parseContextLimitInput("1m")).toBe(1_000_000);
+    expect(parseContextLimitInput("253k")).toBe(253_000);
+    expect(parseContextLimitInput("250000")).toBe(250_000);
+    expect(parseContextLimitInput("")).toBeUndefined();
+    expect(parseContextLimitInput("12k")).toBeNull();
   });
 
   it("routes clicks through the same arm/confirm path as Esc", () => {

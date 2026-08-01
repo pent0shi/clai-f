@@ -145,6 +145,12 @@ export function createCompositionRoot(
         event.payload.model,
       );
     }
+    // Auto-compaction mutates history through onMessages. Its provider usage is
+    // otherwise stale until the following model response, so immediately use
+    // the same final assembled-request estimate shown on the compaction card.
+    if (event.type === "compaction-completed" && sessionRef) {
+      sessionRef.noteContextCompacted(event.payload.afterTokens);
+    }
     // session.notice / agent notices → toast only (not chat items).
     if (event.type === "notice") {
       const level = event.payload.level === "warn" ? "warn" : "info";

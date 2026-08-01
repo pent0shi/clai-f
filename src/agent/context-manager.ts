@@ -78,11 +78,10 @@ export function estimateMessagesTokens(messages: ChatMessage[]): number {
  * Agent-loop auto-compact threshold (estimated tokens). Shared with `/context`
  * so the reported % of budget matches when auto-compaction fires.
  *
- * 120k (was 100k): raised to give implement/plan loops more working room
- * before auto-compaction fires, while still leaving headroom for large
- * context-window models.
+ * 180k: provider/model-neutral default. A session-specific model window can
+ * opt into a 70%-of-window trigger.
  */
-export const AUTO_COMPACT_TOKEN_BUDGET = 120_000;
+export const AUTO_COMPACT_TOKEN_BUDGET = 180_000;
 
 /**
  * Soft post-compact band we *prefer* (includes system prompt ~8k).

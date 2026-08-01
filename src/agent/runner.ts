@@ -171,7 +171,6 @@ import {
   CompactionAttemptLedger,
   compactionAttemptKey,
 } from "./compaction-attempt.js";
-import { resolveRequestBudget } from "./request-budget.js";
 import {
   loadPlan,
   savePlan,
@@ -510,6 +509,8 @@ export interface AgentRunOptions {
   displayPrompt?: string | null | undefined;
   /** How the previous turn ended, so recovery is decided from state. */
   previousTurn?: PreviousTurnSignal | undefined;
+  /** User-declared model window for this provider/model/session. */
+  contextLimitTokens?: number | undefined;
 }
 
 /**
@@ -3958,8 +3959,13 @@ export async function runAgentTurn(
       force = false,
     ): Promise<void> {
       const beforeTokens = estimateNextRequestTokens(messages);
-      const budget = resolveRequestBudget({ provider, model });
-      const compactTrigger = budget.effectiveTrigger;
+      const compactTrigger = autoCompactTriggerTokens(getReliabilityPolicy(), {
+        provider,
+        model,
+        ...(options.contextLimitTokens
+          ? { contextLimitTokens: options.contextLimitTokens }
+          : {}),
+      });
       if (!force && beforeTokens < compactTrigger) return;
       // Structural eligibility only: there must be closed history to summarize.
       if (messages.length <= AUTO_COMPACT_KEEP_RECENT + 2) return;
@@ -4073,22 +4079,14 @@ export async function runAgentTurn(
                   ? PLAN_IMPLEMENT_MEMORY_PREFIX
                   : COMPACTION_MEMORY_PREFIX,
               );
-        // Card shows pre/post of the summarization; plan re-injection is noted.
-        writeCompactionCompleted(
-          compactionId,
-          summaryText,
-          beforeTokens,
-          compactedTokens,
-        );
-        const planNote =
-          afterTokens > compactedTokens
-            ? ` (compacted to ~${compactedTokens.toLocaleString()}, +plan → ~${afterTokens.toLocaleString()})`
-            : "";
+        // Report the final assembled request, including live plan and session
+        // state reinjection, so the card and the next provider request agree.
+        writeCompactionCompleted(compactionId, summaryText, beforeTokens, afterTokens);
         writeNotice(
           "info",
-          `context auto-compacted to fit the window (~${beforeTokens.toLocaleString()} → ~${compactedTokens.toLocaleString()} tokens${planNote})`,
+          `context auto-compacted to fit the window (~${beforeTokens.toLocaleString()} → ~${afterTokens.toLocaleString()} tokens)`,
           chalk.dim(
-            `  ℹ context auto-compacted (~${beforeTokens.toLocaleString()} → ~${compactedTokens.toLocaleString()} tokens${planNote})\n`,
+            `  ℹ context auto-compacted (~${beforeTokens.toLocaleString()} → ~${afterTokens.toLocaleString()} tokens)\n`,
           ),
         );
       } catch (error) {

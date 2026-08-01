@@ -22,6 +22,7 @@ export function createCurrentAgentPort(): AgentPort {
         mode: request.mode,
         displayPrompt: request.displayPrompt,
         previousTurn: request.previousTurn,
+        contextLimitTokens: request.contextLimitTokens,
       });
     },
   };

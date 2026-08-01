@@ -1,9 +1,8 @@
 // Context-usage projection for the session footer.
 //
-// The denominator shown to the user is the request budget that governs the next
-// request (auto-compaction trigger), not the raw model window, so the footer
-// agrees with the moment compaction actually fires.
-import { requestBudgetDenominator } from "../../agent/request-budget.js";
+// A denominator is displayed only when the user explicitly sets a session
+// model-window override. The default footer remains a concise current-context
+// count; compaction policy is resolved independently by the agent runner.
 import { estimateMessagesTokens } from "../../agent/context-manager.js";
 import {
   applyUsageToSnapshot,
@@ -15,11 +14,17 @@ import type { ChatMessage, ProviderId, TokenUsage } from "../../types.js";
 export interface ContextUsageTarget {
   readonly provider?: ProviderId | undefined;
   readonly model?: string | undefined;
+  /** Explicit provider/model window for this session, if the user set one. */
+  readonly contextLimitTokens?: number | undefined;
 }
 
-// Effective request budget used as the footer denominator.
+// The footer denominator is the explicit model window, never a guessed window
+// or compaction trigger. Zero means no session override was set.
 export function contextUsageLimit(target: ContextUsageTarget): number {
-  return requestBudgetDenominator(target.provider, target.model);
+  const limit = target.contextLimitTokens;
+  return typeof limit === "number" && Number.isFinite(limit) && limit > 0
+    ? Math.floor(limit)
+    : 0;
 }
 
 // Prefer the last API `prompt_tokens` as context fill (exact); otherwise
@@ -95,6 +100,7 @@ export function createContextProjector(
     const key = [
       target.provider ?? "",
       target.model ?? "",
+      target.contextLimitTokens ?? 0,
       history.length,
       first?.content.length ?? 0,
       last?.content.length ?? 0,
@@ -132,10 +138,9 @@ export function restoredUsageSnapshot(
   if (!usage || usage.contextTokens <= 0) return undefined;
   return {
     contextTokens: usage.contextTokens,
-    contextLimit:
-      typeof usage.contextLimit === "number" && usage.contextLimit > 0
-        ? usage.contextLimit
-        : contextUsageLimit(target),
+    // Persisted snapshots from older builds stored an auto-compact trigger
+    // here. Only a live explicit session override may become a denominator.
+    contextLimit: contextUsageLimit(target),
     lastCompletionTokens: usage.lastCompletionTokens ?? 0,
     sessionPromptTokens: usage.sessionPromptTokens ?? 0,
     sessionCompletionTokens: usage.sessionCompletionTokens ?? 0,

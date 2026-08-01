@@ -17,11 +17,15 @@ import type {
 } from "../../../app/controllers/session-controller.js";
 import type { ResponderRuntimeState } from "../../../app/controllers/session-responder.js";
 import type { Mode } from "../../../types.js";
-import {
-  formatTokenCount,
-  type ContextUsageSnapshot,
-} from "../../../llm/token-usage.js";
 import type { Theme } from "../../rendering/theme.js";
+import {
+  ContextLimitChip,
+  contextChipForDensity,
+  type StatusDensity,
+} from "./context-limit-chip.js";
+
+export { contextChipForDensity, parseContextLimitInput } from "./context-limit-chip.js";
+export type { StatusDensity } from "./context-limit-chip.js";
 import { useSessionState } from "../../state/use-session-state.js";
 import {
   EMPTY_SCROLL_METRICS,
@@ -99,7 +103,7 @@ export function idleHintIds(
   return ["commands", ...draft, "thinking", "output", "shortcuts"];
 }
 
-export type StatusDensity = "xs" | "sm" | "md" | "lg";
+
 
 /** Map content width → chrome density. */
 export function statusDensityForWidth(width: number): StatusDensity {
@@ -186,33 +190,7 @@ function formatActivity(
   return `${base} · ${elapsedSec}s`;
 }
 
-/** Raw current context-token count; request budgets remain internal. */
-export function contextChipForDensity(
-  usage: ContextUsageSnapshot | undefined,
-  _density: StatusDensity,
-): string | undefined {
-  if (!usage) return undefined;
-  return `ctx ${formatTokenCount(usage.contextTokens)}`;
-}
 
-function ContextChip(props: {
-  chip: string;
-  theme: Theme;
-  exact: boolean;
-}): ReactNode {
-  const { chip, theme, exact } = props;
-  return (
-    <text
-      selectable={false}
-      content={chip}
-      style={{
-        fg: exact ? theme.cyan : theme.muted,
-        attributes: exact ? TextAttributes.BOLD : TextAttributes.DIM,
-        flexShrink: 0,
-      }}
-    />
-  );
-}
 
 function sep(theme: Theme): ReactNode {
   return (
@@ -314,6 +292,8 @@ function ClickableHint(props: {
         alignItems: "center",
         flexShrink: 0,
         backgroundColor: bg,
+        paddingLeft: 1,
+        paddingRight: 1,
       }}
     >
       <text
@@ -524,14 +504,14 @@ export function StatusLine(props: StatusLineProps): ReactNode {
             justifyContent: "flex-end",
           }}
         >
-          {ctxChip ? (
-            <>
-              <ContextChip
-                chip={ctxChip}
-                theme={theme}
-                exact={state.contextUsage?.exact === true}
-              />
-            </>
+          {ctxChip && state.contextUsage ? (
+            <ContextLimitChip
+              chip={ctxChip}
+              theme={theme}
+              exact={state.contextUsage.exact}
+              usage={state.contextUsage}
+              session={session}
+            />
           ) : null}
           <ScrollRemainderBadges
             theme={theme}
@@ -707,14 +687,14 @@ export function StatusLine(props: StatusLineProps): ReactNode {
           justifyContent: "flex-end",
         }}
       >
-        {ctxChip ? (
-          <>
-            <ContextChip
-              chip={ctxChip}
-              theme={theme}
-              exact={state.contextUsage?.exact === true}
-            />
-          </>
+        {ctxChip && state.contextUsage ? (
+          <ContextLimitChip
+            chip={ctxChip}
+            theme={theme}
+            exact={state.contextUsage.exact}
+            usage={state.contextUsage}
+            session={session}
+          />
         ) : null}
         <ScrollRemainderBadges
           theme={theme}

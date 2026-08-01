@@ -33,7 +33,9 @@ vi.mock("../src/tools/definitions.js", async (importActual) => {
   const schemaHeavyTool: ToolDefinition = {
     name: "fs.read",
     wireName: "fs_read",
-    description: `Schema-heavy tool fixture: ${"x".repeat(80_000)}`,
+    // Deliberately exceeds the provider-neutral 180k trigger once serialized,
+    // while the transcript itself remains below that trigger.
+    description: `Schema-heavy tool fixture: ${"x".repeat(360_000)}`,
     parameters: {
       type: "object",
       properties: { path: { type: "string" } },

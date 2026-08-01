@@ -52,6 +52,7 @@ import {
   SessionResponder,
   type ResponderRuntimeState,
 } from "./session-responder.js";
+import { SessionContextLimits } from "./session-context-limits.js";
 
 export interface SessionState {
   readonly sessionId: SessionId;
@@ -154,6 +155,8 @@ export class SessionController implements Disposable {
   private static readonly AUTOSAVE_MIN_MS = 15_000;
   /** Last known context / session token totals for the status strip. */
   private contextUsage: ContextUsageSnapshot | undefined;
+  /** Explicit model windows, scoped to a provider/model pair within this session. */
+  private readonly contextLimits = new SessionContextLimits();
   /** Bumped by reset/history load/dispose so late callbacks can be ignored. */
   private lifecycleGeneration = 0;
   private lastTurnResult: TurnResult | undefined;
@@ -254,19 +257,23 @@ export class SessionController implements Disposable {
     return this.projectContext(this.usageTarget, this.history, this.contextUsage);
   }
 
+  private get contextLimitTokens(): number | undefined {
+    return this.contextLimits.get(this.provider, this.model);
+  }
+
   private get usageTarget(): ContextUsageTarget {
-    return { provider: this.provider, model: this.model };
+    const contextLimitTokens = this.contextLimitTokens;
+    return {
+      provider: this.provider,
+      model: this.model,
+      ...(contextLimitTokens ? { contextLimitTokens } : {}),
+    };
   }
 
   private resolveContextUsage(): ContextUsageSnapshot | undefined {
-    return resolveContextUsageSnapshot(
-      this.usageTarget,
-      this.history,
-      this.contextUsage,
-    );
+    return resolveContextUsageSnapshot(this.usageTarget, this.history, this.contextUsage);
   }
 
-  /** Record provider-reported usage (from agent token-usage events). */
   recordTokenUsage(usage: TokenUsage, model?: string): void {
     const target = { provider: this.provider, model: model ?? this.model };
     this.contextUsage = recordUsageSnapshot(target, this.contextUsage, usage);
@@ -274,25 +281,15 @@ export class SessionController implements Disposable {
     this.notifyState();
   }
 
-  /** After /compact or auto-compact, report the post-compaction context size. */
   noteContextCompacted(afterTokens?: number): void {
     this.contextUsage = compactedUsageSnapshot(
-      this.usageTarget,
-      this.contextUsage,
-      this.history,
-      afterTokens,
+      this.usageTarget, this.contextUsage, this.history, afterTokens,
     );
     this.notifyState();
   }
 
-  /** After history loads, estimate fill until the next API usage report. */
   private refreshEstimatedContext(): void {
-    this.contextUsage = snapshotFromEstimate(
-      this.history,
-      this.model,
-      this.provider,
-      undefined,
-    );
+    this.contextUsage = snapshotFromEstimate(this.history, this.model, this.provider, undefined);
   }
 
   get messages(): readonly ChatMessage[] {
@@ -308,6 +305,13 @@ export class SessionController implements Disposable {
   setProvider(provider: ProviderId | undefined): void {
     this.provider = provider;
     clearTextOnlyModels();
+    this.notifyState();
+  }
+
+  /** Set or clear this session's current provider/model window override. */
+  setContextLimitTokens(limit: number | undefined): void {
+    this.contextLimits.set(this.provider, this.model, limit);
+    this.contextUsage = this.resolveContextUsage();
     this.notifyState();
   }
 
@@ -373,6 +377,7 @@ export class SessionController implements Disposable {
       const nextSessionId = asSessionId(options.sessionId);
       if (nextSessionId !== this.sessionIdValue) {
         this.fenceInteractiveOwner(this.sessionIdValue);
+        this.contextLimits.clear();
       }
       this.sessionIdValue = nextSessionId;
       this.sequencer.rebind(this.sessionIdValue);
@@ -423,6 +428,7 @@ export class SessionController implements Disposable {
     this.spool.clear();
     if (options.mintNewId) {
       this.fenceInteractiveOwner(this.sessionIdValue);
+      this.contextLimits.clear();
       this.sessionIdValue = asSessionId(mintSessionId());
       this.sequencer.rebind(this.sessionIdValue);
       this.persistence.newSession();
@@ -693,6 +699,9 @@ export class SessionController implements Disposable {
         ? { displayPrompt: opts.displayPrompt }
         : {}),
       ...(checkpoint ? { previousTurn: checkpoint } : {}),
+      ...(this.contextLimitTokens
+        ? { contextLimitTokens: this.contextLimitTokens }
+        : {}),
     });
     if (built.fallbackReason) this.notice("info", built.fallbackReason);
     for (const issue of built.imageIssues) this.notice("warn", issue);

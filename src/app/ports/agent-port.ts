@@ -33,6 +33,8 @@ export interface RunTurnRequest {
    * guessing from prompt wording when deciding to re-attach to open work.
    */
   readonly previousTurn?: PreviousTurnSignal | undefined;
+  /** User-declared model window for this provider/model/session. */
+  readonly contextLimitTokens?: number | undefined;
 }
 
 export type { PreviousTurnSignal } from "../../agent/continue-orient.js";

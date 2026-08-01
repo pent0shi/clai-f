@@ -115,11 +115,16 @@ export function getReliabilityPolicy(): ReliabilityPolicy {
 /**
  * E1: token threshold that triggers auto-compact.
  * Soft path fires earlier; hard budget is the ceiling used when soft is off.
- * The result is additionally clamped to what the target model can serve.
+ * Defaults are provider/model-neutral; a session model-window override uses
+ * 70% of its explicit limit.
  */
 export function autoCompactTriggerTokens(
   policy = getReliabilityPolicy(),
-  target?: { provider?: ProviderId | undefined; model?: string | undefined },
+  target?: {
+    provider?: ProviderId | undefined;
+    model?: string | undefined;
+    contextLimitTokens?: number | undefined;
+  },
 ): number {
   const configured = policy.softEarlyCompact
     ? Math.min(policy.softCompactTokenBudget, policy.hardCompactTokenBudget)
@@ -127,6 +132,9 @@ export function autoCompactTriggerTokens(
   return resolveRequestBudget({
     ...(target?.provider ? { provider: target.provider } : {}),
     ...(target?.model ? { model: target.model } : {}),
+    ...(target?.contextLimitTokens
+      ? { contextLimitTokens: target.contextLimitTokens }
+      : {}),
     overrideTokens: configured,
   }).effectiveTrigger;
 }
