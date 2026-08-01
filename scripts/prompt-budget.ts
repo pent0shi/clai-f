@@ -80,7 +80,7 @@ report("pentestWorkflowDirective", pentestWorkflowDirective());
 report("typical BUILD turn (sys+directives)", buildTurn);
 report("typical PENTEST turn (sys+directives)", pentestTurn);
 console.log(
-  "\nTargets (from revamp): core agent ~5–6k tok; build/pentest injects short FOCUS cards.",
+  "\nTargets: core agent ~8–9k tok; build/pentest injects focused workflow directives.",
 );
 
 const mandatorySections = [
@@ -106,8 +106,8 @@ for (const section of mandatorySections) {
 // Per-variant ceilings. The everyday paths (no pentest methodology attached)
 // are held tightest because they are what most turns actually pay for.
 for (const [label, text, limit] of [
-  ["fence", agent, 33_000],
-  ["fence+pentest", agentPentest, 37_000],
+  ["fence", agent, 35_000],
+  ["fence+pentest", agentPentest, 39_000],
   ["native", agentNative, 22_000],
   ["native+pentest", agentNativePentest, 26_000],
 ] as const) {

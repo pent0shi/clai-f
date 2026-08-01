@@ -19,6 +19,7 @@ Two things make it practical for everyday use:
 - **Scope-based pentesting.** Opt-in engagement scope with authorized/excluded targets, allowed phases, rate and concurrency ceilings, redirect and DNS-rebinding escape detection, and out-of-scope flagging — designed for authorized pentests and bug-bounty programs.
 - **Real building & debugging.** Scaffolds apps, edits code surgically, installs packages, runs builds/tests, starts dev servers as background jobs, and probes them before reporting success.
 - **Durable plans.** `plan.create` / `task.update` drive a live checklist that survives context compaction and reloads with `/history` — the agent works task-by-task and won't fake completion.
+- **Persistent interactive terminals.** Conversation-owned PTY or pipe sessions keep REPLs such as Python, Metasploit, Meterpreter, database consoles, and debuggers open across model turns. The agent can send follow-up input, read incremental output, resize, interrupt, and close them without losing state.
 - **Native + text tool calling.** Uses provider-native function calling where available, with a text-fence fallback (`toolCalling: auto|native|text`).
 - **Safety gate you control.** Every action is classified safe / confirm / block; deletes always confirm with a preview; destructive patterns are blocked.
 
@@ -413,6 +414,20 @@ Search-provider keys are multi-key and rotate just like model providers.
 ## Per-project context
 
 Drop a `.clai/context.md` in a repo and its contents are injected every turn — lab topology, in-scope hosts, stack assumptions, coding conventions, or anything the agent should always know for that project.
+
+---
+
+## Interactive REPLs and terminals
+
+Ask clai to use an interactive terminal whenever a program needs more than one input step. It keeps the process attached to the current conversation instead of treating it like a one-line shell command:
+
+```text
+Start a Python REPL, inspect the failing parser, make a small change, and show me the result.
+```
+
+The agent uses `terminal.start`, `terminal.send`, `terminal.read`, `terminal.status`, `terminal.list`, `terminal.resize`, and `terminal.close` internally. Sessions are isolated per conversation, capture output as cursor-addressed pages, redact prompted secret input before it reaches transcripts or artifacts, and reliably terminate their process trees on close. In plan mode, starting or sending terminal input waits for plan approval; read, status, list, and close operations remain available.
+
+For authorized security work, interactive effects are re-evaluated against the active engagement scope at the time they are delivered. That includes the target, port, phase, and expiry accumulated from prior REPL commands, so a split sequence cannot bypass scope controls.
 
 ---
 
