@@ -265,7 +265,7 @@ describe("SessionController parity helpers (V2-080)", () => {
     expect(result.summarized).toBe(true);
     expect(completeWithProvider).toHaveBeenCalledTimes(2);
     expect(completeWithProvider.mock.calls[1]?.[0]).toMatchObject({
-      maxTokens: 8_192,
+      maxTokens: 2_048,
       temperature: 0,
       thinking: { enabled: false, effort: "none" },
     });

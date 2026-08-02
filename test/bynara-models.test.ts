@@ -107,4 +107,26 @@ describe("Bynara model discovery", () => {
     };
     expect(body.messages.find((message) => message.role === "tool")?.content).toBe(output);
   });
+
+  it("explicitly disables StepFun thinking for a bounded summary request", async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      choices: [{ message: { content: "memory" }, finish_reason: "stop" }],
+    }), { status: 200, headers: { "content-type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await bynaraProvider.complete(
+      {
+        model: "stepfun-ai/step-3.7-flash",
+        messages: [{ role: "user", content: "Summarize this session." }],
+        maxTokens: 1_024,
+        thinking: { enabled: false, effort: "none" },
+      },
+      { apiKey: "test-key" },
+    );
+
+    const request = fetchMock.mock.calls[0]![1] as RequestInit;
+    const body = JSON.parse(String(request.body));
+    expect(body.max_tokens).toBe(1_024);
+    expect(body.chat_template_kwargs).toEqual({ enable_thinking: false });
+  });
 });

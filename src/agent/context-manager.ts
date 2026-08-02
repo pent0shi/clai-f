@@ -346,6 +346,15 @@ export async function compactMessagesWithSummary(
     ? redactSecrets(sessionTranscript.trim())
     : "";
 
+  // The V2 transcript normally contains the same user/assistant/tool evidence
+  // as model history, but additionally labels tool output. Sending both makes
+  // a compaction pay twice for identical material. Only omit model history
+  // after proving each non-system older turn is represented verbatim in the
+  // visual transcript; partial/restored transcripts retain both sources.
+  const visualCoversOlderHistory = Boolean(visual) && older
+    .filter((message) => message.role !== "system" && message.content.trim())
+    .every((message) => visual.includes(message.content.trim()));
+
   const durableBits = messages
     .filter((m) => m.role === "system" && isDurableSystem(m.content))
     .map((m) => {
@@ -374,23 +383,59 @@ export async function compactMessagesWithSummary(
     .filter((part): part is string => Boolean(part))
     .join("\n\n");
 
-  // Every region of history is mapped and then reduced. Head/tail omission is
-  // never used: state that exists only in the middle of a long session must
-  // survive compaction.
+  // Keep every region of both sources. The visual transcript has tool-output
+  // detail while model history is the authoritative fallback after resumes;
+  // trimming either would make the agent forget completed checks and repeat
+  // work. `chunkTranscriptForCompaction` limits this to two map calls plus one
+  // final reduce, so preserving evidence does not recreate the old request
+  // fan-out.
   const combinedTranscript = [
     visual ? `VISUAL TRANSCRIPT:\n\n${visual}` : "",
-    messageTranscript ? `OLDER MODEL TURNS:\n\n${messageTranscript}` : "",
+    messageTranscript && !visualCoversOlderHistory
+      ? `OLDER MODEL TURNS:\n\n${messageTranscript}`
+      : "",
   ]
     .filter(Boolean)
     .join("\n\n---\n\n");
   const chunks = chunkTranscriptForCompaction(combinedTranscript);
 
+  // Weak models occasionally echo a region verbatim. Retry that one stage with
+  // an explicit correction before it contaminates the final memory; never
+  // blindly spend another whole map/reduce pass.
+  const summarizeUsable = async (
+    prompt: string,
+    stage: CompactionSummaryStage,
+  ): Promise<string> => {
+    const first = await summarize(prompt, stage);
+    const visible = stripThinking(first ?? "").visible.trim();
+    // Provider adapters already make one no-thinking retry for an empty/
+    // reasoning-only response. Do not add another request here in that case.
+    if (!visible) {
+      throw new Error("compaction failed: model returned an empty summary");
+    }
+    if (!looksLikeTranscriptReplay(visible)) return first;
+    const repaired = await summarize(
+      `${prompt}\n\nQUALITY CORRECTION: Your previous result was unusable because it was empty or replayed source material. Return only a concise transformed memory of facts; do not quote or reproduce the transcript.`,
+      stage,
+    );
+    const repairedVisible = stripThinking(repaired ?? "").visible.trim();
+    if (!repairedVisible) {
+      throw new Error("compaction failed: model returned an empty summary");
+    }
+    if (looksLikeTranscriptReplay(repairedVisible)) {
+      throw new Error(
+        "compaction failed: model replayed the transcript instead of summarizing — original context retained",
+      );
+    }
+    return repaired;
+  };
+
   let modelSummary: string;
   if (chunks.length <= 1) {
-    modelSummary = await summarize(
+    modelSummary = await summarizeUsable(
       buildCompactionUserPrompt({
         visualTranscript: visual || undefined,
-        messageTranscript,
+        messageTranscript: visualCoversOlderHistory ? "" : messageTranscript,
         durableState: durableState || undefined,
         purpose: options.purpose,
       }),
@@ -399,7 +444,7 @@ export async function compactMessagesWithSummary(
   } else {
     const mapped = await Promise.all(
       chunks.map(async (chunk, index) => {
-        const partial = await summarize(
+        const partial = await summarizeUsable(
           buildCompactionChunkPrompt({
             chunk,
             index,
@@ -417,7 +462,7 @@ export async function compactMessagesWithSummary(
         "compaction failed: no region summary was produced for a long session",
       );
     }
-    modelSummary = await summarize(
+    modelSummary = await summarizeUsable(
       buildCompactionReducePrompt({
         partials,
         ...(durableState ? { durableState } : {}),

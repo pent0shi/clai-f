@@ -611,6 +611,7 @@ export type ReasoningStyle =
   | "openrouter"
   | "agentrouter"
   | "modal"
+  | "stepfun"
   | "none";
 
 
@@ -720,6 +721,12 @@ export function buildReasoningPayload(
       // "off" must send `false` explicitly rather than omit the field. No
       // effort knob is documented — sending one risks a hard 400.
       return { reasoning: { enabled } };
+    case "stepfun":
+      // Step 3.5/3.7 Flash enables a <think> block by default on compatible
+      // hosts. Omitting an OpenAI reasoning field does not turn that default
+      // off, so compaction would still buy hidden reasoning tokens. vLLM's
+      // StepFun template honours this explicit per-request switch.
+      return { chat_template_kwargs: { enable_thinking: enabled } };
     case "groq": {
       const m = (model ?? "").toLowerCase();
       if (/qwen\/qwen3-32b/.test(m)) {

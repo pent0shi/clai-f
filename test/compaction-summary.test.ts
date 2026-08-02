@@ -188,6 +188,36 @@ describe("LLM compaction integration shape", () => {
     );
   });
 
+  it("keeps every region while bounding a manual compaction to map-reduce", async () => {
+    const msgs: ChatMessage[] = Array.from({ length: 10 }, (_, index) => ({
+      role: index % 2 === 0 ? ("user" as const) : ("assistant" as const),
+      content: `turn-${index}`,
+    }));
+    // A real UI transcript can contain many large tool cards. Every region is
+    // supplied to a map pass, then merged once; no nested splitter may turn
+    // that into an unbounded request fan-out.
+    const transcript = Array.from(
+      { length: 80 },
+      (_, index) => `TOOL ${index}:\n${"x".repeat(2_000)}`,
+    ).join("\n\n");
+    let calls = 0;
+    const result = await compactMessagesWithSummary(
+      msgs,
+      async (prompt) => {
+        calls += 1;
+        if (calls <= 2) {
+          expect(prompt).toContain(calls === 1 ? "TOOL 0:" : "TOOL 79:");
+        }
+        return "## Work completed\nCompacted bounded transcript.\n## Remaining work\nContinue.";
+      },
+      { budgetTokens: 0, keepRecent: 2 },
+      transcript,
+    );
+
+    expect(result.summarized).toBe(true);
+    expect(calls).toBe(3);
+  });
+
   it("fails compaction when the model replays the transcript instead of summarizing", async () => {
     const msgs: ChatMessage[] = Array.from({ length: 12 }, (_, index) => ({
       role: index % 2 === 0 ? ("user" as const) : ("assistant" as const),

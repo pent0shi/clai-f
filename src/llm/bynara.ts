@@ -17,6 +17,13 @@ import {
 // https://router.bynara.id/v1. API keys usually start with sk_nry_.
 const baseUrl = "https://router.bynara.id/v1";
 
+function reasoningStyleFor(model: string): "openai" | "stepfun" {
+  return /(?:^|\/)step(?:fun[-_])?(?:ai\/)?step-3\.(?:5|7)-flash/i.test(model) ||
+    /step-3\.(?:5|7)-flash/i.test(model)
+    ? "stepfun"
+    : "openai";
+}
+
 // Cache model lists per API key so swapping keys (e.g. free → paid) refreshes
 // the picker without waiting for a global TTL to expire.
 interface ModelCache {
@@ -75,7 +82,7 @@ export const bynaraProvider: LlmProvider = {
       temperature: request.temperature,
       signal: request.signal,
       reasoning: request.thinking,
-      reasoningStyle: "openai",
+      reasoningStyle: reasoningStyleFor(model),
       tools: request.tools,
       toolChoice: request.toolChoice,
       parallelToolCalls: request.parallelToolCalls,
@@ -102,7 +109,7 @@ export const bynaraProvider: LlmProvider = {
       onToken,
       onToolCallDelta: request.onToolCallDelta,
       reasoning: request.thinking,
-      reasoningStyle: "openai",
+      reasoningStyle: reasoningStyleFor(model),
       // 60s first byte, but the mid-stream budget has to survive a fully
       // buffered tool call (see DEFAULT_STREAM_IDLE_TIMEOUT_MS).
       initialIdleTimeoutMs: 60_000,

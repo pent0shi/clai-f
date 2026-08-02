@@ -156,6 +156,8 @@ import {
 } from "./durable-envelope.js";
 import {
   COMPACTION_SYSTEM_PROMPT,
+  COMPACTION_MAX_COMPLETION_TOKENS,
+  COMPACTION_MAP_MAX_COMPLETION_TOKENS,
 } from "./compaction-summary.js";
 import {
   maybeAppendPlanModeReminder,
@@ -3860,13 +3862,17 @@ export async function runAgentTurn(
           { role: "user" as const, content: summaryPrompt },
         ],
         temperature: 0.1,
-        maxTokens: 8_192,
+        maxTokens:
+          stage?.phase === "map"
+            ? COMPACTION_MAP_MAX_COMPLETION_TOKENS
+            : COMPACTION_MAX_COMPLETION_TOKENS,
+        thinking: { enabled: false, effort: "none" as const },
         signal: options.signal,
       };
       const response = await streamWithProvider(
         request,
         (token) => deltaParser?.push(token),
-        { onStatus: () => undefined, maxRetries: 1 },
+        { onStatus: () => undefined, maxRetries: 0 },
       );
       deltaParser?.finish();
       const parsed = stripThinking(response.text);
@@ -3882,9 +3888,12 @@ export async function runAgentTurn(
           { role: "user" as const, content: summaryPrompt },
         ],
         temperature: 0,
-        maxTokens: 8_192,
+        maxTokens:
+          stage?.phase === "map"
+            ? COMPACTION_MAP_MAX_COMPLETION_TOKENS
+            : COMPACTION_MAX_COMPLETION_TOKENS,
         thinking: { enabled: false, effort: "none" as const },
-      }, { maxRetries: 1 });
+      }, { maxRetries: 0 });
       const retryVisible = stripThinking(retry.text).visible.trim();
       if (retryVisible && compactionId) {
         writeCompactionDelta(compactionId, retryVisible);

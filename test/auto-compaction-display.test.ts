@@ -167,13 +167,9 @@ describe("auto-compaction display (Chunk 3)", () => {
           onToken: (token: string) => void,
         ) => {
           const system = req.messages?.[0]?.content ?? "";
-          const user = req.messages?.[1]?.content ?? "";
           const isCompaction = system.toLowerCase().includes("continuation memory");
-          const isFinalSummary = /\nREGION 1:\n/.test(user);
           const rawText = isCompaction
-            ? isFinalSummary
-              ? "<think>the final allowance contained only reasoning</think>"
-              : SUMMARY_TEXT
+            ? "<think>the summary allowance contained only reasoning</think>"
             : "All set; nothing else to do.";
           onToken(rawText);
           return Promise.resolve({
@@ -202,9 +198,12 @@ describe("auto-compaction display (Chunk 3)", () => {
         onEvent: (event) => events.push(event),
       });
 
-      expect(complete).toHaveBeenCalledTimes(1);
+      // Long history uses two evidence-preserving map summaries and one final
+      // reduce. Each may need the no-thinking retry; this is bounded (never a
+      // nested per-chunk fan-out).
+      expect(complete).toHaveBeenCalledTimes(3);
       expect(complete.mock.calls[0]?.[0]).toMatchObject({
-        maxTokens: 8_192,
+        maxTokens: 1_024,
         temperature: 0,
         thinking: { enabled: false, effort: "none" },
       });

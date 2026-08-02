@@ -41,6 +41,12 @@ describe("project root sticky paths", () => {
     expect(resolveToolPath("src/App.jsx")).not.toContain("/clai/src/");
   });
 
+  it("keeps an absolute user path absolute even while a project root is pinned", () => {
+    setActiveProjectRoot(join(homedir(), "Desktop", "todo-app"));
+    const requested = join(homedir(), "Desktop", "3d", "src", "city.js");
+    expect(resolveToolPath(requested)).toBe(requested);
+  });
+
   it("remaps agent-cwd absolute src writes onto project root", () => {
     const project = join(homedir(), "Desktop", "todo-app");
     const agent = safeCwd();

@@ -136,6 +136,16 @@ export function buildCompactionUserPrompt(parts: CompactionPromptParts): string 
 /** Soft cap for transcript fed to the summarizer (chars). */
 export const COMPACTION_TRANSCRIPT_CHAR_BUDGET = 48_000;
 
+/**
+ * A compaction is a compression operation, not a reasoning task. Keeping this
+ * modest prevents reasoning-capable providers from spending thousands of
+ * hidden tokens on every map/reduce pass.
+ */
+export const COMPACTION_MAX_COMPLETION_TOKENS = 2_048;
+
+/** Map passes only extract facts; reserve the larger allowance for final memory. */
+export const COMPACTION_MAP_MAX_COMPLETION_TOKENS = 1_024;
+
 /** Chars per map-stage chunk when the transcript exceeds one summarizer call. */
 export const COMPACTION_CHUNK_CHAR_BUDGET = 96_000;
 
@@ -194,7 +204,7 @@ export function buildCompactionChunkPrompt(input: {
     `Summarize region ${input.index + 1} of ${input.total} of one continuous session.`,
     "This is a partial region: do not write an orientation line, do not speculate about regions you cannot see, and do not answer the user.",
     focus,
-    "Dense bullets only. Never invent tool results, receipts, exit codes or transcript lines.",
+    "Dense fact bullets only. Transform the material into findings; never copy transcript lines, headings, tool-call JSON, file-write receipts, or long output verbatim. Preserve completed work, negative results, decisions, paths, commands, blockers, and remaining work so they are not repeated after resume.",
     "",
     "SESSION MATERIAL (REGION):",
     "",

@@ -4,6 +4,10 @@
 
 import type { ChatMessage, ProviderId } from "../../types.js";
 import {
+  COMPACTION_MAX_COMPLETION_TOKENS,
+  COMPACTION_MAP_MAX_COMPLETION_TOKENS,
+} from "../../agent/compaction-summary.js";
+import {
   compactMessagesWithSummary,
   estimateMessagesTokens,
   isCompactionMemoryMessage,
@@ -28,10 +32,14 @@ export async function summarizeForSessionCompact(
     signal?: AbortSignal | undefined;
     /** plan-implement needs denser handoff memory — allow a larger completion. */
     purpose?: "default" | "plan-implement" | undefined;
+    stage?: "single" | "map" | "reduce" | undefined;
     onToken?: ((token: string) => void) | undefined;
   },
 ): Promise<string> {
-  const maxTokens = 8_192;
+  const maxTokens =
+    opts.stage === "map"
+      ? COMPACTION_MAP_MAX_COMPLETION_TOKENS
+      : COMPACTION_MAX_COMPLETION_TOKENS;
   const systemContent =
     opts.purpose === "plan-implement"
       ? "Write concise, non-redundant research memory for an agent executing an approved plan. Do not add framing: the PLAN MODE HANDOFF wrapper and active plan are injected separately. For coding target 600–1000 tokens; preserve only verified state, reusable research/artifacts, decisions, blockers, and risks. Security handoffs may be longer to preserve findings and coverage. Never invent or cut a fact mid-token. You are summarizing, not continuing: never emit tool calls or fabricate tool results, file receipts, or transcript lines."
@@ -53,11 +61,14 @@ export async function summarizeForSessionCompact(
       ],
       temperature: 0.1,
       maxTokens,
+      // Summarizing does not benefit from hidden reasoning; disabling it keeps
+      // compaction cheap and consistent for reasoning-capable providers.
+      thinking: { enabled: false, effort: "none" as const },
       signal: opts.signal,
     };
     let rawSummary: string;
     if (!onToken) {
-      rawSummary = (await completeWithProvider(request, { maxRetries: 1 })).text;
+      rawSummary = (await completeWithProvider(request, { maxRetries: 0 })).text;
     } else {
       const parser = createThinkingStreamParser(onToken, undefined, {
         remember: false,
@@ -65,7 +76,7 @@ export async function summarizeForSessionCompact(
       const response = await streamWithProvider(
         request,
         (token) => parser.push(token),
-        { onStatus: () => undefined, maxRetries: 1 },
+        { onStatus: () => undefined, maxRetries: 0 },
       );
       parser.finish();
       rawSummary = response.text;
@@ -84,40 +95,17 @@ export async function summarizeForSessionCompact(
         { role: "user" as const, content: p },
       ],
       temperature: 0,
-      maxTokens: 8_192,
+      maxTokens,
       thinking: { enabled: false, effort: "none" as const },
-    }, { maxRetries: 1 });
+    }, { maxRetries: 0 });
     const retryVisible = stripThinking(retry.text).visible.trim();
     if (retryVisible && onToken) onToken(retryVisible);
     return retry.text;
   };
 
-  const chunkSize = 50_000;
-  if (prompt.length <= chunkSize) {
-    return completeSummary(prompt, opts.onToken);
-  }
-  const chunks = Array.from(
-    { length: Math.ceil(prompt.length / chunkSize) },
-    (_, index) => prompt.slice(index * chunkSize, (index + 1) * chunkSize),
-  );
-  const partials = await Promise.all(
-    chunks.map((chunk, index) =>
-      completeSummary(
-        opts.purpose === "plan-implement"
-          ? `Summarize part ${index + 1} of ${chunks.length} of plan-mode research for implement handoff. Preserve targets, stack, confirmed findings, negatives, untested classes, artifact paths, tools used, and remaining work.\n\n${chunk}`
-          : `Summarize part ${index + 1} of ${chunks.length} of one session. Preserve concrete goals, actions, commands, results, task state, failures, and remaining work.\n\n${chunk}`,
-      ),
-    ),
-  );
-  opts.signal?.throwIfAborted();
-  return completeSummary(
-    opts.purpose === "plan-implement"
-      ? "Merge these ordered partial plan-mode research memories into one non-redundant implement handoff. Use sections: User goals, Research evidence, Coverage ledger, Confirmed findings, Negative/tested-OK, Untested/open, Artifacts, Durable rules, Plan-mode-only notes, Commands/tools, Current state, Remaining work, Open risks. Complete every fact; never cut mid-token.\n\n" +
-          partials.map((part, index) => `PART ${index + 1}:\n${part}`).join("\n\n")
-      : "Merge these ordered partial session memories into one non-redundant continuation memory. Preserve all concrete facts and unresolved work. Use sections: User goals, Decisions and constraints, Work completed, Commands/tools and results, Current state, Remaining work.\n\n" +
-          partials.map((part, index) => `PART ${index + 1}:\n${part}`).join("\n\n"),
-    opts.onToken,
-  );
+  // `compactMessagesWithSummary` owns chunking/map-reduce. A second splitting
+  // layer here multiplied one /compact into N map calls plus another reduce.
+  return completeSummary(prompt, opts.onToken);
 }
 
 interface RunSessionCompactionOptions {
@@ -172,6 +160,7 @@ export async function runSessionCompaction(
           model: options.model,
           signal: options.signal,
           purpose: options.purpose,
+          stage: stage?.phase,
           ...(options.persist && stage?.phase !== "map"
             ? {
                 onToken: (text: string) => {

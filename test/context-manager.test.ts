@@ -81,6 +81,28 @@ describe("phase 9 — context manager", () => {
     expect(result.messages.slice(-8)).toEqual(msgs.slice(-8));
   });
 
+  it("does not send duplicate model history when the visual transcript covers it", async () => {
+    const msgs: ChatMessage[] = [
+      { role: "user", content: "inspect the repository" },
+      { role: "assistant", content: "I inspected package.json." },
+      { role: "user", content: "recent request" },
+      { role: "assistant", content: "recent reply" },
+    ];
+    let prompt = "";
+    await compactMessagesWithSummary(
+      msgs,
+      async (value) => {
+        prompt = value;
+        return "## Work completed\nRepository inspected.\n## Remaining work\nContinue.";
+      },
+      { budgetTokens: 0, keepRecent: 2 },
+      "USER INTENT/PROMPT:\ninspect the repository\n\nASSISTANT RESPONSE:\nI inspected package.json.",
+    );
+
+    expect(prompt).toContain("inspect the repository");
+    expect(prompt).not.toContain("OLDER MODEL TURNS");
+  });
+
   it("compacts resumed history together with newer turns", async () => {
     // Simulate /history load (older turns) + follow-up chat, then /compact.
     const history: ChatMessage[] = [
