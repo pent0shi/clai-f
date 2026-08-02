@@ -49,6 +49,7 @@ function baseInput(overrides: Partial<FinalizeGateInput> = {}): FinalizeGateInpu
     sawServerTail: false,
     sawLocalHttpProbe: false,
     sawFailedLocalHttpProbe: false,
+    serverCriterionRequired: false,
     sawActivePentestTest: false,
     sawSuccessfulMutation: false,
     featureAppAsk: false,
@@ -408,10 +409,16 @@ describe("finalize gate — runtime verify", () => {
       ...overrides,
     });
 
-  it("fires when a finished coding plan has no runtime proof", () => {
-    const action = chooseFinalizeRecovery(runtimeInput());
+  it("fires when a finished coding plan has no runtime proof and the outcome contract requires a server", () => {
+    const action = chooseFinalizeRecovery(
+      runtimeInput({ serverCriterionRequired: true }),
+    );
     expect(action?.kind).toBe("runtime_verify");
     expect(action?.message).toContain("/tmp/app");
+  });
+
+  it("does not fire for a finished coding plan whose outcome contract has no server criterion", () => {
+    expect(chooseFinalizeRecovery(runtimeInput())).toBeUndefined();
   });
 
   it("does not fire when the plan carries runtime evidence", () => {
@@ -448,6 +455,7 @@ describe("finalize gate — runtime verify", () => {
           plan: undefined,
           sawLocalAppMaterialWork: true,
           productiveSteps: 2,
+          serverCriterionRequired: true,
           cleaned: "The app is ready. Run npm run dev to start it.",
         }),
       )?.kind,
@@ -458,6 +466,7 @@ describe("finalize gate — runtime verify", () => {
     const probing = {
       sawFailedLocalHttpProbe: true,
       sawLocalHttpProbe: false,
+      serverCriterionRequired: true,
     } as const;
     expect(chooseFinalizeRecovery(runtimeInput(probing))?.kind).toBe(
       "runtime_verify",

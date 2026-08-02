@@ -130,11 +130,11 @@ describe("history append keeps the signed block", () => {
     });
   });
 
-  it("drops an unsigned block rather than replaying something Anthropic rejects", () => {
+  it("stores an unsigned reasoning block so non-Anthropic models can replay reasoning_content", () => {
     const messages: ChatMessage[] = [];
     appendAssistantWithTools(messages, "working", [
       { id: "t1", name: "fs.read", args: {} },
     ], { text: "thought" });
-    expect(messages[0]!.reasoningBlock).toBeUndefined();
+    expect(messages[0]!.reasoningBlock).toEqual({ text: "thought" });
   });
 });

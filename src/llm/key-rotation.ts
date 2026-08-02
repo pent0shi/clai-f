@@ -105,7 +105,12 @@ export function isKeyCircleStopError(error: unknown): boolean {
   return false;
 }
 
-export type ProviderKeyEventType = "using" | "retry" | "switch" | "exhausted";
+export type ProviderKeyEventType =
+  | "using"
+  | "retry"
+  | "switch"
+  | "endpoint"
+  | "exhausted";
 
 export interface ProviderKeyEvent {
   readonly type: ProviderKeyEventType;
@@ -136,6 +141,10 @@ export function formatKeyEventStatus(event: ProviderKeyEvent): string {
         event.waitMs !== undefined ? ` in ${Math.ceil(event.waitMs / 1000)}s` : "";
       const why = event.reason ?? "retrying";
       return `⏳ ${event.provider}${idx}${keyPart} ${why}${secs}…`;
+    }
+    case "endpoint": {
+      const why = event.reason ? ` (${event.reason})` : "";
+      return `switching ${event.provider} endpoint${keyPart}${why}`;
     }
     case "exhausted":
       return `all ${event.provider} API keys failed`;

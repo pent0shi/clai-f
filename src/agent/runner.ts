@@ -1013,10 +1013,11 @@ export async function runAgentTurn(
           imageView: visionAvailable,
           // E6: slim native constitution when API tool schemas are attached.
           ...(native ? { slimNative: reliability.slimNativePrompt } : {}),
-          ...(pentestPromptTurn ? { pentest: true } : {}),
         });
     };
-    const systemSections: string[] = [renderRequestEnvironmentContext()];
+    const systemSections: string[] = [
+      renderRequestEnvironmentContext({ plan: activePlan }),
+    ];
     if (projectContext) {
       systemSections.push(
         `Project context from .clai/context.md:\n${projectContext}`,
@@ -3859,13 +3860,13 @@ export async function runAgentTurn(
           { role: "user" as const, content: summaryPrompt },
         ],
         temperature: 0.1,
-        maxTokens: 2_048,
+        maxTokens: 8_192,
         signal: options.signal,
       };
       const response = await streamWithProvider(
         request,
         (token) => deltaParser?.push(token),
-        { onStatus: () => undefined },
+        { onStatus: () => undefined, maxRetries: 1 },
       );
       deltaParser?.finish();
       const parsed = stripThinking(response.text);
@@ -3883,7 +3884,7 @@ export async function runAgentTurn(
         temperature: 0,
         maxTokens: 8_192,
         thinking: { enabled: false, effort: "none" as const },
-      });
+      }, { maxRetries: 1 });
       const retryVisible = stripThinking(retry.text).visible.trim();
       if (retryVisible && compactionId) {
         writeCompactionDelta(compactionId, retryVisible);
@@ -4236,7 +4237,7 @@ export async function runAgentTurn(
               ? `${seconds}s`
               : `${Math.floor(seconds / 60)}m${String(seconds % 60).padStart(2, "0")}s`;
           if (generatedTokens > 0 && !inThinking) {
-            return `generating response · ${generatedTokens} tokens · ${elapsed}`;
+            return `generating response · ${elapsed}`;
           }
           if (sawReasoning) return `thinking · ${elapsed}`;
           return `waiting for model · ${elapsed}`;
@@ -4293,6 +4294,11 @@ export async function runAgentTurn(
             messages,
             toolsAttached ? turnTools : undefined,
           );
+          emit({
+            type: "context-estimate",
+            estimatedTokens: contextBreakdown.estimatedTotalTokens,
+            model,
+          });
           // E4: advisory only — never blocks free-tier users.
           if (!freeTierLargeContextWarned) {
             const notices = freeTierGuardNotices({
@@ -4941,7 +4947,10 @@ export async function runAgentTurn(
                       messages,
                       assistantText.visible,
                       salvageHistoryCalls,
-                      completion.reasoningBlock,
+                      completion.reasoningBlock ??
+                        (assistantText.hasThinking && assistantText.thinkContent
+                          ? { text: assistantText.thinkContent }
+                          : undefined),
                     );
                     for (const tc of salvageHistoryCalls) {
                       appendToolResult(
@@ -5447,6 +5456,10 @@ export async function runAgentTurn(
             sawServerTail,
             sawLocalHttpProbe,
             sawFailedLocalHttpProbe,
+            serverCriterionRequired: outcomeState.outcome.criteria.some(
+              (criterion) =>
+                criterion.domain === "server" && criterion.required,
+            ),
             sawActivePentestTest,
             sawSuccessfulMutation,
             featureAppAsk,
@@ -5691,7 +5704,9 @@ export async function runAgentTurn(
         if (sequenceDecision.suppress) {
           const reason = sequenceDecision.terminal
             ? "The model repeated the same action sequence after it was already suppressed. No commands were run again."
-            : "The same action sequence already ran in the previous model round. No commands were run again; reuse the existing results and choose a materially different next action or finish.";
+            : sequenceDecision.oscillation
+              ? "This exact action sequence already completed earlier this turn (the agent is oscillating back to finished work). No commands were run again; every one of these results is already in context — synthesize them and either advance to a genuinely new action or finish."
+              : "The same action sequence already ran in the previous model round. No commands were run again; reuse the existing results and choose a materially different next action or finish.";
           writeNotice("warn", reason, chalk.yellow(`  ⚠ ${reason}\n`));
           const suppressedResults = bound.map((b) => {
             const duplicate = runIds.has(b.id);
@@ -5730,7 +5745,10 @@ export async function runAgentTurn(
               messages,
               beforeTool ?? "",
               historyNativeCalls,
-              completion.reasoningBlock,
+              completion.reasoningBlock ??
+                (assistantText.hasThinking && assistantText.thinkContent
+                  ? { text: assistantText.thinkContent }
+                  : undefined),
             );
             for (const { b, resultReason, result } of suppressedResults) {
               appendToolResult(
@@ -5801,7 +5819,10 @@ export async function runAgentTurn(
             messages,
             beforeTool ?? "",
             historyNativeCalls,
-            completion.reasoningBlock,
+            completion.reasoningBlock ??
+              (assistantText.hasThinking && assistantText.thinkContent
+                ? { text: assistantText.thinkContent }
+                : undefined),
           );
         } else {
           const standardizedContent =

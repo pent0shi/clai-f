@@ -65,4 +65,11 @@ describe("transcript selection wiring (TUI-005)", () => {
     expect(source).toContain("selection.handleKey(key, chord)");
     expect(source).toContain("renderer.hasSelection");
   });
+
+  it("never clears the native selection while a pointer drag is active", () => {
+    const source = readFileSync(TRANSCRIPT_VIEW, "utf8");
+    expect(source).toContain("renderer.hasSelection && !pointerGestureActive.current");
+    const guards = source.match(/if \(pointerGestureActive\.current\) return;/g);
+    expect(guards?.length).toBeGreaterThanOrEqual(2);
+  });
 });

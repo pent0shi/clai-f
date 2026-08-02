@@ -127,54 +127,91 @@ export function computeLineOps(
     }));
   }
 
-  // Whole-file replace for oversized inputs (avoid O(N*M) blowups).
-  if (n > DIFF_MAX_LINES || m > DIFF_MAX_LINES) {
-    return wholeFileReplace(oldLines, newLines);
+  let prefix = 0;
+  while (prefix < n && prefix < m && oldLines[prefix] === newLines[prefix]) {
+    prefix += 1;
   }
 
-  // Classic DP LCS for moderate sizes; Myers-style for typical source files
-  // under ~4k lines is fine with simple LCS table when n*m is bounded.
-  if (n * m > 4_000_000) {
-    return wholeFileReplace(oldLines, newLines);
+  let suffix = 0;
+  while (
+    suffix < n - prefix &&
+    suffix < m - prefix &&
+    oldLines[n - 1 - suffix] === newLines[m - 1 - suffix]
+  ) {
+    suffix += 1;
   }
 
-  // LCS lengths
-  const dp: Uint32Array[] = new Array(n + 1);
-  for (let i = 0; i <= n; i += 1) dp[i] = new Uint32Array(m + 1);
-  for (let i = 1; i <= n; i += 1) {
-    const oi = oldLines[i - 1]!;
+  const oldMiddle = oldLines.slice(prefix, n - suffix);
+  const newMiddle = newLines.slice(prefix, m - suffix);
+  const middleN = oldMiddle.length;
+  const middleM = newMiddle.length;
+
+  const prefixOps: DiffLine[] = [];
+  for (let i = 0; i < prefix; i += 1) {
+    prefixOps.push({
+      op: "context",
+      text: oldLines[i]!,
+      oldLine: i + 1,
+      newLine: i + 1,
+    });
+  }
+
+  const suffixOps: DiffLine[] = [];
+  for (let i = 0; i < suffix; i += 1) {
+    suffixOps.push({
+      op: "context",
+      text: oldLines[n - suffix + i]!,
+      oldLine: n - suffix + i + 1,
+      newLine: m - suffix + i + 1,
+    });
+  }
+
+  if (middleN > DIFF_MAX_LINES || middleM > DIFF_MAX_LINES || middleN * middleM > 4_000_000) {
+    const middleReplace = wholeFileReplace(oldMiddle, newMiddle);
+    const shiftedMiddle = middleReplace.map((op) => {
+      if (op.op === "add") return { ...op, newLine: op.newLine! + prefix };
+      if (op.op === "del") return { ...op, oldLine: op.oldLine! + prefix };
+      return { ...op, oldLine: op.oldLine! + prefix, newLine: op.newLine! + prefix };
+    });
+    return [...prefixOps, ...shiftedMiddle, ...suffixOps];
+  }
+
+  const dp: Uint32Array[] = new Array(middleN + 1);
+  for (let i = 0; i <= middleN; i += 1) dp[i] = new Uint32Array(middleM + 1);
+  for (let i = 1; i <= middleN; i += 1) {
+    const oi = oldMiddle[i - 1]!;
     const row = dp[i]!;
     const prev = dp[i - 1]!;
-    for (let j = 1; j <= m; j += 1) {
-      if (oi === newLines[j - 1]) row[j] = prev[j - 1]! + 1;
+    for (let j = 1; j <= middleM; j += 1) {
+      if (oi === newMiddle[j - 1]) row[j] = prev[j - 1]! + 1;
       else row[j] = Math.max(prev[j]!, row[j - 1]!);
     }
   }
 
-  // Backtrack
   const rev: DiffLine[] = [];
-  let i = n;
-  let j = m;
+  let i = middleN;
+  let j = middleM;
   while (i > 0 || j > 0) {
-    if (i > 0 && j > 0 && oldLines[i - 1] === newLines[j - 1]) {
+    if (i > 0 && j > 0 && oldMiddle[i - 1] === newMiddle[j - 1]) {
       rev.push({
         op: "context",
-        text: oldLines[i - 1]!,
-        oldLine: i,
-        newLine: j,
+        text: oldMiddle[i - 1]!,
+        oldLine: i + prefix,
+        newLine: j + prefix,
       });
       i -= 1;
       j -= 1;
     } else if (j > 0 && (i === 0 || dp[i]![j - 1]! >= dp[i - 1]![j]!)) {
-      rev.push({ op: "add", text: newLines[j - 1]!, newLine: j });
+      rev.push({ op: "add", text: newMiddle[j - 1]!, newLine: j + prefix });
       j -= 1;
     } else {
-      rev.push({ op: "del", text: oldLines[i - 1]!, oldLine: i });
+      rev.push({ op: "del", text: oldMiddle[i - 1]!, oldLine: i + prefix });
       i -= 1;
     }
   }
   rev.reverse();
-  return rev;
+
+  return [...prefixOps, ...rev, ...suffixOps];
 }
 
 function wholeFileReplace(

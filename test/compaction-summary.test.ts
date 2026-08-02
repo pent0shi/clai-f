@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
   buildCompactionUserPrompt,
+  chunkTranscriptForCompaction,
   COMPACTION_SYSTEM_PROMPT,
   looksLikeTranscriptReplay,
+  MAX_COMPACTION_CHUNKS,
   trimTranscriptForCompaction,
 } from "../src/agent/compaction-summary.js";
 import {
@@ -357,5 +359,30 @@ describe("responder result compaction durability", () => {
     );
     expect(ledger?.content).toContain("notification=completion:job-ledger");
     expect(ledger?.content).toContain("consumed=true");
+  });
+});
+
+
+describe("chunkTranscriptForCompaction", () => {
+  it("caps map-stage calls at MAX_COMPACTION_CHUNKS for very long transcripts", () => {
+    const longTranscript = Array.from(
+      { length: 4000 },
+      (_, i) => `turn ${i}: ${"x".repeat(100)}`,
+    ).join("\n\n");
+    const chunks = chunkTranscriptForCompaction(longTranscript);
+    expect(chunks.length).toBeGreaterThan(1);
+    expect(chunks.length).toBeLessThanOrEqual(MAX_COMPACTION_CHUNKS);
+  });
+
+  it("preserves every region of history across chunks", () => {
+    const longTranscript = Array.from(
+      { length: 4000 },
+      (_, i) => `turn ${i}: ${"y".repeat(100)}`,
+    ).join("\n\n");
+    const chunks = chunkTranscriptForCompaction(longTranscript);
+    const rejoined = chunks.join("");
+    for (let i = 0; i < 4000; i += 500) {
+      expect(rejoined).toContain(`turn ${i}:`);
+    }
   });
 });

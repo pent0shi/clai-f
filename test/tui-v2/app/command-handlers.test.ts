@@ -118,11 +118,10 @@ describe("command handlers (V2-072..075)", () => {
   it("/model refreshes via provider.listModels when available", async () => {
     const services = buildServices();
     services.session.setProvider("groq");
-    const { getProvider } = await import("../../../src/llm/router.js");
-    const impl = getProvider("groq");
+    const { groqProvider } = await import("../../../src/llm/groq.js");
     const live = ["live-model-a", "live-model-b", "llama-3.3-70b-versatile"];
     const listModels = vi.fn(async () => live);
-    const spy = vi.spyOn(impl, "listModels" as "listModels").mockImplementation(listModels);
+    const spy = vi.spyOn(groqProvider, "listModels").mockImplementation(listModels);
 
     await services.commands.dispatch({ name: "model", args: "" });
     await waitUntil(() => services.overlay.getState().kind === "picker");

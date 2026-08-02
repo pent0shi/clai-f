@@ -21,6 +21,11 @@ export function normalizeTurnOutcomeInput(
   if (input.status !== "succeeded" || input.remainingCriteria.length === 0) {
     return input;
   }
+  const claimsCompletion =
+    /\b(?:all\s+(?:tasks?|work|done|complete)|everything\s+is\s+done|fully\s+(?:implemented|fixed|resolved)|fix\s+(?:is\s+)?(?:complete|verified)|work\s+is\s+(?:done|complete)|successfully\s+(?:implemented|fixed|completed|verified))\b/i.test(
+      input.answer,
+    );
+  if (claimsCompletion) return input;
   return {
     ...input,
     status: "partial",

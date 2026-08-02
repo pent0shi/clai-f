@@ -19,6 +19,20 @@ export interface SemanticDocument {
   readonly blocks: readonly SemanticBlock[];
 }
 
+const blockIndexCache = new WeakMap<SemanticDocument, Map<string, number>>();
+
+function blockIndexMap(document: SemanticDocument): Map<string, number> {
+  let map = blockIndexCache.get(document);
+  if (!map) {
+    map = new Map<string, number>();
+    for (let index = 0; index < document.blocks.length; index += 1) {
+      map.set(document.blocks[index]!.id, index);
+    }
+    blockIndexCache.set(document, map);
+  }
+  return map;
+}
+
 export interface SemanticAnchor {
   readonly blockId: string;
   readonly offset: number;
@@ -181,7 +195,7 @@ export function semanticLineRange(
 }
 
 function indexOfBlock(document: SemanticDocument, id: string): number {
-  return document.blocks.findIndex((block) => block.id === id);
+  return blockIndexMap(document).get(id) ?? -1;
 }
 
 function moveCharacter(

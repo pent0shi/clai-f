@@ -320,10 +320,14 @@ function promptEnvironmentValues(stable: boolean): Record<string, string> {
   };
 }
 
+import type { SessionPlan } from "../store/plan.js";
+
 /** Mutable environment facts carried after the cached constitution. */
-export function renderRequestEnvironmentContext(): string {
+export function renderRequestEnvironmentContext(options?: {
+  plan?: SessionPlan | null | undefined;
+}): string {
   const values = promptEnvironmentValues(false);
-  return [
+  const lines = [
     "REQUEST ENVIRONMENT",
     `OS: ${values.os}`,
     `Shell: ${values.shell}`,
@@ -331,7 +335,19 @@ export function renderRequestEnvironmentContext(): string {
     `Session scratch: ${values.scratch}`,
     `Temporary root: ${values.tempRoot}`,
     `Current time: ${values.datetime}`,
-  ].join("\n");
+  ];
+  if (options?.plan) {
+    const p = options.plan;
+    const finished = p.tasks.filter(
+      (t) => t.state === "done" || t.state === "skipped",
+    ).length;
+    lines.push(
+      `Plan status: ACTIVE PLAN EXISTS (goal: "${p.goal}", tasks: ${p.tasks.length} total [${finished} finished], status: ${p.status}). An active plan is already present in this session; do NOT call plan.create to create a new plan — use task.add to append new tasks.`,
+    );
+  } else {
+    lines.push("Plan status: NO PLAN EXISTS (no active plan in session).");
+  }
+  return lines.join("\n");
 }
 
 export const _ASK_TEMPLATE = askPrompt;

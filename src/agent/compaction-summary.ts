@@ -137,14 +137,14 @@ export function buildCompactionUserPrompt(parts: CompactionPromptParts): string 
 export const COMPACTION_TRANSCRIPT_CHAR_BUDGET = 48_000;
 
 /** Chars per map-stage chunk when the transcript exceeds one summarizer call. */
-export const COMPACTION_CHUNK_CHAR_BUDGET = 40_000;
+export const COMPACTION_CHUNK_CHAR_BUDGET = 96_000;
 
 /**
  * Upper bound on map-stage summarizer calls. Chunks grow instead of being
  * dropped, so a very long session costs more chars per call but never loses a
  * region of history.
  */
-export const MAX_COMPACTION_CHUNKS = 12;
+export const MAX_COMPACTION_CHUNKS = 2;
 
 /**
  * Split the transcript into ordered chunks that together contain every
@@ -163,6 +163,10 @@ export function chunkTranscriptForCompaction(
   const chunks: string[] = [];
   let index = 0;
   while (index < text.length) {
+    if (chunks.length === maxChunks - 1) {
+      chunks.push(text.slice(index));
+      break;
+    }
     const hardEnd = Math.min(text.length, index + size);
     let end = hardEnd;
     if (hardEnd < text.length) {

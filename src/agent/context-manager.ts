@@ -397,20 +397,21 @@ export async function compactMessagesWithSummary(
       { phase: "single" },
     );
   } else {
-    const partials: string[] = [];
-    for (let index = 0; index < chunks.length; index += 1) {
-      const partial = await summarize(
-        buildCompactionChunkPrompt({
-          chunk: chunks[index]!,
-          index,
-          total: chunks.length,
-          purpose: options.purpose,
-        }),
-        { phase: "map", index, total: chunks.length },
-      );
-      const cleaned = stripThinking(partial ?? "").visible.trim();
-      if (cleaned) partials.push(cleaned);
-    }
+    const mapped = await Promise.all(
+      chunks.map(async (chunk, index) => {
+        const partial = await summarize(
+          buildCompactionChunkPrompt({
+            chunk,
+            index,
+            total: chunks.length,
+            purpose: options.purpose,
+          }),
+          { phase: "map", index, total: chunks.length },
+        );
+        return stripThinking(partial ?? "").visible.trim();
+      }),
+    );
+    const partials = mapped.filter((cleaned) => cleaned.length > 0);
     if (partials.length === 0) {
       throw new Error(
         "compaction failed: no region summary was produced for a long session",

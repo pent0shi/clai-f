@@ -1,15 +1,23 @@
-import { getConfig, getProviderModel } from "../../store/config.js";
+import { getConfig, getProviderModel, updateConfig } from "../../store/config.js";
 import type { ProviderId } from "../../types.js";
 
 /**
- * Session-local model-window overrides. Keys are concrete provider/model pairs
- * so a limit never leaks into another route, model, or resumed session.
+ * Model-window overrides keyed by concrete provider/model pair so a limit
+ * never leaks into another route or model. Values persist in config and
+ * survive history navigation and restarts; the in-memory map is a write-through
+ * cache cleared on session-id change.
  */
 export class SessionContextLimits {
   private readonly byTarget = new Map<string, number>();
 
   get(provider: ProviderId | undefined, model: string | undefined): number | undefined {
-    return this.byTarget.get(this.key(provider, model));
+    const key = this.key(provider, model);
+    const local = this.byTarget.get(key);
+    if (local !== undefined) return local;
+    const persisted = getConfig().contextLimitTokens?.[key];
+    return typeof persisted === "number" && Number.isFinite(persisted) && persisted >= 20_000
+      ? Math.floor(persisted)
+      : undefined;
   }
 
   set(
@@ -18,11 +26,19 @@ export class SessionContextLimits {
     limit: number | undefined,
   ): void {
     const key = this.key(provider, model);
-    if (limit === undefined || !Number.isFinite(limit) || limit < 20_000) {
+    const valid = limit !== undefined && Number.isFinite(limit) && limit >= 20_000;
+    if (valid) {
+      this.byTarget.set(key, Math.floor(limit));
+    } else {
       this.byTarget.delete(key);
-      return;
     }
-    this.byTarget.set(key, Math.floor(limit));
+    const persisted = { ...(getConfig().contextLimitTokens ?? {}) };
+    if (valid) {
+      persisted[key] = Math.floor(limit);
+    } else {
+      delete persisted[key];
+    }
+    updateConfig({ contextLimitTokens: persisted });
   }
 
   clear(): void {

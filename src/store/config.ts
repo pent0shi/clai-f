@@ -1,6 +1,6 @@
 import Conf from "conf";
 import { dirname } from "node:path";
-import { readFileSync, statSync } from "node:fs";
+import { readFileSync, statSync, writeFileSync } from "node:fs";
 import type { Mode, ProviderId, ReasoningPreference } from "../types.js";
 import type { ExaSearchType, SearchProviderId } from "../tools/web/types.js";
 import { DEFAULT_EXA_SEARCH_TYPE } from "../tools/web/types.js";
@@ -120,6 +120,11 @@ export interface ClaiConfig {
   toolResultDedup?: boolean;
   /** E6: omit long fence-protocol tool encyclopedia when native tools are active. */
   slimNativePrompt?: boolean;
+  /**
+   * Durable per-route model-window overrides, keyed `provider:model`. Set via
+   * the footer ctx-limit chip; survives history navigation and restarts.
+   */
+  contextLimitTokens?: Record<string, number>;
 }
 
 /**
@@ -190,6 +195,7 @@ const defaults: ClaiConfig = {
   toolResultDedup: true,
   slimNativePrompt: true,
   learnedVisionCapabilities: {},
+  contextLimitTokens: {},
 };
 
 const store = (() => {
@@ -242,7 +248,36 @@ function cloneConfig(config: ClaiConfig): ClaiConfig {
     allowAlwaysTools: [...config.allowAlwaysTools],
     sandboxRoots: [...config.sandboxRoots],
     thinking: { ...config.thinking },
+    contextLimitTokens: { ...(config.contextLimitTokens ?? {}) },
   };
+}
+
+const COMPACTION_DEFAULT_TOKENS = 180_000;
+
+function migrateCompactionBudgetKeys(): void {
+  let raw: Record<string, unknown>;
+  try {
+    raw = JSON.parse(readFileSync(store.path, "utf8")) as Record<string, unknown>;
+  } catch {
+    return;
+  }
+  const stale = (value: unknown): value is number =>
+    typeof value === "number" &&
+    Number.isFinite(value) &&
+    value < COMPACTION_DEFAULT_TOKENS;
+  const auto = raw.autoCompactRequestTokens;
+  const legacy = raw.softCompactTokenBudget;
+  if (!stale(auto) && !stale(legacy)) return;
+  const next: Record<string, unknown> = { ...raw };
+  if (stale(auto)) delete next.autoCompactRequestTokens;
+  if (stale(legacy)) delete next.softCompactTokenBudget;
+  try {
+    writeFileSync(store.path, `${JSON.stringify(next, null, 2)}\n`, "utf8");
+    fixOwnerSync(store.path);
+    invalidateConfigCache();
+  } catch (err: any) {
+    handlePermissionError(err);
+  }
 }
 
 export function getConfig(): ClaiConfig {
@@ -250,8 +285,10 @@ export function getConfig(): ClaiConfig {
   if (key !== undefined && cachedConfig?.key === key) {
     return cloneConfig(cachedConfig.value);
   }
+  migrateCompactionBudgetKeys();
   const resolved = readConfigFromStore();
-  if (key !== undefined) cachedConfig = { key, value: resolved };
+  const freshKey = configFileKey();
+  if (freshKey !== undefined) cachedConfig = { key: freshKey, value: resolved };
   return cloneConfig(resolved);
 }
 

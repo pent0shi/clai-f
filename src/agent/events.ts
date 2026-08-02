@@ -59,4 +59,6 @@ export type AgentEvent =
   /** Legacy one-shot compaction event retained for non-streaming integrations. */
   | { type: "compacted"; summary: string; beforeTokens: number; afterTokens: number }
   /** Provider-reported token usage after a model completion. */
-  | { type: "token-usage"; usage: TokenUsage; model?: string | undefined };
+  | { type: "token-usage"; usage: TokenUsage; model?: string | undefined }
+  /** Authoritative assembled-request estimate (same measure as compaction). */
+  | { type: "context-estimate"; estimatedTokens: number; model?: string | undefined };

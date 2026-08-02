@@ -6,6 +6,7 @@ import type {
 } from "../types.js";
 import {
   getActiveProviderEndpoint,
+  getProviderEndpoints,
   getConfig,
   providerCategory,
   providerUsesEndpoints,
@@ -80,6 +81,8 @@ export type ProviderKeyEventHandler = (event: ProviderKeyEvent) => void;
 export interface StreamWithProviderOptions {
   readonly onStatus?: ((message: string) => void) | undefined;
   readonly onKeyEvent?: ProviderKeyEventHandler | undefined;
+  /** Cap retries for this request (default MAX_RETRIES). Use 0-1 for compaction. */
+  readonly maxRetries?: number | undefined;
 }
 
 async function sleep(ms: number, signal?: AbortSignal): Promise<void> {
@@ -761,6 +764,7 @@ async function runWithKeyRotation<T>(opts: {
   mode: "complete" | "stream";
   onToken?: ((token: string) => void) | undefined;
   onStatus?: ((message: string) => void) | undefined;
+  maxRetries?: number | undefined;
 }): Promise<T> {
   const { providerId, provider, request, model, emitKey } = opts;
   const multi = await getProviderKeys(providerId);
@@ -773,13 +777,30 @@ async function runWithKeyRotation<T>(opts: {
   const multiKey = slots.length > 1;
   // Single key: time-increasing retries (MAX_RETRIES+1 attempts).
   // Multi key: 2 attempts per key (initial + one retry), then next key.
-  const maxPerKey = attemptsPerKey(slots.length, MAX_RETRIES + 1);
+  const maxPerKey = attemptsPerKey(slots.length, (opts.maxRetries ?? MAX_RETRIES) + 1);
   let lastError: unknown;
+
+  // Endpoint failover: a provider can carry several base URLs (e.g. Modal
+  // workspaces). On an auth/quota error the active endpoint may simply be the
+  // wrong workspace for the key, so rotate the endpoint too before giving up.
+  const endpointUrls = providerUsesEndpoints(providerId)
+    ? getProviderEndpoints(providerId).urls
+    : [];
+  const endpointStart = providerUsesEndpoints(providerId)
+    ? getProviderEndpoints(providerId).activeIndex
+    : 0;
+  let endpointOffset = 0;
+  const endpointCount = endpointUrls.length;
+  const authForAttempt = (value: string | undefined): ProviderAuth => {
+    if (endpointCount === 0) return authForSlot(providerId, value);
+    const url = endpointUrls[(endpointStart + endpointOffset) % endpointCount]!;
+    return { apiKey: value, baseUrl: url };
+  };
 
   for (let planIdx = 0; planIdx < plan.length; planIdx++) {
     const keyIndex = plan[planIdx]!;
     const slot = slots[keyIndex]!;
-    const auth = authForSlot(providerId, slot.value);
+    const auth = authForAttempt(slot.value);
     const tail = maskSecretTail(slot.value);
 
     // Announce only when rotating after a failure — never re-toast the sticky
@@ -827,6 +848,19 @@ async function runWithKeyRotation<T>(opts: {
 
         // Auth / quota (402 credits): never sleep on the same key — switch now.
         if (isImmediateKeySwitchError(error)) {
+          // A workspace-mismatched endpoint (e.g. Modal "different workspace")
+          // will fail for every key, so rotate the endpoint before the key.
+          if (endpointCount > 1 && endpointOffset + 1 < endpointCount) {
+            endpointOffset += 1;
+            emitKey({
+              type: "endpoint",
+              provider: providerId,
+              maskedTail: tail,
+              reason: failureReason(error),
+            });
+            planIdx = -1;
+            break;
+          }
           if (multiKey) {
             // Always advance (or exit plan after last key) so every key is tried.
             break;
@@ -933,6 +967,7 @@ export async function completeWithProvider(
         emitKey,
         mode: "complete",
         ...(options?.onStatus ? { onStatus: options.onStatus } : {}),
+        ...(options?.maxRetries !== undefined ? { maxRetries: options.maxRetries } : {}),
       });
     } catch (error) {
       failures.push({
@@ -1007,6 +1042,7 @@ export async function streamWithProvider(
         mode: "stream",
         onToken,
         onStatus: emitStatus,
+        ...(options.maxRetries !== undefined ? { maxRetries: options.maxRetries } : {}),
       });
     } catch (error) {
       failures.push({

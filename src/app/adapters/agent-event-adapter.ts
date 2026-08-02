@@ -63,6 +63,12 @@ export class AgentEventAdapter {
           ...(event.model !== undefined ? { model: event.model } : {}),
         });
         return;
+      case "context-estimate":
+        this.push("context-estimate", {
+          estimatedTokens: event.estimatedTokens,
+          ...(event.model !== undefined ? { model: event.model } : {}),
+        });
+        return;
       case "thinking-delta":
         this.push("thinking-delta", { text: event.text });
         return;

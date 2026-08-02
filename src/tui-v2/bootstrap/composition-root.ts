@@ -151,6 +151,9 @@ export function createCompositionRoot(
     if (event.type === "compaction-completed" && sessionRef) {
       sessionRef.noteContextCompacted(event.payload.afterTokens);
     }
+    if (event.type === "context-estimate" && sessionRef) {
+      sessionRef.noteContextEstimate(event.payload.estimatedTokens);
+    }
     // session.notice / agent notices → toast only (not chat items).
     if (event.type === "notice") {
       const level = event.payload.level === "warn" ? "warn" : "info";

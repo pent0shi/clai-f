@@ -69,6 +69,7 @@ export interface FinalizeGateInput {
   sawServerTail: boolean;
   sawLocalHttpProbe: boolean;
   sawFailedLocalHttpProbe: boolean;
+  serverCriterionRequired: boolean;
   sawActivePentestTest: boolean;
   sawSuccessfulMutation: boolean;
   featureAppAsk: boolean;
@@ -208,7 +209,10 @@ export function chooseFinalizeRecovery(
         (input.projectRoot !== undefined ||
           /\b(?:npm|pnpm|yarn|bun)\s+run\s+dev\b/i.test(cleaned) ||
           /\bopen\s+http:\/\/localhost\b/i.test(cleaned));
-      if (codingPlanFinished || freestyleLocalAppDone) {
+      if (
+        (codingPlanFinished || freestyleLocalAppDone) &&
+        input.serverCriterionRequired
+      ) {
         return recoveryForRuntimeVerify(input.projectRoot);
       }
     }

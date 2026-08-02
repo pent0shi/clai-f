@@ -74,6 +74,10 @@ export interface ActionSequenceDecision {
   suppress: boolean;
   terminal: boolean;
   repetitions: number;
+  /** Cumulative suppressions this turn, across distinct sequences (drives escalation). */
+  totalSuppressions: number;
+  /** True when the repeat was caught via the recent-sequence window, not back-to-back. */
+  oscillation: boolean;
 }
 
 export class LoopGuard {
@@ -83,6 +87,15 @@ export class LoopGuard {
   private lastActionSequence: string | undefined;
   private lastActionSequenceEligible = false;
   private actionSequenceRepetitions = 0;
+  /**
+   * Bounded window of recently completed eligible sequences. Catches A→B→A
+   * oscillation that a single lastActionSequence slot misses: returning to a
+   * sequence after intervening different work is still a repeat.
+   */
+  private recentActionSequences: string[] = [];
+  private static readonly MAX_RECENT_SEQUENCES = 8;
+  /** Cumulative suppressions this turn, across distinct sequences. */
+  private totalSequenceSuppressions = 0;
   /**
    * A successful call with no body is not evidence that repeating the exact
    * call can make progress. Keep only lightweight retry state, never output.
@@ -156,33 +169,60 @@ export class LoopGuard {
       stateKey?: string | undefined;
     }[],
   ): ActionSequenceDecision {
+    const none: ActionSequenceDecision = {
+      suppress: false,
+      terminal: false,
+      repetitions: 0,
+      totalSuppressions: this.totalSequenceSuppressions,
+      oscillation: false,
+    };
     if (calls.length === 0) {
       this.lastActionSequence = undefined;
       this.lastActionSequenceEligible = false;
       this.actionSequenceRepetitions = 0;
-      return { suppress: false, terminal: false, repetitions: 0 };
+      return none;
     }
     const signature = calls
       .map(
         (call) =>
           `${this.canonicalize(call.name, call.args)}::state=${call.stateKey ?? ""}`,
       )
-      .join("\u0000");
+      .join(" ");
     if (signature !== this.lastActionSequence) {
+      // Oscillation: this exact sequence already completed earlier in the
+      // window (A→B→A). Suppress immediately — intervening different work does
+      // not make re-running an identical completed sequence productive.
+      if (this.recentActionSequences.includes(signature)) {
+        this.totalSequenceSuppressions += 1;
+        this.lastActionSequence = signature;
+        this.lastActionSequenceEligible = false;
+        this.actionSequenceRepetitions = 0;
+        return {
+          suppress: true,
+          terminal: this.totalSequenceSuppressions >= 4,
+          repetitions: 1,
+          totalSuppressions: this.totalSequenceSuppressions,
+          oscillation: true,
+        };
+      }
       this.lastActionSequence = signature;
       this.lastActionSequenceEligible = false;
       this.actionSequenceRepetitions = 0;
-      return { suppress: false, terminal: false, repetitions: 0 };
+      return none;
     }
     if (!this.lastActionSequenceEligible) {
-      return { suppress: false, terminal: false, repetitions: 0 };
+      return none;
     }
     this.actionSequenceRepetitions += 1;
+    this.totalSequenceSuppressions += 1;
     return {
       suppress: true,
       terminal:
-        this.actionSequenceRepetitions >= (calls.length > 1 ? 2 : 3),
+        this.actionSequenceRepetitions >= (calls.length > 1 ? 2 : 3) ||
+        this.totalSequenceSuppressions >= 4,
       repetitions: this.actionSequenceRepetitions,
+      totalSuppressions: this.totalSequenceSuppressions,
+      oscillation: false,
     };
   }
 
@@ -200,10 +240,24 @@ export class LoopGuard {
         (call) =>
           `${this.canonicalize(call.name, call.args)}::state=${call.stateKey ?? ""}`,
       )
-      .join("\u0000");
+      .join(" ");
     if (signature !== this.lastActionSequence) return;
     this.lastActionSequenceEligible = eligible;
-    if (!eligible) this.actionSequenceRepetitions = 0;
+    if (!eligible) {
+      this.actionSequenceRepetitions = 0;
+      return;
+    }
+    // Record the completed eligible sequence so a later identical sequence is
+    // caught even after intervening different work (A→B→A oscillation).
+    const existing = this.recentActionSequences.indexOf(signature);
+    if (existing >= 0) this.recentActionSequences.splice(existing, 1);
+    this.recentActionSequences.push(signature);
+    if (this.recentActionSequences.length > LoopGuard.MAX_RECENT_SEQUENCES) {
+      this.recentActionSequences.splice(
+        0,
+        this.recentActionSequences.length - LoopGuard.MAX_RECENT_SEQUENCES,
+      );
+    }
   }
 
   recordAttempt(
@@ -462,7 +516,6 @@ export class LoopGuard {
     const count = this.signatureCount.get(sig) ?? 0;
     if (count === 0) return { block: false };
 
-    // Prior success (or never failed): always allow free re-execution.
     if (this.signatureSuccess.get(sig) !== false) {
       return { block: false };
     }

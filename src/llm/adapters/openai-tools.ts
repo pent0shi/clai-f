@@ -29,6 +29,7 @@ export type OpenAiWireMessage =
   | {
       role: "system" | "user" | "assistant";
       content: string | unknown[] | null;
+      reasoning_content?: string;
       tool_calls?: Array<{
         id: string;
         type: "function";
@@ -62,9 +63,14 @@ export function toOpenAiToolMessages(
       continue;
     }
     if (message.role === "assistant" && message.toolCalls?.length) {
+      const unsignedReasoning =
+        message.reasoningBlock?.text && !message.reasoningBlock.signature
+          ? message.reasoningBlock.text
+          : undefined;
       out.push({
         role: "assistant",
         content: message.content || null,
+        ...(unsignedReasoning ? { reasoning_content: unsignedReasoning } : {}),
         tool_calls: message.toolCalls.map((tc) => ({
           id: tc.id,
           type: "function" as const,
@@ -83,9 +89,16 @@ export function toOpenAiToolMessages(
       });
       continue;
     }
+    const plainReasoning =
+      message.role === "assistant" &&
+      message.reasoningBlock?.text &&
+      !message.reasoningBlock.signature
+        ? message.reasoningBlock.text
+        : undefined;
     out.push({
       role: message.role as "system" | "assistant",
       content: message.content,
+      ...(plainReasoning ? { reasoning_content: plainReasoning } : {}),
     });
   }
   return out;

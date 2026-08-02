@@ -192,4 +192,56 @@ describe("LoopGuard", () => {
       }).block,
     ).toBe(false);
   });
+
+  it("suppresses an oscillated repeat (A→B→A) caught via the recent-sequence window", () => {
+    const guard = new LoopGuard();
+    const seqA = [{ name: "fs.read", args: { path: "a" } }];
+    const seqB = [{ name: "fs.read", args: { path: "b" } }];
+
+    // Complete A (eligible), then complete B (eligible). Returning to A is a repeat.
+    guard.observeActionSequence(seqA);
+    guard.completeActionSequence(seqA, true);
+    guard.observeActionSequence(seqB);
+    guard.completeActionSequence(seqB, true);
+
+    const backToA = guard.observeActionSequence(seqA);
+    expect(backToA.suppress).toBe(true);
+    expect(backToA.oscillation).toBe(true);
+    expect(backToA.totalSuppressions).toBe(1);
+  });
+
+  it("does not suppress a genuinely new sequence", () => {
+    const guard = new LoopGuard();
+    const seqA = [{ name: "fs.read", args: { path: "a" } }];
+    const seqC = [{ name: "fs.read", args: { path: "c" } }];
+
+    guard.observeActionSequence(seqA);
+    guard.completeActionSequence(seqA, true);
+
+    const fresh = guard.observeActionSequence(seqC);
+    expect(fresh.suppress).toBe(false);
+    expect(fresh.oscillation).toBe(false);
+  });
+
+  it("escalates to terminal after repeated suppressions across distinct sequences", () => {
+    const guard = new LoopGuard();
+    const mk = (path: string) => [{ name: "fs.read", args: { path } }];
+
+    // Drive totalSuppressions to the terminal threshold (4) via oscillation.
+    for (const path of ["a", "b", "c", "d"]) {
+      guard.observeActionSequence(mk(path));
+      guard.completeActionSequence(mk(path), true);
+    }
+    let decision = guard.observeActionSequence(mk("a")); // 1st suppression
+    expect(decision.suppress).toBe(true);
+    expect(decision.terminal).toBe(false);
+    decision = guard.observeActionSequence(mk("b")); // 2nd
+    expect(decision.suppress).toBe(true);
+    decision = guard.observeActionSequence(mk("c")); // 3rd
+    expect(decision.suppress).toBe(true);
+    decision = guard.observeActionSequence(mk("d")); // 4th → terminal
+    expect(decision.suppress).toBe(true);
+    expect(decision.terminal).toBe(true);
+    expect(decision.totalSuppressions).toBe(4);
+  });
 });

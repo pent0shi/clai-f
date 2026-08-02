@@ -195,27 +195,56 @@ function anchorAtPointer(
   x: number,
   y: number,
 ): SemanticAnchor | undefined {
-  const visible = document.blocks
-    .map((block) => ({ block, renderable: scroll?.findDescendantById(block.id) }))
-    .filter((entry): entry is { block: SemanticDocument["blocks"][number]; renderable: Renderable } =>
-      Boolean(entry.renderable && entry.renderable.visible),
-    )
-    .sort((left, right) => left.renderable.screenY - right.renderable.screenY);
+  // Resolve every mounted block renderable in ONE depth-first pass over the
+  // (viewport-culled) tree instead of a per-block findDescendantById walk —
+  // 4k blocks × O(tree) per mouse-move was the drag-lag bottleneck. Blocks are
+  // in document (source) order, which matches their vertical layout order in
+  // the transcript column, so no sort is needed.
+  const renderableById = new Map<string, Renderable>();
+  collectVisibleRenderables(scroll, renderableById);
 
-  for (const entry of visible) {
-    const { renderable } = entry;
-    if (y >= renderable.screenY && y < renderable.screenY + renderable.height) {
-      return anchorForPoint(entry.block, renderable, x, y);
-    }
+  let firstVisible: { block: SemanticDocument["blocks"][number]; renderable: Renderable } | undefined;
+  let lastVisible: { block: SemanticDocument["blocks"][number]; renderable: Renderable } | undefined;
+  let nearestAbove: { block: SemanticDocument["blocks"][number]; renderable: Renderable } | undefined;
+  let nearestBelow: { block: SemanticDocument["blocks"][number]; renderable: Renderable } | undefined;
+
+  for (const block of document.blocks) {
+    const renderable = renderableById.get(block.id);
+    if (!renderable) continue;
+    const top = renderable.screenY;
+    const bottom = top + renderable.height;
+    if (!firstVisible) firstVisible = { block, renderable };
+    lastVisible = { block, renderable };
+    if (y >= top && y < bottom) return anchorForPoint(block, renderable, x, y);
+    if (bottom <= y) nearestAbove = { block, renderable };
+    if (top > y && !nearestBelow) nearestBelow = { block, renderable };
   }
-  if (visible.length === 0) return documentStart(document);
-  const first = visible[0]!;
-  const last = visible.at(-1)!;
-  if (y < first.renderable.screenY) return { blockId: first.block.id, offset: 0 };
-  if (y >= last.renderable.screenY + last.renderable.height) {
-    return { blockId: last.block.id, offset: last.block.text.length };
+
+  if (!firstVisible || !lastVisible) return documentStart(document);
+  if (y < firstVisible.renderable.screenY) return { blockId: firstVisible.block.id, offset: 0 };
+  if (y >= lastVisible.renderable.screenY + lastVisible.renderable.height) {
+    return { blockId: lastVisible.block.id, offset: lastVisible.block.text.length };
   }
-  return documentEnd(document);
+  const above = nearestAbove ?? firstVisible;
+  const below = nearestBelow ?? lastVisible;
+  const distAbove = Math.abs(y - (above.renderable.screenY + above.renderable.height));
+  const distBelow = Math.abs(y - below.renderable.screenY);
+  if (distAbove <= distBelow) {
+    return { blockId: above.block.id, offset: above.block.text.length };
+  }
+  return { blockId: below.block.id, offset: 0 };
+}
+
+function collectVisibleRenderables(
+  node: ScrollBoxRenderable | Renderable | null,
+  out: Map<string, Renderable>,
+): void {
+  if (!node) return;
+  if (node.id && node.visible) out.set(node.id, node);
+  const children = node.getChildren();
+  for (const child of children) {
+    collectVisibleRenderables(child as Renderable, out);
+  }
 }
 
 function anchorForPoint(
@@ -224,8 +253,8 @@ function anchorForPoint(
   x: number,
   y: number,
 ): SemanticAnchor {
-  const line = Math.max(0, Math.floor(y - renderable.screenY));
-  const column = Math.max(0, Math.floor(x - renderable.screenX));
+  const line = Math.max(0, Math.round(y - renderable.screenY));
+  const column = Math.max(0, Math.round(x - renderable.screenX));
   const lines = block.text.split("\n");
   const selectedLine = Math.min(line, Math.max(0, lines.length - 1));
   const before = lines.slice(0, selectedLine).reduce((total, value) => total + value.length + 1, 0);
@@ -234,7 +263,9 @@ function anchorForPoint(
 }
 
 function nextClickCount(previous: ClickState | undefined, anchor: SemanticAnchor): 1 | 2 | 3 {
-  const samePoint = previous?.anchor.blockId === anchor.blockId && previous.anchor.offset === anchor.offset;
-  if (!samePoint || !previous || Date.now() - previous.at > MULTI_CLICK_WINDOW_MS) return 1;
+  if (!previous || Date.now() - previous.at > MULTI_CLICK_WINDOW_MS) return 1;
+  const sameBlock = previous.anchor.blockId === anchor.blockId;
+  const closeEnough = sameBlock && Math.abs(previous.anchor.offset - anchor.offset) <= 2;
+  if (!closeEnough) return 1;
   return Math.min(3, previous.count + 1) as 1 | 2 | 3;
 }

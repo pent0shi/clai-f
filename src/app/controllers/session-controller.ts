@@ -10,7 +10,8 @@ import {
 } from "../../llm/token-usage.js";
 import {
   compactedUsageSnapshot, recordUsageSnapshot, resolveContextUsageSnapshot,
-  restoredUsageSnapshot, createContextProjector, type PartialUsageSnapshot,
+  restoredUsageSnapshot, createContextProjector, estimatedUsageSnapshot,
+  type PartialUsageSnapshot,
   type ContextProjection, type ContextUsageTarget,
 } from "./session-context-usage.js";
 import { createSessionPolicy, type SessionPolicy } from "../../agent/session-policy.js";
@@ -275,17 +276,15 @@ export class SessionController implements Disposable {
   }
 
   recordTokenUsage(usage: TokenUsage, model?: string): void {
-    const target = { provider: this.provider, model: model ?? this.model };
-    this.contextUsage = recordUsageSnapshot(target, this.contextUsage, usage);
-    if (model) this.model = model;
-    this.notifyState();
+    this.contextUsage = recordUsageSnapshot({ provider: this.provider, model: model ?? this.model }, this.contextUsage, usage);
+    if (model) this.model = model; this.notifyState();
   }
 
   noteContextCompacted(afterTokens?: number): void {
-    this.contextUsage = compactedUsageSnapshot(
-      this.usageTarget, this.contextUsage, this.history, afterTokens,
-    );
-    this.notifyState();
+    this.contextUsage = compactedUsageSnapshot(this.usageTarget, this.contextUsage, this.history, afterTokens); this.notifyState();
+  }
+  noteContextEstimate(estimatedTokens: number): void {
+    const next = estimatedUsageSnapshot(this.usageTarget, this.contextUsage, estimatedTokens); if (next !== this.contextUsage) { this.contextUsage = next; this.notifyState(); }
   }
 
   private refreshEstimatedContext(): void {
@@ -304,6 +303,7 @@ export class SessionController implements Disposable {
 
   setProvider(provider: ProviderId | undefined): void {
     this.provider = provider;
+    this.contextUsage = this.resolveContextUsage();
     clearTextOnlyModels();
     this.notifyState();
   }
@@ -317,6 +317,7 @@ export class SessionController implements Disposable {
 
   setModel(model: string | undefined): void {
     this.model = model;
+    this.contextUsage = this.resolveContextUsage();
     // Allow native tools again after /model switch (sticky text-only is process-global).
     clearTextOnlyModels();
     this.notifyState();

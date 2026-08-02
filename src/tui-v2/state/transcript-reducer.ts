@@ -314,11 +314,18 @@ export function applyAppEvent(state: TranscriptState, event: AnyAppEvent): Trans
               withSeq.pendingAssistantId,
             ),
             pendingAssistantId: undefined,
+            runningStatus: undefined,
           };
         }
-        return withSeq;
+        return {
+          ...withSeq,
+          runningStatus: undefined,
+        };
       }
-      return finalizeMessage(withSeq, event, "assistant", text);
+      return {
+        ...finalizeMessage(withSeq, event, "assistant", text),
+        runningStatus: undefined,
+      };
     }
 
     case "thinking-delta":
@@ -353,7 +360,7 @@ export function applyAppEvent(state: TranscriptState, event: AnyAppEvent): Trans
               name: event.payload.name,
               argsDisplay: event.payload.argsDisplay,
             })),
-            runningStatus: withSeq.runningStatus ?? "preparing tools",
+            runningStatus: "preparing tools",
           };
         }
       }
@@ -378,7 +385,7 @@ export function applyAppEvent(state: TranscriptState, event: AnyAppEvent): Trans
       return {
         ...appendItem(cleaned, item),
         // Don't set activity to this name yet — card is only queued.
-        runningStatus: withSeq.runningStatus ?? "preparing tools",
+        runningStatus: "preparing tools",
       };
     }
 
@@ -540,6 +547,7 @@ export function applyAppEvent(state: TranscriptState, event: AnyAppEvent): Trans
     case "plan-updated":
     case "confirm-requested":
     case "token-usage":
+    case "context-estimate":
       // SessionController records usage; transcript does not need a card.
       return withSeq;
 

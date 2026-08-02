@@ -9,6 +9,7 @@ import {
   _ASK_TEMPLATE,
   _AGENT_TEMPLATE,
   currentDateTimeContext,
+  renderRequestEnvironmentContext,
 } from "../src/prompts/index.js";
 
 describe("prompt rendering", () => {
@@ -104,6 +105,28 @@ describe("prompt rendering", () => {
     expect(d).toMatch(/plan\.create/i);
     expect(d).toMatch(/Do not implement/i);
     expect(d).toMatch(/1000%|comprehensive|architecture/i);
+  });
+
+  it("renderRequestEnvironmentContext includes NO PLAN EXISTS when plan is omitted", () => {
+    const envStr = renderRequestEnvironmentContext();
+    expect(envStr).toContain("Plan status: NO PLAN EXISTS");
+  });
+
+  it("renderRequestEnvironmentContext includes ACTIVE PLAN EXISTS details when plan is passed", () => {
+    const mockPlan: any = {
+      id: "p1",
+      goal: "Build web app",
+      status: "in_progress",
+      tasks: [
+        { id: "t1", state: "done", title: "scaffold" },
+        { id: "t2", state: "pending", title: "implement" },
+      ],
+    };
+    const envStr = renderRequestEnvironmentContext({ plan: mockPlan });
+    expect(envStr).toContain("Plan status: ACTIVE PLAN EXISTS");
+    expect(envStr).toContain('goal: "Build web app"');
+    expect(envStr).toContain("tasks: 2 total [1 finished]");
+    expect(envStr).toContain("use task.add to append new tasks");
   });
 });
 

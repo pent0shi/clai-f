@@ -79,6 +79,23 @@ export function compactedUsageSnapshot(
   };
 }
 
+export function estimatedUsageSnapshot(
+  target: ContextUsageTarget,
+  current: ContextUsageSnapshot | undefined,
+  estimatedTokens: number,
+): ContextUsageSnapshot | undefined {
+  if (!Number.isFinite(estimatedTokens) || estimatedTokens <= 0) return current;
+  if (current?.exact) return current;
+  return {
+    contextTokens: Math.floor(estimatedTokens),
+    contextLimit: current?.contextLimit ?? contextUsageLimit(target),
+    lastCompletionTokens: current?.lastCompletionTokens ?? 0,
+    sessionPromptTokens: current?.sessionPromptTokens ?? 0,
+    sessionCompletionTokens: current?.sessionCompletionTokens ?? 0,
+    exact: false,
+  };
+}
+
 export interface ContextProjection {
   contextUsage: ContextUsageSnapshot | undefined;
   contextChip: string | undefined;

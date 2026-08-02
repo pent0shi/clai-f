@@ -216,7 +216,11 @@ export class SelectionController {
   }
 
   hasSelection(): boolean {
-    return this.selectedText().length > 0;
+    const range = this.state.range;
+    if (!range) return false;
+    const document = this.documents.get(range.pane);
+    if (!document) return false;
+    return compareSemanticAnchors(document, range.anchor, range.focus) !== 0;
   }
 
   async copy(): Promise<SelectionCopyResult> {

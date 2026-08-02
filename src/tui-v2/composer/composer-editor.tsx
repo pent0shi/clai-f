@@ -228,7 +228,11 @@ export function ComposerEditor(props: ComposerEditorProps): ReactNode {
   });
 
   usePaste((event) => {
-    if (!shouldOwnKeyboard) return;
+    if (overlay.kind !== "none") return;
+    if (!props.focused) {
+      services.focus.focusRegion("composer");
+      editorRef.current?.focus();
+    }
     const text = stripAnsiSequences(decodePasteBytes(event.bytes));
     if (imagePaste.handlePaste(text, event)) return;
     if (imagePaste.handleDroppedImages(text, event)) return;

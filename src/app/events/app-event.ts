@@ -125,6 +125,10 @@ export interface AppEventPayloads {
     readonly exact: boolean;
     readonly model?: string | undefined;
   };
+  "context-estimate": {
+    readonly estimatedTokens: number;
+    readonly model?: string | undefined;
+  };
   "turn-ended": { readonly finalAnswer: string; readonly steps: number };
   "turn-aborted": { readonly reason?: string | undefined };
   "turn-error": { readonly message: string };

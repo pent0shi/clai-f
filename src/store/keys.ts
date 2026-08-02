@@ -118,8 +118,8 @@ async function readFallback(): Promise<FallbackKeys> {
   try {
     const raw = await readFile(keysFile, 'utf8');
     return JSON.parse(raw) as FallbackKeys;
-  } catch (err: any) {
-    handlePermissionError(err);
+  } catch {
+    return {};
   }
 }
 

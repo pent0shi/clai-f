@@ -241,9 +241,6 @@ export function TranscriptView(props: TranscriptViewProps): ReactNode {
     const sb = scrollRef.current;
     if (!sb) return;
     if (isAutoScrollEdge(sb, y)) {
-      if (canAutoScroll(sb, y) && clearNativeSelection()) {
-        copySemanticOnRelease.current = true;
-      }
       dragPointer.current = pointer;
       if (dragFrame.current === undefined) {
         dragFrame.current = requestAnimationFrame(refreshSemanticDrag);
@@ -257,6 +254,7 @@ export function TranscriptView(props: TranscriptViewProps): ReactNode {
   function copyHandedOffSelection(): void {
     if (!copySemanticOnRelease.current) return;
     copySemanticOnRelease.current = false;
+    if (!services.selection.hasSelection()) return;
     void services.selection.copy().then((result) => {
       if (result.status === "copied") {
         services.toast.success("Copied to clipboard", {
@@ -271,7 +269,6 @@ export function TranscriptView(props: TranscriptViewProps): ReactNode {
       }
     });
   }
-
   useLayoutEffect(() => {
     const sb = scrollRef.current;
     if (!sb) return;
@@ -281,15 +278,13 @@ export function TranscriptView(props: TranscriptViewProps): ReactNode {
       viewportHeight: sb.viewport.height,
     };
     const previous = scrollSnapshot.current;
-    if (previous && renderer.hasSelection) {
+    if (previous && renderer.hasSelection && !pointerGestureActive.current) {
       const previousMax = Math.max(0, previous.scrollHeight - previous.viewportHeight);
       const wasAtBottom = previousMax === 0 || previous.scrollTop >= previousMax - 2;
       const moved = current.scrollTop !== previous.scrollTop;
       const grewAtBottom = current.scrollHeight !== previous.scrollHeight && wasAtBottom;
       if (moved || grewAtBottom) {
-        if (clearNativeSelection() && pointerGestureActive.current) {
-          copySemanticOnRelease.current = true;
-        }
+        clearNativeSelection();
       }
     }
     scrollSnapshot.current = current;
@@ -328,6 +323,7 @@ export function TranscriptView(props: TranscriptViewProps): ReactNode {
 
   /** Scroll to the true bottom after layout settles (double-rAF). */
   function pinToBottom(): void {
+    if (pointerGestureActive.current) return;
     const sb = scrollRef.current;
     if (!sb) return;
     const go = (): void => {
@@ -370,6 +366,7 @@ export function TranscriptView(props: TranscriptViewProps): ReactNode {
   useEffect(() => {
     const grew = items.length - lastCount.current;
     lastCount.current = items.length;
+    if (pointerGestureActive.current) return;
 
     // New user prompt always re-engages follow (classic: show what you just sent).
     if (grew > 0) {

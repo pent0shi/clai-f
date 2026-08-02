@@ -31,7 +31,7 @@ export async function summarizeForSessionCompact(
     onToken?: ((token: string) => void) | undefined;
   },
 ): Promise<string> {
-  const maxTokens = 2_048;
+  const maxTokens = 8_192;
   const systemContent =
     opts.purpose === "plan-implement"
       ? "Write concise, non-redundant research memory for an agent executing an approved plan. Do not add framing: the PLAN MODE HANDOFF wrapper and active plan are injected separately. For coding target 600–1000 tokens; preserve only verified state, reusable research/artifacts, decisions, blockers, and risks. Security handoffs may be longer to preserve findings and coverage. Never invent or cut a fact mid-token. You are summarizing, not continuing: never emit tool calls or fabricate tool results, file receipts, or transcript lines."
@@ -57,7 +57,7 @@ export async function summarizeForSessionCompact(
     };
     let rawSummary: string;
     if (!onToken) {
-      rawSummary = (await completeWithProvider(request)).text;
+      rawSummary = (await completeWithProvider(request, { maxRetries: 1 })).text;
     } else {
       const parser = createThinkingStreamParser(onToken, undefined, {
         remember: false,
@@ -65,7 +65,7 @@ export async function summarizeForSessionCompact(
       const response = await streamWithProvider(
         request,
         (token) => parser.push(token),
-        { onStatus: () => undefined },
+        { onStatus: () => undefined, maxRetries: 1 },
       );
       parser.finish();
       rawSummary = response.text;
@@ -86,7 +86,7 @@ export async function summarizeForSessionCompact(
       temperature: 0,
       maxTokens: 8_192,
       thinking: { enabled: false, effort: "none" as const },
-    });
+    }, { maxRetries: 1 });
     const retryVisible = stripThinking(retry.text).visible.trim();
     if (retryVisible && onToken) onToken(retryVisible);
     return retry.text;
@@ -100,17 +100,15 @@ export async function summarizeForSessionCompact(
     { length: Math.ceil(prompt.length / chunkSize) },
     (_, index) => prompt.slice(index * chunkSize, (index + 1) * chunkSize),
   );
-  const partials: string[] = [];
-  for (let index = 0; index < chunks.length; index += 1) {
-    opts.signal?.throwIfAborted();
-    partials.push(
-      await completeSummary(
+  const partials = await Promise.all(
+    chunks.map((chunk, index) =>
+      completeSummary(
         opts.purpose === "plan-implement"
-          ? `Summarize part ${index + 1} of ${chunks.length} of plan-mode research for implement handoff. Preserve targets, stack, confirmed findings, negatives, untested classes, artifact paths, tools used, and remaining work.\n\n${chunks[index]}`
-          : `Summarize part ${index + 1} of ${chunks.length} of one session. Preserve concrete goals, actions, commands, results, task state, failures, and remaining work.\n\n${chunks[index]}`,
+          ? `Summarize part ${index + 1} of ${chunks.length} of plan-mode research for implement handoff. Preserve targets, stack, confirmed findings, negatives, untested classes, artifact paths, tools used, and remaining work.\n\n${chunk}`
+          : `Summarize part ${index + 1} of ${chunks.length} of one session. Preserve concrete goals, actions, commands, results, task state, failures, and remaining work.\n\n${chunk}`,
       ),
-    );
-  }
+    ),
+  );
   opts.signal?.throwIfAborted();
   return completeSummary(
     opts.purpose === "plan-implement"
