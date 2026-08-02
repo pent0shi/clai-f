@@ -167,11 +167,12 @@ export function remapAgentCwdWrite(
   if (!root) return resolved;
   const agent = safeCwd();
   if (root === agent) return resolved;
-  // Already under project
+  // Already under project or explicit existing absolute path
   if (
     resolved === root ||
     resolved.startsWith(root + "/") ||
-    resolved.startsWith(root + "\\")
+    resolved.startsWith(root + "\\") ||
+    (isAbsolute(original.trim()) && existsSync(resolved))
   ) {
     return resolved;
   }

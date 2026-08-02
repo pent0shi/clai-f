@@ -1179,14 +1179,60 @@ export async function fsEdit(
   const content = await readFile(resolved, "utf8");
   const expected = expectedReplacements ?? 1;
 
-  // Count occurrences
+  let targetOldText = oldText;
+  let targetNewText = newText;
+
+  // Count occurrences (exact match first)
   let count = 0;
   let searchPos = 0;
   while (true) {
-    const idx = content.indexOf(oldText, searchPos);
+    const idx = content.indexOf(targetOldText, searchPos);
     if (idx === -1) break;
     count += 1;
-    searchPos = idx + oldText.length;
+    searchPos = idx + targetOldText.length;
+  }
+
+  // Fallback: match CRLF / LF line ending differences or trailing whitespace
+  if (count === 0) {
+    const hasCRLF = content.includes("\r\n");
+    const candidateOld = hasCRLF
+      ? oldText.replace(/\r?\n/g, "\r\n")
+      : oldText.replace(/\r\n/g, "\n");
+    const candidateNew = hasCRLF
+      ? newText.replace(/\r?\n/g, "\r\n")
+      : newText.replace(/\r\n/g, "\n");
+
+    let altCount = 0;
+    let altPos = 0;
+    while (true) {
+      const idx = content.indexOf(candidateOld, altPos);
+      if (idx === -1) break;
+      altCount += 1;
+      altPos = idx + candidateOld.length;
+    }
+
+    if (altCount > 0) {
+      targetOldText = candidateOld;
+      targetNewText = candidateNew;
+      count = altCount;
+    } else {
+      const trimmedOld = candidateOld.trimEnd();
+      if (trimmedOld.length > 0) {
+        let trimCount = 0;
+        let trimPos = 0;
+        while (true) {
+          const idx = content.indexOf(trimmedOld, trimPos);
+          if (idx === -1) break;
+          trimCount += 1;
+          trimPos = idx + trimmedOld.length;
+        }
+        if (trimCount > 0) {
+          targetOldText = trimmedOld;
+          targetNewText = candidateNew.trimEnd();
+          count = trimCount;
+        }
+      }
+    }
   }
 
   if (count === 0) {
@@ -1204,7 +1250,7 @@ export async function fsEdit(
     };
   }
 
-  const updated = content.replaceAll(oldText, newText);
+  const updated = content.replaceAll(targetOldText, targetNewText);
 
   // Atomic, mode-preserving, race-safe replacement.
   await writeFileAtomic(resolved, updated);

@@ -70,6 +70,18 @@ describe("fsEdit", () => {
     expect(result.ok).toBe(true);
     expect(readFileSync(file, "utf8")).toBe("ccc bbb ccc\n");
   });
+
+  it("handles line ending normalization (CRLF / LF)", async () => {
+    const dir = makeTempDir("fsedit");
+    dirs.push(dir);
+    const file = join(dir, "crlf.txt");
+    writeFileSync(file, "first line\r\nsecond line\r\nthird line\r\n");
+
+    // Pass LF in oldText against CRLF file
+    const result = await fsEdit(file, "first line\nsecond line", "first line\nmodified line");
+    expect(result.ok).toBe(true);
+    expect(readFileSync(file, "utf8")).toBe("first line\r\nmodified line\r\nthird line\r\n");
+  });
 });
 
 describe("fsDelete", () => {
