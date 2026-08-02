@@ -12,6 +12,9 @@
 
 import { useEffect, useState, type ReactNode } from "react";
 import { TextAttributes } from "@opentui/core";
+import { homedir } from "node:os";
+import { execFile } from "node:child_process";
+import { safeCwd } from "../../../os/cwd.js";
 import type {
   SessionController,
 } from "../../../app/controllers/session-controller.js";
@@ -366,6 +369,43 @@ export function StatusLine(props: StatusLineProps): ReactNode {
     EMPTY_SCROLL_METRICS,
   );
 
+  // ── CWD + git branch ──────────────────────────────────────────────────
+  const [cwdDisplay, setCwdDisplay] = useState(() => {
+    const cwd = safeCwd();
+    const home = homedir();
+    return cwd.startsWith(home) ? `~${cwd.slice(home.length)}` : cwd;
+  });
+  const [gitBranch, setGitBranch] = useState<string | undefined>(undefined);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function refresh(): Promise<void> {
+      const currentCwd = safeCwd();
+      const home = homedir();
+      const display = currentCwd.startsWith(home)
+        ? `~${currentCwd.slice(home.length)}`
+        : currentCwd;
+      const branch = await new Promise<string | undefined>((resolve) => {
+        execFile(
+          "git",
+          ["rev-parse", "--abbrev-ref", "HEAD"],
+          { cwd: currentCwd, timeout: 1500, encoding: "utf8" },
+          (err, stdout) => {
+            if (err) { resolve(undefined); return; }
+            const b = stdout.trim();
+            resolve(b || undefined);
+          },
+        );
+      });
+      if (cancelled) return;
+      setCwdDisplay(display);
+      setGitBranch(branch);
+    }
+    void refresh();
+    const timer = setInterval(() => void refresh(), 5000);
+    return () => { cancelled = true; clearInterval(timer); };
+  }, []);
+
   const queued = state.queued.length;
   const density = statusDensityForWidth(width);
   const busy = state.running || state.compacting;
@@ -504,6 +544,18 @@ export function StatusLine(props: StatusLineProps): ReactNode {
             justifyContent: "flex-end",
           }}
         >
+          <text
+            selectable={false}
+            content={cwdDisplay}
+            style={{ fg: theme.muted, flexShrink: 1, minWidth: 0 }}
+          />
+          {gitBranch ? (
+            <text
+              selectable={false}
+              content={` \ue0a0 ${gitBranch}`}
+              style={{ fg: theme.userBorder, flexShrink: 0, paddingRight: 2 }}
+            />
+          ) : null}
           {ctxChip && state.contextUsage ? (
             <ContextLimitChip
               chip={ctxChip}
@@ -678,7 +730,7 @@ export function StatusLine(props: StatusLineProps): ReactNode {
         ) : null}
       </box>
 
-      {/* Right rail: tokens + scroll — never overwritten by left chips */}
+      {/* Right rail: cwd · branch · tokens · ▲▼ */}
       <box
         style={{
           flexDirection: "row",
@@ -687,6 +739,18 @@ export function StatusLine(props: StatusLineProps): ReactNode {
           justifyContent: "flex-end",
         }}
       >
+        <text
+          selectable={false}
+          content={cwdDisplay}
+          style={{ fg: theme.muted, flexShrink: 1, minWidth: 0 }}
+        />
+        {gitBranch ? (
+          <text
+            selectable={false}
+            content={` \ue0a0 ${gitBranch}`}
+            style={{ fg: theme.userBorder, flexShrink: 0, paddingRight: 2 }}
+          />
+        ) : null}
         {ctxChip && state.contextUsage ? (
           <ContextLimitChip
             chip={ctxChip}

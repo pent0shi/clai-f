@@ -127,6 +127,12 @@ function resolvePath(path: string): string {
   return remapAgentCwdWrite(resolved, path);
 }
 
+/** Resolve path for reads: tilde expansion + project root for relatives.
+ *  Reads should never apply the write-only agent→project remap. */
+function resolveReadPath(path: string): string {
+  return resolveToolPath(path);
+}
+
 /**
  * Decide whether a path falls inside configured sandbox roots / cwd / home.
  * Used for UX (outside-cwd confirm) and optional sandboxReads opt-in.
@@ -652,7 +658,7 @@ export async function fsRead(
   path: string,
   options: FsReadOptions = {},
 ): Promise<ToolResult> {
-  const resolved = resolvePath(path);
+  const resolved = resolveReadPath(path);
   ensureReadAllowed(resolved, path, options.confirmed);
 
   // Directory → list contents (models often fs.read a folder by mistake).
@@ -951,7 +957,7 @@ export async function fsList(
   path: string,
   options: { maxEntries?: number | undefined; confirmed?: boolean | undefined } = {},
 ): Promise<ToolResult> {
-  const resolved = resolvePath(path);
+  const resolved = resolveReadPath(path);
   ensureReadAllowed(resolved, path, options.confirmed);
   const maxEntries = options.maxEntries ?? DEFAULT_LIST_MAX_ENTRIES;
   try {
@@ -1017,7 +1023,7 @@ export async function fsSearch(
     timeoutMs?: number | undefined;
   } = {},
 ): Promise<ToolResult> {
-  const resolved = resolvePath(path);
+  const resolved = resolveReadPath(path);
   ensureReadAllowed(resolved, path, options.confirmed);
   const maxMatches = Math.min(
     200,
