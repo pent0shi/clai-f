@@ -4,41 +4,104 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { accessSync, constants } from "node:fs";
+import { accessSync, chmodSync, constants, existsSync } from "node:fs";
 import { delimiter, join } from "node:path";
+
+import { homedir } from "node:os";
 
 export function isBunRuntime(): boolean {
   return typeof (globalThis as { Bun?: unknown }).Bun !== "undefined";
 }
 
-/** Resolve `bun` on PATH (cross-platform). */
+/** Resolve `bun` on PATH or local clai/bun bin dirs (cross-platform). */
 export function findBunExecutable(): string | undefined {
+  const binName = process.platform === "win32" ? "bun.exe" : "bun";
   const fromEnv = process.env.BUN_INSTALL
-    ? join(
-        process.env.BUN_INSTALL,
-        "bin",
-        process.platform === "win32" ? "bun.exe" : "bun",
-      )
+    ? join(process.env.BUN_INSTALL, "bin", binName)
     : undefined;
+  const claiBin = join(homedir(), ".clai", "bin", binName);
+  const bunHomeBin = join(homedir(), ".bun", "bin", binName);
+
   const candidates = [
     fromEnv,
+    claiBin,
+    bunHomeBin,
     ...(process.env.PATH ?? "")
       .split(delimiter)
       .filter(Boolean)
-      .map((dir) =>
-        join(dir, process.platform === "win32" ? "bun.exe" : "bun"),
-      ),
+      .map((dir) => join(dir, binName)),
   ].filter((p): p is string => Boolean(p));
+
+  const checkMode = process.platform === "win32" ? constants.F_OK : constants.X_OK;
 
   for (const path of candidates) {
     try {
-      accessSync(path, constants.X_OK);
+      accessSync(path, checkMode);
       return path;
     } catch {
       // try next
     }
   }
   return undefined;
+}
+
+/** Automatically install Bun into ~/.clai/bin if missing (cross-platform). */
+export function autoInstallBun(): string | undefined {
+  if (process.env.CLAI_NO_BUN_AUTO_INSTALL === "1") return undefined;
+  const targetDir = join(homedir(), ".clai");
+  const binName = process.platform === "win32" ? "bun.exe" : "bun";
+  const targetBin = join(targetDir, "bin", binName);
+
+  const env = {
+    ...process.env,
+    BUN_INSTALL: targetDir,
+  };
+
+  console.log("  [clai] Setting up Bun runtime for OpenTUI (~/.clai/bin)...");
+  try {
+    if (process.platform === "win32") {
+      spawnSync(
+        "powershell",
+        [
+          "-NoProfile",
+          "-ExecutionPolicy",
+          "Bypass",
+          "-Command",
+          "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; irm https://bun.sh/install.ps1 | iex",
+        ],
+        { env, stdio: "inherit", windowsHide: true },
+      );
+    } else {
+      const res = spawnSync(
+        "sh",
+        ["-c", "curl -fsSL https://bun.sh/install | bash"],
+        { env, stdio: "inherit" },
+      );
+
+      if (res.status !== 0) {
+        spawnSync(
+          "sh",
+          ["-c", "wget -qO- https://bun.sh/install | bash"],
+          { env, stdio: "inherit" },
+        );
+      }
+    }
+
+    if (existsSync(targetBin)) {
+      if (process.platform !== "win32") {
+        try {
+          chmodSync(targetBin, 0o755);
+        } catch {
+          // ignore
+        }
+      }
+      return targetBin;
+    }
+  } catch {
+    // try fallback check below
+  }
+
+  return findBunExecutable();
 }
 
 export function openTuiRuntimeHint(): string {
@@ -64,7 +127,10 @@ export function reexecWithBunIfNeeded(entryPath: string): boolean {
   if (process.env.CLAI_NO_BUN_REEXEC === "1") return false;
   if (process.env.CLAI_FORCE_NODE === "1") return false;
 
-  const bun = findBunExecutable();
+  let bun = findBunExecutable();
+  if (!bun && process.stdout.isTTY) {
+    bun = autoInstallBun();
+  }
   if (!bun) return false;
   if (!entryPath) return false;
 
