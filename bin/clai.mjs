@@ -24,4 +24,20 @@ try {
   }
 }
 
-await import('../dist/index.js');
+try {
+  await import('../dist/index.js');
+} catch (err) {
+  // Never exit silently — always print something so the user knows what happened.
+  const msg = err instanceof Error ? err.message : String(err);
+  process.stderr.write(`\nclai: failed to start: ${msg}\n`);
+  if (err instanceof Error && err.stack) {
+    process.stderr.write(err.stack + '\n');
+  }
+  process.stderr.write(
+    '\nIf this persists, try:\n' +
+    '  • Reinstall: npm i -g @pentoshi/clai\n' +
+    '  • Classic mode: clai --classic\n' +
+    '  • Report: https://github.com/pentoshi007/clai/issues\n'
+  );
+  process.exitCode = 1;
+}

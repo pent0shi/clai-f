@@ -5,7 +5,7 @@ import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import type { ProviderId, ProviderStatus } from '../types.js';
 import { providerIds } from '../types.js';
-import { envVars, getDefaultModel, maskSecret } from '../llm/provider.js';
+import { envVars, getDefaultModel, getEnvVar, maskSecret } from '../llm/provider.js';
 import {
   getActiveProviderEndpoint,
   getConfig,
@@ -458,7 +458,7 @@ export function envValue(provider: ProviderId): string | undefined {
     const secret = process.env.MODAL_PROXY_TOKEN_SECRET?.trim();
     return id && secret ? `${id}:${secret}` : undefined;
   }
-  const envVar = envVars[provider];
+  const envVar = getEnvVar(provider);
   if (!envVar) {
     return undefined;
   }
@@ -817,7 +817,12 @@ function endpointNote(provider: ProviderId): string | undefined {
 
 export async function listProviderStatuses(activeProvider: ProviderId): Promise<ProviderStatus[]> {
   const statuses: ProviderStatus[] = [];
-  for (const provider of providerIds) {
+  // Custom (user-defined) provider ids are appended after the built-ins so
+  // `/keys` and the `/provider` picker show them alongside the built-ins.
+  const { getCustomProviders } = await import('./config.js');
+  const customIds = getCustomProviders().map((d) => d.id as ProviderId);
+  const allIds: ProviderId[] = [...providerIds, ...customIds];
+  for (const provider of allIds) {
     const multi = await getProviderKeys(provider);
     const configured = multi.keys.length > 0 || provider === 'ollama';
     const activeIdx = clampActiveIndex(multi.activeIndex, multi.keys.length);

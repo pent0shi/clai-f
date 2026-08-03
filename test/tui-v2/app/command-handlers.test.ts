@@ -294,6 +294,99 @@ describe("command handlers (V2-072..075)", () => {
     }
   });
 
+  it("/provider picker lists built-ins plus an add-custom-provider row", async () => {
+    const services = buildServices();
+    await services.commands.dispatch({ name: "provider", args: "" });
+    await waitUntil(() => services.overlay.getState().kind === "picker");
+    const state = services.overlay.getState();
+    expect(state.kind).toBe("picker");
+    if (state.kind === "picker") {
+      const values = state.request.options.map((o) => o.value);
+      expect(values).toContain("__add_custom_provider__");
+      expect(values).toContain("groq");
+      expect(values).toContain("nvidia");
+    }
+    services.overlay.close();
+  });
+
+  it("/provider picker shows a previously-added custom provider", async () => {
+    const { addCustomProvider, getCustomProviders } = await import(
+      "../../../src/store/config.js"
+    );
+    addCustomProvider({
+      id: "mycustom",
+      displayName: "My Custom",
+      baseUrl: "https://api.example.com/v1",
+      defaultModel: "m1",
+    });
+    try {
+      const services = buildServices();
+      await services.commands.dispatch({ name: "provider", args: "" });
+      await waitUntil(() => services.overlay.getState().kind === "picker");
+      const state = services.overlay.getState();
+      expect(state.kind).toBe("picker");
+      if (state.kind === "picker") {
+        const values = state.request.options.map((o) => o.value);
+        expect(values).toContain("mycustom");
+      }
+      services.overlay.close();
+      expect(getCustomProviders().some((d) => d.id === "mycustom")).toBe(true);
+    } finally {
+      const { removeCustomProvider } = await import("../../../src/store/config.js");
+      removeCustomProvider("mycustom");
+    }
+  });
+
+  it("/provider picker shows a remove-custom-provider row when customs exist", async () => {
+    const { addCustomProvider } = await import("../../../src/store/config.js");
+    addCustomProvider({
+      id: "removeme",
+      displayName: "Remove Me",
+      baseUrl: "https://api.example.com/v1",
+      defaultModel: "m1",
+    });
+    try {
+      const services = buildServices();
+      await services.commands.dispatch({ name: "provider", args: "" });
+      await waitUntil(() => services.overlay.getState().kind === "picker");
+      const state = services.overlay.getState();
+      expect(state.kind).toBe("picker");
+      if (state.kind === "picker") {
+        const values = state.request.options.map((o) => o.value);
+        expect(values).toContain("__remove_custom_provider__");
+      }
+      services.overlay.close();
+    } finally {
+      const { removeCustomProvider } = await import("../../../src/store/config.js");
+      removeCustomProvider("removeme");
+    }
+  });
+
+  it("remove-custom-provider flow deletes the definition after confirm", async () => {
+    const { addCustomProvider, getCustomProviders } = await import(
+      "../../../src/store/config.js"
+    );
+    addCustomProvider({
+      id: "doomed",
+      displayName: "Doomed",
+      baseUrl: "https://api.example.com/v1",
+      defaultModel: "m1",
+    });
+    const services = buildServices();
+    // 1. Pick "remove custom provider" from /provider.
+    await services.commands.dispatch({ name: "provider", args: "" });
+    await waitUntil(() => services.overlay.getState().kind === "picker");
+    services.overlay.selectPicker("__remove_custom_provider__");
+    // 2. Pick the custom provider to remove.
+    await waitUntil(() => services.overlay.getState().kind === "picker");
+    services.overlay.selectPicker("doomed");
+    // 3. Confirm the reset prompt.
+    await waitUntil(() => services.overlay.getState().kind === "confirm");
+    services.overlay.answerConfirm(true);
+    await waitUntil(() => services.overlay.getState().kind === "none");
+    expect(getCustomProviders().some((d) => d.id === "doomed")).toBe(false);
+  });
+
   afterEach(() => {
     updateConfig({ disableKeychain: false, permissions: "default" });
   });

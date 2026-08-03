@@ -6,10 +6,12 @@ import type {
 } from "../types.js";
 import {
   getActiveProviderEndpoint,
+  getCustomProviders,
   getProviderEndpoints,
   getConfig,
   providerCategory,
   providerUsesEndpoints,
+  resolveProviderCategory,
 } from "../store/config.js";
 import {
   getProviderKeys,
@@ -64,6 +66,7 @@ import { lightningProvider } from "./lightning.js";
 import { tokenrouterProvider } from "./tokenrouter.js";
 import type { LlmProvider, ProviderAuth } from "./provider.js";
 import { maskSecretTail } from "./provider.js";
+import { getCustomProviderSync } from "./custom-providers.js";
 import {
   isToolsUnsupportedError,
   markTextOnlyModel,
@@ -400,6 +403,16 @@ const fallbackOrder: ProviderId[] = [
 ];
 
 
+/**
+ * Built-in provider ids in fallback preference order. Custom (user-defined)
+ * provider ids are appended after the built-ins so they participate in the
+ * cross-provider fallback chain when enabled, in config declaration order.
+ */
+function allFallbackIds(): ProviderId[] {
+  const custom = getCustomProviders().map((d) => d.id as ProviderId);
+  return [...fallbackOrder, ...custom];
+}
+
 export function buildFallbackChain(
   requested: ProviderId,
   freeOnly: boolean,
@@ -407,12 +420,13 @@ export function buildFallbackChain(
   preferAlternates = false,
 ): ProviderId[] {
   if (!enabled) return [requested];
+  const order = allFallbackIds();
   const filtered = freeOnly
-    ? fallbackOrder.filter(
+    ? order.filter(
         (provider) =>
-          provider === requested || providerCategory[provider] !== "paid-cloud",
+          provider === requested || resolveProviderCategory(provider) !== "paid-cloud",
       )
-    : fallbackOrder;
+    : order;
   const alternates = filtered.filter((provider) => provider !== requested);
   // A live-connection stall has already spent one full generation on the
   // selected route. Retrying it first creates the duplicate partial bubbles in
@@ -424,7 +438,16 @@ export function buildFallbackChain(
 }
 
 export function getProvider(provider: ProviderId): LlmProvider {
-  return providers[provider];
+  const builtin = providers[provider];
+  if (builtin) return builtin;
+  // Custom (user-defined) providers are not in the static map; resolve them
+  // from the runtime registry. Returns undefined for an unknown id.
+  const custom = getCustomProviderSync(provider as string);
+  if (custom) return custom;
+  // Unknown id: return the first built-in so callers that don't pre-validate
+  // get a usable object rather than `undefined`. Callers that need to assert
+  // existence use `assertProvider` (which now accepts custom ids too).
+  return providers.nvidia;
 }
 
 export async function providerAuth(
@@ -929,7 +952,7 @@ export async function completeWithProvider(
 ): Promise<CompletionResult> {
   const config = getConfig();
   const requested = request.provider ?? config.defaultProvider;
-  const providerImpl = providers[requested];
+  const providerImpl = getProvider(requested);
   const isDefaultModel = !request.model || request.model === providerImpl.defaultModel;
   const fallbackEnabled =
     config.providerFallback && (isDefaultModel || request.allowModelFallback === true);
@@ -944,7 +967,7 @@ export async function completeWithProvider(
 
   for (const providerId of order) {
     request.signal?.throwIfAborted();
-    const provider = providers[providerId];
+    const provider = getProvider(providerId);
     const multi = await getProviderKeys(providerId);
     const hasAuth = multi.keys.length > 0;
     if (!hasAuth) {
@@ -1003,7 +1026,7 @@ export async function streamWithProvider(
 
   const config = getConfig();
   const requested = request.provider ?? config.defaultProvider;
-  const providerImpl = providers[requested];
+  const providerImpl = getProvider(requested);
   const isDefaultModel = !request.model || request.model === providerImpl.defaultModel;
   const fallbackEnabled =
     config.providerFallback && (isDefaultModel || request.allowModelFallback === true);
@@ -1019,7 +1042,7 @@ export async function streamWithProvider(
 
   for (const providerId of order) {
     request.signal?.throwIfAborted();
-    const provider = providers[providerId];
+    const provider = getProvider(providerId);
     const multi = await getProviderKeys(providerId);
     if (multi.keys.length === 0) {
       failures.push({ provider: providerId, message: "no API key configured" });
@@ -1077,7 +1100,7 @@ export async function pingProvider(
   providerId: ProviderId,
   secretOverride?: string,
 ): Promise<void> {
-  const provider = providers[providerId];
+  const provider = getProvider(providerId);
   const resolved = await providerAuth(providerId);
   const auth: ProviderAuth =
     providerId === "ollama"

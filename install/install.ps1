@@ -10,6 +10,9 @@ $ErrorActionPreference = "Stop"
 
 $repo = if ($env:CLAI_REPO) { $env:CLAI_REPO } else { "pentoshi007/clai" }
 $installDir = if ($env:CLAI_BIN_DIR) { $env:CLAI_BIN_DIR } else { "$env:LOCALAPPDATA\clai" }
+if (-not $installDir -or [string]::IsNullOrWhiteSpace($installDir)) {
+    $installDir = Join-Path $env:USERPROFILE '.clai\bin'
+}
 $skipChecksum = $env:CLAI_SKIP_CHECKSUM -eq "1"
 
 $arch = if ([Environment]::Is64BitOperatingSystem) { "x64" } else { "x64" }
@@ -72,5 +75,21 @@ if ($currentPath -notlike "*$installDir*") {
     Write-Host "Added $installDir to PATH (restart your terminal)" -ForegroundColor Yellow
 }
 
+# Verify the binary works
+try {
+    $verOutput = & $dest --version 2>&1
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host "  Verified: clai $verOutput" -ForegroundColor Green
+    } else {
+        Write-Host "  Warning: clai installed but --version returned exit code $LASTEXITCODE" -ForegroundColor Yellow
+        Write-Host "  This may resolve after restarting your terminal." -ForegroundColor Gray
+    }
+} catch {
+    Write-Host "  Warning: Could not verify installation: $_" -ForegroundColor Yellow
+    Write-Host "  Restart your terminal and try: clai --version" -ForegroundColor Gray
+}
+
+Write-Host ""
 Write-Host "Installed clai to $dest" -ForegroundColor Green
 Write-Host "  Restart your terminal, then run 'clai' to get started." -ForegroundColor Gray
+Write-Host "  For help: clai --help  |  Diagnostics: clai doctor" -ForegroundColor Gray

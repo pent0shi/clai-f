@@ -92,5 +92,13 @@ else
   sudo mv "$tmp" "$bin_dir/clai"
 fi
 
+# Verify the binary works
+if "$bin_dir/clai" --version > /dev/null 2>&1; then
+  echo "✓ Verified: $($bin_dir/clai --version 2>/dev/null || echo 'ok')"
+else
+  echo "⚠ Binary installed but could not verify. Try: clai --version"
+fi
+
 echo "✓ Installed clai to $bin_dir/clai"
 echo "  Run 'clai' to get started."
+echo "  For help: clai --help  |  Diagnostics: clai doctor"

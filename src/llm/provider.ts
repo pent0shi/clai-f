@@ -137,22 +137,61 @@ export const envVars: Record<ProviderId, string | undefined> = {
   tokenrouter: "TOKENROUTER_API_KEY",
 };
 
+/** Resolve the env var for any provider, including user-defined custom ones. */
+export function getEnvVar(provider: ProviderId): string | undefined {
+  if (envVars[provider]) return envVars[provider];
+  return envVarResolver?.(provider);
+}
+
+/** Injected resolver for custom-provider env vars (avoids a static import cycle). */
+let envVarResolver: ((provider: ProviderId) => string | undefined) | undefined;
+
+export function setEnvVarResolver(
+  resolver: ((provider: ProviderId) => string | undefined) | undefined,
+): void {
+  envVarResolver = resolver;
+}
+
 export function normalizeProvider(value: string): ProviderId | undefined {
-  return providerAliases[value.trim().toLowerCase()];
+  const alias = providerAliases[value.trim().toLowerCase()];
+  if (alias) return alias;
+  // Custom (user-defined) providers: the id is its own alias. The resolver is
+  // injected by `store/config.ts` at bootstrap to avoid a static import cycle
+  // (config.ts imports defaultModels from this module).
+  const lower = value.trim().toLowerCase();
+  if (customProviderResolver?.(lower)) return lower as ProviderId;
+  return undefined;
 }
 
 export function assertProvider(value: string): ProviderId {
   const provider = normalizeProvider(value);
   if (!provider) {
     throw new Error(
-      `Unsupported provider "${value}". Supported providers: ${providerIds.join(", ")}`,
+      `Unsupported provider "${value}". Supported providers: ${providerIds.join(", ")}${customProviderResolver ? " (plus any custom providers you added)" : ""}`,
     );
   }
   return provider;
 }
 
 export function getDefaultModel(provider: ProviderId): string {
-  return defaultModels[provider];
+  // Built-ins read from the static map; custom providers fall back to the
+  // injected resolver (wired from store/config.js) so /keys shows their model.
+  if (defaultModels[provider]) return defaultModels[provider];
+  return customDefaultModelResolver?.(provider) ?? "";
+}
+
+/**
+ * Inject the custom-provider id resolver (called once at bootstrap from
+ * `store/config.ts`). Returns `true` when `id` matches a user-defined custom
+ * provider. Kept here (rather than a static import) to avoid a config ↔
+ * provider import cycle.
+ */
+let customProviderResolver: ((id: string) => boolean) | undefined;
+
+export function setCustomProviderResolver(
+  resolver: ((id: string) => boolean) | undefined,
+): void {
+  customProviderResolver = resolver;
 }
 
 export function sanitizeProviderModel(provider: ProviderId, model: string): string {
@@ -498,5 +537,33 @@ No expiry`,
 };
 
 export function getProviderInfoText(provider: string): string {
-  return providerInfo[provider.toLowerCase()] ?? "no info available";
+  const known = providerInfo[provider.toLowerCase()];
+  if (known) return known;
+  // Custom (user-defined) providers: generate a basic info page from the
+  // stored definition so /info <custom-provider> is still useful.
+  const custom = customProviderInfoResolver?.(provider);
+  if (custom) return custom;
+  return "no info available";
+}
+
+/** Injected resolver that builds an info page for a custom provider id. */
+let customProviderInfoResolver:
+  | ((provider: string) => string | undefined)
+  | undefined;
+
+export function setCustomProviderInfoResolver(
+  resolver: ((provider: string) => string | undefined) | undefined,
+): void {
+  customProviderInfoResolver = resolver;
+}
+
+/** Injected resolver returning the default model for a custom provider id. */
+let customDefaultModelResolver:
+  | ((provider: ProviderId) => string | undefined)
+  | undefined;
+
+export function setCustomDefaultModelResolver(
+  resolver: ((provider: ProviderId) => string | undefined) | undefined,
+): void {
+  customDefaultModelResolver = resolver;
 }

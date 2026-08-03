@@ -60,6 +60,29 @@ export async function runDoctor(): Promise<void> {
   console.log(
     chalk.dim('  full-screen: clai (needs Bun)  ·  line REPL: clai --classic'),
   );
+  // node-pty availability check — optional, but improves classic REPL shell features
+  let nodePtyOk = false;
+  try {
+    await import('node-pty');
+    nodePtyOk = true;
+  } catch {
+    // not available
+  }
+  console.log(
+    `node-pty: ${
+      nodePtyOk
+        ? chalk.green('available (interactive terminals)')
+        : chalk.yellow('not loaded') +
+          chalk.dim(' — interactive terminals use basic pipes (still works, fewer features)')
+    }`,
+  );
+  if (!nodePtyOk) {
+    console.log(
+      chalk.dim(
+        '         To enable: npm i -g @pentoshi/clai --allow-scripts=@pentoshi/clai,node-pty',
+      ),
+    );
+  }
   const keychain = await probeKeychain();
   if (keychain.available) {
     console.log(`Keychain: ${chalk.green('available')} (OS keystore)`);

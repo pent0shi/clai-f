@@ -19,6 +19,8 @@ function findBun() {
     fromEnv,
     join(targetDir, "bin", binName),
     join(homedir(), ".bun", "bin", binName),
+    process.env.LOCALAPPDATA ? join(process.env.LOCALAPPDATA, "bun", binName) : undefined,
+    process.env.APPDATA ? join(process.env.APPDATA, "bun", "bin", binName) : undefined,
     ...(process.env.PATH ?? "")
       .split(delimiter)
       .filter(Boolean)
@@ -87,7 +89,27 @@ if (!findBun() && process.env.CLAI_NO_BUN_AUTO_INSTALL !== "1") {
         // ignore
       }
     }
+
+    try {
+      const verify = spawnSync(targetBin, ["--version"], { encoding: "utf8", timeout: 10000 });
+      if (verify.status === 0 && verify.stdout) {
+        console.log(`  ✓ Bun ${verify.stdout.trim()} installed to ${targetBin}`);
+      } else {
+        console.log(`  Note: Could not verify Bun installation.`);
+      }
+    } catch (e) {
+      console.log(`  Note: Could not verify Bun installation.`);
+    }
   } catch (err) {
-    console.warn("Notice: Automatic Bun setup skipped or failed:", err?.message || err);
+    console.log(`  ⚠ Automatic Bun setup skipped: ${err?.message || err}`);
+    console.log(`    clai will retry on first launch, or use: clai --classic`);
   }
+}
+
+if (!findBun()) {
+  console.log(`
+  Note: Bun was not installed during postinstall.
+  clai will automatically install Bun on first launch.
+  To skip the full-screen UI, run: clai --classic
+  `);
 }

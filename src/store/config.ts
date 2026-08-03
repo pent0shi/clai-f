@@ -5,6 +5,7 @@ import type { Mode, ProviderId, ReasoningPreference } from "../types.js";
 import type { ExaSearchType, SearchProviderId } from "../tools/web/types.js";
 import { DEFAULT_EXA_SEARCH_TYPE } from "../tools/web/types.js";
 import { defaultModels, sanitizeProviderModel } from "../llm/provider.js";
+import type { CustomProviderDef } from "../llm/custom-providers.js";
 import { safeCwd } from "../os/cwd.js";
 import { fixOwnerSync, handlePermissionError } from "../os/permissions.js";
 
@@ -30,6 +31,12 @@ export const endpointProviders: readonly ProviderId[] = [
   "tokenrouter",
 ];
 
+export function providerUsesEndpoints(provider: ProviderId): boolean {
+  if (endpointProviders.includes(provider)) return true;
+  // Custom providers always carry a user-supplied base URL.
+  return isCustomProviderIdSync(provider);
+}
+
 /** Environment override, checked before the stored list. */
 const endpointEnvVars: Partial<Record<ProviderId, string>> = {
   modal: "MODAL_BASE_URL",
@@ -37,8 +44,11 @@ const endpointEnvVars: Partial<Record<ProviderId, string>> = {
   tokenrouter: "TOKENROUTER_BASE_URL",
 };
 
-export function providerUsesEndpoints(provider: ProviderId): boolean {
-  return endpointProviders.includes(provider);
+/** Resolve the env var for a provider (custom providers use their own envVar). */
+function providerEndpointEnvVar(provider: ProviderId): string | undefined {
+  if (endpointEnvVars[provider]) return endpointEnvVars[provider];
+  const def = findCustomProviderDefSync(provider);
+  return def?.envVar;
 }
 
 export type LearnedVisionEntry = boolean | { vision: boolean; at: string };
@@ -125,6 +135,8 @@ export interface ClaiConfig {
    * the footer ctx-limit chip; survives history navigation and restarts.
    */
   contextLimitTokens?: Record<string, number>;
+  /** User-defined OpenAI-compatible providers (added via /provider picker). */
+  customProviders?: CustomProviderDef[];
 }
 
 /**
@@ -156,6 +168,15 @@ export const providerCategory: Record<ProviderId, ProviderCategory> = {
   // Prepaid balance, billed per token.
   tokenrouter: "paid-cloud",
 };
+
+/**
+ * Resolve the category for any provider id (built-in or custom). Custom
+ * providers default to "paid-cloud" so `/freeonly` keeps them out of the
+ * fallback chain unless the user explicitly switched to one.
+ */
+export function resolveProviderCategory(provider: ProviderId): ProviderCategory {
+  return providerCategory[provider] ?? "paid-cloud";
+}
 
 const defaults: ClaiConfig = {
   defaultProvider: "nvidia",
@@ -196,6 +217,7 @@ const defaults: ClaiConfig = {
   slimNativePrompt: true,
   learnedVisionCapabilities: {},
   contextLimitTokens: {},
+  customProviders: [],
 };
 
 const store = (() => {
@@ -213,6 +235,38 @@ const store = (() => {
     handlePermissionError(err);
   }
 })();
+
+// Inject the custom-provider id resolver so `normalizeProvider`/`assertProvider`
+// recognise user-defined provider ids. Done once, after the store is live.
+import { setCustomDefaultModelResolver, setCustomProviderInfoResolver, setCustomProviderResolver, setEnvVarResolver } from "../llm/provider.js";
+setCustomProviderResolver((id: string): boolean => {
+  const list = getConfig().customProviders ?? [];
+  return list.some((d) => d.id === id);
+});
+setEnvVarResolver((provider) => findCustomProviderDefSync(provider)?.envVar);
+setCustomDefaultModelResolver((provider) => findCustomProviderDefSync(provider)?.defaultModel);
+setCustomProviderInfoResolver((provider) => {
+  const def = findCustomProviderDefSync(provider);
+  if (!def) return undefined;
+  const env = def.envVar ? `\nENVIRONMENT VARIABLE\n  ${def.envVar}  API key (used when nothing is stored)\n` : "";
+  return `${def.displayName} — custom OpenAI-compatible provider
+
+CONFIGURATION
+  id:            ${def.id}
+  base URL:      ${def.baseUrl}
+  default model: ${def.defaultModel}${env}
+
+MANAGING KEYS
+  clai set ${def.id} <key>       add an API key (up to 10, rotated on failure)
+  clai set ${def.id} <key2>      add another; the last that worked is sticky
+  /set ${def.id}                 multi-key editor
+  clai unset ${def.id}           remove every stored key
+
+This provider was added manually via the /provider picker. It speaks the
+standard OpenAI Chat Completions API (/chat/completions, /models, SSE
+streaming, native tool calling, reasoning_effort). Use /model to pick from
+the live catalogue fetched from ${def.baseUrl}/models.`;
+});
 
 let cachedConfig: { key: string; value: ClaiConfig } | undefined;
 
@@ -249,6 +303,7 @@ function cloneConfig(config: ClaiConfig): ClaiConfig {
     sandboxRoots: [...config.sandboxRoots],
     thinking: { ...config.thinking },
     contextLimitTokens: { ...(config.contextLimitTokens ?? {}) },
+    customProviders: (config.customProviders ?? []).map((d) => ({ ...d })),
   };
 }
 
@@ -310,6 +365,49 @@ function readConfigFromStore(): ClaiConfig {
   };
 }
 
+// --- Custom provider definitions (user-defined, runtime registry) --------------
+
+/** All custom provider defs stored in config. */
+export function getCustomProviders(): CustomProviderDef[] {
+  const list = getConfig().customProviders ?? [];
+  return list.map((d) => ({ ...d }));
+}
+
+/** True when `id` matches a user-defined custom provider (sync, reads config). */
+export function isCustomProviderIdSync(id: string | ProviderId): boolean {
+  const list = getConfig().customProviders ?? [];
+  return list.some((d) => d.id === id);
+}
+
+/** Resolve a custom definition by id (sync). */
+export function findCustomProviderDefSync(
+  id: string | ProviderId,
+): CustomProviderDef | undefined {
+  const list = getConfig().customProviders ?? [];
+  const found = list.find((d) => d.id === id);
+  return found ? { ...found } : undefined;
+}
+
+/** Persist a new custom provider definition. Throws on duplicate id. */
+export function addCustomProvider(def: CustomProviderDef): CustomProviderDef {
+  const current = getConfig().customProviders ?? [];
+  if (current.some((d) => d.id === def.id)) {
+    throw new Error(`custom provider "${def.id}" already exists`);
+  }
+  updateConfig({ customProviders: [...current, def] });
+  return def;
+}
+
+/** Remove a custom provider definition (does not touch its stored keys). */
+export function removeCustomProvider(id: string): boolean {
+  const current = getConfig().customProviders ?? [];
+  const next = current.filter((d) => d.id !== id);
+  if (next.length === current.length) return false;
+  updateConfig({ customProviders: next });
+  return true;
+}
+
+
 export function updateConfig(patch: Partial<ClaiConfig>): ClaiConfig {
   const next = { ...getConfig(), ...patch } satisfies ClaiConfig;
   try {
@@ -353,6 +451,12 @@ export function getProviderEndpoints(provider: ProviderId): ProviderEndpoints {
   if (urls.length === 0 && provider === "modal") {
     const legacy = config.modalBaseUrl?.trim();
     if (legacy) urls.push(legacy);
+  }
+  // Custom providers seed their endpoint list from the stored base URL so the
+  // editor / `clai keys` shows it even before the user adds more via --url.
+  if (urls.length === 0) {
+    const customDef = findCustomProviderDefSync(provider);
+    if (customDef?.baseUrl) urls.push(customDef.baseUrl);
   }
   const activeIndex =
     urls.length > 0
@@ -434,7 +538,7 @@ export function setActiveProviderEndpoint(
  * turn that into an actionable error, and Lightning falls back to its gateway.
  */
 export function getActiveProviderEndpoint(provider: ProviderId): string {
-  const envVar = endpointEnvVars[provider];
+  const envVar = providerEndpointEnvVar(provider);
   const fromEnv = envVar ? process.env[envVar]?.trim() : undefined;
   if (fromEnv) return fromEnv;
   const { urls, activeIndex } = getProviderEndpoints(provider);
@@ -443,9 +547,11 @@ export function getActiveProviderEndpoint(provider: ProviderId): string {
 
 export function getProviderModel(provider: ProviderId): string {
   const configured = getConfig().providerModels[provider];
-  return configured
-    ? sanitizeProviderModel(provider, configured)
-    : defaultModels[provider];
+  if (configured) return sanitizeProviderModel(provider, configured);
+  // Custom providers carry their own default model; built-ins use defaultModels.
+  const customDef = findCustomProviderDefSync(provider);
+  if (customDef) return customDef.defaultModel;
+  return defaultModels[provider];
 }
 
 /**

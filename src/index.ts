@@ -672,8 +672,27 @@ async function main(): Promise<void> {
 }
 
 main().catch((error) => {
-  printError(error);
+  // Ensure errors are always visible, even on Windows where stdout may
+  // buffer and the process exits before flushing.
+  try {
+    printError(error);
+  } catch {
+    // stderr write itself failed; last-resort diagnostic.
+    try { process.stderr.write(`clai fatal: ${error}\n`); } catch { /* truly hopeless */ }
+  }
   if (!process.exitCode) {
     process.exitCode = 1;
   }
+});
+
+// On Windows cmd.exe, Node/Bun can exit before stderr is flushed.
+// Handle uncaught exceptions at the process level so the binary never
+// "hangs then exits silently" — it always prints *something*.
+process.on('uncaughtException', (err) => {
+  try { process.stderr.write(`\nclai: uncaught error: ${err?.message ?? err}\n`); } catch { /* */ }
+  process.exitCode = 1;
+});
+process.on('unhandledRejection', (reason) => {
+  try { process.stderr.write(`\nclai: unhandled rejection: ${reason}\n`); } catch { /* */ }
+  process.exitCode = 1;
 });

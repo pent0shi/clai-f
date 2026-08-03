@@ -4,7 +4,7 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { accessSync, chmodSync, constants, existsSync } from "node:fs";
+import { accessSync, chmodSync, constants, existsSync, mkdirSync } from "node:fs";
 import { delimiter, join } from "node:path";
 
 import { homedir } from "node:os";
@@ -22,10 +22,21 @@ export function findBunExecutable(): string | undefined {
   const claiBin = join(homedir(), ".clai", "bin", binName);
   const bunHomeBin = join(homedir(), ".bun", "bin", binName);
 
+  // Windows-specific: Bun's official installer puts bun.exe in LOCALAPPDATA\bun
+  // or APPDATA\bun\bin depending on the installer variant.
+  const localAppData = process.env.LOCALAPPDATA
+    ? join(process.env.LOCALAPPDATA, "bun", binName)
+    : undefined;
+  const appData = process.env.APPDATA
+    ? join(process.env.APPDATA, "bun", "bin", binName)
+    : undefined;
+
   const candidates = [
     fromEnv,
     claiBin,
     bunHomeBin,
+    localAppData,
+    appData,
     ...(process.env.PATH ?? "")
       .split(delimiter)
       .filter(Boolean)
@@ -45,6 +56,26 @@ export function findBunExecutable(): string | undefined {
   return undefined;
 }
 
+/**
+ * Verify a Bun binary works by running `bun --version`.
+ * Returns the version string on success, undefined on failure.
+ */
+function verifyBun(bunPath: string): string | undefined {
+  try {
+    const result = spawnSync(bunPath, ["--version"], {
+      encoding: "utf8",
+      timeout: 15000,
+      windowsHide: true,
+    });
+    if (result.status === 0 && result.stdout) {
+      return result.stdout.trim();
+    }
+  } catch {
+    // verification failed
+  }
+  return undefined;
+}
+
 /** Automatically install Bun into ~/.clai/bin if missing (cross-platform). */
 export function autoInstallBun(): string | undefined {
   if (process.env.CLAI_NO_BUN_AUTO_INSTALL === "1") return undefined;
@@ -52,15 +83,20 @@ export function autoInstallBun(): string | undefined {
   const binName = process.platform === "win32" ? "bun.exe" : "bun";
   const targetBin = join(targetDir, "bin", binName);
 
+  mkdirSync(join(targetDir, "bin"), { recursive: true });
+
   const env = {
     ...process.env,
     BUN_INSTALL: targetDir,
   };
 
-  console.log("  [clai] Setting up Bun runtime for OpenTUI (~/.clai/bin)...");
+  console.log("  [clai] Installing Bun runtime for full-screen UI...");
+  let installed = false;
+
   try {
     if (process.platform === "win32") {
-      spawnSync(
+      // Try PowerShell first (official Bun installer)
+      const psResult = spawnSync(
         "powershell",
         [
           "-NoProfile",
@@ -69,36 +105,65 @@ export function autoInstallBun(): string | undefined {
           "-Command",
           "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; irm https://bun.sh/install.ps1 | iex",
         ],
-        { env, stdio: "inherit", windowsHide: true },
+        { env, stdio: "inherit", windowsHide: true, timeout: 120000 },
       );
+
+      if (psResult.status !== 0 && psResult.status !== null) {
+        // PowerShell failed — try npm as fallback
+        console.log("  [clai] PowerShell install failed, trying npm...");
+        const npmCmd = process.platform === "win32" ? "npm.cmd" : "npm";
+        spawnSync(npmCmd, ["install", "-g", "bun"], {
+          stdio: "inherit",
+          timeout: 120000,
+          windowsHide: true,
+        });
+      }
     } else {
       const res = spawnSync(
         "sh",
         ["-c", "curl -fsSL https://bun.sh/install | bash"],
-        { env, stdio: "inherit" },
+        { env, stdio: "inherit", timeout: 120000 },
       );
 
       if (res.status !== 0) {
         spawnSync(
           "sh",
           ["-c", "wget -qO- https://bun.sh/install | bash"],
-          { env, stdio: "inherit" },
+          { env, stdio: "inherit", timeout: 120000 },
         );
       }
     }
 
-    if (existsSync(targetBin)) {
-      if (process.platform !== "win32") {
+    // Check the target location first, then fall back to findBunExecutable
+    const bunPath = existsSync(targetBin) ? targetBin : findBunExecutable();
+    if (bunPath) {
+      if (process.platform !== "win32" && bunPath === targetBin) {
         try {
           chmodSync(targetBin, 0o755);
         } catch {
           // ignore
         }
       }
-      return targetBin;
+      // Verify the binary actually works
+      const version = verifyBun(bunPath);
+      if (version) {
+        console.log(`  [clai] ✓ Bun ${version} installed successfully`);
+        installed = true;
+        return bunPath;
+      }
+      // Binary exists but doesn't run correctly
+      console.log("  [clai] ⚠ Bun binary found but could not verify. Trying anyway...");
+      installed = true;
+      return bunPath;
     }
-  } catch {
-    // try fallback check below
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.log(`  [clai] ⚠ Bun auto-install error: ${msg}`);
+  }
+
+  if (!installed) {
+    console.log("  [clai] ⚠ Bun auto-install could not complete. Using classic REPL instead.");
+    console.log("  [clai]   Manual install: https://bun.sh");
   }
 
   return findBunExecutable();
@@ -106,10 +171,10 @@ export function autoInstallBun(): string | undefined {
 
 export function openTuiRuntimeHint(): string {
   return [
-    "OpenTUI needs the Bun runtime (Node/tsx cannot load the native renderer).",
-    "  • Dev:     npm run dev:bun   or   bun run src/index.ts",
-    "  • Install: https://bun.sh",
-    "  • Or:      clai --classic   (line REPL without OpenTUI)",
+    "OpenTUI needs the Bun runtime to render the full-screen UI.",
+    "clai will try to install Bun automatically on the next launch.",
+    "  • Manual install: https://bun.sh",
+    "  • Skip the TUI:  clai --classic  (uses the line-based REPL instead)",
   ].join("\n");
 }
 
@@ -128,7 +193,7 @@ export function reexecWithBunIfNeeded(entryPath: string): boolean {
   if (process.env.CLAI_FORCE_NODE === "1") return false;
 
   let bun = findBunExecutable();
-  if (!bun && process.stdout.isTTY) {
+  if (!bun) {
     bun = autoInstallBun();
   }
   if (!bun) return false;
