@@ -32,6 +32,12 @@ export function evaluateTui(env: TuiEnv): TuiCapability {
 }
 
 export function canUseTui(): TuiCapability {
+  // OpenTUI's native Zig FFI renderer doesn't ship Windows binaries yet.
+  // Skip the TUI entirely on Windows — avoids the Bun install + re-exec cycle
+  // that always ends in an FFI load failure anyway.
+  if (process.platform === "win32") {
+    return { ok: false, reason: "Windows (OpenTUI not yet supported)" };
+  }
   return evaluateTui({
     stdoutIsTTY: process.stdout.isTTY,
     stdinIsTTY: process.stdin.isTTY,
