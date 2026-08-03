@@ -3,12 +3,9 @@
  * Renders a `ThinkingItem` (CHAT-006, V2-053).
  *
  * Live stream: while the model is still reasoning (`item.streaming`), the body
- * is shown only when the user asked for reasoning — thinking enabled
- * (`/variants`) or expanded with Ctrl+T. Models like MiniMax M3, GLM and Kimi
- * reason by default no matter what we request, and printing that chain
- * verbatim contradicts an explicit `/variants off`. After the block is
- * finalized, the body follows the global Ctrl+T toggle (or a per-block
- * override from clicking the header).
+ * is always shown so the user sees live progress — regardless of the global
+ * thinking toggle (Ctrl+T). After the block is finalized, the body follows the
+ * global Ctrl+T toggle (or a per-block override from clicking the header).
  *
  * Placement: thinking rows always precede the ◆ Response / tool cards for
  * the same model step (agent emits thinking-block before assistant-message
@@ -43,7 +40,9 @@ export function ThinkingBlock(props: {
 }): ReactNode {
   const { item, theme, expanded, liveBody = true, contentWidth, onToggle } = props;
   const { width: termWidth } = useTerminalDimensions();
-  const showBody = expanded || (item.streaming && liveBody);
+  // Always show reasoning while it streams so the user sees live progress,
+  // then collapse once the block is finalized if thinking is toggled off.
+  const showBody = expanded || item.streaming;
   const onMouseUp = (event: MouseEvent): void => {
     event.preventDefault();
     // Only allow collapse/expand once the block is complete.
