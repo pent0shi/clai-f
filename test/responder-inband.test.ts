@@ -477,7 +477,7 @@ describe("ordinary-turn responder delivery", () => {
       (event): event is Extract<AgentEvent, { type: "tool-output" }> =>
         event.type === "tool-output" && event.id === calls[1]!.id,
     );
-    expect(secondOutput?.chunk).toContain("same action sequence");
+    expect(secondOutput?.chunk).toContain("already completed with identical arguments");
   });
 
   it("keeps a suppressed unchanged normal-job probe visible", async () => {

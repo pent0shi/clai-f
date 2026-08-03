@@ -2048,6 +2048,15 @@ export async function runAgentTurn(
         };
       }
 
+      if (call.name === "loop.reset") {
+        loopGuard.resetAllSequenceCounts();
+        const output = "Loop guard counters reset. You may re-run commands freely.";
+        const result: ToolResult = { ok: true, output, exitCode: 0 };
+        emitVisibleSyntheticReceipt(result, output);
+        loopGuard.recordAttempt(step, call.name, call.args, true, 0, output);
+        return { ok: true, call, result, contextOutput: output };
+      }
+
       if (
         call.name === "plan.create" ||
         call.name === "task.add" ||
@@ -5800,6 +5809,13 @@ export async function runAgentTurn(
             ),
           );
           continue;
+        }
+
+        if (sequenceDecision.warn && sequenceDecision.warnMessage) {
+          writeNotice("warn", sequenceDecision.warnMessage, chalk.yellow(`  ⚠ ${sequenceDecision.warnMessage}\n`));
+          messages.push(
+            recoveryUserMessage(sequenceDecision.warnMessage),
+          );
         }
 
         // Notice BEFORE tool cards so the transcript reads:

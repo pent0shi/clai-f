@@ -193,21 +193,93 @@ describe("LoopGuard", () => {
     ).toBe(false);
   });
 
-  it("suppresses an oscillated repeat (A→B→A) caught via the recent-sequence window", () => {
+  it("allows repeated sequences up to warn threshold without suppression", () => {
+    const guard = new LoopGuard();
+    const seq = [{ name: "shell.exec", args: { command: "node test.mjs" } }];
+
+    for (let i = 0; i < 4; i++) {
+      const decision = guard.observeActionSequence(seq);
+      expect(decision.suppress).toBe(false);
+      expect(decision.warn).toBe(false);
+      guard.completeActionSequence(seq, true);
+    }
+  });
+
+  it("warns at 5th repetition but does not suppress", () => {
+    const guard = new LoopGuard();
+    const seq = [{ name: "shell.exec", args: { command: "node test.mjs" } }];
+
+    for (let i = 0; i < 5; i++) {
+      guard.observeActionSequence(seq);
+      guard.completeActionSequence(seq, true);
+    }
+
+    const decision = guard.observeActionSequence(seq);
+    expect(decision.suppress).toBe(false);
+    expect(decision.warn).toBe(true);
+    expect(decision.warnMessage).toMatch(/loop\.reset/);
+  });
+
+  it("blocks at 10th repetition", () => {
+    const guard = new LoopGuard();
+    const seq = [{ name: "shell.exec", args: { command: "node test.mjs" } }];
+
+    for (let i = 0; i < 10; i++) {
+      guard.observeActionSequence(seq);
+      guard.completeActionSequence(seq, true);
+    }
+
+    const decision = guard.observeActionSequence(seq);
+    expect(decision.suppress).toBe(true);
+  });
+
+  it("resetAllSequenceCounts allows commands to run again after block threshold", () => {
+    const guard = new LoopGuard();
+    const seq = [{ name: "shell.exec", args: { command: "node test.mjs" } }];
+
+    for (let i = 0; i < 10; i++) {
+      guard.observeActionSequence(seq);
+      guard.completeActionSequence(seq, true);
+    }
+
+    expect(guard.observeActionSequence(seq).suppress).toBe(true);
+    guard.resetAllSequenceCounts();
+    const after = guard.observeActionSequence(seq);
+    expect(after.suppress).toBe(false);
+    expect(after.warn).toBe(false);
+  });
+
+  it("does not suppress oscillation (A→B→A) below warn threshold", () => {
     const guard = new LoopGuard();
     const seqA = [{ name: "fs.read", args: { path: "a" } }];
     const seqB = [{ name: "fs.read", args: { path: "b" } }];
 
-    // Complete A (eligible), then complete B (eligible). Returning to A is a repeat.
     guard.observeActionSequence(seqA);
     guard.completeActionSequence(seqA, true);
     guard.observeActionSequence(seqB);
     guard.completeActionSequence(seqB, true);
 
     const backToA = guard.observeActionSequence(seqA);
-    expect(backToA.suppress).toBe(true);
-    expect(backToA.oscillation).toBe(true);
-    expect(backToA.totalSuppressions).toBe(1);
+    expect(backToA.suppress).toBe(false);
+    expect(backToA.warn).toBe(false);
+  });
+
+  it("warns on oscillation at warn threshold", () => {
+    const guard = new LoopGuard();
+    const seqA = [{ name: "fs.read", args: { path: "a" } }];
+    const seqB = [{ name: "fs.read", args: { path: "b" } }];
+
+    for (let i = 0; i < 5; i++) {
+      guard.observeActionSequence(seqA);
+      guard.completeActionSequence(seqA, true);
+      guard.observeActionSequence(seqB);
+      guard.completeActionSequence(seqB, true);
+    }
+
+    const decision = guard.observeActionSequence(seqA);
+    expect(decision.suppress).toBe(false);
+    expect(decision.warn).toBe(true);
+    expect(decision.oscillation).toBe(true);
   });
 
   it("does not suppress a genuinely new sequence", () => {
@@ -221,27 +293,37 @@ describe("LoopGuard", () => {
     const fresh = guard.observeActionSequence(seqC);
     expect(fresh.suppress).toBe(false);
     expect(fresh.oscillation).toBe(false);
+    expect(fresh.warn).toBe(false);
   });
 
-  it("escalates to terminal after repeated suppressions across distinct sequences", () => {
+  it("getSequenceRunCount tracks completed eligible sequences", () => {
     const guard = new LoopGuard();
-    const mk = (path: string) => [{ name: "fs.read", args: { path } }];
+    const seq = [{ name: "shell.exec", args: { command: "npm test" } }];
 
-    // Drive totalSuppressions to the terminal threshold (4) via oscillation.
-    for (const path of ["a", "b", "c", "d"]) {
-      guard.observeActionSequence(mk(path));
-      guard.completeActionSequence(mk(path), true);
+    expect(guard.getSequenceRunCount(seq)).toBe(0);
+    guard.observeActionSequence(seq);
+    guard.completeActionSequence(seq, true);
+    expect(guard.getSequenceRunCount(seq)).toBe(1);
+    guard.observeActionSequence(seq);
+    guard.completeActionSequence(seq, true);
+    expect(guard.getSequenceRunCount(seq)).toBe(2);
+  });
+
+  it("resetSequenceCount clears count for a specific sequence", () => {
+    const guard = new LoopGuard();
+    const seq = [{ name: "shell.exec", args: { command: "npm test" } }];
+
+    for (let i = 0; i < 6; i++) {
+      guard.observeActionSequence(seq);
+      guard.completeActionSequence(seq, true);
     }
-    let decision = guard.observeActionSequence(mk("a")); // 1st suppression
-    expect(decision.suppress).toBe(true);
-    expect(decision.terminal).toBe(false);
-    decision = guard.observeActionSequence(mk("b")); // 2nd
-    expect(decision.suppress).toBe(true);
-    decision = guard.observeActionSequence(mk("c")); // 3rd
-    expect(decision.suppress).toBe(true);
-    decision = guard.observeActionSequence(mk("d")); // 4th → terminal
-    expect(decision.suppress).toBe(true);
-    expect(decision.terminal).toBe(true);
-    expect(decision.totalSuppressions).toBe(4);
+    expect(guard.getSequenceRunCount(seq)).toBe(6);
+    expect(guard.observeActionSequence(seq).warn).toBe(true);
+
+    guard.resetSequenceCount(seq);
+    expect(guard.getSequenceRunCount(seq)).toBe(0);
+    const after = guard.observeActionSequence(seq);
+    expect(after.warn).toBe(false);
+    expect(after.suppress).toBe(false);
   });
 });

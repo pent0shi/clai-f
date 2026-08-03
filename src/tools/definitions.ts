@@ -96,6 +96,7 @@ export const RUNNER_META_TOOL_NAMES = new Set([
 export const NON_REGISTRY_TOOL_NAMES = new Set([
   ...RUNNER_META_TOOL_NAMES,
   "agent.handoff",
+  "loop.reset",
 ]);
 
 export const TOOL_DEFINITIONS: ToolDefinition[] = [
@@ -1218,6 +1219,15 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         },
       },
       required: ["task", "reason"],
+      additionalProperties: false,
+    },
+  ),
+  def(
+    "loop.reset",
+    "Reset the action-sequence loop counter so a repeated command is not blocked. Call this ONLY when you are genuinely iterating (e.g. re-running a test after editing source) and the loop guard warned you. Do not call preemptively.",
+    {
+      type: "object",
+      properties: {},
       additionalProperties: false,
     },
   ),

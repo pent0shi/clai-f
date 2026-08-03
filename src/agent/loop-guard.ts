@@ -14,13 +14,8 @@ export interface ToolAttempt {
   exitCode?: number | undefined;
 }
 
-/** Bound attempt history so long thrash turns cannot retain thousands of sigs. */
 const MAX_ATTEMPT_HISTORY = 400;
 
-/**
- * Non-mutating tools that may legitimately need re-calling after context
- * compaction removes their earlier results.
- */
 const READ_ONLY_TOOLS = new Set([
   "web.fetch",
   "http.fetch",
@@ -38,11 +33,6 @@ const READ_ONLY_TOOLS = new Set([
   "pdf.read",
 ]);
 
-/**
- * Track tool attempts for failure reflection. Successful calls that produced
- * an observation remain repeatable; an empty success is different because the
- * model has no result from which to choose its next action.
- */
 export interface LoopGuardOptions {
   /** @deprecated Retry authorization belongs in RetryContext passed to shouldBlock. */
   allowUnlimitedFailedRetries?: boolean;
@@ -51,13 +41,9 @@ export interface LoopGuardOptions {
 }
 
 export interface RetryContext {
-  /** A dependency changed since the failed attempt. */
   dependenciesChanged?: boolean;
-  /** The execution environment changed since the failed attempt. */
   environmentChanged?: boolean;
-  /** Stable live state for status probes, excluding elapsed time. */
   stateKey?: string | undefined;
-  /** Structured justification for retrying without an external change. */
   retryReason?: {
     code: string;
     detail: string;
@@ -70,14 +56,17 @@ export interface LoopDecision {
   reason?: string | undefined;
 }
 
+const SEQUENCE_WARN_THRESHOLD = 5;
+const SEQUENCE_BLOCK_THRESHOLD = 10;
+
 export interface ActionSequenceDecision {
   suppress: boolean;
   terminal: boolean;
   repetitions: number;
-  /** Cumulative suppressions this turn, across distinct sequences (drives escalation). */
   totalSuppressions: number;
-  /** True when the repeat was caught via the recent-sequence window, not back-to-back. */
   oscillation: boolean;
+  warn: boolean;
+  warnMessage?: string | undefined;
 }
 
 export class LoopGuard {
@@ -87,24 +76,14 @@ export class LoopGuard {
   private lastActionSequence: string | undefined;
   private lastActionSequenceEligible = false;
   private actionSequenceRepetitions = 0;
-  /**
-   * Bounded window of recently completed eligible sequences. Catches A→B→A
-   * oscillation that a single lastActionSequence slot misses: returning to a
-   * sequence after intervening different work is still a repeat.
-   */
   private recentActionSequences: string[] = [];
   private static readonly MAX_RECENT_SEQUENCES = 8;
-  /** Cumulative suppressions this turn, across distinct sequences. */
   private totalSequenceSuppressions = 0;
-  /**
-   * A successful call with no body is not evidence that repeating the exact
-   * call can make progress. Keep only lightweight retry state, never output.
-   */
+  private sequenceRunCounts = new Map<string, number>();
   private emptySuccessfulCalls = new Map<
     string,
     { step: number; stateKey?: string | undefined; retryReason?: string | undefined }
   >();
-  /** Failed read-only signatures that already used their one free env-change retry. */
   private failedReadRetryUsed = new Set<string>();
   private successfulProbes = new Map<
     string,
@@ -142,17 +121,8 @@ export class LoopGuard {
     }
   }
 
-  /**
-   * Produce a canonical string for a (name, args) pair so that calls
-   * with identical semantics match even if arg order differs or
-   * command whitespace varies.
-   *
-   * Large string values (file contents) are fingerprinted — never kept
-   * verbatim — so writeMany scaffolds cannot pin multi-MB strings in Maps.
-   */
   canonicalize(name: string, args: Record<string, unknown>): string {
     const slimmed = slimToolArgs(args);
-    // Normalize shell command whitespace after slim (commands stay full when short).
     if (
       (name === "shell.exec" || name === "shell.start") &&
       typeof slimmed.command === "string"
@@ -160,6 +130,21 @@ export class LoopGuard {
       slimmed.command = slimmed.command.trim().replace(/\s+/g, " ");
     }
     return `${name}::${JSON.stringify(slimmed)}`;
+  }
+
+  private sequenceSignature(
+    calls: readonly {
+      name: string;
+      args: Record<string, unknown>;
+      stateKey?: string | undefined;
+    }[],
+  ): string {
+    return calls
+      .map(
+        (call) =>
+          `${this.canonicalize(call.name, call.args)}::state=${call.stateKey ?? ""}`,
+      )
+      .join(" ");
   }
 
   observeActionSequence(
@@ -175,6 +160,7 @@ export class LoopGuard {
       repetitions: 0,
       totalSuppressions: this.totalSequenceSuppressions,
       oscillation: false,
+      warn: false,
     };
     if (calls.length === 0) {
       this.lastActionSequence = undefined;
@@ -182,48 +168,82 @@ export class LoopGuard {
       this.actionSequenceRepetitions = 0;
       return none;
     }
-    const signature = calls
-      .map(
-        (call) =>
-          `${this.canonicalize(call.name, call.args)}::state=${call.stateKey ?? ""}`,
-      )
-      .join(" ");
+    const signature = this.sequenceSignature(calls);
+    const currentCount = this.sequenceRunCounts.get(signature) ?? 0;
+
     if (signature !== this.lastActionSequence) {
-      // Oscillation: this exact sequence already completed earlier in the
-      // window (A→B→A). Suppress immediately — intervening different work does
-      // not make re-running an identical completed sequence productive.
-      if (this.recentActionSequences.includes(signature)) {
-        this.totalSequenceSuppressions += 1;
-        this.lastActionSequence = signature;
-        this.lastActionSequenceEligible = false;
-        this.actionSequenceRepetitions = 0;
-        return {
-          suppress: true,
-          terminal: this.totalSequenceSuppressions >= 4,
-          repetitions: 1,
-          totalSuppressions: this.totalSequenceSuppressions,
-          oscillation: true,
-        };
-      }
+      const isOscillation = this.recentActionSequences.includes(signature);
       this.lastActionSequence = signature;
       this.lastActionSequenceEligible = false;
       this.actionSequenceRepetitions = 0;
+
+      if (isOscillation && currentCount >= SEQUENCE_BLOCK_THRESHOLD) {
+        this.totalSequenceSuppressions += 1;
+        return {
+          suppress: true,
+          terminal: this.totalSequenceSuppressions >= 4,
+          repetitions: currentCount,
+          totalSuppressions: this.totalSequenceSuppressions,
+          oscillation: true,
+          warn: false,
+        };
+      }
+      if (isOscillation && currentCount >= SEQUENCE_WARN_THRESHOLD) {
+        return {
+          suppress: false,
+          terminal: false,
+          repetitions: currentCount,
+          totalSuppressions: this.totalSequenceSuppressions,
+          oscillation: true,
+          warn: true,
+          warnMessage:
+            `You have run this exact action sequence ${currentCount} times this session. ` +
+            "Make sure you are not stuck in a loop repeating the same command without making progress. " +
+            "If you are receiving output and genuinely iterating (e.g. testing after edits), call loop.reset to reset the counter and continue. " +
+            `Commands will be blocked after ${SEQUENCE_BLOCK_THRESHOLD} repetitions.`,
+        };
+      }
       return none;
     }
+
     if (!this.lastActionSequenceEligible) {
       return none;
     }
+
     this.actionSequenceRepetitions += 1;
-    this.totalSequenceSuppressions += 1;
-    return {
-      suppress: true,
-      terminal:
-        this.actionSequenceRepetitions >= (calls.length > 1 ? 2 : 3) ||
-        this.totalSequenceSuppressions >= 4,
-      repetitions: this.actionSequenceRepetitions,
-      totalSuppressions: this.totalSequenceSuppressions,
-      oscillation: false,
-    };
+    const totalReps = currentCount + 1;
+
+    if (totalReps >= SEQUENCE_BLOCK_THRESHOLD) {
+      this.totalSequenceSuppressions += 1;
+      return {
+        suppress: true,
+        terminal:
+          this.actionSequenceRepetitions >= (calls.length > 1 ? 2 : 3) ||
+          this.totalSequenceSuppressions >= 4,
+        repetitions: this.actionSequenceRepetitions,
+        totalSuppressions: this.totalSequenceSuppressions,
+        oscillation: false,
+        warn: false,
+      };
+    }
+
+    if (totalReps >= SEQUENCE_WARN_THRESHOLD) {
+      return {
+        suppress: false,
+        terminal: false,
+        repetitions: this.actionSequenceRepetitions,
+        totalSuppressions: this.totalSequenceSuppressions,
+        oscillation: false,
+        warn: true,
+        warnMessage:
+          `You have run this exact action sequence ${totalReps} times this session. ` +
+          "Make sure you are not stuck in a loop repeating the same command without making progress. " +
+          "If you are receiving output and genuinely iterating (e.g. testing after edits), call loop.reset to reset the counter and continue. " +
+          `Commands will be blocked after ${SEQUENCE_BLOCK_THRESHOLD} repetitions.`,
+      };
+    }
+
+    return none;
   }
 
   completeActionSequence(
@@ -235,20 +255,14 @@ export class LoopGuard {
     eligible: boolean,
   ): void {
     if (calls.length === 0) return;
-    const signature = calls
-      .map(
-        (call) =>
-          `${this.canonicalize(call.name, call.args)}::state=${call.stateKey ?? ""}`,
-      )
-      .join(" ");
+    const signature = this.sequenceSignature(calls);
     if (signature !== this.lastActionSequence) return;
     this.lastActionSequenceEligible = eligible;
     if (!eligible) {
       this.actionSequenceRepetitions = 0;
       return;
     }
-    // Record the completed eligible sequence so a later identical sequence is
-    // caught even after intervening different work (A→B→A oscillation).
+    this.sequenceRunCounts.set(signature, (this.sequenceRunCounts.get(signature) ?? 0) + 1);
     const existing = this.recentActionSequences.indexOf(signature);
     if (existing >= 0) this.recentActionSequences.splice(existing, 1);
     this.recentActionSequences.push(signature);
@@ -258,6 +272,47 @@ export class LoopGuard {
         this.recentActionSequences.length - LoopGuard.MAX_RECENT_SEQUENCES,
       );
     }
+  }
+
+  resetSequenceCount(
+    calls: readonly {
+      name: string;
+      args: Record<string, unknown>;
+      stateKey?: string | undefined;
+    }[],
+  ): boolean {
+    if (calls.length === 0) return false;
+    const signature = this.sequenceSignature(calls);
+    return this.resetSequenceCountBySignature(signature);
+  }
+
+  resetSequenceCountBySignature(signature: string): boolean {
+    if (!this.sequenceRunCounts.has(signature)) return false;
+    this.sequenceRunCounts.delete(signature);
+    const idx = this.recentActionSequences.indexOf(signature);
+    if (idx >= 0) this.recentActionSequences.splice(idx, 1);
+    this.actionSequenceRepetitions = 0;
+    return true;
+  }
+
+  resetAllSequenceCounts(): void {
+    this.sequenceRunCounts.clear();
+    this.recentActionSequences.length = 0;
+    this.actionSequenceRepetitions = 0;
+    this.totalSequenceSuppressions = 0;
+    this.lastActionSequence = undefined;
+    this.lastActionSequenceEligible = false;
+  }
+
+  getSequenceRunCount(
+    calls: readonly {
+      name: string;
+      args: Record<string, unknown>;
+      stateKey?: string | undefined;
+    }[],
+  ): number {
+    if (calls.length === 0) return 0;
+    return this.sequenceRunCounts.get(this.sequenceSignature(calls)) ?? 0;
   }
 
   recordAttempt(
@@ -346,7 +401,6 @@ export class LoopGuard {
     );
   }
 
-  /** Drop list/read signatures that touch paths a successful tool may have created. */
   private invalidateReadsAfterSuccess(
     name: string,
     args: Record<string, unknown>,
@@ -387,11 +441,6 @@ export class LoopGuard {
     }
   }
 
-  /**
-   * Only blocks *failed* identical re-tries without changed context.
-   * Successful re-calls always pass through with no warning — no
-   * "already succeeded / use prior results" messaging.
-   */
   shouldBlock(
     name: string,
     args: Record<string, unknown>,
@@ -404,10 +453,6 @@ export class LoopGuard {
     const sig = this.canonicalize(name, args);
     const emptySuccess = this.emptySuccessfulCalls.get(sig);
     if (emptySuccess) {
-      // A probe that reports its own live state is authoritative about whether
-      // re-reading can reveal anything new. Unrelated work finishing in between
-      // must not re-authorize it, or a poll interleaved with real actions
-      // repeats forever.
       if (
         retryContext?.stateKey !== undefined &&
         retryContext.stateKey !== emptySuccess.stateKey
@@ -520,8 +565,6 @@ export class LoopGuard {
       return { block: false };
     }
 
-    // Previously-failed signature: allow structured retry, or one free retry
-    // for read-only tools after environment-changing successful work.
     const structuredReason = retryContext?.retryReason;
     const authorized =
       retryContext?.dependenciesChanged === true ||
@@ -558,20 +601,12 @@ export class LoopGuard {
     return this.signatureCount.get(sig) ?? 0;
   }
 
-  /**
-   * Check if recent calls show a pattern of repeated failures
-   * (e.g., command not found → retry → not found → ...).
-   */
   hasRepeatedFailures(threshold = 3): boolean {
     if (this.attempts.length < threshold) return false;
     const recent = this.attempts.slice(-threshold);
     return recent.every((a) => !a.ok);
   }
 
-  /**
-   * Count consecutive failures trailing the most recent attempts.
-   * Stops at the first success (or the start of the history).
-   */
   consecutiveFailureCount(): number {
     let count = 0;
     for (let i = this.attempts.length - 1; i >= 0; i--) {
@@ -581,10 +616,6 @@ export class LoopGuard {
     return count;
   }
 
-  /**
-   * Returns a reflection prompt when recent failures suggest the agent may
-   * be stuck, or null if everything looks fine.
-   */
   getFailureReflection(): string | null {
     const consecutiveFailures = this.consecutiveFailureCount();
     if (consecutiveFailures < 3) return null;
@@ -615,10 +646,6 @@ DECIDE one of:
 Do NOT keep trying variations of the same failing approach without explicitly deciding to SWITCH or STOP first.`;
   }
 
-  /**
-   * Reset counters for read-only tools. Called after context compaction
-   * so the model can re-fetch data whose results were compacted away.
-   */
   resetReadOnly(): void {
     for (const sig of [...this.signatureCount.keys()]) {
       const name = sig.split("::")[0] ?? "";

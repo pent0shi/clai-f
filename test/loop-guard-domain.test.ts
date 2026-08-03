@@ -36,4 +36,49 @@ describe("loop guard semantics", () => {
     guard.recordAttempt(4, "shell.exec", { command: " npm   test " }, true);
     expect(guard.getAttemptCount("shell.exec", { command: "npm test" })).toBe(1);
   });
+
+  it("graduated sequence guard: no suppress below warn threshold", () => {
+    const guard = new LoopGuard();
+    const seq = [{ name: "shell.exec", args: { command: "node police-test.mjs" } }];
+
+    for (let i = 0; i < 4; i++) {
+      const d = guard.observeActionSequence(seq);
+      expect(d.suppress).toBe(false);
+      expect(d.warn).toBe(false);
+      guard.completeActionSequence(seq, true);
+    }
+  });
+
+  it("graduated sequence guard: warns at threshold, blocks at hard limit", () => {
+    const guard = new LoopGuard();
+    const seq = [{ name: "shell.exec", args: { command: "node police-test.mjs" } }];
+
+    for (let i = 0; i < 5; i++) {
+      guard.observeActionSequence(seq);
+      guard.completeActionSequence(seq, true);
+    }
+    const warn = guard.observeActionSequence(seq);
+    expect(warn.suppress).toBe(false);
+    expect(warn.warn).toBe(true);
+    guard.completeActionSequence(seq, true);
+
+    for (let i = 6; i < 10; i++) {
+      guard.observeActionSequence(seq);
+      guard.completeActionSequence(seq, true);
+    }
+    const block = guard.observeActionSequence(seq);
+    expect(block.suppress).toBe(true);
+  });
+
+  it("resetAllSequenceCounts unblocks after hard limit", () => {
+    const guard = new LoopGuard();
+    const seq = [{ name: "shell.exec", args: { command: "node police-test.mjs" } }];
+    for (let i = 0; i < 10; i++) {
+      guard.observeActionSequence(seq);
+      guard.completeActionSequence(seq, true);
+    }
+    expect(guard.observeActionSequence(seq).suppress).toBe(true);
+    guard.resetAllSequenceCounts();
+    expect(guard.observeActionSequence(seq).suppress).toBe(false);
+  });
 });
