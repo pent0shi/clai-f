@@ -9,7 +9,7 @@
 import { createElement } from "react";
 import { createCliRenderer } from "@opentui/core";
 import { createRoot } from "@opentui/react";
-import { createInMemoryClipboardPort } from "../../app/adapters/in-memory-clipboard-adapter.js";
+import { createSystemClipboardPort } from "../../app/adapters/in-memory-clipboard-adapter.js";
 import type { Mode, ProviderId } from "../../types.js";
 import { App } from "../app/App.js";
 import { ServicesProvider } from "../app/providers.js";
@@ -34,16 +34,10 @@ export interface StartTuiV2Options {
 export async function startTuiV2(
   options: StartTuiV2Options = {},
 ): Promise<void> {
-  // Must run before any <text content=…> mounts — null content crashes OpenTUI.
   patchOpenTuiTextContent();
-  // Never let sudo/ssh steal stdin — that freezes the TUI (Password: under
-  // composer, Esc/Ctrl+C/clicks dead). Elevation uses the secret modal + -S.
   setAllowInteractiveStdinInherit(false);
-  // OpenTUI native drag-select is enabled. Interactive chrome (prompts/tools/
-  // composer) sets selectable={false}; response/thinking body stays selectable.
-  // Copy-on-release is wired in TranscriptView via useNativeSelectionCopy.
   const capabilities = readCapabilitiesFromProcess();
-  const fallbackClipboard = createInMemoryClipboardPort();
+  const fallbackClipboard = createSystemClipboardPort();
   // We own Ctrl+C (abort then double-press exit). OpenTUI must not kill the
   // process on the first press, and SIGINT is handled cooperatively below.
   const renderer = await createCliRenderer({

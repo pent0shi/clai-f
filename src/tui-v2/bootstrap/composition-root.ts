@@ -24,7 +24,7 @@ import { createCurrentJobsPort } from "../../app/adapters/current-jobs-adapter.j
 import { createCurrentInteractiveSessionsPort } from "../../app/adapters/current-interactive-sessions-adapter.js";
 import type { InteractiveSessionsPort } from "../../app/ports/interactive-sessions-port.js";
 import { createCurrentUpdatesPort } from "../../app/adapters/current-updates-adapter.js";
-import { createInMemoryClipboardPort } from "../../app/adapters/in-memory-clipboard-adapter.js";
+import { createSystemClipboardPort } from "../../app/adapters/in-memory-clipboard-adapter.js";
 import { SessionController } from "../../app/controllers/session-controller.js";
 import {
   buildDefaultCommandRegistry,
@@ -182,7 +182,7 @@ export function createCompositionRoot(
     interactiveSessions:
       options.interactiveSessions ?? createCurrentInteractiveSessionsPort(),
     updates: options.updates ?? createCurrentUpdatesPort(),
-    clipboard: options.clipboard ?? createInMemoryClipboardPort(),
+    clipboard: options.clipboard ?? createSystemClipboardPort(),
     confirm: options.confirm ?? createOverlayConfirmPort(overlay),
     requestSecret: options.requestSecret ?? createOverlaySecretPort(overlay),
   };

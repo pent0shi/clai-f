@@ -37,11 +37,11 @@ function baseKeyName(name: string): string {
 
 export function chordFromKeyEvent(key: KeyEventLike): string {
   const isLinefeed = key.name === "linefeed";
-  // Shift+Tab arrives as either {name:"tab",shift:true} or a bare "backtab".
   const isBacktab = key.name === "backtab";
   const ctrl = key.ctrl || isLinefeed;
   const alt = Boolean(key.option || key.meta);
-  const shift = Boolean(key.shift) || isBacktab;
+  const isUpper = key.name.length === 1 && key.name >= "A" && key.name <= "Z";
+  const shift = Boolean(key.shift) || isBacktab || isUpper;
   const meta = Boolean(key.super);
 
   const parts: string[] = [];

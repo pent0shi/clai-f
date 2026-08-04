@@ -138,12 +138,10 @@ export function tasksToggleLabel(
   visible: boolean,
   density: StatusDensity | boolean = "lg",
 ): string {
-  // Back-compat: tests/callers that pass `compact: true` map to sm.
   const d: StatusDensity =
     typeof density === "boolean" ? (density ? "sm" : "lg") : density;
-  if (d === "xs" || d === "sm") return "^H";
-  if (d === "md") return visible ? "^H hide" : "^H show";
-  return visible ? "^H · hide" : "^H · show";
+  if (d === "xs") return "^H";
+  return "Tasks";
 }
 
 export function responderStatusText(
@@ -545,7 +543,7 @@ export function StatusLine(props: StatusLineProps): ReactNode {
               {sep(theme)}
               <ClickableHint
                 short={tasksToggleLabel(planVisible, density)}
-                expand={planVisible ? "hide tasks" : "show tasks"}
+                expand="Tasks"
                 active={planVisible}
                 theme={theme}
                 onClick={onTogglePlan}
@@ -738,7 +736,7 @@ export function StatusLine(props: StatusLineProps): ReactNode {
             {sep(theme)}
             <ClickableHint
               short={tasksToggleLabel(planVisible, density)}
-              expand={planVisible ? "hide tasks" : "show tasks"}
+              expand="Tasks"
               active={planVisible}
               theme={theme}
               onClick={onTogglePlan}

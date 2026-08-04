@@ -48,4 +48,9 @@ describe("chordFromKeyEvent", () => {
     expect(chordFromKeyEvent({ name: "tab", shift: true })).toBe("shift+tab");
     expect(chordFromKeyEvent({ name: "backtab" })).toBe("shift+tab");
   });
+
+  it("maps uppercase character names to shift chords", () => {
+    expect(chordFromKeyEvent({ name: "X", ctrl: true })).toBe("ctrl+shift+x");
+    expect(chordFromKeyEvent({ name: "X" })).toBe("shift+x");
+  });
 });

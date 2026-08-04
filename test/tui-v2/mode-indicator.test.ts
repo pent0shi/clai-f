@@ -15,15 +15,14 @@ describe("composer mode indicator", () => {
   });
 
   it("labels the active Tasks pane action by density", () => {
-    expect(tasksToggleLabel(true, "lg")).toBe("^H · hide");
-    expect(tasksToggleLabel(false, "lg")).toBe("^H · show");
-    expect(tasksToggleLabel(true, "md")).toBe("^H hide");
-    expect(tasksToggleLabel(false, "md")).toBe("^H show");
-    expect(tasksToggleLabel(true, "sm")).toBe("^H");
-    expect(tasksToggleLabel(false, "sm")).toBe("^H");
-    // boolean compact back-compat
-    expect(tasksToggleLabel(true, true)).toBe("^H");
-    expect(tasksToggleLabel(false, false)).toBe("^H · show");
+    expect(tasksToggleLabel(true, "lg")).toBe("Tasks");
+    expect(tasksToggleLabel(false, "lg")).toBe("Tasks");
+    expect(tasksToggleLabel(true, "md")).toBe("Tasks");
+    expect(tasksToggleLabel(false, "md")).toBe("Tasks");
+    expect(tasksToggleLabel(true, "sm")).toBe("Tasks");
+    expect(tasksToggleLabel(false, "sm")).toBe("Tasks");
+    expect(tasksToggleLabel(true, true)).toBe("Tasks");
+    expect(tasksToggleLabel(false, false)).toBe("Tasks");
   });
 
   it("presents concise, distinct copy for every live session mode", () => {
