@@ -56,7 +56,45 @@ cd clai && npm install && npm run build && npm start
 
 Node.js ≥ 20. Type `clai` in any terminal to start.
 
+### Platform notes
+
+<table>
+<tr><th>Platform</th><th>Full-screen TUI (OpenTUI)</th><th>Classic REPL (<code>--classic</code>)</th></tr>
+<tr><td>macOS</td><td>✅ Full support</td><td>✅</td></tr>
+<tr><td>Linux</td><td>✅ Full support</td><td>✅</td></tr>
+<tr><td>Windows</td><td>❌ Not available yet</td><td>✅ Automatic fallback</td></tr>
+</table>
+
+**Windows:** OpenTUI's native renderer does not ship Windows binaries yet, so clai automatically starts in classic REPL mode — no extra flags needed. All core features (ask, agent, multi-key rotation, pentesting, plans, history) work identically; only the full-screen UI is absent.
+
+> **Note:** The standalone Windows binary (`clai.exe` via `install.ps1` / Scoop) may crash silently on some Windows builds. If `clai` returns without output after the raw-URL install, use the **npm method** instead — it is the most reliable way to run clai on Windows:
+> ```powershell
+> npm i -g @pentoshi/clai
+> ```
+
+**Linux — terminal recommendations for full mouse & hover support:**
+
+The full-screen TUI uses mouse tracking and hover events via OpenTUI's Zig FFI renderer. Not all Linux terminal emulators report these correctly. If you see missing hover highlights, broken scroll, or no mouse response:
+
+| Terminal | Mouse/Hover | Notes |
+|----------|-------------|-------|
+| **Kitty** | ✅ Full | Recommended — fastest GPU-rendered terminal, full mouse protocol support |
+| **Alacritty** | ✅ Full | GPU-accelerated, excellent mouse support |
+| **WezTerm** | ✅ Full | Cross-platform, great defaults |
+| **iTerm2** (macOS) | ✅ Full | Native macOS, full mouse + hover |
+| **macOS Terminal** | ✅ Full | Works out of the box |
+| **GNOME Terminal** | ⚠️ Partial | Mouse clicks work; hover/SGR mouse mode may be limited |
+| **Konsole** | ⚠️ Partial | Some hover events may not report |
+| **xterm** | ⚠️ Partial | Needs `xterm -xrm 'XTerm*allowMouseOps: true'` |
+| **Linux TTY** (bare `/dev/tty`) | ❌ None | No mouse support; use `clai --classic` |
+| **tmux / screen** | ⚠️ Varies | Add `set -g mouse on` to `~/.tmux.conf`; passthrough depends on the outer terminal |
+
+> **Tip:** For the best experience on Linux, use **Kitty**, **Alacritty**, or **WezTerm**. These support SGR extended mouse reporting, which is what OpenTUI requires for hover, click, and scroll events. If your terminal doesn't support hover, clai still works — you just won't see hover highlights on buttons and links.
+>
+> For tmux users: `set -g mouse on` enables mouse passthrough, but hover quality depends on the outer terminal emulator.
+
 ---
+
 
 ## Quick start
 
