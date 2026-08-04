@@ -41,25 +41,32 @@ export function ContextLimitChip(props: {
   exact: boolean;
   usage: ContextUsageSnapshot;
   session: SessionController;
+  /** Called when the inline editor closes so the caller can restore focus. */
+  onEditingDone?: (() => void) | undefined;
 }): ReactNode {
-  const { chip, theme, exact, usage, session } = props;
+  const { chip, theme, exact, usage, session, onEditingDone } = props;
   const [editing, setEditing] = useState(false);
   const [hovered, setHovered] = useState(false);
+  const [clickExpanded, setClickExpanded] = useState(false);
   const [value, setValue] = useState("");
   const open = (): void => {
     setValue(usage.contextLimit > 0 ? String(usage.contextLimit) : "");
     setEditing(true);
+    setClickExpanded(false);
+    setHovered(false);
   };
   const submit = (): void => {
     const limit = parseContextLimitInput(value);
     if (limit === null) return;
     session.setContextLimitTokens(limit);
     setEditing(false);
+    onEditingDone?.();
   };
   const reset = (): void => {
     session.setContextLimitTokens(undefined);
     setValue("");
     setEditing(false);
+    onEditingDone?.();
   };
 
   if (editing) {
@@ -95,7 +102,8 @@ export function ContextLimitChip(props: {
     );
   }
 
-  const label = hovered ? "edit ctx limit" : chip;
+  const shown = hovered || clickExpanded;
+  const label = shown ? "edit ctx limit" : chip;
   return (
     <box
       onMouseDown={(event) => {
@@ -103,12 +111,18 @@ export function ContextLimitChip(props: {
         event.stopPropagation();
         open();
       }}
-      onMouseOver={() => setHovered(true)}
-      onMouseOut={() => setHovered(false)}
+      onMouseOver={() => {
+        setHovered(true);
+        setClickExpanded(false);
+      }}
+      onMouseOut={() => {
+        setHovered(false);
+        setClickExpanded(false);
+      }}
       style={{
         flexDirection: "row",
         flexShrink: 0,
-        backgroundColor: hovered ? theme.selection : theme.background,
+        backgroundColor: shown ? theme.selection : theme.background,
         paddingLeft: 1,
         paddingRight: 1,
       }}
@@ -117,10 +131,11 @@ export function ContextLimitChip(props: {
         selectable={false}
         content={label}
         style={{
-          fg: hovered ? theme.white : exact ? theme.cyan : theme.muted,
-          attributes: hovered || exact ? TextAttributes.BOLD : TextAttributes.DIM,
+          fg: shown ? theme.white : exact ? theme.cyan : theme.muted,
+          attributes: shown || exact ? TextAttributes.BOLD : TextAttributes.DIM,
         }}
       />
     </box>
   );
 }
+

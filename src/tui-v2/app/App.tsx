@@ -757,6 +757,7 @@ export function App(): ReactNode {
           onCycleMode={cycleMode}
           cancelArmed={escapeCancelArmed}
           onRequestCancel={() => handleEscapeCancellation(false)}
+          onFocusComposer={() => services.focus.focusRegion("composer")}
         />
       </box>
 

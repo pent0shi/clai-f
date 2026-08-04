@@ -64,6 +64,8 @@ export interface StatusLineProps {
   readonly cancelArmed?: boolean | undefined;
   /** Arm/confirm cancellation — the same controller path Esc uses. */
   readonly onRequestCancel?: (() => void) | undefined;
+  /** Restore keyboard focus to the composer (e.g. after inline context-limit editing). */
+  readonly onFocusComposer?: (() => void) | undefined;
 }
 
 const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"] as const;
@@ -251,6 +253,10 @@ function ScrollRemainderBadges(props: {
  * Compact chip that expands on hover.
  * Idle: short chord (`^T`). Hover: full action (`show thinking`).
  * `accent`: cyan emphasis for primary actions (Esc · cancel while running).
+ *
+ * On terminals without hover (no `onMouseOut` events — common on native Linux
+ * terminals), clicking toggles the expanded label and auto-dismisses it after
+ * a short delay so it doesn't stick forever.
  */
 function ClickableHint(props: {
   /** Short label when not hovered (e.g. `^T`). */
@@ -265,21 +271,26 @@ function ClickableHint(props: {
 }): ReactNode {
   const { short, expand, active, theme, onClick, accent = false } = props;
   const [hovered, setHovered] = useState(false);
+  // Track whether the last expand was caused by hover or click, so we know
+  // whether to auto-dismiss (click on non-hover terminals) or rely on
+  // onMouseOut (hover-capable terminals).
+  const [clickExpanded, setClickExpanded] = useState(false);
   const full = expand ?? short;
-  const content = hovered ? full : short;
+  const shown = hovered || clickExpanded;
+  const content = shown ? full : short;
 
-  const fg = hovered
+  const fg = shown
     ? theme.white
     : active || accent
       ? theme.cyan
       : theme.muted;
-  const bg = hovered
+  const bg = shown
     ? theme.selection
     : accent
       ? theme.chip
       : theme.background;
   const attributes =
-    hovered || active || accent ? TextAttributes.BOLD : TextAttributes.NONE;
+    shown || active || accent ? TextAttributes.BOLD : TextAttributes.NONE;
 
   return (
     <box
@@ -287,9 +298,23 @@ function ClickableHint(props: {
         event.preventDefault();
         event.stopPropagation();
         onClick?.();
+        // On non-hover terminals, onMouseOut never fires so the expanded
+        // label gets stuck. Show the expanded label briefly on click, then
+        // auto-dismiss after 1.5 seconds.
+        if (!hovered) {
+          setClickExpanded(true);
+          setTimeout(() => setClickExpanded(false), 1500);
+        }
       }}
-      onMouseOver={() => setHovered(true)}
-      onMouseOut={() => setHovered(false)}
+      onMouseOver={() => {
+        setHovered(true);
+        // If we had a click-expand timer running, clear it — real hover took over.
+        setClickExpanded(false);
+      }}
+      onMouseOut={() => {
+        setHovered(false);
+        setClickExpanded(false);
+      }}
       style={{
         flexDirection: "row",
         alignItems: "center",
@@ -307,6 +332,7 @@ function ClickableHint(props: {
     </box>
   );
 }
+
 
 function ModeBadge(props: {
   mode: Mode;
@@ -360,6 +386,7 @@ export function StatusLine(props: StatusLineProps): ReactNode {
     onCycleMode,
     cancelArmed = false,
     onRequestCancel,
+    onFocusComposer,
   } = props;
   const state = useSessionState(session);
   const [frame, setFrame] = useState(0);
@@ -563,6 +590,7 @@ export function StatusLine(props: StatusLineProps): ReactNode {
               exact={state.contextUsage.exact}
               usage={state.contextUsage}
               session={session}
+              onEditingDone={onFocusComposer}
             />
           ) : null}
           <ScrollRemainderBadges
@@ -758,6 +786,7 @@ export function StatusLine(props: StatusLineProps): ReactNode {
             exact={state.contextUsage.exact}
             usage={state.contextUsage}
             session={session}
+            onEditingDone={onFocusComposer}
           />
         ) : null}
         <ScrollRemainderBadges
