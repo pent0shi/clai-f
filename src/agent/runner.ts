@@ -4245,20 +4245,14 @@ export async function runAgentTurn(
         const callIds: string[] = [];
         let streamedCallsCount = 0;
         // A model can think silently for minutes. Without a heartbeat the UI
-        // shows a frozen label and the turn looks hung, so surface elapsed time
-        // and the current phase on a timer rather than only on token arrival.
-        const streamStartedAt = Date.now();
+        // shows a frozen label and the turn looks hung, so surface the current
+        // phase on a timer rather than only on token arrival.
         const streamPhase = (): string => {
-          const seconds = Math.round((Date.now() - streamStartedAt) / 1000);
-          const elapsed =
-            seconds < 60
-              ? `${seconds}s`
-              : `${Math.floor(seconds / 60)}m${String(seconds % 60).padStart(2, "0")}s`;
           if (generatedTokens > 0 && !inThinking) {
-            return `generating response · ${elapsed}`;
+            return "generating response";
           }
-          if (sawReasoning) return `thinking · ${elapsed}`;
-          return `waiting for model · ${elapsed}`;
+          if (sawReasoning) return "thinking";
+          return "waiting for model";
         };
         const heartbeat = setInterval(() => {
           const text = streamPhase();
