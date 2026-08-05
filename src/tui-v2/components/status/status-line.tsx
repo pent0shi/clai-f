@@ -10,7 +10,7 @@
  *  - lg  (≥96):  full shortcut row
  */
 
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { TextAttributes } from "@opentui/core";
 import { homedir } from "node:os";
 import { execFile } from "node:child_process";
@@ -253,14 +253,48 @@ function ClickableHint(props: {
 }): ReactNode {
   const { short, expand, active, theme, onClick, accent = false } = props;
   const full = expand ?? short;
+  const [hovered, setHovered] = useState(false);
+  const hideTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
-  const fg = active || accent ? theme.cyan : theme.muted;
-  const bg = accent ? theme.chip : theme.background;
+  const reveal = (): void => {
+    if (hideTimer.current) {
+      clearTimeout(hideTimer.current);
+      hideTimer.current = undefined;
+    }
+    setHovered(true);
+  };
+  const scheduleHide = (): void => {
+    if (hideTimer.current) clearTimeout(hideTimer.current);
+    hideTimer.current = setTimeout(() => {
+      setHovered(false);
+      hideTimer.current = undefined;
+    }, 300);
+  };
+  useEffect(
+    () => () => {
+      if (hideTimer.current) clearTimeout(hideTimer.current);
+    },
+    [],
+  );
+
+  const shown = hovered;
+  const fg = shown
+    ? theme.white
+    : active || accent
+      ? theme.cyan
+      : theme.muted;
+  const bg = shown
+    ? theme.selection
+    : accent
+      ? theme.chip
+      : theme.background;
   const attributes =
-    active || accent ? TextAttributes.BOLD : TextAttributes.NONE;
+    shown || active || accent ? TextAttributes.BOLD : TextAttributes.NONE;
 
   return (
     <box
+      onMouseOver={reveal}
+      onMouseOut={scheduleHide}
       onMouseDown={(event) => {
         event.preventDefault();
         event.stopPropagation();
@@ -277,7 +311,7 @@ function ClickableHint(props: {
     >
       <text
         selectable={false}
-        content={short}
+        content={shown ? full : short}
         style={{ fg, bg, attributes }}
       />
     </box>
