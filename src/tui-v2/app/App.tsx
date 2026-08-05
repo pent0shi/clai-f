@@ -12,7 +12,7 @@
 
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useKeyboard, useTerminalDimensions } from "@opentui/react";
-import type { MouseEvent } from "@opentui/core";
+import type { MouseEvent, ScrollBoxRenderable } from "@opentui/core";
 import {
   COMPOSER_MAX_HEIGHT,
   MIN_CHAT_ROWS,
@@ -20,7 +20,8 @@ import {
 } from "../layout/compute-layout.js";
 import { ComposerEditor } from "../composer/composer-editor.js";
 import { maxComposerTextRows } from "../composer/composer-height.js";
-import { TranscriptView } from "../components/transcript/transcript-view.js";
+import { TranscriptView, useTranscriptFollowKey } from "../components/transcript/transcript-view.js";
+import { TranscriptScrollbar } from "../components/transcript/transcript-scrollbar.js";
 import { PlanView } from "../components/plan/plan-view.js";
 import { OverlayHost } from "../components/overlay/overlay-host.js";
 import { QueuePanel } from "../components/queue/queue-panel.js";
@@ -147,6 +148,8 @@ export function App(): ReactNode {
   });
 
   const session = useSessionState(services.session);
+  const transcriptScrollRef = useRef<ScrollBoxRenderable>(null);
+  const followKey = useTranscriptFollowKey(transcript, session.running);
   const horizontalPadding = width >= 56 ? 2 : width >= 28 ? 1 : 0;
   const completionRows = Math.max(6, Math.min(12, Math.floor(height / 3)));
 
@@ -665,6 +668,7 @@ export function App(): ReactNode {
               theme={theme}
               focused={focusContext === "transcript" && overlay.kind === "none"}
               contentWidth={Math.max(20, chatContentWidth - planChatGap)}
+              scrollRef={transcriptScrollRef}
             />
           </box>
           {layout.plan.placement === "split" && planPresent && splitPlanW > 0 ? (
@@ -760,6 +764,12 @@ export function App(): ReactNode {
           onFocusComposer={() => services.focus.focusRegion("composer")}
         />
       </box>
+
+      <TranscriptScrollbar
+        scrollRef={transcriptScrollRef}
+        theme={theme}
+        followKey={followKey}
+      />
 
       {layout.plan.placement === "overlay" && planPresent ? (
         <box

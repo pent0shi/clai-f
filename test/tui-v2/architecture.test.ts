@@ -69,6 +69,7 @@ const RENDERER_ALLOWED = new Set<string>([
   join(tuiV2Root, "components", "plan", "use-pane-presence.ts"),
   join(tuiV2Root, "components", "overlay", "overlay-host.tsx"),
   join(tuiV2Root, "components", "transcript", "selectable-line.tsx"),
+  join(tuiV2Root, "components", "transcript", "transcript-scrollbar.tsx"),
 ]);
 
 function walk(dir: string): string[] {

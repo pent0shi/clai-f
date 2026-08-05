@@ -52,11 +52,8 @@ export interface TranscriptViewProps {
   readonly services: AppServices;
   readonly theme: Theme;
   readonly focused: boolean;
-  /**
-   * Available content columns for the chat pane (not full terminal). Used for
-   * the intro card and markdown wrap (tables reflow when the plan pane is open).
-   */
   readonly contentWidth?: number | undefined;
+  readonly scrollRef?: React.RefObject<ScrollBoxRenderable | null>;
 }
 /** Hide OpenTUI's native scrollbar chrome. */
 const HIDDEN_SCROLLBARS = {
@@ -86,50 +83,16 @@ function publishScrollRemainder(sb: ScrollBoxRenderable | null): void {
     linesBelow: Math.max(0, max - top),
   });
 }
-export function TranscriptView(props: TranscriptViewProps): ReactNode {
-  const { services, theme, focused, contentWidth } = props;
-  const state = useTranscriptState(services.transcript);
-  const session = useSessionState(services.session);
-  const items = useMemo(() => transcriptItems(state), [state]);
-  /**
-   * Whether reasoning paints live. Re-read at each turn boundary rather than
-   * per frame: the transcript re-renders on every streamed token, and this only
-   * changes when the user runs `/variants` between turns.
-   */
-  const liveThinking = useMemo(() => getConfig().thinking.enabled, [session.running]);
-  const { width: termWidth } = useTerminalDimensions();
-  // Prefer the shell-provided chat width so split/overlay plan never draws
-  // the intro card (or markdown tables) wider than the remaining columns.
-  const paneWidth = Math.max(20, contentWidth ?? termWidth - 6);
-  const introWidth = Math.max(40, paneWidth);
-  const scrollRef = useRef<ScrollBoxRenderable>(null);
-  const closeOverlay = useRef<(() => void) | undefined>(undefined);
-  const lastCount = useRef(items.length);
-  /**
-   * Product-level follow flag (force re-pin). OpenTUI sticky scroll is the
-   * primary follower; this tracks intentional scroll-away.
-   */
-  const followBottom = useRef(true);
-  const wasRunning = useRef(false);
-  const dragPointer = useRef<{ x: number; y: number } | undefined>(undefined);
-  const dragFrame = useRef<number | undefined>(undefined);
-  const pointerGestureActive = useRef(false);
-  const copySemanticOnRelease = useRef(false);
-  const scrollSnapshot = useRef<
-    { scrollTop: number; scrollHeight: number; viewportHeight: number } | undefined
-  >(undefined);
-
-  /**
-   * Bumps when anything visible can grow: new rows, streaming tails on the
-   * last few items, tool output bytes, running status.
-   */
-  const followKey = useMemo(() => {
+export function useTranscriptFollowKey(
+  state: ReturnType<typeof useTranscriptState>,
+  running: boolean,
+): string {
+  return useMemo(() => {
     const parts: string[] = [
       String(state.order.length),
       state.runningStatus ?? "",
-      session.running ? "1" : "0",
+      running ? "1" : "0",
     ];
-    // Last N items — streaming can grow any of the recent rows mid-turn.
     const window = state.order.slice(-8);
     for (const id of window) {
       const item = state.byId.get(id);
@@ -160,9 +123,38 @@ export function TranscriptView(props: TranscriptViewProps): ReactNode {
       }
     }
     return parts.join("|");
-  }, [state, session.running]);
+  }, [state, running]);
+}
 
-  /** Filter input visible (typing a term). */
+export function TranscriptView(props: TranscriptViewProps): ReactNode {
+  const { services, theme, focused, contentWidth, scrollRef: externalScrollRef } = props;
+  const state = useTranscriptState(services.transcript);
+  const session = useSessionState(services.session);
+  const items = useMemo(() => transcriptItems(state), [state]);
+  const liveThinking = useMemo(() => getConfig().thinking.enabled, [session.running]);
+  const { width: termWidth } = useTerminalDimensions();
+  const paneWidth = Math.max(20, contentWidth ?? termWidth - 6);
+  const introWidth = Math.max(40, paneWidth);
+  const internalScrollRef = useRef<ScrollBoxRenderable>(null);
+  const scrollRef = (externalScrollRef ?? internalScrollRef) as React.RefObject<ScrollBoxRenderable | null>;
+  const closeOverlay = useRef<(() => void) | undefined>(undefined);
+  const lastCount = useRef(items.length);
+  /**
+   * Product-level follow flag (force re-pin). OpenTUI sticky scroll is the
+   * primary follower; this tracks intentional scroll-away.
+   */
+  const followBottom = useRef(true);
+  const wasRunning = useRef(false);
+  const dragPointer = useRef<{ x: number; y: number } | undefined>(undefined);
+  const dragFrame = useRef<number | undefined>(undefined);
+  const pointerGestureActive = useRef(false);
+  const copySemanticOnRelease = useRef(false);
+  const scrollSnapshot = useRef<
+    { scrollTop: number; scrollHeight: number; viewportHeight: number } | undefined
+  >(undefined);
+
+  const followKey = useTranscriptFollowKey(state, session.running);
+
   const [searchOpen, setSearchOpen] = useState(false);
   /** Sticky query kept after Enter so n/N + highlights work (pager model). */
   const [query, setQuery] = useState("");

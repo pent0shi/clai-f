@@ -30,11 +30,6 @@ import {
 export { contextChipForDensity, parseContextLimitInput } from "./context-limit-chip.js";
 export type { StatusDensity } from "./context-limit-chip.js";
 import { useSessionState } from "../../state/use-session-state.js";
-import {
-  EMPTY_SCROLL_METRICS,
-  transcriptScrollPort,
-  type ScrollMetrics,
-} from "../transcript/transcript-scroll-port.js";
 
 export interface StatusLineProps {
   readonly session: SessionController;
@@ -201,48 +196,6 @@ function sep(theme: Theme): ReactNode {
   );
 }
 
-/** Far-right amber remaining-line badges. */
-function ScrollRemainderBadges(props: {
-  theme: Theme;
-  metrics: ScrollMetrics;
-  compact?: boolean | undefined;
-}): ReactNode {
-  const { theme, metrics, compact = false } = props;
-  if (metrics.linesAbove <= 0 && metrics.linesBelow <= 0) return null;
-  return (
-    <box style={{ flexDirection: "row", alignItems: "center", flexShrink: 0 }}>
-      {metrics.linesAbove > 0 ? (
-        <>
-          <text selectable={false} content=" " />
-          <text
-            selectable={false}
-            content={compact ? `▲${metrics.linesAbove}` : ` ▲ ${metrics.linesAbove} `}
-            style={{
-              fg: theme.white,
-              bg: theme.queued,
-              attributes: TextAttributes.BOLD,
-            }}
-          />
-        </>
-      ) : null}
-      {metrics.linesBelow > 0 ? (
-        <>
-          <text selectable={false} content=" " />
-          <text
-            selectable={false}
-            content={compact ? `▼${metrics.linesBelow}` : ` ▼ ${metrics.linesBelow} `}
-            style={{
-              fg: theme.white,
-              bg: theme.queued,
-              attributes: TextAttributes.BOLD,
-            }}
-          />
-        </>
-      ) : null}
-    </box>
-  );
-}
-
 function ClickableHint(props: {
   readonly short: string;
   readonly expand?: string | undefined;
@@ -250,9 +203,8 @@ function ClickableHint(props: {
   readonly theme: Theme;
   readonly onClick?: (() => void) | undefined;
   readonly accent?: boolean | undefined;
-  readonly stableWidth?: boolean | undefined;
 }): ReactNode {
-  const { short, expand, active, theme, onClick, accent = false, stableWidth = false } = props;
+  const { short, expand, active, theme, onClick, accent = false } = props;
   const full = expand ?? short;
   const [hovered, setHovered] = useState(false);
   const hideTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
@@ -292,8 +244,6 @@ function ClickableHint(props: {
   const attributes =
     shown || active || accent ? TextAttributes.BOLD : TextAttributes.NONE;
 
-  const chipWidth = Math.max(short.length, full.length) + 2;
-
   return (
     <box
       onMouseOver={reveal}
@@ -310,7 +260,6 @@ function ClickableHint(props: {
         backgroundColor: bg,
         paddingLeft: 1,
         paddingRight: 1,
-        ...(stableWidth ? { width: chipWidth } : {}),
       }}
     >
       <text
@@ -379,9 +328,6 @@ export function StatusLine(props: StatusLineProps): ReactNode {
   const [frame, setFrame] = useState(0);
   const [sessionElapsed, setSessionElapsed] = useState(0);
   const [sessionStartedAt, setSessionStartedAt] = useState<number | undefined>(undefined);
-  const [scrollMetrics, setScrollMetrics] = useState<ScrollMetrics>(
-    EMPTY_SCROLL_METRICS,
-  );
 
   const [cwdDisplay, setCwdDisplay] = useState(() => {
     const cwd = safeCwd();
@@ -424,8 +370,6 @@ export function StatusLine(props: StatusLineProps): ReactNode {
   const busy = state.running || state.compacting;
   const showTasks = (hasActivePlan || planVisible) && density !== "xs";
 
-  useEffect(() => transcriptScrollPort.onMetrics(setScrollMetrics), []);
-
   useEffect(() => {
     if (!busy) {
       setFrame(0);
@@ -450,7 +394,6 @@ export function StatusLine(props: StatusLineProps): ReactNode {
   }, [sessionStartedAt]);
 
   const ctxChip = contextChipForDensity(state.contextUsage, density);
-  const scrollCompact = density === "xs" || density === "sm";
   const idleHints = idleHintIds(density, hasDraft);
 
   if (busy) {
@@ -523,7 +466,6 @@ export function StatusLine(props: StatusLineProps): ReactNode {
                 active={cancelArmed}
                 theme={theme}
                 accent
-                stableWidth
                 onClick={onRequestCancel}
               />
             </>
@@ -581,11 +523,6 @@ export function StatusLine(props: StatusLineProps): ReactNode {
               onEditingDone={onFocusComposer}
             />
           ) : null}
-          <ScrollRemainderBadges
-            theme={theme}
-            metrics={scrollMetrics}
-            compact={scrollCompact}
-          />
         </box>
       </box>
     );
@@ -775,11 +712,6 @@ export function StatusLine(props: StatusLineProps): ReactNode {
             onEditingDone={onFocusComposer}
           />
         ) : null}
-        <ScrollRemainderBadges
-          theme={theme}
-          metrics={scrollMetrics}
-          compact={scrollCompact}
-        />
       </box>
     </box>
   );
