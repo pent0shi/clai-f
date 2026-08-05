@@ -3,23 +3,35 @@
 import { useState, type ReactNode } from "react";
 import { TextAttributes } from "@opentui/core";
 import type { SessionController } from "../../../app/controllers/session-controller.js";
-import {
-  formatTokenCount,
-  type ContextUsageSnapshot,
-} from "../../../llm/token-usage.js";
+import type { ContextUsageSnapshot } from "../../../llm/token-usage.js";
 import type { Theme } from "../../rendering/theme.js";
 
 export type StatusDensity = "xs" | "sm" | "md" | "lg";
 
-/** Raw current context-token count; show a denominator only when explicitly set. */
+function formatContextK(n: number): string {
+  const v = Math.max(0, Math.floor(n));
+  if (v < 1000) return String(v);
+  if (v < 1_000_000) {
+    const k = v / 1000;
+    if (k >= 100) {
+      const r = Math.round(k);
+      return r >= 1000 ? "1M" : `${r}k`;
+    }
+    return `${k.toFixed(1).replace(/\.0$/, "")}k`;
+  }
+  const m = v / 1_000_000;
+  if (m >= 100) return `${Math.round(m)}M`;
+  return `${m.toFixed(1).replace(/\.0$/, "")}M`;
+}
+
 export function contextChipForDensity(
   usage: ContextUsageSnapshot | undefined,
   _density: StatusDensity,
 ): string | undefined {
   if (!usage) return undefined;
-  const used = formatTokenCount(usage.contextTokens);
+  const used = formatContextK(usage.contextTokens);
   return usage.contextLimit > 0
-    ? `ctx ${used}/${formatTokenCount(usage.contextLimit, true)}`
+    ? `ctx ${used}/${formatContextK(usage.contextLimit)}`
     : `ctx ${used}`;
 }
 

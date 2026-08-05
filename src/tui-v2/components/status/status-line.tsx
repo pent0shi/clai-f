@@ -4,9 +4,9 @@
  * the token count / scroll badges on the right.
  *
  * Density (by content width):
- *  - xs  (<48):  MODE · tokens · ▲▼
- *  - sm  (<68):  MODE · ^H · tokens · ▲▼  (+ spinner/activity when running)
- *  - md  (<96):  MODE · core keys · ^H · tokens · ▲▼
+ *  - xs  (<48):  badge · tokens · ▲▼
+ *  - sm  (<68):  badge · ^H · tokens · ▲▼  (+ spinner/activity when running)
+ *  - md  (<96):  badge · core keys · ^H · tokens · ▲▼
  *  - lg  (≥96):  full shortcut row
  */
 
@@ -250,8 +250,9 @@ function ClickableHint(props: {
   readonly theme: Theme;
   readonly onClick?: (() => void) | undefined;
   readonly accent?: boolean | undefined;
+  readonly stableWidth?: boolean | undefined;
 }): ReactNode {
-  const { short, expand, active, theme, onClick, accent = false } = props;
+  const { short, expand, active, theme, onClick, accent = false, stableWidth = false } = props;
   const full = expand ?? short;
   const [hovered, setHovered] = useState(false);
   const hideTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
@@ -291,6 +292,8 @@ function ClickableHint(props: {
   const attributes =
     shown || active || accent ? TextAttributes.BOLD : TextAttributes.NONE;
 
+  const chipWidth = Math.max(short.length, full.length) + 2;
+
   return (
     <box
       onMouseOver={reveal}
@@ -307,6 +310,7 @@ function ClickableHint(props: {
         backgroundColor: bg,
         paddingLeft: 1,
         paddingRight: 1,
+        ...(stableWidth ? { width: chipWidth } : {}),
       }}
     >
       <text
@@ -322,10 +326,8 @@ function ClickableHint(props: {
 function ModeBadge(props: {
   mode: Mode;
   theme: Theme;
-  /** When true, omit the trailing "MODE" word (saves ~5 cols). */
-  short?: boolean | undefined;
 }): ReactNode {
-  const { mode, theme, short = false } = props;
+  const { mode, theme } = props;
   const label = modeIndicatorPresentation(mode).label;
   const bg =
     mode === "plan"
@@ -336,7 +338,7 @@ function ModeBadge(props: {
   return (
     <text
       selectable={false}
-      content={short ? ` ${label} ` : ` ${label} MODE `}
+      content={` ${label} `}
       style={{
         fg: theme.white,
         bg,
@@ -375,8 +377,6 @@ export function StatusLine(props: StatusLineProps): ReactNode {
   } = props;
   const state = useSessionState(session);
   const [frame, setFrame] = useState(0);
-  const [sessionElapsed, setSessionElapsed] = useState(0);
-  const [sessionStartedAt, setSessionStartedAt] = useState<number | undefined>(undefined);
   const [scrollMetrics, setScrollMetrics] = useState<ScrollMetrics>(
     EMPTY_SCROLL_METRICS,
   );
@@ -421,7 +421,6 @@ export function StatusLine(props: StatusLineProps): ReactNode {
   const density = statusDensityForWidth(width);
   const busy = state.running || state.compacting;
   const showTasks = (hasActivePlan || planVisible) && density !== "xs";
-  const shortMode = density === "xs" || density === "sm";
 
   useEffect(() => transcriptScrollPort.onMetrics(setScrollMetrics), []);
 
@@ -430,7 +429,6 @@ export function StatusLine(props: StatusLineProps): ReactNode {
       setFrame(0);
       return;
     }
-    setSessionStartedAt((prev) => prev ?? Date.now());
     const spinner = setInterval(
       () => setFrame((current) => (current + 1) % SPINNER_FRAMES.length),
       100,
@@ -439,14 +437,6 @@ export function StatusLine(props: StatusLineProps): ReactNode {
       clearInterval(spinner);
     };
   }, [busy]);
-
-  useEffect(() => {
-    if (sessionStartedAt === undefined) return;
-    const clock = setInterval(() => {
-      setSessionElapsed(Math.max(0, Math.floor((Date.now() - sessionStartedAt) / 1000)));
-    }, 1000);
-    return () => clearInterval(clock);
-  }, [sessionStartedAt]);
 
   const ctxChip = contextChipForDensity(state.contextUsage, density);
   const scrollCompact = density === "xs" || density === "sm";
@@ -487,7 +477,7 @@ export function StatusLine(props: StatusLineProps): ReactNode {
             minWidth: 0,
           }}
         >
-          <ModeBadge mode={mode} theme={theme} short={shortMode} />
+          <ModeBadge mode={mode} theme={theme} />
           {sep(theme)}
           <text
             selectable={false}
@@ -501,16 +491,6 @@ export function StatusLine(props: StatusLineProps): ReactNode {
               style={{ fg: theme.activity, flexShrink: 1 }}
             />
           ) : null}
-          {density !== "xs" ? (
-            <>
-              {sep(theme)}
-              <text
-                selectable={false}
-                content={`${sessionElapsed}s`}
-                style={{ fg: theme.cyan, flexShrink: 0, attributes: TextAttributes.BOLD }}
-              />
-            </>
-          ) : null}
           {cancelArmed || (density !== "xs" && !state.compacting) ? (
             <>
               {sep(theme)}
@@ -520,6 +500,7 @@ export function StatusLine(props: StatusLineProps): ReactNode {
                 active={cancelArmed}
                 theme={theme}
                 accent
+                stableWidth
                 onClick={onRequestCancel}
               />
             </>
@@ -610,7 +591,7 @@ export function StatusLine(props: StatusLineProps): ReactNode {
           overflow: "hidden",
         }}
       >
-        <ModeBadge mode={mode} theme={theme} short={shortMode} />
+        <ModeBadge mode={mode} theme={theme} />
         {cancelArmed ? (
           <>
             {sep(theme)}

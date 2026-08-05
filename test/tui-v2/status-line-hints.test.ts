@@ -52,10 +52,10 @@ describe("status line hints and Esc semantics", () => {
       exact: true,
     };
     for (const density of DENSITIES) {
-      expect(contextChipForDensity(usage, density)).toBe("ctx 54,000");
+      expect(contextChipForDensity(usage, density)).toBe("ctx 54k");
       expect(
         contextChipForDensity({ ...usage, contextLimit: 1_000_000 }, density),
-      ).toBe("ctx 54,000/1M");
+      ).toBe("ctx 54k/1M");
     }
   });
 
