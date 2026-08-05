@@ -1166,12 +1166,6 @@ export function parseAllToolCalls(text: string): ToolCall[] {
   }
 
   found.sort((a, b) => a.index - b.index);
-  // De-duplicate calls that two different matchers picked up at (nearly) the
-  // same spot so a single XML call isn't executed twice. Identical MUTATING
-  // calls are collapsed message-wide regardless of distance: a model that
-  // repeats the same fs.append / fs.delete / shell.exec block must not double
-  // its effect. Read-only duplicates keep the proximity window so a genuinely
-  // repeated read still runs where the model expects it.
   const deduped: Array<{ index: number; call: ToolCall }> = [];
   for (const entry of found) {
     const mutating = isMutatingToolName(entry.call.name);
@@ -1186,7 +1180,16 @@ export function parseAllToolCalls(text: string): ToolCall[] {
     }
     deduped.push(entry);
   }
-  return deduped.map((f) => f.call);
+  const MAX_PER_TOOL = 5;
+  const toolCounts = new Map<string, number>();
+  const capped: ToolCall[] = [];
+  for (const entry of deduped) {
+    const count = toolCounts.get(entry.call.name) ?? 0;
+    if (count >= MAX_PER_TOOL) continue;
+    toolCounts.set(entry.call.name, count + 1);
+    capped.push(entry.call);
+  }
+  return capped;
 }
 
 /**

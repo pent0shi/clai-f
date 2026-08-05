@@ -94,9 +94,7 @@ export type IdleHintId =
   | "clear-draft"
   | "cut-draft";
 
-// Thin idle row: the chords users reach for, not every binding. The full list
-// lives behind /shortcuts. Draft hints only appear while a draft exists, so the
-// row does not carry chords that would currently do nothing.
+
 export function idleHintIds(
   density: StatusDensity,
   hasDraft = false,
@@ -167,10 +165,8 @@ function clip(value: string, max: number): string {
   return `${value.slice(0, Math.max(0, max - 1))}…`;
 }
 
-/** Collapse router/agent status noise into a single clean activity phrase. */
 function formatActivity(
   activity: string | undefined,
-  elapsedSec: number,
   maxLen: number,
 ): string {
   let base =
@@ -190,7 +186,7 @@ function formatActivity(
   if (/rate limited|retrying in/i.test(base) && !base.startsWith("⏳")) {
     base = `⏳ ${base}`;
   }
-  return `${base} · ${elapsedSec}s`;
+  return base;
 }
 
 
@@ -247,48 +243,21 @@ function ScrollRemainderBadges(props: {
   );
 }
 
-/**
- * Compact chip that expands on hover.
- * Idle: short chord (`^T`). Hover: full action (`show thinking`).
- * `accent`: cyan emphasis for primary actions (Esc · cancel while running).
- *
- * On terminals without hover (no `onMouseOut` events — common on native Linux
- * terminals), clicking toggles the expanded label and auto-dismisses it after
- * a short delay so it doesn't stick forever.
- */
 function ClickableHint(props: {
-  /** Short label when not hovered (e.g. `^T`). */
   readonly short: string;
-  /** Expanded label on hover (e.g. `show thinking`). Defaults to short. */
   readonly expand?: string | undefined;
   readonly active: boolean;
   readonly theme: Theme;
   readonly onClick?: (() => void) | undefined;
-  /** Cyan/bold when idle — used for cancel while agent is running. */
   readonly accent?: boolean | undefined;
 }): ReactNode {
   const { short, expand, active, theme, onClick, accent = false } = props;
-  const [hovered, setHovered] = useState(false);
-  // Track whether the last expand was caused by hover or click, so we know
-  // whether to auto-dismiss (click on non-hover terminals) or rely on
-  // onMouseOut (hover-capable terminals).
-  const [clickExpanded, setClickExpanded] = useState(false);
   const full = expand ?? short;
-  const shown = hovered || clickExpanded;
-  const content = shown ? full : short;
 
-  const fg = shown
-    ? theme.white
-    : active || accent
-      ? theme.cyan
-      : theme.muted;
-  const bg = shown
-    ? theme.selection
-    : accent
-      ? theme.chip
-      : theme.background;
+  const fg = active || accent ? theme.cyan : theme.muted;
+  const bg = accent ? theme.chip : theme.background;
   const attributes =
-    shown || active || accent ? TextAttributes.BOLD : TextAttributes.NONE;
+    active || accent ? TextAttributes.BOLD : TextAttributes.NONE;
 
   return (
     <box
@@ -296,22 +265,6 @@ function ClickableHint(props: {
         event.preventDefault();
         event.stopPropagation();
         onClick?.();
-        // On non-hover terminals, onMouseOut never fires so the expanded
-        // label gets stuck. Show the expanded label briefly on click, then
-        // auto-dismiss after 1.5 seconds.
-        if (!hovered) {
-          setClickExpanded(true);
-          setTimeout(() => setClickExpanded(false), 1500);
-        }
-      }}
-      onMouseOver={() => {
-        setHovered(true);
-        // If we had a click-expand timer running, clear it — real hover took over.
-        setClickExpanded(false);
-      }}
-      onMouseOut={() => {
-        setHovered(false);
-        setClickExpanded(false);
       }}
       style={{
         flexDirection: "row",
@@ -324,7 +277,7 @@ function ClickableHint(props: {
     >
       <text
         selectable={false}
-        content={content}
+        content={short}
         style={{ fg, bg, attributes }}
       />
     </box>
@@ -388,13 +341,12 @@ export function StatusLine(props: StatusLineProps): ReactNode {
   } = props;
   const state = useSessionState(session);
   const [frame, setFrame] = useState(0);
-  const [elapsed, setElapsed] = useState(0);
-  const [startedAt, setStartedAt] = useState<number | undefined>(undefined);
+  const [sessionElapsed, setSessionElapsed] = useState(0);
+  const [sessionStartedAt, setSessionStartedAt] = useState<number | undefined>(undefined);
   const [scrollMetrics, setScrollMetrics] = useState<ScrollMetrics>(
     EMPTY_SCROLL_METRICS,
   );
 
-  // ── CWD + git branch ──────────────────────────────────────────────────
   const [cwdDisplay, setCwdDisplay] = useState(() => {
     const cwd = safeCwd();
     const home = homedir();
@@ -442,39 +394,31 @@ export function StatusLine(props: StatusLineProps): ReactNode {
   useEffect(() => {
     if (!busy) {
       setFrame(0);
-      setElapsed(0);
-      setStartedAt(undefined);
       return;
     }
-    const origin = Date.now();
-    setStartedAt(origin);
-    setElapsed(0);
+    setSessionStartedAt((prev) => prev ?? Date.now());
     const spinner = setInterval(
       () => setFrame((current) => (current + 1) % SPINNER_FRAMES.length),
       100,
     );
-    const clock = setInterval(() => {
-      setElapsed(Math.max(0, Math.floor((Date.now() - origin) / 1000)));
-    }, 250);
     return () => {
       clearInterval(spinner);
-      clearInterval(clock);
     };
-  }, [busy, state.compacting, state.running]);
+  }, [busy]);
 
   useEffect(() => {
-    if (!busy || startedAt === undefined) return;
-    setElapsed(Math.max(0, Math.floor((Date.now() - startedAt) / 1000)));
-  }, [busy, startedAt, activity]);
+    if (sessionStartedAt === undefined) return;
+    const clock = setInterval(() => {
+      setSessionElapsed(Math.max(0, Math.floor((Date.now() - sessionStartedAt) / 1000)));
+    }, 1000);
+    return () => clearInterval(clock);
+  }, [sessionStartedAt]);
 
   const ctxChip = contextChipForDensity(state.contextUsage, density);
   const scrollCompact = density === "xs" || density === "sm";
   const idleHints = idleHintIds(density, hasDraft);
 
-  // ── Running / compacting ──────────────────────────────────────────────
   if (busy) {
-    // Left:  MODE · spinner · activity·timer · Esc:cancel · ^H · queue
-    // Right: tokens · ▲▼  (never sandwich Esc between tokens and scroll)
     const activityMax =
       density === "xs"
         ? 0
@@ -485,8 +429,8 @@ export function StatusLine(props: StatusLineProps): ReactNode {
       density === "xs"
         ? undefined
         : state.compacting
-          ? `compacting · ${elapsed}s`
-          : formatActivity(activity, elapsed, activityMax);
+          ? "compacting"
+          : formatActivity(activity, activityMax);
 
     return (
       <box
@@ -523,6 +467,16 @@ export function StatusLine(props: StatusLineProps): ReactNode {
               style={{ fg: theme.activity, flexShrink: 1 }}
             />
           ) : null}
+          {density !== "xs" ? (
+            <>
+              {sep(theme)}
+              <text
+                selectable={false}
+                content={`${sessionElapsed}s`}
+                style={{ fg: theme.cyan, flexShrink: 0, attributes: TextAttributes.BOLD }}
+              />
+            </>
+          ) : null}
           {cancelArmed || (density !== "xs" && !state.compacting) ? (
             <>
               {sep(theme)}
@@ -532,8 +486,6 @@ export function StatusLine(props: StatusLineProps): ReactNode {
                 active={cancelArmed}
                 theme={theme}
                 accent
-                // Same arm/confirm ladder as pressing Esc — a click must not
-                // skip the confirmation the keyboard path requires.
                 onClick={onRequestCancel}
               />
             </>
@@ -601,9 +553,7 @@ export function StatusLine(props: StatusLineProps): ReactNode {
     );
   }
 
-  // ── Idle ─────────────────────────────────────────────────────────────
-  // Left: mode (+ optional center chips that may shrink)
-  // Right: tokens + scroll (never shrink away)
+
   return (
     <box
       style={{
