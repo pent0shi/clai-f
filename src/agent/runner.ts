@@ -513,6 +513,10 @@ export interface AgentRunOptions {
   previousTurn?: PreviousTurnSignal | undefined;
   /** User-declared model window for this provider/model/session. */
   contextLimitTokens?: number | undefined;
+  getContextLimitTokens?: (
+    provider: ProviderId | undefined,
+    model: string | undefined,
+  ) => number | undefined;
 }
 
 /**
@@ -901,6 +905,10 @@ export async function runAgentTurn(
     let provider = initialProvider;
     await ensureProviderConfigured(provider);
     let model = initialModel;
+    const currentContextLimitTokens = (): number | undefined =>
+      options.getContextLimitTokens
+        ? options.getContextLimitTokens(provider, model)
+        : options.contextLimitTokens;
     // Some Groq free-tier models have a per-request/per-minute input budget
     // below the normal agent prompt alone. Select a purpose-built compact
     // instruction set before the request is made, rather than treating the
@@ -3978,11 +3986,12 @@ export async function runAgentTurn(
       force = false,
     ): Promise<void> {
       const beforeTokens = estimateNextRequestTokens(messages);
+      const contextLimitTokens = currentContextLimitTokens();
       const compactTrigger = autoCompactTriggerTokens(getReliabilityPolicy(), {
         provider,
         model,
-        ...(options.contextLimitTokens
-          ? { contextLimitTokens: options.contextLimitTokens }
+        ...(contextLimitTokens !== undefined
+          ? { contextLimitTokens }
           : {}),
       });
       if (!force && beforeTokens < compactTrigger) return;
@@ -4325,6 +4334,7 @@ export async function runAgentTurn(
               writeNotice("info", notice, chalk.dim(`  ℹ ${notice}\n`));
             }
           }
+          const contextLimitTokens = currentContextLimitTokens();
           await auditLog("agent.turn", {
             provider,
             model,
@@ -4333,7 +4343,16 @@ export async function runAgentTurn(
             step,
             // Metadata-only composition metrics (no prompt/tool text).
             ...contextBreakdownAuditPayload(contextBreakdown),
-            compactTriggerTokens: autoCompactTriggerTokens(),
+            compactTriggerTokens: autoCompactTriggerTokens(
+              getReliabilityPolicy(),
+              {
+                provider,
+                model,
+                ...(contextLimitTokens !== undefined
+                  ? { contextLimitTokens }
+                  : {}),
+              },
+            ),
             maxTokensBudget: resolveStepMaxTokens({
               nativeToolsActive,
               toolsAttached,

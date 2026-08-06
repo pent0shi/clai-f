@@ -20,7 +20,7 @@ export interface DraftActionsInput {
   readonly resetMenuState: () => void;
   readonly setContentRows: (rows: number) => void;
   readonly clearPasteChips: () => void;
-  readonly focusComposer: () => void;
+  readonly focusComposer: () => boolean;
   readonly refreshMenu: () => void;
   readonly syncContentRows: () => void;
   readonly notify: (message: string, durationMs: number) => void;
@@ -42,6 +42,7 @@ export function useDraftActions(input: DraftActionsInput): DraftActions {
     input.resetMenuState();
     input.setContentRows(1);
     input.clearPasteChips();
+    composerActionPort.setHasDraft(false);
   };
 
   const cut = async (): Promise<void> => {
@@ -59,8 +60,7 @@ export function useDraftActions(input: DraftActionsInput): DraftActions {
 
   const showCommands = (): void => {
     const editor = input.editorRef.current;
-    if (!editor) return;
-    input.focusComposer();
+    if (!editor || !input.focusComposer()) return;
     primeCommandMenu(editor);
     input.refreshMenu();
     input.syncContentRows();

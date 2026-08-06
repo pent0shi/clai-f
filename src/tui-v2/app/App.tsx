@@ -82,6 +82,7 @@ export function App(): ReactNode {
   const [composerSeed, setComposerSeed] = useState<
     { token: number; text: string } | undefined
   >(undefined);
+  const [contextLimitEditing, setContextLimitEditing] = useState(false);
 
   // Smooth enter/exit (~120ms in / ~100ms out); stays mounted through exit.
   const panePresence = usePanePresence(planVisible);
@@ -417,7 +418,10 @@ export function App(): ReactNode {
   // Composer only owns the keyboard when the focus region is composer.
   // Clicking the transcript leaves focus there so ↑/↓ scroll the chat instead
   // of walking prompt history in the textarea.
-  const composerFocused = overlay.kind === "none" && focusContext === "composer";
+  const composerFocused =
+    overlay.kind === "none" &&
+    focusContext === "composer" &&
+    !contextLimitEditing;
 
   function clearEscapeCancellation(): void {
     lastEscape.current = 0;
@@ -734,6 +738,7 @@ export function App(): ReactNode {
           focused={composerFocused}
           maxSuggestions={completionRows}
           running={session.running}
+          inputSuspended={contextLimitEditing}
           onEscapeCancel={() => handleEscapeCancellation(false)}
           seedDraft={composerSeed}
         />
@@ -761,7 +766,11 @@ export function App(): ReactNode {
           onCycleMode={cycleMode}
           cancelArmed={escapeCancelArmed}
           onRequestCancel={() => handleEscapeCancellation(false)}
-          onFocusComposer={() => services.focus.focusRegion("composer")}
+          onContextLimitEditingStart={() => setContextLimitEditing(true)}
+          onFocusComposer={() => {
+            setContextLimitEditing(false);
+            services.focus.focusRegion("composer");
+          }}
         />
       </box>
 

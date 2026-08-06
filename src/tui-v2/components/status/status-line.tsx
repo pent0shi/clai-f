@@ -59,6 +59,7 @@ export interface StatusLineProps {
   readonly cancelArmed?: boolean | undefined;
   /** Arm/confirm cancellation — the same controller path Esc uses. */
   readonly onRequestCancel?: (() => void) | undefined;
+  readonly onContextLimitEditingStart?: (() => void) | undefined;
   /** Restore keyboard focus to the composer (e.g. after inline context-limit editing). */
   readonly onFocusComposer?: (() => void) | undefined;
 }
@@ -322,6 +323,7 @@ export function StatusLine(props: StatusLineProps): ReactNode {
     onCycleMode,
     cancelArmed = false,
     onRequestCancel,
+    onContextLimitEditingStart,
     onFocusComposer,
   } = props;
   const state = useSessionState(session);
@@ -520,6 +522,7 @@ export function StatusLine(props: StatusLineProps): ReactNode {
               exact={state.contextUsage.exact}
               usage={state.contextUsage}
               session={session}
+              onEditingStart={onContextLimitEditingStart}
               onEditingDone={onFocusComposer}
             />
           ) : null}
@@ -709,6 +712,7 @@ export function StatusLine(props: StatusLineProps): ReactNode {
             exact={state.contextUsage.exact}
             usage={state.contextUsage}
             session={session}
+            onEditingStart={onContextLimitEditingStart}
             onEditingDone={onFocusComposer}
           />
         ) : null}

@@ -35,6 +35,10 @@ export interface RunTurnRequest {
   readonly previousTurn?: PreviousTurnSignal | undefined;
   /** User-declared model window for this provider/model/session. */
   readonly contextLimitTokens?: number | undefined;
+  readonly getContextLimitTokens?: (
+    provider: ProviderId | undefined,
+    model: string | undefined,
+  ) => number | undefined;
 }
 
 export type { PreviousTurnSignal } from "../../agent/continue-orient.js";

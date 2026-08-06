@@ -156,7 +156,6 @@ export class SessionController implements Disposable {
   private static readonly AUTOSAVE_MIN_MS = 15_000;
   /** Last known context / session token totals for the status strip. */
   private contextUsage: ContextUsageSnapshot | undefined;
-  /** Explicit model windows, scoped to a provider/model pair within this session. */
   private readonly contextLimits = new SessionContextLimits();
   /** Bumped by reset/history load/dispose so late callbacks can be ignored. */
   private lifecycleGeneration = 0;
@@ -308,7 +307,6 @@ export class SessionController implements Disposable {
     this.notifyState();
   }
 
-  /** Set or clear this session's current provider/model window override. */
   setContextLimitTokens(limit: number | undefined): void {
     this.contextLimits.set(this.provider, this.model, limit);
     this.contextUsage = this.resolveContextUsage();
@@ -378,7 +376,6 @@ export class SessionController implements Disposable {
       const nextSessionId = asSessionId(options.sessionId);
       if (nextSessionId !== this.sessionIdValue) {
         this.fenceInteractiveOwner(this.sessionIdValue);
-        this.contextLimits.clear();
       }
       this.sessionIdValue = nextSessionId;
       this.sequencer.rebind(this.sessionIdValue);
@@ -429,7 +426,6 @@ export class SessionController implements Disposable {
     this.spool.clear();
     if (options.mintNewId) {
       this.fenceInteractiveOwner(this.sessionIdValue);
-      this.contextLimits.clear();
       this.sessionIdValue = asSessionId(mintSessionId());
       this.sequencer.rebind(this.sessionIdValue);
       this.persistence.newSession();
@@ -703,6 +699,8 @@ export class SessionController implements Disposable {
       ...(this.contextLimitTokens
         ? { contextLimitTokens: this.contextLimitTokens }
         : {}),
+      getContextLimitTokens: (routeProvider, routeModel) =>
+        this.contextLimits.get(routeProvider, routeModel),
     });
     if (built.fallbackReason) this.notice("info", built.fallbackReason);
     for (const issue of built.imageIssues) this.notice("warn", issue);

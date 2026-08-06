@@ -1,7 +1,7 @@
 /** @jsxImportSource @opentui/react */
 
-import { useState, type ReactNode } from "react";
-import { TextAttributes } from "@opentui/core";
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import { TextAttributes, type InputRenderable } from "@opentui/core";
 import type { SessionController } from "../../../app/controllers/session-controller.js";
 import type { ContextUsageSnapshot } from "../../../llm/token-usage.js";
 import type { Theme } from "../../rendering/theme.js";
@@ -53,15 +53,43 @@ export function ContextLimitChip(props: {
   exact: boolean;
   usage: ContextUsageSnapshot;
   session: SessionController;
-  /** Called when the inline editor closes so the caller can restore focus. */
+  onEditingStart?: (() => void) | undefined;
   onEditingDone?: (() => void) | undefined;
 }): ReactNode {
-  const { chip, theme, exact, usage, session, onEditingDone } = props;
+  const {
+    chip,
+    theme,
+    exact,
+    usage,
+    session,
+    onEditingStart,
+    onEditingDone,
+  } = props;
+  const inputRef = useRef<InputRenderable | null>(null);
+  const editingRef = useRef(false);
+  const onEditingDoneRef = useRef(onEditingDone);
+  onEditingDoneRef.current = onEditingDone;
   const [editing, setEditing] = useState(false);
   const [hovered, setHovered] = useState(false);
   const [clickExpanded, setClickExpanded] = useState(false);
   const [value, setValue] = useState("");
+
+  useEffect(() => {
+    if (!editing) return;
+    const frame = requestAnimationFrame(() => inputRef.current?.focus());
+    return () => cancelAnimationFrame(frame);
+  }, [editing]);
+
+  useEffect(
+    () => () => {
+      if (editingRef.current) onEditingDoneRef.current?.();
+    },
+    [],
+  );
+
   const open = (): void => {
+    editingRef.current = true;
+    onEditingStart?.();
     setValue(usage.contextLimit > 0 ? String(usage.contextLimit) : "");
     setEditing(true);
     setClickExpanded(false);
@@ -71,12 +99,14 @@ export function ContextLimitChip(props: {
     const limit = parseContextLimitInput(value);
     if (limit === null) return;
     session.setContextLimitTokens(limit);
+    editingRef.current = false;
     setEditing(false);
     onEditingDone?.();
   };
   const reset = (): void => {
     session.setContextLimitTokens(undefined);
     setValue("");
+    editingRef.current = false;
     setEditing(false);
     onEditingDone?.();
   };
@@ -86,6 +116,9 @@ export function ContextLimitChip(props: {
       <box style={{ flexDirection: "row", alignItems: "center", flexShrink: 0 }}>
         <text content="ctx limit " style={{ fg: theme.muted }} />
         <input
+          ref={(input: InputRenderable | null) => {
+            inputRef.current = input;
+          }}
           focused
           value={value}
           onInput={setValue}

@@ -14,6 +14,10 @@ export interface TurnRequestInput {
   readonly displayPrompt?: string | null | undefined;
   readonly previousTurn?: PreviousTurnSignal | undefined;
   readonly contextLimitTokens?: number | undefined;
+  readonly getContextLimitTokens?: (
+    provider: ProviderId | undefined,
+    model: string | undefined,
+  ) => number | undefined;
 }
 
 export interface BuiltTurnRequest {
@@ -50,6 +54,9 @@ export function buildTurnRequest(input: TurnRequestInput): BuiltTurnRequest {
     ...(input.previousTurn ? { previousTurn: input.previousTurn } : {}),
     ...(input.contextLimitTokens
       ? { contextLimitTokens: input.contextLimitTokens }
+      : {}),
+    ...(input.getContextLimitTokens
+      ? { getContextLimitTokens: input.getContextLimitTokens }
       : {}),
   };
   return {

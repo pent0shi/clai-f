@@ -1,20 +1,12 @@
-import { getConfig, getProviderModel } from "../../store/config.js";
+import { getConfig, getProviderModel, updateConfig } from "../../store/config.js";
 import type { ProviderId } from "../../types.js";
 
-/**
- * Model-window overrides keyed by concrete provider/model pair so a limit
- * never leaks into another route or model. Session-only: the in-memory map
- * is cleared on session-id change and never persists to config, so a fresh
- * process or a new conversation resets to the default 180k compaction trigger.
- */
-export class SessionContextLimits {
-  private readonly byTarget = new Map<string, number>();
+const MIN_CONTEXT_LIMIT_TOKENS = 20_000;
 
+export class SessionContextLimits {
   get(provider: ProviderId | undefined, model: string | undefined): number | undefined {
-    const key = this.key(provider, model);
-    const local = this.byTarget.get(key);
-    if (local !== undefined) return local;
-    return undefined;
+    const value = getConfig().contextLimitTokens?.[this.key(provider, model)];
+    return this.isValid(value) ? Math.floor(value) : undefined;
   }
 
   set(
@@ -22,17 +14,27 @@ export class SessionContextLimits {
     model: string | undefined,
     limit: number | undefined,
   ): void {
+    const config = getConfig();
+    const contextLimitTokens = { ...(config.contextLimitTokens ?? {}) };
     const key = this.key(provider, model);
-    const valid = limit !== undefined && Number.isFinite(limit) && limit >= 20_000;
-    if (valid) {
-      this.byTarget.set(key, Math.floor(limit));
+    if (this.isValid(limit)) {
+      contextLimitTokens[key] = Math.floor(limit);
     } else {
-      this.byTarget.delete(key);
+      delete contextLimitTokens[key];
     }
+    updateConfig({ contextLimitTokens });
   }
 
   clear(): void {
-    this.byTarget.clear();
+    updateConfig({ contextLimitTokens: {} });
+  }
+
+  private isValid(value: unknown): value is number {
+    return (
+      typeof value === "number" &&
+      Number.isFinite(value) &&
+      value >= MIN_CONTEXT_LIMIT_TOKENS
+    );
   }
 
   private key(provider: ProviderId | undefined, model: string | undefined): string {

@@ -72,6 +72,7 @@ export interface ComposerEditorProps {
   readonly maxSuggestions?: number | undefined;
   /** Mirrors the legacy composer hint while a turn is active. */
   readonly running?: boolean | undefined;
+  readonly inputSuspended?: boolean | undefined;
   /** Visual region focus from the shell (Tab cycle). */
   readonly focused: boolean;
   /**
@@ -127,11 +128,12 @@ export function ComposerEditor(props: ComposerEditorProps): ReactNode {
     cfg.permissions ?? "default",
   );
 
-  const shouldOwnKeyboard = overlay.kind === "none" && props.focused;
+  const shouldOwnKeyboard =
+    overlay.kind === "none" && props.focused && !props.inputSuspended;
   useEffect(() => {
     if (shouldOwnKeyboard) editorRef.current?.focus();
     else editorRef.current?.blur();
-  }, [shouldOwnKeyboard]);
+  }, [shouldOwnKeyboard, props.running]);
 
   // Dim only: suppress native draft wheel so chat scrolls alone under pointer.
   useEffect(() => {
@@ -150,7 +152,13 @@ export function ComposerEditor(props: ComposerEditorProps): ReactNode {
   const lastSeedToken = useRef<number | undefined>(undefined);
   useEffect(() => {
     const seed = props.seedDraft;
-    if (!seed || seed.token === lastSeedToken.current) return;
+    if (
+      !seed ||
+      seed.token === lastSeedToken.current ||
+      props.inputSuspended
+    ) {
+      return;
+    }
     lastSeedToken.current = seed.token;
     const editor = editorRef.current;
     if (!editor) return;
@@ -164,13 +172,14 @@ export function ComposerEditor(props: ComposerEditorProps): ReactNode {
       syncContentRows();
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps -- seed token is the trigger
-  }, [props.seedDraft?.token]);
+  }, [props.seedDraft?.token, props.inputSuspended]);
 
   // Global keyboard: (1) keep completion menus navigable even if the textarea
   // briefly loses focus after @/click, (2) reclaim the composer on printable
   // keys so typing never feels dead.
   useKeyboard((key) => {
     if (key.eventType === "release") return;
+    if (props.inputSuspended) return;
     const chord = chordFromKeyEvent(key);
 
     // Escape and Ctrl+C are owned by App so double-press cancellation and
@@ -228,7 +237,7 @@ export function ComposerEditor(props: ComposerEditorProps): ReactNode {
   });
 
   usePaste((event) => {
-    if (overlay.kind !== "none") return;
+    if (props.inputSuspended || overlay.kind !== "none") return;
     if (!props.focused) {
       services.focus.focusRegion("composer");
       editorRef.current?.focus();
@@ -446,12 +455,7 @@ export function ComposerEditor(props: ComposerEditorProps): ReactNode {
       return;
     }
     const expanded = pasteRegistry.current.expand(editor.plainText).trim();
-    editor.clear();
-    pasteRegistry.current.clear();
-    promptHistory.current.reset();
-    resetMenuState();
-    setContentRows(1);
-    setPasteChips([]);
+    clearDraftState(editor);
     if (!expanded) return;
     if (shouldStoreInPromptHistory(expanded)) promptHistory.current.push(expanded);
     void dispatchOrRunTurn(expanded);
@@ -504,7 +508,7 @@ export function ComposerEditor(props: ComposerEditorProps): ReactNode {
 
   /** Focused multi-line → native draft; else chat (never dual-scroll). */
   function onComposerWheel(event: MouseEvent): void {
-    if (!event.scroll || overlay.kind !== "none") return;
+    if (props.inputSuspended || !event.scroll || overlay.kind !== "none") return;
     const editor = editorRef.current;
     const visible = resolveComposerTextRows(contentRows, props.height);
     if (shouldOwnKeyboard && editor) {
@@ -681,6 +685,7 @@ export function ComposerEditor(props: ComposerEditorProps): ReactNode {
   }
 
   function onKeyDown(key: KeyEvent): void {
+    if (props.inputSuspended) return;
     // Only handle when the composer actually owns input — never steal from
     // transcript scroll by force-focusing on every key event. (Menu keys are
     // also routed from the global useKeyboard when focus glitches.)
@@ -703,9 +708,11 @@ export function ComposerEditor(props: ComposerEditorProps): ReactNode {
   // Focused: bright aqua. Blurred: muted so focus shift is obvious.
   const chromeFg = shouldOwnKeyboard ? theme.inputBorder : theme.muted;
 
-  function focusComposer(): void {
+  function focusComposer(): boolean {
+    if (props.inputSuspended) return false;
     services.focus.focusRegion("composer");
     editorRef.current?.focus();
+    return true;
   }
 
   const resetMenuState = (): void => {
