@@ -103,7 +103,7 @@ export function buildCompactionUserPrompt(parts: CompactionPromptParts): string 
       "## Remaining work",
       "## Open risks / failures",
       "",
-      "Preserve: user intentions, decisions, constraints, paths, stack/package manager,",
+      "Preserve: user intentions, decisions, constraints, requested execution boundary (entire program/all phases versus a named phase versus unspecified), referenced roadmap/plan/task/index paths, stack/package manager,",
       "commands and key results, plan task states/hierarchy, errors and failed approaches,",
       "Responder notification ids, linked task/parent ids, job/PID/status, durable artifact paths, and the authoritative consumed/analyzed state from RESPONDER RESULT LEDGER entries. Never describe consumed=true ledger entries as unread, pending, or needing another artifact read.",
       "servers/jobs still running, and exactly what remains.",

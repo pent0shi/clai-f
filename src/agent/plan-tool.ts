@@ -503,7 +503,7 @@ export function planContextMessage(plan: SessionPlan, approved: boolean): string
           task.state === "failed"),
     );
     lines.push(
-      "The user APPROVED this plan. Execute it NOW. Tasks are checkpoints — you still own the whole goal.",
+      "The user APPROVED this plan. Execute it NOW. Tasks are checkpoints — you still own the user's requested boundary. Their states are authoritative for tracked work, but a completed phase is not completion of an explicitly requested whole roadmap/program.",
     );
     if (inProgress) {
       lines.push(

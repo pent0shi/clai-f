@@ -258,7 +258,7 @@ export function buildContinueOrientation(input: ContinueOrientInput): string {
   const orderSteps: string[] = ["Suggested order (adapt to evidence):"];
   if (plan) {
     orderSteps.push(
-      "1) Re-read the ACTIVE PLAN task states above first — they are the current source of truth for what is done vs pending; reconcile against them, not against the memory summary's prose.",
+      "1) Re-read the ACTIVE PLAN task states above first — they are the current source of truth for tracked task status, not proof that a higher-level roadmap is exhausted. If the user explicitly requested the entire roadmap/program or all phases, reconcile against the referenced roadmap/phase/index files before treating the last tracked task as completion and append omitted work with task.add.",
       "2) Open the in_progress / failed task and read only its own artifacts plus the earlier-task outputs you need to confirm what is already done — before scanning unrelated files.",
       "3) If long jobs were running, shell.jobs then shell.tail the relevant ids (or read saved artifacts) to harvest results before redoing that work.",
       "4) Resume the task with real tools; mark it done only with fresh proof, then open the next pending task.",

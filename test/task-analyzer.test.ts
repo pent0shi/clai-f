@@ -99,8 +99,8 @@ describe("task-analyzer", () => {
     expect(hint).toMatch(/TASK ANALYSIS/);
     expect(hint).toMatch(/complexity=/);
     expect(hint).toMatch(/Likely tools/);
-    expect(hint).toMatch(/durable task tracking strongly recommended/i);
-    expect(hint).toMatch(/plan before mutation/i);
+    expect(hint).toMatch(/durable task tracking may help/i);
+    expect(hint).toMatch(/decide whether to use it or execute directly/i);
   });
 
   it("truncates goal to 100 chars", () => {

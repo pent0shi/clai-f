@@ -12,7 +12,6 @@ export interface RecoveryBudgets {
   failedProbe: number;
   prematureComplete: number;
   shallowPentest: number;
-  freshnessUsed: boolean;
 }
 
 export function createRecoveryBudgets(): RecoveryBudgets {
@@ -25,7 +24,6 @@ export function createRecoveryBudgets(): RecoveryBudgets {
     failedProbe: 0,
     prematureComplete: 0,
     shallowPentest: 0,
-    freshnessUsed: false,
   };
 }
 
@@ -37,7 +35,6 @@ export type RecoveryKind =
   | "runtime_verify"
   | "failed_probe"
   | "premature_complete"
-  | "freshness"
   | "shallow_pentest";
 
 export interface RecoveryAction {
@@ -58,14 +55,12 @@ const LIMITS: Record<keyof RecoveryBudgets, number> = {
   failedProbe: 3,
   prematureComplete: 6,
   shallowPentest: 2,
-  freshnessUsed: 1,
 };
 
 export function budgetRemaining(
   budgets: RecoveryBudgets,
   key: keyof RecoveryBudgets,
 ): boolean {
-  if (key === "freshnessUsed") return !budgets.freshnessUsed;
   return budgets[key] < LIMITS[key];
 }
 
@@ -73,11 +68,7 @@ export function consumeBudget(
   budgets: RecoveryBudgets,
   key: keyof RecoveryBudgets,
 ): void {
-  if (key === "freshnessUsed") {
-    budgets.freshnessUsed = true;
-    return;
-  }
-  budgets[key] = (budgets[key] as number) + 1;
+  budgets[key] = budgets[key] + 1;
 }
 
 export function recoveryForErrorDiagnosis(nativeTools: boolean): RecoveryAction {
@@ -244,15 +235,6 @@ export function recoveryForPrematureComplete(input: {
     message:
       `You have not finished the approved plan: ${input.unfinished.length} task(s) remain (${list}). ` +
       `Do not claim completion without tool evidence. ${instruction}`,
-  };
-}
-
-export function recoveryForFreshness(extra: string): RecoveryAction {
-  return {
-    kind: "freshness",
-    budgetKey: "freshnessUsed",
-    notice: "current-info question — search before answering",
-    message: extra,
   };
 }
 

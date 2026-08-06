@@ -21,8 +21,6 @@ describe("recovery budgets", () => {
     consumeBudget(b, "forcePlan");
     consumeBudget(b, "forcePlan");
     expect(budgetRemaining(b, "forcePlan")).toBe(false);
-    consumeBudget(b, "freshnessUsed");
-    expect(budgetRemaining(b, "freshnessUsed")).toBe(false);
   });
 
   it("builds feature and premature-complete messages", () => {

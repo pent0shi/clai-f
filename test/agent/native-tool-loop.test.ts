@@ -505,6 +505,54 @@ describe("native tool loop integration", () => {
     expect(streamMock).toHaveBeenCalledTimes(2);
   });
 
+  it("executes DSML text whose invoke closer the model omitted", async () => {
+    const target = join(cwd, "guard.txt");
+    await writeFile(target, "before", "utf8");
+    let turn = 0;
+    let displayed = "";
+    streamMock.mockImplementation(
+      async (request: CompletionRequest, onToken: (token: string) => void) => {
+        turn += 1;
+        if (turn === 1) {
+          const text =
+            `I'm on t6: add the architecture guard.\n\n` +
+            `<｜DSML｜tool_calls>\n<｜DSML｜invoke name="fs_write">\n` +
+            `<｜DSML｜parameter name="path" string="true">${target}</｜DSML｜parameter>\n` +
+            `<｜DSML｜parameter name="content" string="true">after</｜DSML｜parameter>\n` +
+            `</｜DSML｜tool_calls>`;
+          onToken(text);
+          return {
+            text,
+            provider: "tokenrouter",
+            model: "deepseek/deepseek-v4-flash-0731",
+            finishReason: "stop",
+          };
+        }
+        displayed = request.messages
+          .filter((message) => message.role === "assistant")
+          .map((message) => message.content)
+          .join("\n");
+        return {
+          text: "guard added",
+          provider: "tokenrouter",
+          model: "deepseek/deepseek-v4-flash-0731",
+          finishReason: "stop",
+        };
+      },
+    );
+
+    const { runAgentLoop } = await import("../../src/agent/runner.js");
+    await expect(
+      runAgentLoop("add the architecture guard", {
+        provider: "tokenrouter",
+        model: "deepseek/deepseek-v4-flash-0731",
+        maxSteps: 4,
+      }),
+    ).resolves.toBe("guard added");
+    expect(await readFile(target, "utf8")).toBe("after");
+    expect(displayed).not.toContain("DSML");
+  });
+
   it("allows repeated test commands after intervening fixes", async () => {
     const target = join(cwd, "test.js");
     const command = "node test.js";

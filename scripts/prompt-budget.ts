@@ -106,10 +106,10 @@ for (const section of mandatorySections) {
 // Per-variant ceilings. The everyday paths (no pentest methodology attached)
 // are held tightest because they are what most turns actually pay for.
 for (const [label, text, limit] of [
-  ["fence", agent, 35_000],
-  ["fence+pentest", agentPentest, 39_000],
-  ["native", agentNative, 22_000],
-  ["native+pentest", agentNativePentest, 26_000],
+  ["fence", agent, 36_000],
+  ["fence+pentest", agentPentest, 40_000],
+  ["native", agentNative, 24_000],
+  ["native+pentest", agentNativePentest, 28_000],
 ] as const) {
   if (text.length > limit) {
     throw new Error(

@@ -217,8 +217,6 @@ import {
   looksLikeWebActionNarration,
   localHttpProbeIsFailure,
   localHttpProbeIsSuccess,
-  requiresFreshWebSearch,
-  freshnessGuardMessage,
   buildWorkflowDirective,
   narrowNmapOperationDirective,
   pentestWorkflowDirective,
@@ -289,9 +287,7 @@ import {
   isReadOnlyReconTool,
   isReadOnlyVersionProbeCommand,
   isRemoteActiveTestCall,
-  isRemoteObservationTask,
   isRemoteReconToolCall,
-  isRuntimeObservationTask,
   isScaffoldCreateCommand,
   isServerReadyOutput,
   ledgerFromTaskEvidence,
@@ -889,20 +885,12 @@ export async function runAgentTurn(
     // brand-new plan (the exact failure where "what do u know till now"
     // triggered explore→plan and created an unrelated "Enhance clai" plan).
     const informationalQuery = looksLikeInformationalQuery(prompt);
-    // Greetings / thanks / short acks must never force tools, plans, or
-    // freshness retries — a false "act don't narrate" path burned tokens on
-    // web.search recovery loops after a simple "hi".
+    // Greetings / thanks / short acks must never force tools or plans.
     const idleOrSocialPrompt = looksLikeIdleOrSocialPrompt(prompt);
     suppressOutcomeDiagnostics =
       informationalQuery ||
       idleOrSocialPrompt ||
       looksLikeContinueOrResumePrompt(prompt);
-    const freshWebSearchRequired =
-      !buildLikeTurn &&
-      !pentestLikeTurn &&
-      !idleOrSocialPrompt &&
-      toolNames.includes("web.search") &&
-      requiresFreshWebSearch(prompt);
     let provider = initialProvider;
     await ensureProviderConfigured(provider);
     let model = initialModel;
@@ -1084,9 +1072,6 @@ export async function runAgentTurn(
       if (candidate) orientInput.candidateProject = candidate;
       systemSections.push(buildWorkspaceOrientation(orientInput));
     }
-    if (freshWebSearchRequired) {
-      systemSections.push(freshnessGuardMessage());
-    }
     // The live plan is mutable state: it is injected once as a keyed request
     // suffix (upsertPlanContextMessage) instead of being frozen into the stable
     // system prefix, so the model never sees a stale and a fresh plan together.
@@ -1219,7 +1204,6 @@ export async function runAgentTurn(
           content.startsWith("ACTIVE PROJECT ROOT:") ||
           content.startsWith("USER DESTINATION:") ||
           content.startsWith("WORKSPACE STATUS") ||
-          content.startsWith("Freshness guard for this turn:") ||
           content.includes("MODE") ||
           content.includes("OUTCOME"),
       }));
@@ -1483,7 +1467,6 @@ export async function runAgentTurn(
     // retry instead of leaking the raw block as the final answer.
     let malformedFenceRetries = 0;
 
-    let sawFreshWebSearch = false;
 
     const recovery = createRecoveryBudgets();
     let sawServerStart = false;
@@ -1572,85 +1555,6 @@ export async function runAgentTurn(
         planKind: plan.kind,
         remoteWorkVerified: planHasVerifiedRemoteWork(plan),
       });
-    };
-
-
-    const reconcileOpenTaskBeforeFinalizing = async (): Promise<SessionPlan | undefined> => {
-      let plan = await loadPlan(session.sessionId).catch(() => undefined);
-      const open = plan?.tasks.find(
-        (task) => task.state === "in_progress" && !task.responderOwned,
-      );
-      if (!plan || !open) return plan;
-      const gate = completionGateForTask(plan, open.id);
-      if (!gate.ok) return plan;
-
-      const reconciledTaskIds = [open.id];
-      const working = plan;
-      markTask(working, open.id, "done", "Completion reconciled from verified task evidence.");
-
-      while (true) {
-        const observation = readyPlanTasks(working).find(
-          (task) =>
-            isRuntimeObservationTask(task.title) ||
-            (working.kind === "pentest" && isRemoteObservationTask(task.title)),
-        );
-        if (!observation) break;
-        const observationGate = completionGateForTask(working, observation.id);
-        if (!observationGate.ok) break;
-        markTask(
-          working,
-          observation.id,
-          "done",
-          working.kind === "pentest"
-            ? "Satisfied by verified remote evidence from the preceding task."
-            : "Satisfied by the verified runtime evidence from the preceding task.",
-        );
-        reconciledTaskIds.push(observation.id);
-      }
-      if (working.status === "draft" || working.status === "approved") {
-        working.status = "in_progress";
-      }
-      if (isPlanTerminal(working)) {
-        working.status = isPlanSuccessful(working) ? "completed" : "abandoned";
-      }
-      // Replay the same reconciliation as a reducer so a concurrent
-      // responder settlement is preserved instead of overwritten.
-      const reconciledNotes = new Map(
-        reconciledTaskIds.map((id) => [
-          id,
-          working.tasks.find((task) => task.id === id)?.note,
-        ]),
-      );
-      const reconcileResult = await mutatePlan(session.sessionId, (draft) => {
-        let changed = false;
-        for (const [id, note] of reconciledNotes) {
-          const task = draft.tasks.find((candidate) => candidate.id === id);
-          if (!task || task.state === "done") continue;
-          task.state = "done";
-          if (note !== undefined) task.note = note;
-          changed = true;
-        }
-        if (draft.status === "draft" || draft.status === "approved") {
-          draft.status = "in_progress";
-          changed = true;
-        }
-        if (isPlanTerminal(draft)) {
-          draft.status = isPlanSuccessful(draft) ? "completed" : "abandoned";
-          changed = true;
-        }
-        return changed;
-      }).catch(() => undefined);
-      if (reconcileResult?.ok && reconcileResult.plan) plan = reconcileResult.plan;
-      writePlanUpdate(plan, renderPlanForTerminal(plan) + "\n");
-      writeNotice(
-        "info",
-        `reconciled ${reconciledTaskIds.map((id) => `[${id}]`).join(", ")} from verified evidence`,
-        chalk.dim(
-          `  ℹ reconciled ${reconciledTaskIds.map((id) => `[${id}]`).join(", ")} from verified evidence — no duplicate verification\n`,
-        ),
-      );
-      taskWorkLedger = null;
-      return plan;
     };
 
     async function persistProjectRootOnPlan(root: string): Promise<void> {
@@ -2620,10 +2524,6 @@ export async function runAgentTurn(
             contextOutput: message,
           };
         }
-      }
-
-      if (call.name === "web.search") {
-        sawFreshWebSearch = true;
       }
 
       if (!alreadyPrintedIds.has(toolEventId)) {
@@ -4424,10 +4324,7 @@ export async function runAgentTurn(
               ...(toolsAttached
                 ? {
                   tools: turnTools,
-                  toolChoice:
-                    freshWebSearchRequired && !sawFreshWebSearch
-                      ? ({ type: "function", name: "web.search" } as const)
-                      : ("auto" as const),
+                  toolChoice: "auto" as const,
                   parallelToolCalls: true,
                   // P2-3: emit tool cards as soon as the function name arrives.
                   onToolCallDelta: (delta) => {
@@ -5074,11 +4971,7 @@ export async function runAgentTurn(
             commitAssistantRetry(assistantText.visible);
             // Keep nudges SHORT — cheap models lose the key instruction in long text.
             const buildNudge =
-              freshWebSearchRequired && !sawFreshWebSearch
-                ? toolsAttached
-                  ? "No visible output. This is current or scheduled information: call web.search now. Do NOT answer from memory."
-                  : "No visible output. This is current or scheduled information: emit exactly one valid ```tool block for web.search now. Do NOT answer from memory or hide the tool call in <think> tags."
-                : isPlanMode && !activePlan
+              isPlanMode && !activePlan
                   ? toolsAttached
                     ? "No visible output. In plan mode: gather context or call plan.create when ready (do not only describe the plan)."
                     : "No visible output. In plan mode: emit a ```tool block for research/recon or plan.create. " +
@@ -5372,11 +5265,9 @@ export async function runAgentTurn(
           const narratedAction = looksLikeActionNarration(cleaned);
           const narratedWebAction = looksLikeWebActionNarration(cleaned);
 
-          const reconciledPlanAtCompletion =
-            await reconcileOpenTaskBeforeFinalizing();
-          const livePlanAtCompletion =
-            reconciledPlanAtCompletion ??
-            (await loadPlan(session.sessionId).catch(() => undefined));
+          const livePlanAtCompletion = await loadPlan(session.sessionId).catch(
+            () => undefined,
+          );
           const planStatusAtCompletion =
             livePlanAtCompletion?.status ?? activePlan?.status;
           const completedPlanDuringThisTurn =
@@ -5385,7 +5276,6 @@ export async function runAgentTurn(
           const planHasOpenWorkNow = planHasOpenWork(planStatusAtCompletion);
 
           const userExpectsWork =
-            freshWebSearchRequired ||
             (planHasOpenWorkNow && session.planApproved.value) ||
             (!informationalQuery &&
               !idleOrSocialPrompt &&
@@ -5494,11 +5384,6 @@ export async function runAgentTurn(
             pentestSession,
             informationalQuery,
             idleOrSocialPrompt,
-            freshWebSearchRequired,
-            freshnessGuardText: freshWebSearchRequired
-              ? freshnessGuardMessage()
-              : "",
-            sawFreshWebSearch,
             sawPlanCreateOk,
             sawFeatureImplWrite,
             sawScaffoldOk,

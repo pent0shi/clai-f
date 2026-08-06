@@ -8,7 +8,6 @@ import {
   looksLikeShallowPentestReport,
   recoveryForErrorDiagnosis,
   recoveryForFailedProbe,
-  recoveryForFreshness,
   recoveryForMissingFeature,
   recoveryForMissingPlan,
   recoveryForNarration,
@@ -58,9 +57,6 @@ export interface FinalizeGateInput {
   pentestSession: boolean;
   informationalQuery: boolean;
   idleOrSocialPrompt: boolean;
-  freshWebSearchRequired: boolean;
-  freshnessGuardText: string;
-  sawFreshWebSearch: boolean;
   sawPlanCreateOk: boolean;
   sawFeatureImplWrite: boolean;
   sawScaffoldOk: boolean;
@@ -122,7 +118,7 @@ export function chooseFinalizeRecovery(
       action = recoveryForNarration(toolsAttached, "pentest");
     } else if (
       budgetRemaining(recovery, "actionIntent") &&
-      (input.freshWebSearchRequired || input.narratedWebAction)
+      input.narratedWebAction
     ) {
       action = recoveryForNarration(toolsAttached, "web");
     } else if (
@@ -140,19 +136,6 @@ export function chooseFinalizeRecovery(
       action = recoveryForNarration(toolsAttached, "generic");
     }
     if (action) return action;
-  }
-
-  if (
-    input.freshWebSearchRequired &&
-    !input.sawFreshWebSearch &&
-    budgetRemaining(recovery, "freshnessUsed")
-  ) {
-    return recoveryForFreshness(
-      input.freshnessGuardText +
-      (toolsAttached
-        ? " Call the web_search tool now."
-        : " Reply with ONLY a fenced ```tool block for web.search now."),
-    );
   }
 
   if (

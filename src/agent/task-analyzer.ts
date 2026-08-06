@@ -316,7 +316,7 @@ export function formatTaskAnalysisHint(analysis: TaskAnalysis): string {
       ? analysis.likelyTools.slice(0, 8).join(", ")
       : "—";
   const tracking = analysis.shouldPlan
-    ? "durable task tracking strongly recommended: create one concise plan before mutation, then keep task.update states aligned with real work"
+    ? "durable task tracking may help; decide whether to use it or execute directly"
     : "direct execution ok";
   return (
     `TASK ANALYSIS: category=${analysis.category} complexity=${analysis.complexity} (${tracking}). ` +

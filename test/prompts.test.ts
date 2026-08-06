@@ -83,28 +83,43 @@ describe("prompt rendering", () => {
     expect(currentDateTimeContext(a)).toBe(currentDateTimeContext(b));
   });
 
-  it("agent prompt distinguishes agent tasks vs plan tasks and verify-before-done", () => {
+  it("agent prompt makes tasks optional while preserving verify-before-done", () => {
     const prompt = renderAgentSystemPrompt("task.update, plan.create, shell.exec");
     expect(prompt).toMatch(/AGENT-MODE TASKS vs PLAN-MODE TASKS/i);
+    expect(prompt).toMatch(/optional working memory|not a prerequisite/i);
+    expect(prompt).toMatch(/Never create tasks merely because work has multiple steps/i);
     expect(prompt).toMatch(/read\/analyze results|read tool results|READ results/i);
     expect(prompt).toMatch(/typecheck|automated checks/i);
-    expect(prompt).toMatch(/Never mark done before success|done only when|Never mark done because/i);
+    expect(prompt).toMatch(/Never mark done before evidence|done only when|Never mark done because/i);
   });
 
-  it("agentModeDirective requires evidence before task done + build testing", () => {
+  it("agent prompt preserves explicit whole-program and phase-only boundaries", () => {
+    const prompt = renderAgentSystemPrompt("task.add, task.update, fs.read");
+    expect(prompt).toMatch(/entire roadmap\/folder\/program|whole roadmap\/program/i);
+    expect(prompt).toMatch(/do not stop for a progress summary between phases/i);
+    expect(prompt).toMatch(/explicitly limits the request to a phase/i);
+    expect(prompt).toMatch(/complete one coherent phase.*ask whether to continue/is);
+    expect(prompt).toMatch(/append the next phase.*instead of replacing completed work/is);
+  });
+
+  it("agentModeDirective requires evidence and keeps task usage model-directed", () => {
     const d = agentModeDirective();
-    expect(d).toMatch(/working checklist/i);
+    expect(d).toMatch(/optional working memory/i);
+    expect(d).toMatch(/Never create tasks merely because work has multiple steps/i);
+    expect(d).toMatch(/entire roadmap\/folder\/program/i);
     expect(d).toMatch(/Never mark done on hope/i);
     expect(d).toMatch(/typecheck|automated checks/i);
     expect(d).toMatch(/open the next task immediately/i);
   });
 
-  it("planModeDirective is plan-as-deliverable, not execution", () => {
+  it("planModeDirective is plan-as-deliverable with user-bounded scope", () => {
     const d = planModeDirective();
     expect(d).toMatch(/NOT agent-mode task execution/i);
     expect(d).toMatch(/plan\.create/i);
     expect(d).toMatch(/Do not implement/i);
     expect(d).toMatch(/1000%|comprehensive|architecture/i);
+    expect(d).toMatch(/whole-program\/all-phase requests require one plan/i);
+    expect(d).toMatch(/phase-only requests must not expand beyond it/i);
   });
 
   it("renderRequestEnvironmentContext includes NO PLAN EXISTS when plan is omitted", () => {

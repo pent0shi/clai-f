@@ -382,7 +382,7 @@ export function buildWorkspaceOrientation(
     "2. If a target project path ALREADY EXISTS with project markers, CONTINUE that project (edit feature files). Do NOT re-run a scaffolder into it (scaffolders cancel on non-empty dirs).",
     "3. If creating new, scaffold into a NEW empty subfolder under the destination (not into a non-empty dir).",
     "4. Prefer absolute paths under the real project root for all fs/shell work.",
-    "5. plan.create detail MUST mention what exists vs what you will create, based on this status.",
+    "5. If you choose plan.create, its detail must distinguish what already exists from what you will create.",
     "",
   ];
 

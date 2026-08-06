@@ -2,12 +2,11 @@
  * Pure parsing and classification for model output: recovering tool calls
  * from the many shapes different models emit (fenced JSON, XML wrappers,
  * Kimi sentinel tokens, bare args objects), and text-pattern classifiers
- * (build/pentest task detection, freshness guard, narration detection) used
+ * (build/pentest task detection, narration detection) used
  * to steer the agent loop. Nothing here touches process state, the file
  * system, or any store — nothing here executes a tool call, either.
  */
 import type { ChatMessage, ToolCall } from "../types.js";
-import { currentDateTimeContext } from "../prompts/index.js";
 import { isCompactionMemoryMessage } from "./context-manager.js";
 import { isResponderResultLedgerMessage } from "./responder-context.js";
 import { safeCwd } from "../os/cwd.js";
@@ -280,10 +279,34 @@ function parseKimiToolCall(text: string): ToolCall | undefined {
   return tryParseCall(JSON.stringify({ name, args: tryJson(match[2]!) ?? {} }));
 }
 
-const DSML_INVOKE_RE =
-  /<[|｜]DSML[|｜]invoke\b([^>]*)>([\s\S]*?)<\/[|｜]DSML[|｜]invoke>/gi;
-const DSML_PARAMETER_RE =
-  /<[|｜]DSML[|｜]parameter\b([^>]*)>([\s\S]*?)<\/[|｜]DSML[|｜]parameter>/gi;
+const DSML_INVOKE_OPEN_RE = /<[|｜]DSML[|｜]invoke\b([^>]*)>/gi;
+const DSML_PARAMETER_OPEN_RE = /<[|｜]DSML[|｜]parameter\b([^>]*)>/gi;
+
+const DSML_INVOKE_END_RES: RegExp[] = [
+  /<\/[|｜]DSML[|｜]invoke>/i,
+  /<[|｜]DSML[|｜]invoke\b/i,
+  /<\/[|｜]DSML[|｜]tool_calls>/i,
+];
+const DSML_PARAMETER_END_RES: RegExp[] = [
+  /<\/[|｜]DSML[|｜]parameter>/i,
+  /<[|｜]DSML[|｜]parameter\b/i,
+  /<\/[|｜]DSML[|｜]invoke>/i,
+  /<\/[|｜]DSML[|｜]tool_calls>/i,
+];
+
+function boundDsmlBlock(
+  after: string,
+  boundaries: RegExp[],
+): { body: string; terminated: boolean } {
+  let end = -1;
+  for (const re of boundaries) {
+    const match = re.exec(after);
+    if (match && (end < 0 || match.index < end)) end = match.index;
+  }
+  return end < 0
+    ? { body: after, terminated: false }
+    : { body: after.slice(0, end), terminated: true };
+}
 
 function dsmlAttribute(attrs: string, name: string): string | undefined {
   const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -323,19 +346,33 @@ function dsmlParameterValue(attrs: string, raw: string): unknown {
 
 function parseAllDsmlToolCalls(text: string): Array<{ index: number; call: ToolCall }> {
   const found: Array<{ index: number; call: ToolCall }> = [];
-  const invokeRe = new RegExp(DSML_INVOKE_RE.source, "gi");
+  const invokeRe = new RegExp(DSML_INVOKE_OPEN_RE.source, "gi");
   let invoke: RegExpExecArray | null;
   while ((invoke = invokeRe.exec(text)) !== null) {
     const name = dsmlAttribute(invoke[1] ?? "", "name")?.replace(/^functions\./, "").trim();
-    if (!name) continue;
+    const body = boundDsmlBlock(
+      text.slice(invoke.index + invoke[0].length),
+      DSML_INVOKE_END_RES,
+    );
+    if (!name || !body.terminated) continue;
     const args: Record<string, unknown> = {};
-    const parameterRe = new RegExp(DSML_PARAMETER_RE.source, "gi");
+    const parameterRe = new RegExp(DSML_PARAMETER_OPEN_RE.source, "gi");
     let parameter: RegExpExecArray | null;
-    while ((parameter = parameterRe.exec(invoke[2] ?? "")) !== null) {
+    let truncated = false;
+    while ((parameter = parameterRe.exec(body.body)) !== null) {
       const parameterName = dsmlAttribute(parameter[1] ?? "", "name")?.trim();
+      const value = boundDsmlBlock(
+        body.body.slice(parameter.index + parameter[0].length),
+        DSML_PARAMETER_END_RES,
+      );
+      if (!value.terminated) {
+        truncated = true;
+        break;
+      }
       if (!parameterName) continue;
-      args[parameterName] = dsmlParameterValue(parameter[1] ?? "", parameter[2] ?? "");
+      args[parameterName] = dsmlParameterValue(parameter[1] ?? "", value.body);
     }
+    if (truncated) continue;
     found.push({ index: invoke.index, call: { name, args } });
   }
   return found;
@@ -637,6 +674,8 @@ function tryJson(raw: string): Record<string, unknown> | undefined {
   return undefined;
 }
 
+const STRAY_DSML_TAG_RE = /<\/?[|｜]DSML[|｜][A-Za-z0-9_]*\b[^>]*>/gi;
+
 /** Strip any leftover Kimi/Moonshot sentinel tokens from final answers
  *  so a model that mixes prose and tool-call markers never bleeds raw
  *  `<|tool_call_begin|>` strings to the terminal. */
@@ -655,7 +694,9 @@ export function stripSentinelTokens(text: string): string {
     .replace(/<tool_call:[A-Za-z0-9_-]+>[\s\S]*?(?:<\/tool_call:[A-Za-z0-9_-]+>|$)/gi, "")
     .replace(/<\/?tool_calls?:[A-Za-z0-9_-]+>/gi, "")
     .replace(/<[|｜]DSML[|｜]tool_calls\b[^>]*>[\s\S]*?(?:<\/[|｜]DSML[|｜]tool_calls>|$)/gi, "")
-    .replace(/<[|｜]DSML[|｜](?:invoke|parameter)\b[^>]*>[\s\S]*?(?:<\/[|｜]DSML[|｜](?:invoke|parameter)>|$)/gi, "")
+    .replace(/<[|｜]DSML[|｜]invoke\b[^>]*>[\s\S]*?(?:<\/[|｜]DSML[|｜]invoke>|$)/gi, "")
+    .replace(/<[|｜]DSML[|｜]parameter\b[^>]*>[\s\S]*?(?:<\/[|｜]DSML[|｜]parameter>|$)/gi, "")
+    .replace(STRAY_DSML_TAG_RE, "")
     .trim();
 }
 
@@ -1397,6 +1438,7 @@ export function textBeforeToolCall(text: string): string {
     /<tool_call:[A-Za-z0-9_-]+>[\s\S]*$/i,
     /<[|｜]DSML[|｜]tool_calls\b[\s\S]*$/i,
     /<[|｜]DSML[|｜]invoke\b[\s\S]*$/i,
+    /<[|｜]DSML[|｜]parameter\b[\s\S]*$/i,
     // Kimi/Moonshot sentinel block — strip from the section opener
     // (or the first call opener if the section header is missing).
     /<\|tool_calls_section_begin\|>[\s\S]*$/i,
@@ -1517,40 +1559,7 @@ export function formatToolArgs(call: ToolCall): string {
   return JSON.stringify(call.args);
 }
 
-const VOLATILE_SIGNAL_RE =
-  /\b(?:current(?:ly)?|latest|newest|today|now|right now|live|recent|breaking|news|release[sd]?|version|prices?|stocks?|market|rates?|weather|forecast|elections?|results?|rankings?|standings?|stats?|cve|advis(?:ory|ories)|vulnerabilit(?:y|ies))\b/i;
-
-const VOLATILE_ROLE_QUERY_RE =
-  /\b(?:who(?:\s+is|'s)?|whos|name|tell\s+me|what(?:\s+is|'s)?)\b[\s\S]{0,120}\b(?:cm|chief\s+minister|prime\s+minister|president|governor|mayor|ministers?|cabinet|leader|head\s+of|ceo|cto|cfo|coo|chair(?:man|woman|person)?|coach|captain)\b/i;
-
-// A dated schedule (exam, application, event, release, etc.) is not stable
-// knowledge even when the user does not say "latest". In particular, terse
-// prompts such as "when is SSC CGL 2026" must be checked rather than guessed.
-const DATED_SCHEDULE_QUERY_RE =
-  /\bwhen\s+(?:is|are|does|will|do)\b[\s\S]{0,120}\b20\d{2}\b|\b(?:exam|test|application|admission|registration|notification|recruitment|event|match|release|launch)\b[\s\S]{0,80}\b(?:date|schedule|calendar|20\d{2})\b/i;
-
-const ROLE_OF_ENTITY_RE =
-  /\b(?:cm|chief\s+minister|prime\s+minister|president|governor|mayor|ministers?|ceo|cto|cfo|coo|chair(?:man|woman|person)?|coach|captain)\s+(?:of|for|in)\b/i;
-
-const EXPLICIT_WEB_LOOKUP_RE =
-  /\b(?:search\s+(?:the\s+)?(?:web|internet|online)|look\s*up|google|verify\s+(?:online|on\s+the\s+web)|check\s+(?:online|the\s+web|internet))\b/i;
-
-const STATIC_DISAMBIGUATION_RE =
-  /\b(?:stand\s+for|stands\s+for|meaning|definition|define|abbreviation|centimeters?|centimetres?)\b/i;
-
-const LOCAL_RUNTIME_RE =
-  /\b(?:current\s+(?:directory|dir|cwd|working\s+directory|folder|path|user|shell|process(?:es)?|branch|git\s+branch|network|ip|interfaces?|working\s+tree|project|repo(?:sitory)?|codebase|code|app|application|stack|setup|config|implementation|architecture|state|status|file|files|tree)|pwd|whoami|server|jobs?|process(?:es)?|ports?|localhost|git)\b/i;
-
-// Session-retrospective / in-conversation questions. Words like "now" or
-// "current" appear, but the user wants local context — not a web search.
-const SESSION_CONTEXT_RE =
-  /\b(?:so\s+far|till\s+now|until\s+now|up\s+to\s+now|what\s+do\s+(?:you|u)\s+know|what\s+have\s+you\s+(?:done|found|learned|checked)|in\s+this\s+(?:session|conversation|chat|project|repo|codebase)|this\s+(?:session|conversation|chat))\b/i;
-
-// Capability / identity questions about the agent itself.
-const SELF_CAPABILITY_RE =
-  /\b(?:what\s+can\s+you\s+do|what\s+do\s+you\s+do|your\s+capabilities|how\s+can\s+you\s+help|who\s+are\s+you|what\s+are\s+you)\b/i;
-
-// Pure social / idle turns — never force tools or freshness retries.
+// Pure social / idle turns — never force tools.
 const SOCIAL_OR_IDLE_PROMPT_RE =
   /^(?:hi|hii+|hello|hey(?:\s+there)?|yo|sup|howdy|hiya|good\s+(?:morning|afternoon|evening|night)|thanks?(?:\s+you)?|thx|ty|ok(?:ay)?|cool|great|nice|awesome|perfect|bye|goodbye|see\s+ya|cheers|gm|gn|how\s+are\s+you(?:\s+doing)?|what'?s\s+up|wassup)(?:\s*[!.?]*)?$/i;
 
@@ -1597,9 +1606,7 @@ const INCOMPLETE_RE =
 
 // The synthetic message injected when the user runs /implement to approve a
 // plan ("I approve the plan. Execute it now, task by task…"). It must always
-// count as a build/continuation turn — it contains the word "now", which
-// would otherwise trip the volatile-info freshness guard and divert the run
-// into a pointless web.search instead of executing the plan.
+// count as a build/continuation turn.
 const PLAN_EXECUTION_RE =
   /\b(?:approve the plan|execute it (?:now|task by task)|task by task|execute the plan|implement the plan)\b/i;
 
@@ -1785,7 +1792,7 @@ const EDUCATIONAL_START_RE =
 
 /**
  * Detect a pure social / idle user prompt (greetings, thanks, short acks).
- * These must never force tool use, plan workflows, or freshness retries.
+ * These must never force tool use or plan workflows.
  */
 export function looksLikeIdleOrSocialPrompt(prompt: string): boolean {
   const text = prompt.replace(/\s+/g, " ").trim();
@@ -1876,40 +1883,6 @@ export function looksLikePlanNarration(text: string): boolean {
   return approval || (goal && tasks);
 }
 
-export function requiresFreshWebSearch(prompt: string): boolean {
-  const text = prompt.replace(/\s+/g, " ").trim();
-  if (!text) return false;
-  // Social / idle prompts never need the web.
-  if (looksLikeIdleOrSocialPrompt(text)) {
-    return false;
-  }
-  if (EXPLICIT_WEB_LOOKUP_RE.test(text)) {
-    return true;
-  }
-  if (
-    STATIC_DISAMBIGUATION_RE.test(text) ||
-    LOCAL_RUNTIME_RE.test(text) ||
-    SESSION_CONTEXT_RE.test(text) ||
-    SELF_CAPABILITY_RE.test(text)
-  ) {
-    return false;
-  }
-  // Plan-execution and terse continuation turns are never "fetch current
-  // info" turns, even when they contain words like "now". (We intentionally
-  // do NOT exclude on build-stack keywords here — "latest vite version" is a
-  // legitimate version lookup. The runAgentLoop caller additionally gates the
-  // guard on looksLikeBuildTask so a real scaffold turn never searches.)
-  if (PLAN_EXECUTION_RE.test(text) || CONTINUATION_RE.test(text)) {
-    return false;
-  }
-  return (
-    VOLATILE_SIGNAL_RE.test(text) ||
-    VOLATILE_ROLE_QUERY_RE.test(text) ||
-    ROLE_OF_ENTITY_RE.test(text) ||
-    DATED_SCHEDULE_QUERY_RE.test(text)
-  );
-}
-
 /**
  * Detect a low-quality "everything in one step" plan task. A single task that
  * itself enumerates many files/actions (multiple commas, an "and", several
@@ -1927,16 +1900,6 @@ export function isLumpedSingleTask(taskTitles: string[]): boolean {
   );
 }
 
-export function freshnessGuardMessage(now = new Date()): string {
-  return (
-    `Freshness guard for this turn: the latest user prompt appears to ask for current, volatile, or externally verifiable information. The present moment is ${currentDateTimeContext(now)}. ` +
-    "Before answering, call web.search FIRST with a concise query derived from the user prompt. " +
-    "Shape the search query for the newest timeline by including current/latest or the current year/month when useful. " +
-    "Do not answer from the snippets alone when detail matters — set fetchTop (e.g. fetchTop:2) to read the top result pages, or follow up with web.fetch on the most relevant URL, then answer from what the pages actually say and cite them. " +
-    "If web.search fails or has no results, say that current information is unavailable instead of guessing from memory."
-  );
-}
-
 /**
  * Compact build inject — reinforces judgment defaults without restating the
  * full system playbook. Stack-agnostic.
@@ -1946,7 +1909,7 @@ export function buildWorkflowDirective(): string {
     "BUILD FOCUS (this turn is a build/scaffold/feature — use judgment, not a rigid script):",
     "EXPLORE once: read WORKSPACE STATUS; list the user destination and candidate project only as needed. After a project root is known, work there — do NOT repeatedly relist the parent destination. Non-empty dirs → CONTINUE an existing project / existing stack (NEVER re-scaffold). 'Operation cancelled' = failure.",
     "UNDERSTAND: match existing stack from manifests/lockfiles (package manager from lockfile). Empty path → pick a modern default and say so. Stack-agnostic scaffolding only into NEW EMPTY folders.",
-    "Scaffold destination is the new subfolder (e.g. Desktop/app), not the parent. Feature apps: replace starter boilerplate — scaffold alone is a failure. For multi-phase app builds, create one concise durable plan with meaningful tasks before mutation and keep task states current; trivial edits can skip tasks.",
+    "Scaffold destination is the new subfolder (e.g. Desktop/app), not the parent. Feature apps: replace starter boilerplate — scaffold alone is a failure. Use plan/tasks only when a durable checklist materially helps; direct execution is valid, and an existing active plan must be preserved.",
     "Local apps end with shell.start + probe; LEAVE the server running; report URL/port/job id. Absolute paths; never write the user app into the agent package tree.",
     "On tool WARN/error: change approach — never retry the identical failing command. Debug by root cause; never stop at diagnosis without fix+re-verify.",
   ].join("\n");

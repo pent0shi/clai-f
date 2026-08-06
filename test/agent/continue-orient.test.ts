@@ -102,6 +102,8 @@ describe("continue-orient", () => {
     expect(text).toMatch(/\[abc\]/);
     expect(text).toMatch(/shell\.jobs/);
     expect(text).toMatch(/do not mark tasks done/i);
+    expect(text).toMatch(/higher-level roadmap/i);
+    expect(text).toMatch(/append omitted work with task\.add/i);
     expect(text).toMatch(/shell\.start/);
   });
 

@@ -35,6 +35,17 @@ describe("stripToolCallSurfaces", () => {
     ).toBe(true);
   });
 
+  it("removes stranded DSML tags left after a settled block", () => {
+    expect(stripToolCallSurfaces("Guard added.</｜DSML｜invoke>\nNext step.")).toBe(
+      "Guard added.\nNext step.",
+    );
+    expect(
+      stripToolCallSurfaces(
+        `<｜DSML｜parameter name="path" string="true">.</｜DSML｜parameter>\nListing now.`,
+      ).trim(),
+    ).toBe("Listing now.");
+  });
+
   it("detects fence-only text", () => {
     expect(
       isToolFenceOnlyText(

@@ -3,7 +3,6 @@ import {
   parseToolCall,
   parseAllToolCalls,
   textBeforeToolCall,
-  requiresFreshWebSearch,
   shouldDimToolChatter,
   looksLikeTruncatedToolCall,
   recognizeBareToolJson,
@@ -19,6 +18,7 @@ import {
   groupToolCallsForExecution,
   buildTurnHistory,
   looksLikePromptLeak,
+  stripSentinelTokens,
 } from "../src/agent/runner.js";
 
 describe("agent tool-call parser", () => {
@@ -373,6 +373,56 @@ describe("DeepSeek DSML tool-call format", () => {
       args: { path: "&#x110000;" },
     });
   });
+
+  it("executes a call whose invoke closer is missing but whose values all ended", () => {
+    const text = `I'm on t6: add the architecture guard.
+
+<｜DSML｜tool_calls>
+<｜DSML｜invoke name="fs_edit">
+<｜DSML｜parameter name="path" string="true">/repo/test/tui-v2/architecture.test.ts</｜DSML｜parameter>
+<｜DSML｜parameter name="oldText" string="true">expect(offenders).toEqual([]);</｜DSML｜parameter>
+<｜DSML｜parameter name="newText" string="true">const f = () => { expect(offenders).toEqual([]); };</｜DSML｜parameter>
+</｜DSML｜tool_calls>`;
+    expect(parseAllToolCalls(text)).toEqual([
+      {
+        name: "fs_edit",
+        args: {
+          path: "/repo/test/tui-v2/architecture.test.ts",
+          oldText: "expect(offenders).toEqual([]);",
+          newText: "const f = () => { expect(offenders).toEqual([]); };",
+        },
+      },
+    ]);
+    expect(textBeforeToolCall(text)).toBe("I'm on t6: add the architecture guard.");
+  });
+
+  it("parses an invoke emitted without the outer tool_calls wrapper", () => {
+    const text = `<｜DSML｜invoke name="fs.read">
+<｜DSML｜parameter name="path" string="true">/repo/src/repl.ts</｜DSML｜parameter>
+</｜DSML｜invoke>`;
+    expect(parseToolCall(text, { strict: true })).toEqual({
+      name: "fs.read",
+      args: { path: "/repo/src/repl.ts" },
+    });
+  });
+
+  it("refuses a call whose last value was cut off mid-stream", () => {
+    const clipped = `<｜DSML｜tool_calls>
+<｜DSML｜invoke name="shell.exec">
+<｜DSML｜parameter name="command" string="true">rm -rf /tmp/build-cache`;
+    expect(parseAllToolCalls(clipped)).toEqual([]);
+    expect(parseToolCall(clipped, { strict: true })).toBeUndefined();
+  });
+
+  it("never leaves DSML markup in display text", () => {
+    const unwrapped = `Adding the guard.
+<｜DSML｜invoke name="fs.read">
+<｜DSML｜parameter name="path" string="true">/repo/a.ts</｜DSML｜parameter>
+</｜DSML｜invoke>`;
+    expect(stripSentinelTokens(unwrapped)).toBe("Adding the guard.");
+    expect(stripSentinelTokens(`done</｜DSML｜invoke>`)).toBe("done");
+    expect(stripSentinelTokens(`<｜DSML｜parameter name="p">v</｜DSML｜parameter>ok`)).toBe("ok");
+  });
 });
 
 describe("fresh web-search guard", () => {
@@ -509,62 +559,6 @@ describe("fresh web-search guard", () => {
     expect(looksLikeIdleOrSocialPrompt("build a todo app")).toBe(false);
   });
 
-  it("treats current office-holder questions as volatile even without the word current", () => {
-    expect(requiresFreshWebSearch("who is westbengal cm")).toBe(true);
-    expect(requiresFreshWebSearch("who is the CEO of Apple")).toBe(true);
-    expect(requiresFreshWebSearch("president of France")).toBe(true);
-  });
-
-  it("treats releases and explicit web lookups as fresh-search cases", () => {
-    expect(requiresFreshWebSearch("latest vite version")).toBe(true);
-    expect(requiresFreshWebSearch("look up the npm package status")).toBe(true);
-  });
-
-  it("treats dated exam and event schedules as fresh-search cases", () => {
-    expect(requiresFreshWebSearch("when is SSC CGL 2026")).toBe(true);
-    expect(requiresFreshWebSearch("UPSC exam date 2027")).toBe(true);
-  });
-
-  it("does not route static abbreviation questions through web.search", () => {
-    expect(requiresFreshWebSearch("what does cm stand for")).toBe(false);
-    expect(requiresFreshWebSearch("define cm")).toBe(false);
-  });
-
-  it("does not treat local runtime/process/server questions as fresh-search", () => {
-    expect(requiresFreshWebSearch("stat server")).toBe(false);
-    expect(requiresFreshWebSearch("is the server running")).toBe(false);
-    expect(requiresFreshWebSearch("check localhost port 5173")).toBe(false);
-    expect(requiresFreshWebSearch("list running jobs")).toBe(false);
-    expect(requiresFreshWebSearch("git status")).toBe(false);
-    expect(requiresFreshWebSearch("check server status")).toBe(false);
-    
-    // Explicit web search queries containing local terms should still be routed to search
-    expect(requiresFreshWebSearch("search web for dev server port issues")).toBe(true);
-  });
-
-  it("does not route greetings, session retrospectives, or local project questions through web.search", () => {
-    expect(requiresFreshWebSearch("hi")).toBe(false);
-    expect(requiresFreshWebSearch("hello")).toBe(false);
-    expect(requiresFreshWebSearch("what do you know till now")).toBe(false);
-    expect(requiresFreshWebSearch("what have you found so far")).toBe(false);
-    expect(requiresFreshWebSearch("explain the current project architecture")).toBe(
-      false,
-    );
-    expect(requiresFreshWebSearch("what can you do right now")).toBe(false);
-  });
-
-  it("never treats a plan-execution / build turn as a fresh-search turn", () => {
-    // The /implement synthetic message contains "now" — must NOT trigger a
-    // web.search for the current date instead of building the project.
-    const implementMsg =
-      "I approve the plan. Execute it now, task by task: mark each task in_progress before " +
-      "you start it and done after it actually succeeds.";
-    expect(requiresFreshWebSearch(implementMsg)).toBe(false);
-    expect(requiresFreshWebSearch("create a simple blog page react app here")).toBe(
-      false,
-    );
-    expect(requiresFreshWebSearch("build it now")).toBe(false);
-  });
 });
 
 describe("web.search display styling", () => {

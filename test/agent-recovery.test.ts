@@ -117,7 +117,7 @@ describe("agent recovery request shaping", () => {
     ]);
   });
 
-  it("requires web.search immediately after an empty reply to a dated schedule question", async () => {
+  it("keeps empty-reply recovery model-directed for a dated schedule question", async () => {
     const requests: CompletionRequest[] = [];
     const controller = new AbortController();
     const snapshot = (request: CompletionRequest): CompletionRequest => ({
@@ -146,7 +146,9 @@ describe("agent recovery request shaping", () => {
     ).resolves.toBe("");
 
     expect(requests).toHaveLength(2);
-    expect(requests[1]!.messages.at(-1)?.content).toContain("web.search now");
+    expect(requests[1]!.messages.at(-1)?.content).toContain("appropriate tool now");
+    expect(requests[1]!.messages.at(-1)?.content).not.toContain("web.search");
+    expect(requests[1]!.toolChoice).toBe("auto");
   });
 
   it("uses the compact agent prompt for low-TPM Groq models", async () => {

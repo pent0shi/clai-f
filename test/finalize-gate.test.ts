@@ -16,7 +16,6 @@ const ERROR_FIX_TEXT =
   "The build failed with a TypeError in src/app.ts. I need to fix the import path.";
 const SHALLOW_PENTEST_TEXT =
   "Assessment complete. Open ports 80, 443. Server header nginx. Missing security headers noted.";
-const FRESHNESS_GUARD_TEXT = "Freshness guard for this turn.";
 
 function baseInput(overrides: Partial<FinalizeGateInput> = {}): FinalizeGateInput {
   return {
@@ -38,9 +37,6 @@ function baseInput(overrides: Partial<FinalizeGateInput> = {}): FinalizeGateInpu
     pentestSession: false,
     informationalQuery: false,
     idleOrSocialPrompt: false,
-    freshWebSearchRequired: false,
-    freshnessGuardText: FRESHNESS_GUARD_TEXT,
-    sawFreshWebSearch: false,
     sawPlanCreateOk: false,
     sawFeatureImplWrite: false,
     sawScaffoldOk: false,
@@ -139,7 +135,6 @@ describe("finalize gate — narration family", () => {
         planHasOpenWork: true,
         pentestLikeTurn: true,
         buildLikeTurn: true,
-        freshWebSearchRequired: true,
       }),
     );
     expect(action?.kind).toBe("error_fix");
@@ -178,8 +173,7 @@ describe("finalize gate — narration family", () => {
           planHasOpenWork: true,
           pentestLikeTurn: true,
           buildLikeTurn: true,
-          freshWebSearchRequired: true,
-        }),
+          }),
       ),
     ).toEqual(recoveryForNarration(true, "plan_open"));
 
@@ -188,8 +182,7 @@ describe("finalize gate — narration family", () => {
         narrating({
           pentestLikeTurn: true,
           buildLikeTurn: true,
-          freshWebSearchRequired: true,
-        }),
+          }),
       ),
     ).toEqual(recoveryForNarration(true, "pentest"));
 
@@ -229,65 +222,6 @@ describe("finalize gate — narration family", () => {
   });
 });
 
-describe("finalize gate — freshness", () => {
-  it("fires when a fresh search is required and none happened", () => {
-    const action = chooseFinalizeRecovery(
-      baseInput({ freshWebSearchRequired: true }),
-    );
-    expect(action?.kind).toBe("freshness");
-    expect(action?.budgetKey).toBe("freshnessUsed");
-    expect(action?.message).toBe(
-      `${FRESHNESS_GUARD_TEXT} Call the web_search tool now.`,
-    );
-  });
-
-  it("asks for a fenced tool block when no native tools are attached", () => {
-    expect(
-      chooseFinalizeRecovery(
-        baseInput({ freshWebSearchRequired: true, toolsAttached: false }),
-      )?.message,
-    ).toBe(
-      `${FRESHNESS_GUARD_TEXT} Reply with ONLY a fenced \`\`\`tool block for web.search now.`,
-    );
-  });
-
-  it("does not fire when no fresh search is required", () => {
-    expect(chooseFinalizeRecovery(baseInput())).toBeUndefined();
-  });
-
-  it("does not fire once a fresh search already ran", () => {
-    expect(
-      chooseFinalizeRecovery(
-        baseInput({ freshWebSearchRequired: true, sawFreshWebSearch: true }),
-      ),
-    ).toBeUndefined();
-  });
-
-  it("does not fire once its one-shot budget is spent", () => {
-    expect(
-      chooseFinalizeRecovery(
-        baseInput({
-          recovery: drained("freshnessUsed", 1),
-          freshWebSearchRequired: true,
-        }),
-      ),
-    ).toBeUndefined();
-  });
-
-  it("loses to the narration family", () => {
-    expect(
-      chooseFinalizeRecovery(
-        baseInput({
-          freshWebSearchRequired: true,
-          wantsAction: true,
-          productiveSteps: 0,
-          narratedWebAction: true,
-        }),
-      ),
-    ).toEqual(recoveryForNarration(true, "web"));
-  });
-});
-
 describe("finalize gate — missing plan", () => {
   const planModeInput = (overrides: Partial<FinalizeGateInput> = {}) =>
     baseInput({ isPlanMode: true, ...overrides });
@@ -310,19 +244,9 @@ describe("finalize gate — missing plan", () => {
     ).toBeUndefined();
   });
 
-  it("loses to freshness and wins once freshness is spent", () => {
+  it("still fires when only web narration is present", () => {
     expect(
-      chooseFinalizeRecovery(
-        planModeInput({ freshWebSearchRequired: true }),
-      )?.kind,
-    ).toBe("freshness");
-    expect(
-      chooseFinalizeRecovery(
-        planModeInput({
-          recovery: drained("freshnessUsed", 1),
-          freshWebSearchRequired: true,
-        }),
-      )?.kind,
+      chooseFinalizeRecovery(planModeInput({ narratedWebAction: true }))?.kind,
     ).toBe("force_plan");
   });
 });
@@ -580,6 +504,23 @@ describe("finalize gate — premature complete", () => {
     expect(action?.kind).toBe("premature_complete");
     expect(action?.notice).toBe("1 plan task(s) still unfinished");
     expect(action?.message).toContain("[t2] implement");
+  });
+
+  it("asks the model to mark a finished in-progress task instead of settling it", () => {
+    const action = chooseFinalizeRecovery(
+      prematureInput({
+        plan: planWith([
+          { id: "t1", title: "scaffold", state: "done" },
+          { id: "t2", title: "add architecture guard", state: "in_progress" },
+        ]),
+        sawFeatureImplWrite: true,
+        sawSuccessfulMutation: true,
+        productiveSteps: 3,
+      }),
+    );
+    expect(action?.kind).toBe("premature_complete");
+    expect(action?.message).toContain("[t2] add architecture guard");
+    expect(action?.message).toMatch(/mark done/);
   });
 
   it("does not fire when the plan is not approved", () => {

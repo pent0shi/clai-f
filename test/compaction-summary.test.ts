@@ -80,6 +80,8 @@ describe("compaction-summary prompts", () => {
     expect(p).toContain("ACTIVE PLAN");
     expect(p).toContain("SESSION MATERIAL");
     expect(p).toMatch(/PHASE AWARENESS/i);
+    expect(p).toMatch(/requested execution boundary/i);
+    expect(p).toMatch(/roadmap\/plan\/task\/index paths/i);
   });
 
   it("plan-implement handoff separates evidence from plan-mode-only gates", () => {

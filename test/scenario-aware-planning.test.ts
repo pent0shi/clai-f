@@ -125,7 +125,8 @@ describe("buildWorkflowDirective — stack-agnostic explore/continue guidance", 
     expect(directive).toMatch(/CONTINUE an existing project|NEVER re-scaffold/i);
     expect(directive).toMatch(/Operation cancelled/i);
     expect(directive).toMatch(/stack-agnostic/i);
-    expect(directive).toMatch(/durable plan/i);
+    expect(directive).toMatch(/durable checklist/i);
+    expect(directive).toMatch(/direct execution is valid/i);
     expect(directive).toMatch(/do NOT repeatedly relist the parent/i);
   });
 });
