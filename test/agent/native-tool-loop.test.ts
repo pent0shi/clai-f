@@ -134,6 +134,115 @@ describe("native tool loop integration", () => {
     expect(streamMock.mock.calls[0]![0].tools?.length).toBeGreaterThan(0);
   });
 
+  it("closes and reports a malformed native call instead of treating it as empty", async () => {
+    await writeFile(join(cwd, "scene.txt"), "ready", "utf8");
+    const events: Array<{ type: string; id?: string; text?: string }> = [];
+    let turn = 0;
+
+    streamMock.mockImplementation(
+      async (request: CompletionRequest): Promise<CompletionResult> => {
+        turn += 1;
+        if (turn === 1) {
+          const rawArguments = `{"path":${JSON.stringify(cwd)}`;
+          request.onToolCallDelta?.({
+            index: 0,
+            id: "call_bad_list",
+            name: "fs.list",
+            argumentsBytes: rawArguments.length,
+          });
+          return {
+            text: "",
+            provider: "bynara",
+            model: "grok-4.5-free",
+            toolCalls: [
+              {
+                id: "call_bad_list",
+                name: "fs.list",
+                args: { _parseError: true, _raw: rawArguments },
+                rawArguments,
+              },
+            ],
+            finishReason: "tool_calls",
+          };
+        }
+
+        if (turn === 2) {
+          const malformedAssistant = request.messages.find(
+            (message) =>
+              message.role === "assistant" &&
+              message.toolCalls?.some((call) => call.id === "call_bad_list"),
+          );
+          expect(malformedAssistant).toBeDefined();
+          expect(
+            request.messages.some(
+              (message) =>
+                message.role === "tool" &&
+                message.toolCallId === "call_bad_list" &&
+                /not valid JSON/i.test(message.content),
+            ),
+          ).toBe(true);
+          return {
+            text: "",
+            provider: "bynara",
+            model: "grok-4.5-free",
+            toolCalls: [
+              {
+                id: "call_good_list",
+                name: "fs.list",
+                args: { path: cwd },
+              },
+            ],
+            finishReason: "tool_calls",
+          };
+        }
+
+        expect(
+          request.messages.some(
+            (message) =>
+              message.role === "tool" &&
+              message.toolCallId === "call_good_list" &&
+              message.content.includes("scene.txt"),
+          ),
+        ).toBe(true);
+        return {
+          text: "inspection complete",
+          provider: "bynara",
+          model: "grok-4.5-free",
+          finishReason: "stop",
+        };
+      },
+    );
+
+    const { runAgentLoop } = await import("../../src/agent/runner.js");
+    const answer = await runAgentLoop("inspect this project", {
+      provider: "bynara",
+      model: "grok-4.5-free",
+      maxSteps: 5,
+      onEvent: (event) => events.push(event),
+    });
+
+    expect(answer).toBe("inspection complete");
+    expect(streamMock).toHaveBeenCalledTimes(3);
+    expect(
+      events.filter(
+        (event) =>
+          event.type === "notice" && /empty response/i.test(event.text ?? ""),
+      ),
+    ).toHaveLength(0);
+    const toolCallIds = new Set(
+      events
+        .filter((event) => event.type === "tool-call")
+        .map((event) => event.id),
+    );
+    const toolResultIds = new Set(
+      events
+        .filter((event) => event.type === "tool-result")
+        .map((event) => event.id),
+    );
+    expect(toolCallIds.size).toBe(2);
+    expect([...toolCallIds].every((id) => id && toolResultIds.has(id))).toBe(true);
+  });
+
   it("preserves parallel tool bodies and session-state ordering for the next model call", async () => {
     const evidencePath = join(cwd, "evidence.txt");
     const appPath = join(cwd, "index.js");

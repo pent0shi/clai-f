@@ -4810,11 +4810,15 @@ export async function runAgentTurn(
 
         if (nativeToolCalls.length) {
           const first = nativeToolCalls[0]!;
-          if (first.args?._parseError) {
-            call = undefined;
-          } else {
-            call = normalizeToolCall({ name: first.name, args: first.args });
-          }
+          call = first.args?._parseError
+            ? {
+              name: first.name || "unknown",
+              args: {
+                __nativeParseError: true,
+                _raw: first.args._raw,
+              },
+            }
+            : normalizeToolCall({ name: first.name, args: first.args });
         } else {
           call = parseToolCall(assistantText.visible, {
             strict: getConfig().parserStrict,
