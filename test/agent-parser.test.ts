@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   parseToolCall,
+  parseAllToolCalls,
+  textBeforeToolCall,
   requiresFreshWebSearch,
   shouldDimToolChatter,
   looksLikeTruncatedToolCall,
@@ -328,6 +330,51 @@ describe("Kimi K2 sentinel-token tool-call format", () => {
   });
 });
 
+describe("DeepSeek DSML tool-call format", () => {
+  it("parses the exact fullwidth-bar DSML call emitted after reasoning degradation", () => {
+    const text = `<｜DSML｜tool_calls>
+<｜DSML｜invoke name="fs.list">
+<｜DSML｜parameter name="path" string="true">/Users/aniketpandey/Desktop/copypaste</｜DSML｜parameter>
+</｜DSML｜invoke>
+</｜DSML｜tool_calls>`;
+    expect(parseToolCall(text, { strict: true })).toEqual({
+      name: "fs.list",
+      args: { path: "/Users/aniketpandey/Desktop/copypaste" },
+    });
+    expect(textBeforeToolCall(`Inspecting.\n${text}`)).toBe("Inspecting.");
+  });
+
+  it("parses every DSML invocation in order with typed and escaped values", () => {
+    const text = `<|DSML|tool_calls>
+<|DSML|invoke name="web.search">
+<|DSML|parameter name="query" string="true">alpha &amp; beta</|DSML|parameter>
+<|DSML|parameter name="maxResults" number="true">3</|DSML|parameter>
+</|DSML|invoke>
+<|DSML|invoke name="http.fetch">
+<|DSML|parameter name="url" string="true">https://example.com?a=1&amp;b=2</|DSML|parameter>
+<|DSML|parameter name="includeHeaders" boolean="true">true</|DSML|parameter>
+</|DSML|invoke>
+</|DSML|tool_calls>`;
+    expect(parseAllToolCalls(text)).toEqual([
+      { name: "web.search", args: { query: "alpha & beta", maxResults: 3 } },
+      {
+        name: "http.fetch",
+        args: { url: "https://example.com?a=1&b=2", includeHeaders: true },
+      },
+    ]);
+  });
+
+  it("does not execute truncated DSML or throw on an out-of-range entity", () => {
+    const truncated = `<｜DSML｜tool_calls><｜DSML｜invoke name="fs.write"><｜DSML｜parameter name="path" string="true">x`;
+    expect(parseToolCall(truncated, { strict: true })).toBeUndefined();
+    const complete = `<｜DSML｜tool_calls><｜DSML｜invoke name="fs.list"><｜DSML｜parameter name="path" string="true">&#x110000;</｜DSML｜parameter></｜DSML｜invoke></｜DSML｜tool_calls>`;
+    expect(parseToolCall(complete, { strict: true })).toEqual({
+      name: "fs.list",
+      args: { path: "&#x110000;" },
+    });
+  });
+});
+
 describe("fresh web-search guard", () => {
   it("treats fetch narration without a tool call as an action stall", () => {
     expect(
@@ -364,6 +411,7 @@ describe("fresh web-search guard", () => {
         "I'll start with the basics of how quicksort works, then walk through an example.",
       ),
     ).toBe(false);
+
     expect(
       looksLikeActionNarration(
         "I'm ready when you are — just tell me what you'd like me to do.",

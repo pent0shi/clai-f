@@ -52,6 +52,34 @@ describe("LoopGuard", () => {
     expect(withReason.shouldBlock("shell.exec", args, retry).block).toBe(true);
   });
 
+  it("allows the same failed command after each intervening action", () => {
+    const guard = new LoopGuard();
+    const command = { command: "node test.js" };
+
+    guard.recordAttempt(0, "shell.exec", command, false, 1, "failed");
+    expect(guard.shouldBlock("shell.exec", command).block).toBe(true);
+
+    guard.recordAttempt(1, "fs.edit", { path: "test.js", oldText: "a", newText: "b" }, true, 0, "edited");
+    expect(guard.shouldBlock("shell.exec", command).block).toBe(false);
+
+    guard.recordAttempt(2, "shell.exec", command, false, 1, "still failed");
+    expect(guard.shouldBlock("shell.exec", command).block).toBe(true);
+
+    guard.recordAttempt(3, "fs.write", { path: "test.js", content: "fixed" }, true, 0, "written");
+    expect(guard.shouldBlock("shell.exec", command).block).toBe(false);
+  });
+
+  it("allows the same observation after a different action", () => {
+    const guard = new LoopGuard();
+    const list = { path: "/tmp/project" };
+
+    guard.recordAttempt(0, "fs.list", list, true, 0, "a.txt");
+    expect(guard.shouldBlock("fs.list", list).block).toBe(true);
+
+    guard.recordAttempt(1, "tool.check", { tools: ["node"] }, true, 0, "node 26");
+    expect(guard.shouldBlock("fs.list", list).block).toBe(false);
+  });
+
   it("suppresses an unchanged successful read without affecting mutations", () => {
     const guard = new LoopGuard();
     const args = { path: "/tmp/blog" };
@@ -62,6 +90,13 @@ describe("LoopGuard", () => {
       kind: "unchanged-success",
     });
     expect(guard.shouldBlock("fs.write", { path: "/tmp/blog/c", content: "c" }).block).toBe(false);
+  });
+
+  it("returns the prior successful observation for suppressed recovery", () => {
+    const guard = new LoopGuard();
+    const args = { path: "/tmp/blog" };
+    guard.recordAttempt(0, "fs.list", args, true, 0, "a\nb\n");
+    expect(guard.getPriorObservation("fs.list", args)).toBe("a\nb");
   });
 
   it("treats whitespace-normalized commands as equivalent for failure tracking", () => {
@@ -193,55 +228,49 @@ describe("LoopGuard", () => {
     ).toBe(false);
   });
 
-  it("allows repeated sequences up to warn threshold without suppression", () => {
+  it("allows the first action sequence", () => {
     const guard = new LoopGuard();
     const seq = [{ name: "shell.exec", args: { command: "node test.mjs" } }];
-
-    for (let i = 0; i < 4; i++) {
-      const decision = guard.observeActionSequence(seq);
-      expect(decision.suppress).toBe(false);
-      expect(decision.warn).toBe(false);
-      guard.completeActionSequence(seq, true);
-    }
-  });
-
-  it("warns at 5th repetition but does not suppress", () => {
-    const guard = new LoopGuard();
-    const seq = [{ name: "shell.exec", args: { command: "node test.mjs" } }];
-
-    for (let i = 0; i < 5; i++) {
-      guard.observeActionSequence(seq);
-      guard.completeActionSequence(seq, true);
-    }
 
     const decision = guard.observeActionSequence(seq);
     expect(decision.suppress).toBe(false);
-    expect(decision.warn).toBe(true);
-    expect(decision.warnMessage).toMatch(/loop\.reset/);
+    expect(decision.warn).toBe(false);
+    guard.completeActionSequence(seq, true);
   });
 
-  it("blocks at 10th repetition", () => {
+  it("suppresses the first exact replay without executing it again", () => {
     const guard = new LoopGuard();
     const seq = [{ name: "shell.exec", args: { command: "node test.mjs" } }];
 
-    for (let i = 0; i < 10; i++) {
-      guard.observeActionSequence(seq);
-      guard.completeActionSequence(seq, true);
-    }
+    guard.observeActionSequence(seq);
+    guard.completeActionSequence(seq, true);
 
     const decision = guard.observeActionSequence(seq);
     expect(decision.suppress).toBe(true);
+    expect(decision.terminal).toBe(false);
+    expect(decision.repetitions).toBe(1);
   });
 
-  it("resetAllSequenceCounts allows commands to run again after block threshold", () => {
+  it("escalates only after repeated suppressed replays", () => {
     const guard = new LoopGuard();
     const seq = [{ name: "shell.exec", args: { command: "node test.mjs" } }];
 
-    for (let i = 0; i < 10; i++) {
-      guard.observeActionSequence(seq);
-      guard.completeActionSequence(seq, true);
-    }
+    guard.observeActionSequence(seq);
+    guard.completeActionSequence(seq, true);
+    expect(guard.observeActionSequence(seq).terminal).toBe(false);
+    expect(guard.observeActionSequence(seq).terminal).toBe(false);
+    expect(guard.observeActionSequence(seq)).toMatchObject({
+      suppress: true,
+      terminal: true,
+    });
+  });
 
+  it("resetAllSequenceCounts allows commands to run again after suppression", () => {
+    const guard = new LoopGuard();
+    const seq = [{ name: "shell.exec", args: { command: "node test.mjs" } }];
+
+    guard.observeActionSequence(seq);
+    guard.completeActionSequence(seq, true);
     expect(guard.observeActionSequence(seq).suppress).toBe(true);
     guard.resetAllSequenceCounts();
     const after = guard.observeActionSequence(seq);
@@ -249,37 +278,29 @@ describe("LoopGuard", () => {
     expect(after.warn).toBe(false);
   });
 
-  it("does not suppress oscillation (A→B→A) below warn threshold", () => {
+  it("never suppresses a sequence separated by another action", () => {
     const guard = new LoopGuard();
-    const seqA = [{ name: "fs.read", args: { path: "a" } }];
-    const seqB = [{ name: "fs.read", args: { path: "b" } }];
+    const seqA = [{ name: "shell.exec", args: { command: "node test.js" } }];
+    const seqB = [{ name: "fs.edit", args: { path: "test.js", oldText: "a", newText: "b" } }];
 
-    guard.observeActionSequence(seqA);
-    guard.completeActionSequence(seqA, true);
-    guard.observeActionSequence(seqB);
-    guard.completeActionSequence(seqB, true);
-
-    const backToA = guard.observeActionSequence(seqA);
-    expect(backToA.suppress).toBe(false);
-    expect(backToA.warn).toBe(false);
-  });
-
-  it("warns on oscillation at warn threshold", () => {
-    const guard = new LoopGuard();
-    const seqA = [{ name: "fs.read", args: { path: "a" } }];
-    const seqB = [{ name: "fs.read", args: { path: "b" } }];
-
-    for (let i = 0; i < 5; i++) {
-      guard.observeActionSequence(seqA);
+    for (let i = 0; i < 4; i++) {
+      expect(guard.observeActionSequence(seqA)).toMatchObject({
+        suppress: false,
+        oscillation: false,
+      });
       guard.completeActionSequence(seqA, true);
-      guard.observeActionSequence(seqB);
+      expect(guard.observeActionSequence(seqB)).toMatchObject({
+        suppress: false,
+        oscillation: false,
+      });
       guard.completeActionSequence(seqB, true);
     }
 
-    const decision = guard.observeActionSequence(seqA);
-    expect(decision.suppress).toBe(false);
-    expect(decision.warn).toBe(true);
-    expect(decision.oscillation).toBe(true);
+    expect(guard.observeActionSequence(seqA)).toMatchObject({
+      suppress: false,
+      oscillation: false,
+      warn: false,
+    });
   });
 
   it("does not suppress a genuinely new sequence", () => {
@@ -313,12 +334,10 @@ describe("LoopGuard", () => {
     const guard = new LoopGuard();
     const seq = [{ name: "shell.exec", args: { command: "npm test" } }];
 
-    for (let i = 0; i < 6; i++) {
-      guard.observeActionSequence(seq);
-      guard.completeActionSequence(seq, true);
-    }
-    expect(guard.getSequenceRunCount(seq)).toBe(6);
-    expect(guard.observeActionSequence(seq).warn).toBe(true);
+    guard.observeActionSequence(seq);
+    guard.completeActionSequence(seq, true);
+    expect(guard.getSequenceRunCount(seq)).toBe(1);
+    expect(guard.observeActionSequence(seq).suppress).toBe(true);
 
     guard.resetSequenceCount(seq);
     expect(guard.getSequenceRunCount(seq)).toBe(0);

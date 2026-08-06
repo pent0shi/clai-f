@@ -939,7 +939,9 @@ export function buildChatBody(options: {
     Boolean(options.reasoning?.enabled) &&
     !modelSupportsThinking(options.providerId, options.model);
   const reasoning =
-    isReasoningUnsupported(options.model) || capabilityDeniesThinking
+    (options.providerId !== undefined &&
+      isReasoningUnsupported(options.providerId, options.model)) ||
+    capabilityDeniesThinking
       ? {}
       : buildReasoningPayload(
           options.reasoning,

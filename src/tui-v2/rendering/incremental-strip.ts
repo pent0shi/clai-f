@@ -49,7 +49,7 @@ function flushBoundary(text: string, limit: number): number {
 // last one can be stripped once and flushed; the remaining prose returns to the
 // cheap append path instead of being rescanned forever.
 const COMPLETE_SURFACE =
-  /```(?:tool|json\s*tool)\b[^\n]*\n[\s\S]*?```|<tool_call\b[^>]*>[\s\S]*?<\/tool_call>/g;
+  /```(?:tool|json\s*tool)\b[^\n]*\n[\s\S]*?```|<tool_call\b[^>]*>[\s\S]*?<\/tool_call>|<[|｜]DSML[|｜]tool_calls\b[^>]*>[\s\S]*?<\/[|｜]DSML[|｜]tool_calls>/g;
 
 function settleCompletedSurfaces(
   stableText: string,

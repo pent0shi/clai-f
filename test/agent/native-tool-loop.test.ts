@@ -463,4 +463,196 @@ describe("native tool loop integration", () => {
       }),
     ).resolves.toBe("inspected");
   });
+
+  it("executes DeepSeek DSML text as a real tool call", async () => {
+    await writeFile(join(cwd, "visible.txt"), "ok", "utf8");
+    let turn = 0;
+    streamMock.mockImplementation(
+      async (request: CompletionRequest, onToken: (token: string) => void) => {
+        turn += 1;
+        if (turn === 1) {
+          const text = `<｜DSML｜tool_calls><｜DSML｜invoke name="fs.list"><｜DSML｜parameter name="path" string="true">${cwd}</｜DSML｜parameter></｜DSML｜invoke></｜DSML｜tool_calls>`;
+          onToken(text);
+          return {
+            text,
+            provider: "tokenrouter",
+            model: "deepseek/deepseek-v4-flash-0731",
+            finishReason: "stop",
+          };
+        }
+        expect(
+          request.messages.some(
+            (message) => message.role === "tool" && message.content.includes("visible.txt"),
+          ),
+        ).toBe(true);
+        return {
+          text: "done",
+          provider: "tokenrouter",
+          model: "deepseek/deepseek-v4-flash-0731",
+          finishReason: "stop",
+        };
+      },
+    );
+
+    const { runAgentLoop } = await import("../../src/agent/runner.js");
+    await expect(
+      runAgentLoop("list this project", {
+        provider: "tokenrouter",
+        model: "deepseek/deepseek-v4-flash-0731",
+        maxSteps: 4,
+      }),
+    ).resolves.toBe("done");
+    expect(streamMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("allows repeated test commands after intervening fixes", async () => {
+    const target = join(cwd, "test.js");
+    const command = "node test.js";
+    await writeFile(target, 'console.error("first failure"); process.exit(1);\n', "utf8");
+    let turn = 0;
+
+    streamMock.mockImplementation(
+      async (request: CompletionRequest): Promise<CompletionResult> => {
+        turn += 1;
+        if (turn === 1 || turn === 3 || turn === 5) {
+          return {
+            text: "",
+            provider: "openai",
+            model: "gpt-test",
+            toolCalls: [
+              {
+                id: `call_test_${turn}`,
+                name: "shell.exec",
+                args: { command, cwd },
+              },
+            ],
+            finishReason: "tool_calls",
+          };
+        }
+        if (turn === 2) {
+          expect(
+            request.messages.some(
+              (message) => message.role === "tool" && message.content.includes("first failure"),
+            ),
+          ).toBe(true);
+          return {
+            text: "",
+            provider: "openai",
+            model: "gpt-test",
+            toolCalls: [
+              {
+                id: "call_edit_still_failing",
+                name: "fs.write",
+                args: {
+                  path: target,
+                  content: 'console.error("second failure"); process.exit(1);\n',
+                },
+              },
+            ],
+            finishReason: "tool_calls",
+          };
+        }
+        if (turn === 4) {
+          expect(
+            request.messages.some(
+              (message) => message.role === "tool" && message.content.includes("second failure"),
+            ),
+          ).toBe(true);
+          expect(
+            request.messages.some((message) =>
+              message.content.includes("previously failed with identical arguments"),
+            ),
+          ).toBe(false);
+          return {
+            text: "",
+            provider: "openai",
+            model: "gpt-test",
+            toolCalls: [
+              {
+                id: "call_edit_passing",
+                name: "fs.write",
+                args: { path: target, content: 'console.log("passed");\n' },
+              },
+            ],
+            finishReason: "tool_calls",
+          };
+        }
+        expect(
+          request.messages.some(
+            (message) => message.role === "tool" && message.content.includes("passed"),
+          ),
+        ).toBe(true);
+        return {
+          text: "fixed and verified",
+          provider: "openai",
+          model: "gpt-test",
+          finishReason: "stop",
+        };
+      },
+    );
+
+    const { runAgentLoop } = await import("../../src/agent/runner.js");
+    await expect(
+      runAgentLoop("fix test.js and rerun node test.js until it passes", {
+        provider: "openai",
+        model: "gpt-4o-mini",
+        maxSteps: 10,
+      }),
+    ).resolves.toBe("fixed and verified");
+    await expect(readFile(target, "utf8")).resolves.toBe('console.log("passed");\n');
+    expect(streamMock).toHaveBeenCalledTimes(6);
+  });
+
+  it("suppresses an exact replay once and returns prior evidence without duplicating history", async () => {
+    await writeFile(join(cwd, "once.txt"), "ok", "utf8");
+    let turn = 0;
+    streamMock.mockImplementation(
+      async (request: CompletionRequest): Promise<CompletionResult> => {
+        turn += 1;
+        if (turn <= 2) {
+          return {
+            text: "",
+            provider: "openai",
+            model: "gpt-test",
+            toolCalls: [
+              {
+                id: `call_list_${turn}`,
+                name: "fs.list",
+                args: { path: cwd },
+              },
+            ],
+            finishReason: "tool_calls",
+          };
+        }
+        const toolCalls = request.messages.flatMap((message) => message.toolCalls ?? []);
+        expect(toolCalls.filter((call) => call.name === "fs.list")).toHaveLength(1);
+        const recovery = request.messages.findLast(
+          (message) => message.role === "user" && message.internal,
+        );
+        expect(recovery?.content).toContain("ACTION CYCLE RECOVERY");
+        expect(recovery?.content).toContain("original successful tool result remains in context");
+        expect(
+          request.messages.some(
+            (message) => message.role === "tool" && message.content.includes("once.txt"),
+          ),
+        ).toBe(true);
+        return {
+          text: "used the existing listing",
+          provider: "openai",
+          model: "gpt-test",
+          finishReason: "stop",
+        };
+      },
+    );
+
+    const { runAgentLoop } = await import("../../src/agent/runner.js");
+    await expect(
+      runAgentLoop("inspect the project once", {
+        provider: "openai",
+        model: "gpt-4o-mini",
+        maxSteps: 4,
+      }),
+    ).resolves.toBe("used the existing listing");
+    expect(streamMock).toHaveBeenCalledTimes(3);
+  });
 });

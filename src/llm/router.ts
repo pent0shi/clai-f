@@ -482,6 +482,10 @@ function authForSlot(
 
 type EmitKey = (event: ProviderKeyEvent) => void;
 
+function withoutReasoning(request: CompletionRequest): CompletionRequest {
+  return { ...request, thinking: undefined };
+}
+
 function makeKeyEmitter(
   onStatus?: (message: string) => void,
   onKeyEvent?: ProviderKeyEventHandler,
@@ -526,8 +530,8 @@ async function tryCompleteOnce(
     // Model rejected a reasoning/thinking knob — mark it and retry once
     // without reasoning so an unsupported option never fails the request.
     if (isReasoningUnsupportedError(error)) {
-      markReasoningUnsupported(model);
-      return await provider.complete(activeRequest, auth);
+      markReasoningUnsupported(providerId, model);
+      return await provider.complete(withoutReasoning(activeRequest), auth);
     }
     if (hasImageInput(activeRequest) && isImageInputUnsupportedError(error)) {
       learnModelVisionCapability(providerId, model, false);
@@ -710,15 +714,16 @@ async function tryStreamOnce(
     // sending reasoning, then retry once without it. A parameter rejection is a
     // request-time 4xx, so no tokens have streamed yet — the retry is clean.
     if (emittedBytes === 0 && isReasoningUnsupportedError(error)) {
-      markReasoningUnsupported(model);
+      markReasoningUnsupported(providerId, model);
       onStatus?.(
         `ℹ ${providerId}/${model} rejected reasoning options — retrying without them`,
       );
+      const retryRequest = withoutReasoning(activeRequest);
       try {
         if (provider.stream) {
-          return await provider.stream(activeRequest, auth, emit);
+          return await provider.stream(retryRequest, auth, emit);
         }
-        const result = await provider.complete(activeRequest, auth);
+        const result = await provider.complete(retryRequest, auth);
         emit(result.text);
         return result;
       } catch (retryError) {

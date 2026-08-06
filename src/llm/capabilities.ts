@@ -84,23 +84,22 @@ const reasoningPatterns: Record<ProviderId, RegExp[]> = {
   ],
 };
 
-// Session-sticky set of models that rejected our reasoning/thinking options at
-// runtime. Keyed by model name because reasoning-parameter support is a
-// property of the model's chat template, not the gateway serving it. Populated
-// by the router when a provider returns a parameter-rejection error for a
-// reasoning knob (see isReasoningUnsupportedError in http.ts).
+// Session-sticky set of provider/model routes that rejected our
+// reasoning/thinking options at runtime. Populated by the router when a
+// provider returns a parameter-rejection error for a reasoning knob.
 const reasoningUnsupportedModels = new Set<string>();
 
-const reasoningKey = (model: string): string => model.trim().toLowerCase();
+const reasoningKey = (provider: ProviderId, model: string): string =>
+  `${provider}:${model.trim().toLowerCase()}`;
 
 /** Mark a model as having rejected reasoning options so we stop sending them. */
-export function markReasoningUnsupported(model: string): void {
-  reasoningUnsupportedModels.add(reasoningKey(model));
+export function markReasoningUnsupported(provider: ProviderId, model: string): void {
+  reasoningUnsupportedModels.add(reasoningKey(provider, model));
 }
 
 /** Whether a model was observed to reject reasoning options this session. */
-export function isReasoningUnsupported(model: string): boolean {
-  return reasoningUnsupportedModels.has(reasoningKey(model));
+export function isReasoningUnsupported(provider: ProviderId, model: string): boolean {
+  return reasoningUnsupportedModels.has(reasoningKey(provider, model));
 }
 
 export function clearReasoningUnsupported(): void {
@@ -111,7 +110,7 @@ export function modelSupportsThinking(
   provider: ProviderId,
   model: string,
 ): boolean {
-  if (isReasoningUnsupported(model)) return false;
+  if (isReasoningUnsupported(provider, model)) return false;
   const patterns = reasoningPatterns[provider] ?? [];
   return patterns.some((pattern) => pattern.test(model));
 }

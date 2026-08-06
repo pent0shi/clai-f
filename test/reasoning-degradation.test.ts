@@ -13,7 +13,7 @@ import {
 import { providers, streamWithProvider } from "../src/llm/router.js";
 import { getConfig, updateConfig } from "../src/store/config.js";
 import type { LlmProvider } from "../src/llm/provider.js";
-import type { ChatMessage } from "../src/types.js";
+import type { ChatMessage, CompletionRequest } from "../src/types.js";
 
 const userMessages: ChatMessage[] = [{ role: "user", content: "hi" }];
 
@@ -66,15 +66,22 @@ describe("isReasoningUnsupportedError", () => {
 describe("reasoning payload graceful degradation", () => {
   it("modelSupportsThinking returns false after a model is marked unsupported", () => {
     expect(modelSupportsThinking("nvidia", "z-ai/glm-5.2")).toBe(true);
-    markReasoningUnsupported("z-ai/glm-5.2");
-    expect(isReasoningUnsupported("z-ai/glm-5.2")).toBe(true);
+    markReasoningUnsupported("nvidia", "z-ai/glm-5.2");
+    expect(isReasoningUnsupported("nvidia", "z-ai/glm-5.2")).toBe(true);
     expect(modelSupportsThinking("nvidia", "z-ai/glm-5.2")).toBe(false);
   });
 
+
+  it("keeps learned reasoning rejection scoped to one provider route", () => {
+    markReasoningUnsupported("nvidia", "deepseek/deepseek-v4-flash-0731");
+    expect(modelSupportsThinking("nvidia", "deepseek/deepseek-v4-flash-0731")).toBe(false);
+    expect(modelSupportsThinking("tokenrouter", "deepseek/deepseek-v4-flash-0731")).toBe(true);
+  });
   it("buildChatBody omits reasoning knobs for a model marked unsupported", () => {
     const before = JSON.parse(
       buildChatBody({
         model: "z-ai/glm-5.2",
+        providerId: "nvidia",
         messages: userMessages,
         stream: false,
         reasoning: { enabled: true, effort: "high" },
@@ -83,10 +90,11 @@ describe("reasoning payload graceful degradation", () => {
     ) as Record<string, unknown>;
     expect(before).toHaveProperty("chat_template_kwargs");
 
-    markReasoningUnsupported("z-ai/glm-5.2");
+    markReasoningUnsupported("nvidia", "z-ai/glm-5.2");
     const after = JSON.parse(
       buildChatBody({
         model: "z-ai/glm-5.2",
+        providerId: "nvidia",
         messages: userMessages,
         stream: false,
         reasoning: { enabled: true, effort: "high" },
@@ -118,12 +126,12 @@ describe("router retries without reasoning when a knob is rejected", () => {
   });
 
   it("marks the model and retries once without reasoning on a 400 knob rejection", async () => {
-    let calls = 0;
+    const requests: CompletionRequest[] = [];
     providers.nvidia = {
       ...originalNvidia,
-      async stream() {
-        calls += 1;
-        if (calls === 1) {
+      async stream(request) {
+        requests.push(request);
+        if (requests.length === 1) {
           throw new ProviderError(
             "NVIDIA NIM (model=z-ai/glm-5.2): request failed",
             400,
@@ -134,6 +142,14 @@ describe("router retries without reasoning when a knob is rejected", () => {
       },
     } as LlmProvider;
 
+    const tools: NonNullable<CompletionRequest["tools"]> = [
+      {
+        name: "fs.list",
+        wireName: "fs_list",
+        description: "List files",
+        parameters: { type: "object", properties: {} },
+      },
+    ];
     const statuses: string[] = [];
     const result = await streamWithProvider(
       {
@@ -141,14 +157,23 @@ describe("router retries without reasoning when a knob is rejected", () => {
         model: "z-ai/glm-5.2",
         thinking: { enabled: true, effort: "high" },
         messages: userMessages,
+        tools,
+        toolChoice: "auto",
+        parallelToolCalls: true,
       },
       () => undefined,
       (message) => statuses.push(message),
     );
 
-    expect(calls).toBe(2);
+    expect(requests).toHaveLength(2);
+    expect(requests[0]!.thinking).toEqual({ enabled: true, effort: "high" });
+    expect(requests[1]!.thinking).toBeUndefined();
+    expect(requests[1]!.messages).toEqual(requests[0]!.messages);
+    expect(requests[1]!.tools).toEqual(tools);
+    expect(requests[1]!.toolChoice).toBe("auto");
+    expect(requests[1]!.parallelToolCalls).toBe(true);
     expect(result.text).toBe("ok");
-    expect(isReasoningUnsupported("z-ai/glm-5.2")).toBe(true);
+    expect(isReasoningUnsupported("nvidia", "z-ai/glm-5.2")).toBe(true);
     expect(statuses.join("")).toMatch(/rejected reasoning options/i);
   });
 });

@@ -37,46 +37,38 @@ describe("loop guard semantics", () => {
     expect(guard.getAttemptCount("shell.exec", { command: "npm test" })).toBe(1);
   });
 
-  it("graduated sequence guard: no suppress below warn threshold", () => {
+  it("allows the first sequence and suppresses its exact replay", () => {
     const guard = new LoopGuard();
     const seq = [{ name: "shell.exec", args: { command: "node police-test.mjs" } }];
 
-    for (let i = 0; i < 4; i++) {
-      const d = guard.observeActionSequence(seq);
-      expect(d.suppress).toBe(false);
-      expect(d.warn).toBe(false);
-      guard.completeActionSequence(seq, true);
-    }
-  });
-
-  it("graduated sequence guard: warns at threshold, blocks at hard limit", () => {
-    const guard = new LoopGuard();
-    const seq = [{ name: "shell.exec", args: { command: "node police-test.mjs" } }];
-
-    for (let i = 0; i < 5; i++) {
-      guard.observeActionSequence(seq);
-      guard.completeActionSequence(seq, true);
-    }
-    const warn = guard.observeActionSequence(seq);
-    expect(warn.suppress).toBe(false);
-    expect(warn.warn).toBe(true);
+    const first = guard.observeActionSequence(seq);
+    expect(first.suppress).toBe(false);
     guard.completeActionSequence(seq, true);
-
-    for (let i = 6; i < 10; i++) {
-      guard.observeActionSequence(seq);
-      guard.completeActionSequence(seq, true);
-    }
-    const block = guard.observeActionSequence(seq);
-    expect(block.suppress).toBe(true);
+    expect(guard.observeActionSequence(seq)).toMatchObject({
+      suppress: true,
+      terminal: false,
+    });
   });
 
-  it("resetAllSequenceCounts unblocks after hard limit", () => {
+  it("escalates only when the model ignores repeated suppression evidence", () => {
     const guard = new LoopGuard();
     const seq = [{ name: "shell.exec", args: { command: "node police-test.mjs" } }];
-    for (let i = 0; i < 10; i++) {
-      guard.observeActionSequence(seq);
-      guard.completeActionSequence(seq, true);
-    }
+
+    guard.observeActionSequence(seq);
+    guard.completeActionSequence(seq, true);
+    expect(guard.observeActionSequence(seq).terminal).toBe(false);
+    expect(guard.observeActionSequence(seq).terminal).toBe(false);
+    expect(guard.observeActionSequence(seq)).toMatchObject({
+      suppress: true,
+      terminal: true,
+    });
+  });
+
+  it("resetAllSequenceCounts unblocks after suppression", () => {
+    const guard = new LoopGuard();
+    const seq = [{ name: "shell.exec", args: { command: "node police-test.mjs" } }];
+    guard.observeActionSequence(seq);
+    guard.completeActionSequence(seq, true);
     expect(guard.observeActionSequence(seq).suppress).toBe(true);
     guard.resetAllSequenceCounts();
     expect(guard.observeActionSequence(seq).suppress).toBe(false);

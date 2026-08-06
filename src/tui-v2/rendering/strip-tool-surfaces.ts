@@ -11,6 +11,9 @@ const COMPLETE_TOOL_FENCE =
 const TRAILING_TOOL_FENCE = /```(?:tool|json\s*tool)\b[\s\S]*$/i;
 const COMPLETE_TOOL_XML = /<tool_call\b[^>]*>[\s\S]*?<\/tool_call>/gi;
 const TRAILING_TOOL_XML = /<tool_call\b[^>]*>[\s\S]*$/i;
+const COMPLETE_TOOL_DSML =
+  /<[|｜]DSML[|｜]tool_calls\b[^>]*>[\s\S]*?<\/[|｜]DSML[|｜]tool_calls>/gi;
+const TRAILING_TOOL_DSML = /<[|｜]DSML[|｜](?:tool_calls|invoke)\b[\s\S]*$/i;
 /** Kimi / sentinel-style blocks sometimes leak as prose. */
 const COMPLETE_TOOL_SENTINEL =
   /(?:^|\n)\s*(?:tool_call|invoke_tool)\s*\([\s\S]*?\)\s*(?=\n|$)/gi;
@@ -22,6 +25,8 @@ export function stripToolCallSurfaces(text: string): string {
   s = s.replace(TRAILING_TOOL_FENCE, "");
   s = s.replace(COMPLETE_TOOL_XML, "");
   s = s.replace(TRAILING_TOOL_XML, "");
+  s = s.replace(COMPLETE_TOOL_DSML, "");
+  s = s.replace(TRAILING_TOOL_DSML, "");
   s = s.replace(COMPLETE_TOOL_SENTINEL, "\n");
   // Collapse leftover blank runs from removed fences.
   s = s.replace(/[ \t]+\n/g, "\n");

@@ -56,8 +56,8 @@ export interface LoopDecision {
   reason?: string | undefined;
 }
 
-const SEQUENCE_WARN_THRESHOLD = 5;
-const SEQUENCE_BLOCK_THRESHOLD = 10;
+const SEQUENCE_WARN_THRESHOLD = 2;
+const SEQUENCE_BLOCK_THRESHOLD = 2;
 
 export interface ActionSequenceDecision {
   suppress: boolean;
@@ -76,8 +76,6 @@ export class LoopGuard {
   private lastActionSequence: string | undefined;
   private lastActionSequenceEligible = false;
   private actionSequenceRepetitions = 0;
-  private recentActionSequences: string[] = [];
-  private static readonly MAX_RECENT_SEQUENCES = 8;
   private totalSequenceSuppressions = 0;
   private sequenceRunCounts = new Map<string, number>();
   private emptySuccessfulCalls = new Map<
@@ -85,10 +83,12 @@ export class LoopGuard {
     { step: number; stateKey?: string | undefined; retryReason?: string | undefined }
   >();
   private failedReadRetryUsed = new Set<string>();
+  private successfulOutputs = new Map<string, string>();
   private successfulProbes = new Map<
     string,
     {
       digest: string;
+      observation: string;
       unchangedRepeats: number;
       stateKey?: string | undefined;
       compareAfterRestore: boolean;
@@ -114,6 +114,7 @@ export class LoopGuard {
       if (!operation.observationDigest) continue;
       this.successfulProbes.set(operation.signature, {
         digest: operation.observationDigest,
+        observation: operation.observation,
         unchangedRepeats: operation.unchangedRepeats ?? 0,
         ...(operation.stateKey ? { stateKey: operation.stateKey } : {}),
         compareAfterRestore: true,
@@ -172,37 +173,9 @@ export class LoopGuard {
     const currentCount = this.sequenceRunCounts.get(signature) ?? 0;
 
     if (signature !== this.lastActionSequence) {
-      const isOscillation = this.recentActionSequences.includes(signature);
       this.lastActionSequence = signature;
       this.lastActionSequenceEligible = false;
       this.actionSequenceRepetitions = 0;
-
-      if (isOscillation && currentCount >= SEQUENCE_BLOCK_THRESHOLD) {
-        this.totalSequenceSuppressions += 1;
-        return {
-          suppress: true,
-          terminal: this.totalSequenceSuppressions >= 4,
-          repetitions: currentCount,
-          totalSuppressions: this.totalSequenceSuppressions,
-          oscillation: true,
-          warn: false,
-        };
-      }
-      if (isOscillation && currentCount >= SEQUENCE_WARN_THRESHOLD) {
-        return {
-          suppress: false,
-          terminal: false,
-          repetitions: currentCount,
-          totalSuppressions: this.totalSequenceSuppressions,
-          oscillation: true,
-          warn: true,
-          warnMessage:
-            `You have run this exact action sequence ${currentCount} times this session. ` +
-            "Make sure you are not stuck in a loop repeating the same command without making progress. " +
-            "If you are receiving output and genuinely iterating (e.g. testing after edits), call loop.reset to reset the counter and continue. " +
-            `Commands will be blocked after ${SEQUENCE_BLOCK_THRESHOLD} repetitions.`,
-        };
-      }
       return none;
     }
 
@@ -263,15 +236,6 @@ export class LoopGuard {
       return;
     }
     this.sequenceRunCounts.set(signature, (this.sequenceRunCounts.get(signature) ?? 0) + 1);
-    const existing = this.recentActionSequences.indexOf(signature);
-    if (existing >= 0) this.recentActionSequences.splice(existing, 1);
-    this.recentActionSequences.push(signature);
-    if (this.recentActionSequences.length > LoopGuard.MAX_RECENT_SEQUENCES) {
-      this.recentActionSequences.splice(
-        0,
-        this.recentActionSequences.length - LoopGuard.MAX_RECENT_SEQUENCES,
-      );
-    }
   }
 
   resetSequenceCount(
@@ -289,15 +253,12 @@ export class LoopGuard {
   resetSequenceCountBySignature(signature: string): boolean {
     if (!this.sequenceRunCounts.has(signature)) return false;
     this.sequenceRunCounts.delete(signature);
-    const idx = this.recentActionSequences.indexOf(signature);
-    if (idx >= 0) this.recentActionSequences.splice(idx, 1);
     this.actionSequenceRepetitions = 0;
     return true;
   }
 
   resetAllSequenceCounts(): void {
     this.sequenceRunCounts.clear();
-    this.recentActionSequences.length = 0;
     this.actionSequenceRepetitions = 0;
     this.totalSequenceSuppressions = 0;
     this.lastActionSequence = undefined;
@@ -338,6 +299,14 @@ export class LoopGuard {
     this.signatureCount.set(sig, (this.signatureCount.get(sig) ?? 0) + 1);
     if (ok) {
       this.signatureSuccess.set(sig, true);
+      if (output?.trim()) {
+        this.successfulOutputs.delete(sig);
+        this.successfulOutputs.set(sig, output.trim().slice(0, 8_000));
+        if (this.successfulOutputs.size > MAX_ATTEMPT_HISTORY) {
+          const oldest = this.successfulOutputs.keys().next().value;
+          if (oldest !== undefined) this.successfulOutputs.delete(oldest);
+        }
+      }
       if (name !== "task.update" && name !== "plan.create") {
         this.lastSuccessfulNonMetaStep = step;
       }
@@ -361,6 +330,7 @@ export class LoopGuard {
         prior?.digest === digest && prior.stateKey === context?.stateKey;
       this.successfulProbes.set(probeSignature, {
         digest,
+        observation: output.trim().slice(0, 8_000),
         unchangedRepeats: unchanged ? (prior?.unchangedRepeats ?? 0) + 1 : 0,
         ...(context?.stateKey ? { stateKey: context.stateKey } : {}),
         compareAfterRestore: false,
@@ -436,9 +406,24 @@ export class LoopGuard {
       if (paths.some((p) => p.length > 1 && sig.includes(p))) {
         this.signatureCount.delete(sig);
         this.signatureSuccess.delete(sig);
+        this.successfulOutputs.delete(sig);
         this.failedReadRetryUsed.delete(sig);
       }
     }
+  }
+
+  getPriorObservation(name: string, args: Record<string, unknown>): string | undefined {
+    const direct = this.successfulOutputs.get(this.canonicalize(name, args));
+    if (direct) return direct;
+    const probeSignature = completedOperationSignature(name, args);
+    return probeSignature
+      ? this.successfulProbes.get(probeSignature)?.observation
+      : undefined;
+  }
+
+  private hasInterveningAttempt(signature: string): boolean {
+    const latest = this.attempts.at(-1);
+    return latest !== undefined && latest.canonicalSignature !== signature;
   }
 
   shouldBlock(
@@ -460,8 +445,9 @@ export class LoopGuard {
         return { block: false };
       }
       if (
-        emptySuccess.stateKey === undefined &&
-        this.lastSuccessfulNonMetaStep > emptySuccess.step
+        this.hasInterveningAttempt(sig) ||
+        (emptySuccess.stateKey === undefined &&
+          this.lastSuccessfulNonMetaStep > emptySuccess.step)
       ) {
         return { block: false };
       }
@@ -498,6 +484,9 @@ export class LoopGuard {
       ) {
         return { block: false };
       }
+      if (this.hasInterveningAttempt(sig)) {
+        return { block: false };
+      }
       const retryReason = retryContext?.retryReason;
       const reasonKey =
         retryReason?.code.trim() && retryReason.detail.trim()
@@ -526,6 +515,9 @@ export class LoopGuard {
         (retryContext?.stateKey !== undefined &&
           retryContext.stateKey !== restoredFailure.stateKey)
       ) {
+        return { block: false };
+      }
+      if (this.hasInterveningAttempt(sig)) {
         return { block: false };
       }
       if (READ_ONLY_TOOLS.has(name) && !this.failedReadRetryUsed.has(sig)) {
@@ -559,7 +551,7 @@ export class LoopGuard {
     }
 
     const count = this.signatureCount.get(sig) ?? 0;
-    if (count === 0) return { block: false };
+    if (count === 0 || this.hasInterveningAttempt(sig)) return { block: false };
 
     if (this.signatureSuccess.get(sig) !== false) {
       return { block: false };
@@ -652,6 +644,7 @@ Do NOT keep trying variations of the same failing approach without explicitly de
       if (READ_ONLY_TOOLS.has(name)) {
         this.signatureCount.delete(sig);
         this.signatureSuccess.delete(sig);
+        this.successfulOutputs.delete(sig);
       }
     }
     this.attempts = this.attempts.filter(

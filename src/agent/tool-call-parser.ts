@@ -280,6 +280,71 @@ function parseKimiToolCall(text: string): ToolCall | undefined {
   return tryParseCall(JSON.stringify({ name, args: tryJson(match[2]!) ?? {} }));
 }
 
+const DSML_INVOKE_RE =
+  /<[|｜]DSML[|｜]invoke\b([^>]*)>([\s\S]*?)<\/[|｜]DSML[|｜]invoke>/gi;
+const DSML_PARAMETER_RE =
+  /<[|｜]DSML[|｜]parameter\b([^>]*)>([\s\S]*?)<\/[|｜]DSML[|｜]parameter>/gi;
+
+function dsmlAttribute(attrs: string, name: string): string | undefined {
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = new RegExp(`(?:^|\\s)${escaped}\\s*=\\s*(?:"([^"]*)"|'([^']*)')`, "i").exec(attrs);
+  return match?.[1] ?? match?.[2];
+}
+
+function decodeDsmlCodePoint(raw: string, radix: number, original: string): string {
+  const value = Number.parseInt(raw, radix);
+  return Number.isInteger(value) && value >= 0 && value <= 0x10ffff
+    ? String.fromCodePoint(value)
+    : original;
+}
+
+function decodeDsmlText(value: string): string {
+  return value
+    .replace(/&#x([0-9a-f]+);/gi, (original: string, hex: string) => decodeDsmlCodePoint(hex, 16, original))
+    .replace(/&#(\d+);/g, (original: string, decimal: string) => decodeDsmlCodePoint(decimal, 10, original))
+    .replace(/&quot;/gi, '"')
+    .replace(/&apos;/gi, "'")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&amp;/gi, "&");
+}
+
+function dsmlParameterValue(attrs: string, raw: string): unknown {
+  const value = decodeDsmlText(raw.trim());
+  if (/\bstring\s*=\s*["']true["']/i.test(attrs)) return value;
+  if (/\bboolean\s*=\s*["']true["']/i.test(attrs)) return value.toLowerCase() === "true";
+  if (/\bnumber\s*=\s*["']true["']/i.test(attrs)) {
+    const number = Number(value);
+    return Number.isFinite(number) ? number : value;
+  }
+  const parsed = lenientJsonParse(value);
+  return parsed === undefined ? value : parsed;
+}
+
+function parseAllDsmlToolCalls(text: string): Array<{ index: number; call: ToolCall }> {
+  const found: Array<{ index: number; call: ToolCall }> = [];
+  const invokeRe = new RegExp(DSML_INVOKE_RE.source, "gi");
+  let invoke: RegExpExecArray | null;
+  while ((invoke = invokeRe.exec(text)) !== null) {
+    const name = dsmlAttribute(invoke[1] ?? "", "name")?.replace(/^functions\./, "").trim();
+    if (!name) continue;
+    const args: Record<string, unknown> = {};
+    const parameterRe = new RegExp(DSML_PARAMETER_RE.source, "gi");
+    let parameter: RegExpExecArray | null;
+    while ((parameter = parameterRe.exec(invoke[2] ?? "")) !== null) {
+      const parameterName = dsmlAttribute(parameter[1] ?? "", "name")?.trim();
+      if (!parameterName) continue;
+      args[parameterName] = dsmlParameterValue(parameter[1] ?? "", parameter[2] ?? "");
+    }
+    found.push({ index: invoke.index, call: { name, args } });
+  }
+  return found;
+}
+
+function parseDsmlToolCall(text: string): ToolCall | undefined {
+  return parseAllDsmlToolCalls(text)[0]?.call;
+}
+
 /**
  * GLM / Tencent / some OpenAI-compat gateways emit:
  *   <tool_calls:6124c78e>
@@ -589,6 +654,8 @@ export function stripSentinelTokens(text: string): string {
     .replace(/<tool_calls:[A-Za-z0-9_-]+>[\s\S]*?(?:<\/tool_calls:[A-Za-z0-9_-]+>|$)/gi, "")
     .replace(/<tool_call:[A-Za-z0-9_-]+>[\s\S]*?(?:<\/tool_call:[A-Za-z0-9_-]+>|$)/gi, "")
     .replace(/<\/?tool_calls?:[A-Za-z0-9_-]+>/gi, "")
+    .replace(/<[|｜]DSML[|｜]tool_calls\b[^>]*>[\s\S]*?(?:<\/[|｜]DSML[|｜]tool_calls>|$)/gi, "")
+    .replace(/<[|｜]DSML[|｜](?:invoke|parameter)\b[^>]*>[\s\S]*?(?:<\/[|｜]DSML[|｜](?:invoke|parameter)>|$)/gi, "")
     .trim();
 }
 
@@ -621,6 +688,9 @@ export function parseToolCall(
   // 2b. <tool_call:id>name\n{args} (GLM / Tencent / some gateways)
   const idTagged = parseIdTaggedToolCall(text);
   if (idTagged) return idTagged;
+
+  const dsml = parseDsmlToolCall(text);
+  if (dsml) return dsml;
 
   // 3. Kimi/Moonshot sentinel format (used by kimi-k2 family on NIM).
   const kimi = parseKimiToolCall(text);
@@ -1140,6 +1210,10 @@ export function parseAllToolCalls(text: string): ToolCall[] {
     found.push(entry);
   }
 
+  for (const entry of parseAllDsmlToolCalls(text)) {
+    found.push(entry);
+  }
+
   const kimiRe = new RegExp(KIMI_TOOL_CALL_RE.source, "gi");
   while ((m = kimiRe.exec(text)) !== null) {
     const call = tryParseCall(
@@ -1321,6 +1395,8 @@ export function textBeforeToolCall(text: string): string {
     // GLM/Tencent id-tagged tool blocks — never show raw XML as ◆ Response.
     /<tool_calls:[A-Za-z0-9_-]+>[\s\S]*$/i,
     /<tool_call:[A-Za-z0-9_-]+>[\s\S]*$/i,
+    /<[|｜]DSML[|｜]tool_calls\b[\s\S]*$/i,
+    /<[|｜]DSML[|｜]invoke\b[\s\S]*$/i,
     // Kimi/Moonshot sentinel block — strip from the section opener
     // (or the first call opener if the section header is missing).
     /<\|tool_calls_section_begin\|>[\s\S]*$/i,

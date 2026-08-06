@@ -477,7 +477,9 @@ describe("ordinary-turn responder delivery", () => {
       (event): event is Extract<AgentEvent, { type: "tool-output" }> =>
         event.type === "tool-output" && event.id === calls[1]!.id,
     );
-    expect(secondOutput?.chunk).toContain("already completed with identical arguments");
+    expect(secondOutput?.chunk).toContain("same action sequence already ran");
+    expect(secondOutput?.chunk).toContain("Prior successful result for shell.jobs");
+    expect(secondOutput?.chunk).toContain("normal-server-job");
   });
 
   it("keeps a suppressed unchanged normal-job probe visible", async () => {

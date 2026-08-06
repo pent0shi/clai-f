@@ -1381,6 +1381,18 @@ export async function runAgentTurn(
       return message;
     };
 
+    const upsertActionCycleRecovery = (content: string): void => {
+      const prefix = "[ACTION CYCLE RECOVERY] ";
+      for (let index = messages.length - 1; index >= 0; index -= 1) {
+        const message = messages[index]!;
+        if (message.role === "user" && message.internal && message.content.startsWith(prefix)) {
+          messages.splice(index, 1);
+          break;
+        }
+      }
+      messages.push(recoveryUserMessage(prefix + content));
+    };
+
     const recoveryProse = (content: string): string | undefined => {
       const text = textBeforeToolCall(stripSentinelTokens(content)).trim();
       if (
@@ -2031,9 +2043,16 @@ export async function runAgentTurn(
         ...(retryReason ? { retryReason } : {}),
       });
       if (loopCheck.block) {
-        const reason =
+        const baseReason =
           loopCheck.reason ??
           `${call.name} previously failed with identical arguments. Change the command/args and retry.`;
+        const priorObservation =
+          loopCheck.kind === "unchanged-success"
+            ? loopGuard.getPriorObservation(call.name, call.args)
+            : undefined;
+        const reason = priorObservation
+          ? `${baseReason}\n\nPrior successful result (reuse this; it is the result of the requested call):\n${priorObservation}`
+          : baseReason;
         if (loopCheck.kind === "unchanged-success") {
           const result: ToolResult = { ok: true, output: reason, exitCode: 0 };
           emitVisibleSyntheticReceipt(result, reason);
@@ -5162,7 +5181,7 @@ export async function runAgentTurn(
           }
 
           if (
-            /<\|tool_call(?:s_section)?_begin\|>|<\|tool_call_argument_begin\|>/i.test(
+            /<\|tool_call(?:s_section)?_begin\|>|<\|tool_call_argument_begin\|>|<[|｜]DSML[|｜](?:tool_calls|invoke|parameter)\b/i.test(
               assistantText.visible,
             )
           ) {
@@ -5741,11 +5760,20 @@ export async function runAgentTurn(
           writeNotice("warn", reason, chalk.yellow(`  ⚠ ${reason}\n`));
           const suppressedResults = bound.map((b) => {
             const duplicate = runIds.has(b.id);
-            const resultReason = duplicate ? reason : deferReason;
+            const priorObservation = duplicate
+              ? loopGuard.getPriorObservation(b.call.name, b.call.args)
+              : undefined;
+            const resultReason = duplicate
+              ? reason +
+                (priorObservation
+                  ? `\n\nPrior successful result for ${b.call.name}:\n${priorObservation}`
+                  : "")
+              : deferReason;
             const result: ToolResult = {
-              ok: false,
+              ok: duplicate,
               output: resultReason,
-              exitCode: duplicate ? 409 : 130,
+              exitCode: duplicate ? 0 : 130,
+              ...(duplicate ? { suppressedRepeat: true } : {}),
             };
             return { b, resultReason, result };
           });
@@ -5771,33 +5799,6 @@ export async function runAgentTurn(
             writeToolOutput(eventId, output, chalk.dim(`  ${output}`));
             emitToolResult(eventId, result, resultReason);
           }
-          if (historyNativeCalls.length) {
-            appendAssistantWithTools(
-              messages,
-              beforeTool ?? "",
-              historyNativeCalls,
-              completion.reasoningBlock ??
-                (assistantText.hasThinking && assistantText.thinkContent
-                  ? { text: assistantText.thinkContent }
-                  : undefined),
-            );
-            for (const { b, resultReason, result } of suppressedResults) {
-              appendToolResult(
-                messages,
-                b.id,
-                `Tool ${b.call.name} result (exit=${result.exitCode}, ok=false):\n${resultReason}`,
-                b.call.name,
-                false,
-              );
-            }
-          } else {
-            const standardizedContent =
-              (beforeTool ? beforeTool.trim() + "\n\n" : "") +
-              allCalls
-                .map((candidate) => `\`\`\`tool\n${JSON.stringify(candidate)}\n\`\`\``)
-                .join("\n\n");
-            pushAssistantHistory(standardizedContent);
-          }
           if (sequenceDecision.terminal) {
             const remainingCriteria = unreadResponderNotificationIds.size > 0
               ? ["Analyze and acknowledge the delivered Responder result without repeating completed foreground work."]
@@ -5813,13 +5814,11 @@ export async function runAgentTurn(
               "The model repeated an identical action sequence without a new premise or state change.",
             );
           }
-          messages.push(
-            recoveryUserMessage(
-              reason +
-                (unreadResponderNotificationIds.size > 0
-                  ? " A delivered Responder result is still unread: analyze the available result, gather only genuinely necessary bounded evidence, then call job.read before returning to foreground work."
-                  : " Reassess the evidence and select the next action yourself; do not replay completed work."),
-            ),
+          upsertActionCycleRecovery(
+            reason +
+              (unreadResponderNotificationIds.size > 0
+                ? " A delivered Responder result is still unread: analyze the available result, gather only genuinely necessary bounded evidence, then call job.read before returning to foreground work."
+                : " The original successful tool result remains in context. Reassess that evidence and either finish or select a materially different action; do not replay completed work."),
           );
           continue;
         }
