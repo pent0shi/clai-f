@@ -603,13 +603,121 @@ describe("native tool loop integration", () => {
     expect(streamMock).toHaveBeenCalledTimes(6);
   });
 
+  it("keeps identical dynamic observations running while their output changes", async () => {
+    await writeFile(join(cwd, "first.txt"), "1", "utf8");
+    let turn = 0;
+    streamMock.mockImplementation(
+      async (request: CompletionRequest): Promise<CompletionResult> => {
+        turn += 1;
+        if (turn === 1) {
+          return {
+            text: "",
+            provider: "openai",
+            model: "gpt-test",
+            toolCalls: [{ id: "call_dynamic_1", name: "fs.list", args: { path: cwd } }],
+            finishReason: "tool_calls",
+          };
+        }
+        if (turn === 2) {
+          await writeFile(join(cwd, "second.txt"), "2", "utf8");
+          return {
+            text: "",
+            provider: "openai",
+            model: "gpt-test",
+            toolCalls: [{ id: "call_dynamic_2", name: "fs.list", args: { path: cwd } }],
+            finishReason: "tool_calls",
+          };
+        }
+        if (turn === 3) {
+          expect(
+            request.messages.some(
+              (message) => message.role === "tool" && message.content.includes("second.txt"),
+            ),
+          ).toBe(true);
+          await writeFile(join(cwd, "third.txt"), "3", "utf8");
+          return {
+            text: "",
+            provider: "openai",
+            model: "gpt-test",
+            toolCalls: [{ id: "call_dynamic_3", name: "fs.list", args: { path: cwd } }],
+            finishReason: "tool_calls",
+          };
+        }
+        expect(
+          request.messages.some(
+            (message) => message.role === "tool" && message.content.includes("third.txt"),
+          ),
+        ).toBe(true);
+        return {
+          text: "observed every change",
+          provider: "openai",
+          model: "gpt-test",
+          finishReason: "stop",
+        };
+      },
+    );
+
+    const { runAgentLoop } = await import("../../src/agent/runner.js");
+    await expect(
+      runAgentLoop("poll this directory until the files appear", {
+        provider: "openai",
+        model: "gpt-4o-mini",
+        maxSteps: 6,
+      }),
+    ).resolves.toBe("observed every change");
+    expect(streamMock).toHaveBeenCalledTimes(4);
+  });
+
+  it("allows an identical transiently failing command to recover on retry", async () => {
+    const counter = join(cwd, "attempt.txt");
+    const command = `node -e 'const fs=require("fs");const p=${JSON.stringify(counter)};const n=Number(fs.existsSync(p)?fs.readFileSync(p,"utf8"):0)+1;fs.writeFileSync(p,String(n));if(n<2){console.error("transient");process.exit(1)}console.log("recovered")'`;
+    let turn = 0;
+    streamMock.mockImplementation(
+      async (request: CompletionRequest): Promise<CompletionResult> => {
+        turn += 1;
+        if (turn <= 2) {
+          return {
+            text: "",
+            provider: "openai",
+            model: "gpt-test",
+            toolCalls: [
+              { id: `call_transient_${turn}`, name: "shell.exec", args: { command, cwd } },
+            ],
+            finishReason: "tool_calls",
+          };
+        }
+        expect(
+          request.messages.some(
+            (message) => message.role === "tool" && message.content.includes("recovered"),
+          ),
+        ).toBe(true);
+        return {
+          text: "retry recovered",
+          provider: "openai",
+          model: "gpt-test",
+          finishReason: "stop",
+        };
+      },
+    );
+
+    const { runAgentLoop } = await import("../../src/agent/runner.js");
+    await expect(
+      runAgentLoop("retry the transient command", {
+        provider: "openai",
+        model: "gpt-4o-mini",
+        maxSteps: 5,
+      }),
+    ).resolves.toBe("retry recovered");
+    await expect(readFile(counter, "utf8")).resolves.toBe("2");
+  });
+
   it("suppresses an exact replay once and returns prior evidence without duplicating history", async () => {
     await writeFile(join(cwd, "once.txt"), "ok", "utf8");
     let turn = 0;
     streamMock.mockImplementation(
       async (request: CompletionRequest): Promise<CompletionResult> => {
         turn += 1;
-        if (turn <= 2) {
+        if (turn <= 4) {
           return {
             text: "",
             provider: "openai",
@@ -625,7 +733,7 @@ describe("native tool loop integration", () => {
           };
         }
         const toolCalls = request.messages.flatMap((message) => message.toolCalls ?? []);
-        expect(toolCalls.filter((call) => call.name === "fs.list")).toHaveLength(1);
+        expect(toolCalls.filter((call) => call.name === "fs.list")).toHaveLength(3);
         const recovery = request.messages.findLast(
           (message) => message.role === "user" && message.internal,
         );
@@ -650,9 +758,9 @@ describe("native tool loop integration", () => {
       runAgentLoop("inspect the project once", {
         provider: "openai",
         model: "gpt-4o-mini",
-        maxSteps: 4,
+        maxSteps: 6,
       }),
     ).resolves.toBe("used the existing listing");
-    expect(streamMock).toHaveBeenCalledTimes(3);
+    expect(streamMock).toHaveBeenCalledTimes(5);
   });
 });

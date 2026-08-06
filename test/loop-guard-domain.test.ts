@@ -2,10 +2,13 @@ import { describe, expect, it } from "vitest";
 import { LoopGuard, type RetryContext } from "../src/agent/loop-guard.js";
 
 describe("loop guard semantics", () => {
-  it("blocks an unchanged failed retry immediately", () => {
+  it("allows one unchanged failed retry before blocking the same failure", () => {
     const guard = new LoopGuard();
-    guard.recordAttempt(0, "shell.exec", { command: "missing" }, false, 127);
-    expect(guard.shouldBlock("shell.exec", { command: "missing" })).toMatchObject({ block: true });
+    const args = { command: "missing" };
+    guard.recordAttempt(0, "shell.exec", args, false, 127, "missing");
+    expect(guard.shouldBlock("shell.exec", args).block).toBe(false);
+    guard.recordAttempt(1, "shell.exec", args, false, 127, "missing");
+    expect(guard.shouldBlock("shell.exec", args)).toMatchObject({ block: true });
   });
 
   it.each<RetryContext>([
@@ -18,10 +21,12 @@ describe("loop guard semantics", () => {
     expect(guard.shouldBlock("shell.exec", { command: "build" }, context).block).toBe(false);
   });
 
-  it("rejects an empty structured rationale", () => {
+  it("rejects an empty structured rationale after the same failure repeats", () => {
     const guard = new LoopGuard();
-    guard.recordAttempt(0, "shell.exec", { command: "build" }, false);
-    expect(guard.shouldBlock("shell.exec", { command: "build" }, { retryReason: { code: "", detail: "" } }).block).toBe(true);
+    const args = { command: "build" };
+    guard.recordAttempt(0, "shell.exec", args, false, 1, "failed");
+    guard.recordAttempt(1, "shell.exec", args, false, 1, "failed");
+    expect(guard.shouldBlock("shell.exec", args, { retryReason: { code: "", detail: "" } }).block).toBe(true);
   });
 
   it("canonicalizes command whitespace and never blocks successful re-reads", () => {
@@ -37,13 +42,19 @@ describe("loop guard semantics", () => {
     expect(guard.getAttemptCount("shell.exec", { command: "npm test" })).toBe(1);
   });
 
-  it("allows the first sequence and suppresses its exact replay", () => {
+  it("warns before suppressing a fourth unchanged observable replay", () => {
     const guard = new LoopGuard();
     const seq = [{ name: "shell.exec", args: { command: "node police-test.mjs" } }];
 
-    const first = guard.observeActionSequence(seq);
-    expect(first.suppress).toBe(false);
-    guard.completeActionSequence(seq, true);
+    expect(guard.observeActionSequence(seq).suppress).toBe(false);
+    guard.completeActionSequence(seq, true, "same");
+    expect(guard.observeActionSequence(seq).suppress).toBe(false);
+    guard.completeActionSequence(seq, true, "same");
+    expect(guard.observeActionSequence(seq)).toMatchObject({
+      suppress: false,
+      warn: true,
+    });
+    guard.completeActionSequence(seq, true, "same");
     expect(guard.observeActionSequence(seq)).toMatchObject({
       suppress: true,
       terminal: false,
@@ -55,7 +66,11 @@ describe("loop guard semantics", () => {
     const seq = [{ name: "shell.exec", args: { command: "node police-test.mjs" } }];
 
     guard.observeActionSequence(seq);
-    guard.completeActionSequence(seq, true);
+    guard.completeActionSequence(seq, true, "same");
+    expect(guard.observeActionSequence(seq).suppress).toBe(false);
+    guard.completeActionSequence(seq, true, "same");
+    expect(guard.observeActionSequence(seq).warn).toBe(true);
+    guard.completeActionSequence(seq, true, "same");
     expect(guard.observeActionSequence(seq).terminal).toBe(false);
     expect(guard.observeActionSequence(seq).terminal).toBe(false);
     expect(guard.observeActionSequence(seq)).toMatchObject({
@@ -68,7 +83,11 @@ describe("loop guard semantics", () => {
     const guard = new LoopGuard();
     const seq = [{ name: "shell.exec", args: { command: "node police-test.mjs" } }];
     guard.observeActionSequence(seq);
-    guard.completeActionSequence(seq, true);
+    guard.completeActionSequence(seq, true, "same");
+    expect(guard.observeActionSequence(seq).suppress).toBe(false);
+    guard.completeActionSequence(seq, true, "same");
+    expect(guard.observeActionSequence(seq).warn).toBe(true);
+    guard.completeActionSequence(seq, true, "same");
     expect(guard.observeActionSequence(seq).suppress).toBe(true);
     guard.resetAllSequenceCounts();
     expect(guard.observeActionSequence(seq).suppress).toBe(false);

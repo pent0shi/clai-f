@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { LoopGuard } from "../src/agent/loop-guard.js";
-import { completedOperationSignature } from "../src/agent/outcomes.js";
+import { completedOperationObservationDigest, completedOperationSignature } from "../src/agent/outcomes.js";
 
 describe("LoopGuard", () => {
   it("does not block the first call", () => {
@@ -24,10 +24,14 @@ describe("LoopGuard", () => {
     expect(thrice.reason).toBeUndefined();
   });
 
-  it("blocks an unchanged successful call that produced no observation", () => {
+  it("allows one empty success comparison before suppressing an unchanged result", () => {
     const guard = new LoopGuard();
     const args = { command: "true" };
     guard.recordAttempt(0, "shell.exec", args, true, 0, "");
+    expect(guard.shouldBlock("shell.exec", args).block).toBe(false);
+    guard.recordAttempt(1, "shell.exec", args, true, 0, "");
+    expect(guard.shouldBlock("shell.exec", args).block).toBe(false);
+    guard.recordAttempt(2, "shell.exec", args, true, 0, "");
 
     expect(guard.shouldBlock("shell.exec", args)).toMatchObject({
       block: true,
@@ -45,6 +49,8 @@ describe("LoopGuard", () => {
 
     const withReason = new LoopGuard();
     withReason.recordAttempt(0, "shell.exec", args, true, 0, "");
+    withReason.recordAttempt(1, "shell.exec", args, true, 0, "");
+    withReason.recordAttempt(2, "shell.exec", args, true, 0, "");
     const retry = {
       retryReason: { code: "service-ready", detail: "the dependency is now running" },
     };
@@ -52,38 +58,50 @@ describe("LoopGuard", () => {
     expect(withReason.shouldBlock("shell.exec", args, retry).block).toBe(true);
   });
 
-  it("allows the same failed command after each intervening action", () => {
+  it("allows one transient failure retry and every retry after an intervening action", () => {
     const guard = new LoopGuard();
     const command = { command: "node test.js" };
 
     guard.recordAttempt(0, "shell.exec", command, false, 1, "failed");
+    expect(guard.shouldBlock("shell.exec", command).block).toBe(false);
+    guard.recordAttempt(1, "shell.exec", command, false, 1, "failed");
     expect(guard.shouldBlock("shell.exec", command).block).toBe(true);
 
-    guard.recordAttempt(1, "fs.edit", { path: "test.js", oldText: "a", newText: "b" }, true, 0, "edited");
+    guard.recordAttempt(2, "fs.edit", { path: "test.js", oldText: "a", newText: "b" }, true, 0, "edited");
     expect(guard.shouldBlock("shell.exec", command).block).toBe(false);
 
-    guard.recordAttempt(2, "shell.exec", command, false, 1, "still failed");
+    guard.recordAttempt(3, "shell.exec", command, false, 1, "still failed");
+    expect(guard.shouldBlock("shell.exec", command).block).toBe(false);
+    guard.recordAttempt(4, "shell.exec", command, false, 1, "still failed");
     expect(guard.shouldBlock("shell.exec", command).block).toBe(true);
 
-    guard.recordAttempt(3, "fs.write", { path: "test.js", content: "fixed" }, true, 0, "written");
+    guard.recordAttempt(5, "fs.write", { path: "test.js", content: "fixed" }, true, 0, "written");
     expect(guard.shouldBlock("shell.exec", command).block).toBe(false);
   });
 
-  it("allows the same observation after a different action", () => {
+  it("compares a repeated observation and allows it again after a different action", () => {
     const guard = new LoopGuard();
     const list = { path: "/tmp/project" };
 
     guard.recordAttempt(0, "fs.list", list, true, 0, "a.txt");
+    expect(guard.shouldBlock("fs.list", list).block).toBe(false);
+    guard.recordAttempt(1, "fs.list", list, true, 0, "a.txt");
+    expect(guard.shouldBlock("fs.list", list).block).toBe(false);
+    guard.recordAttempt(2, "fs.list", list, true, 0, "a.txt");
     expect(guard.shouldBlock("fs.list", list).block).toBe(true);
 
-    guard.recordAttempt(1, "tool.check", { tools: ["node"] }, true, 0, "node 26");
+    guard.recordAttempt(3, "tool.check", { tools: ["node"] }, true, 0, "node 26");
     expect(guard.shouldBlock("fs.list", list).block).toBe(false);
   });
 
-  it("suppresses an unchanged successful read without affecting mutations", () => {
+  it("suppresses a twice-unchanged successful read without affecting mutations", () => {
     const guard = new LoopGuard();
     const args = { path: "/tmp/blog" };
     guard.recordAttempt(0, "fs.list", args, true, 0, "a\nb\n");
+    expect(guard.shouldBlock("fs.list", args).block).toBe(false);
+    guard.recordAttempt(1, "fs.list", args, true, 0, "a\nb\n");
+    expect(guard.shouldBlock("fs.list", args).block).toBe(false);
+    guard.recordAttempt(2, "fs.list", args, true, 0, "a\nb\n");
 
     expect(guard.shouldBlock("fs.list", args)).toMatchObject({
       block: true,
@@ -101,9 +119,10 @@ describe("LoopGuard", () => {
 
   it("treats whitespace-normalized commands as equivalent for failure tracking", () => {
     const guard = new LoopGuard();
-    guard.recordAttempt(0, "shell.exec", { command: "  ls   -la  " }, false);
-    const result = guard.shouldBlock("shell.exec", { command: "ls -la" });
-    expect(result.block).toBe(true);
+    guard.recordAttempt(0, "shell.exec", { command: "  ls   -la  " }, false, 1, "failed");
+    expect(guard.shouldBlock("shell.exec", { command: "ls -la" }).block).toBe(false);
+    guard.recordAttempt(1, "shell.exec", { command: "ls -la" }, false, 1, "failed");
+    expect(guard.shouldBlock("shell.exec", { command: " ls   -la " }).block).toBe(true);
   });
 
   it("does not confuse different arguments", () => {
@@ -138,10 +157,12 @@ describe("LoopGuard", () => {
     expect(sig1).toBe(sig2);
   });
 
-  it("blocks identical failed mutates without structured retry context", () => {
+  it("blocks a twice-identical failed mutate without structured retry context", () => {
     const guard = new LoopGuard();
     const args = { path: "src/App.jsx", content: "x" };
-    guard.recordAttempt(0, "fs.write", args, false);
+    guard.recordAttempt(0, "fs.write", args, false, 1, "denied");
+    expect(guard.shouldBlock("fs.write", args).block).toBe(false);
+    guard.recordAttempt(1, "fs.write", args, false, 1, "denied");
     expect(guard.shouldBlock("fs.write", args).block).toBe(true);
     expect(
       guard.shouldBlock("fs.write", args, {
@@ -150,6 +171,31 @@ describe("LoopGuard", () => {
     ).toBe(false);
   });
 
+
+  it("blocks a same-batch exact side effect after its first success", () => {
+    const guard = new LoopGuard();
+    const args = { path: "events.log", content: "event\n" };
+    guard.recordAttempt(0, "fs.append", args, true, 0, "appended");
+    expect(guard.shouldBlock("fs.append", args)).toMatchObject({
+      block: true,
+      kind: "unchanged-success",
+    });
+  });
+
+  it("does not blindly retry a failed action with uncertain delivery", () => {
+    const guard = new LoopGuard();
+    const args = { id: "terminal-1", kind: "text", text: "next", cursor: 4 };
+    guard.recordAttempt(0, "terminal.send", args, false, 1, "delivery unknown");
+    expect(guard.shouldBlock("terminal.send", args)).toMatchObject({
+      block: true,
+      kind: "failed-retry",
+    });
+    expect(
+      guard.shouldBlock("terminal.send", args, {
+        retryReason: { code: "NOT_DELIVERED", detail: "transport rejected before write" },
+      }).block,
+    ).toBe(false);
+  });
   it("does not block or warn for task.update or plan.create", () => {
     const guard = new LoopGuard();
     const args = { taskId: "1", state: "in_progress" };
@@ -171,10 +217,12 @@ describe("LoopGuard", () => {
   it("allows one fs.list retry after successful scaffold work", () => {
     const guard = new LoopGuard();
     const listArgs = { path: "/Users/me/Desktop/blogging-app" };
-    guard.recordAttempt(0, "fs.list", listArgs, false);
+    guard.recordAttempt(0, "fs.list", listArgs, false, 1, "missing");
+    expect(guard.shouldBlock("fs.list", listArgs).block).toBe(false);
+    guard.recordAttempt(1, "fs.list", listArgs, false, 1, "missing");
     expect(guard.shouldBlock("fs.list", listArgs).block).toBe(true);
     guard.recordAttempt(
-      1,
+      2,
       "shell.exec",
       {
         command:
@@ -202,10 +250,13 @@ describe("LoopGuard", () => {
         observation: "000",
         ok: false,
         exitCode: 6,
+        observationDigest: completedOperationObservationDigest("shell.exec", "000"),
         observedAt: new Date().toISOString(),
       },
     ]);
 
+    expect(guard.shouldBlock("shell.exec", args).block).toBe(false);
+    guard.recordAttempt(0, "shell.exec", args, false, 6, "000");
     expect(guard.shouldBlock("shell.exec", args)).toMatchObject({
       block: true,
       kind: "failed-retry",
@@ -238,12 +289,19 @@ describe("LoopGuard", () => {
     guard.completeActionSequence(seq, true);
   });
 
-  it("suppresses the first exact replay without executing it again", () => {
+  it("warns on the third unchanged observation and suppresses the fourth", () => {
     const guard = new LoopGuard();
     const seq = [{ name: "shell.exec", args: { command: "node test.mjs" } }];
 
     guard.observeActionSequence(seq);
-    guard.completeActionSequence(seq, true);
+    guard.completeActionSequence(seq, true, "same-output");
+    expect(guard.observeActionSequence(seq).suppress).toBe(false);
+    guard.completeActionSequence(seq, true, "same-output");
+    expect(guard.observeActionSequence(seq)).toMatchObject({
+      suppress: false,
+      warn: true,
+    });
+    guard.completeActionSequence(seq, true, "same-output");
 
     const decision = guard.observeActionSequence(seq);
     expect(decision.suppress).toBe(true);
@@ -251,12 +309,72 @@ describe("LoopGuard", () => {
     expect(decision.repetitions).toBe(1);
   });
 
+  it("keeps running an observable sequence while its outcome changes", () => {
+    const guard = new LoopGuard();
+    const seq = [{ name: "http.fetch", args: { url: "https://example.test/status" } }];
+
+    guard.observeActionSequence(seq);
+    guard.completeActionSequence(seq, true, "pending");
+    expect(guard.observeActionSequence(seq).suppress).toBe(false);
+    guard.completeActionSequence(seq, true, "running");
+    expect(guard.observeActionSequence(seq).suppress).toBe(false);
+    guard.completeActionSequence(seq, true, "complete");
+    expect(guard.observeActionSequence(seq).suppress).toBe(false);
+  });
+
+  it("still suppresses an immediately repeated side effect", () => {
+    const guard = new LoopGuard();
+    const seq = [{ name: "fs.append", args: { path: "events.log", content: "x\n" } }];
+
+    guard.observeActionSequence(seq);
+    guard.completeActionSequence(seq, true, "first");
+    expect(guard.observeActionSequence(seq)).toMatchObject({
+      suppress: true,
+      terminal: false,
+    });
+  });
+
+  it("does not let an observable sibling weaken side-effect replay protection", () => {
+    const guard = new LoopGuard();
+    const seq = [
+      { name: "fs.append", args: { path: "events.log", content: "x\n" } },
+      { name: "fs.list", args: { path: "." } },
+    ];
+
+    guard.observeActionSequence(seq);
+    guard.completeActionSequence(seq, true, "first");
+    expect(guard.observeActionSequence(seq).suppress).toBe(true);
+  });
+
+  it("applies side-effect replay protection through tool.batch", () => {
+    const guard = new LoopGuard();
+    const seq = [
+      {
+        name: "tool.batch",
+        args: {
+          calls: [
+            { name: "fs.list", args: { path: "." } },
+            { name: "fs.append", args: { path: "events.log", content: "x\n" } },
+          ],
+        },
+      },
+    ];
+
+    guard.observeActionSequence(seq);
+    guard.completeActionSequence(seq, true, "first");
+    expect(guard.observeActionSequence(seq).suppress).toBe(true);
+  });
+
   it("escalates only after repeated suppressed replays", () => {
     const guard = new LoopGuard();
     const seq = [{ name: "shell.exec", args: { command: "node test.mjs" } }];
 
     guard.observeActionSequence(seq);
-    guard.completeActionSequence(seq, true);
+    guard.completeActionSequence(seq, true, "same-output");
+    expect(guard.observeActionSequence(seq).suppress).toBe(false);
+    guard.completeActionSequence(seq, true, "same-output");
+    expect(guard.observeActionSequence(seq).warn).toBe(true);
+    guard.completeActionSequence(seq, true, "same-output");
     expect(guard.observeActionSequence(seq).terminal).toBe(false);
     expect(guard.observeActionSequence(seq).terminal).toBe(false);
     expect(guard.observeActionSequence(seq)).toMatchObject({
@@ -270,12 +388,30 @@ describe("LoopGuard", () => {
     const seq = [{ name: "shell.exec", args: { command: "node test.mjs" } }];
 
     guard.observeActionSequence(seq);
-    guard.completeActionSequence(seq, true);
+    guard.completeActionSequence(seq, true, "same-output");
+    expect(guard.observeActionSequence(seq).suppress).toBe(false);
+    guard.completeActionSequence(seq, true, "same-output");
+    expect(guard.observeActionSequence(seq).warn).toBe(true);
+    guard.completeActionSequence(seq, true, "same-output");
     expect(guard.observeActionSequence(seq).suppress).toBe(true);
     guard.resetAllSequenceCounts();
     const after = guard.observeActionSequence(seq);
     expect(after.suppress).toBe(false);
     expect(after.warn).toBe(false);
+  });
+
+  it("resetAllSequenceCounts clears per-call unchanged observation state", () => {
+    const guard = new LoopGuard();
+    const args = { path: "/tmp/poll" };
+    guard.recordAttempt(0, "fs.list", args, true, 0, "same");
+    guard.recordAttempt(1, "fs.list", args, true, 0, "same");
+    guard.recordAttempt(2, "fs.list", args, true, 0, "same");
+    expect(guard.shouldBlock("fs.list", args).block).toBe(true);
+
+    guard.resetAllSequenceCounts();
+    expect(guard.shouldBlock("fs.list", args).block).toBe(false);
+    guard.recordAttempt(3, "fs.list", args, true, 0, "same");
+    expect(guard.shouldBlock("fs.list", args).block).toBe(false);
   });
 
   it("never suppresses a sequence separated by another action", () => {
@@ -335,8 +471,12 @@ describe("LoopGuard", () => {
     const seq = [{ name: "shell.exec", args: { command: "npm test" } }];
 
     guard.observeActionSequence(seq);
-    guard.completeActionSequence(seq, true);
+    guard.completeActionSequence(seq, true, "same-output");
     expect(guard.getSequenceRunCount(seq)).toBe(1);
+    expect(guard.observeActionSequence(seq).suppress).toBe(false);
+    guard.completeActionSequence(seq, true, "same-output");
+    expect(guard.observeActionSequence(seq).warn).toBe(true);
+    guard.completeActionSequence(seq, true, "same-output");
     expect(guard.observeActionSequence(seq).suppress).toBe(true);
 
     guard.resetSequenceCount(seq);

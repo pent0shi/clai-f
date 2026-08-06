@@ -239,10 +239,11 @@ describe("agent plan gate enforcement", () => {
     expect(confirmTool).toHaveBeenCalledTimes(1);
   });
 
-  it("suppresses repeated successful reads without reporting a failure", async () => {
+  it("compares then suppresses repeated successful reads without reporting a failure", async () => {
     const repeated =
       '```tool\n{"name":"fs.list","args":{"path":"/test"}}\n```';
     stream
+      .mockImplementationOnce(streamReply(repeated))
       .mockImplementationOnce(streamReply(repeated))
       .mockImplementationOnce(streamReply(repeated))
       .mockImplementationOnce(streamReply(repeated))
@@ -259,8 +260,7 @@ describe("agent plan gate enforcement", () => {
       maxSteps: 8,
     });
 
-    // The first result is reused; later identical probes complete successfully without execution.
-    expect(runTool).toHaveBeenCalledTimes(1);
+    expect(runTool).toHaveBeenCalledTimes(3);
     expect(answer).toContain("Inspection complete.");
     expect(answer).not.toMatch(/Blocked or Cancelled|Status: blocked/i);
     expect(answer).not.toMatch(/already been called|results you already have/i);

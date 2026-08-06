@@ -12,6 +12,7 @@ export interface ToolAttempt {
   canonicalSignature: string;
   ok: boolean;
   exitCode?: number | undefined;
+  observationDigest?: string | undefined;
 }
 
 const MAX_ATTEMPT_HISTORY = 400;
@@ -59,6 +60,39 @@ export interface LoopDecision {
 const SEQUENCE_WARN_THRESHOLD = 2;
 const SEQUENCE_BLOCK_THRESHOLD = 2;
 
+const IMMEDIATE_SEQUENCE_SUPPRESSION_TOOLS = new Set([
+  "fs.write",
+  "fs.writeMany",
+  "fs.edit",
+  "fs.replaceLines",
+  "fs.append",
+  "fs.delete",
+  "shell.start",
+  "shell.stop",
+  "pkg.install",
+  "plan.create",
+  "task.add",
+  "task.move",
+  "job.read",
+  "task.read",
+  "task.update",
+  "agent.handoff",
+  "loop.reset",
+  "terminal.start",
+  "terminal.send",
+  "terminal.resize",
+  "terminal.close",
+]);
+
+const UNSAFE_IMMEDIATE_RETRY_TOOLS = new Set([
+  "fs.append",
+  "shell.start",
+  "task.add",
+  "agent.handoff",
+  "terminal.start",
+  "terminal.send",
+]);
+
 export interface ActionSequenceDecision {
   suppress: boolean;
   terminal: boolean;
@@ -76,6 +110,8 @@ export class LoopGuard {
   private lastActionSequence: string | undefined;
   private lastActionSequenceEligible = false;
   private actionSequenceRepetitions = 0;
+  private lastActionSequenceOutcome: string | undefined;
+  private unchangedActionSequenceRuns = 0;
   private totalSequenceSuppressions = 0;
   private sequenceRunCounts = new Map<string, number>();
   private emptySuccessfulCalls = new Map<
@@ -97,7 +133,13 @@ export class LoopGuard {
   >();
   private failedProbes = new Map<
     string,
-    { stateKey?: string | undefined; retryReason?: string | undefined }
+    {
+      digest?: string | undefined;
+      unchangedRepeats: number;
+      stateKey?: string | undefined;
+      compareAfterRestore: boolean;
+      retryReason?: string | undefined;
+    }
   >();
   private lastSuccessfulNonMetaStep = -1;
 
@@ -107,7 +149,12 @@ export class LoopGuard {
     for (const operation of operations) {
       if (operation.ok === false) {
         this.failedProbes.set(operation.signature, {
+          ...(operation.observationDigest
+            ? { digest: operation.observationDigest }
+            : {}),
+          unchangedRepeats: operation.unchangedRepeats ?? 0,
           ...(operation.stateKey ? { stateKey: operation.stateKey } : {}),
+          compareAfterRestore: true,
         });
         continue;
       }
@@ -148,6 +195,58 @@ export class LoopGuard {
       .join(" ");
   }
 
+  private callNeedsOutcomeComparison(call: {
+    name: string;
+    args?: Record<string, unknown>;
+  }): boolean {
+    if (IMMEDIATE_SEQUENCE_SUPPRESSION_TOOLS.has(call.name)) return false;
+    if (call.name !== "tool.batch") return true;
+    const children = call.args?.calls;
+    if (!Array.isArray(children) || children.length === 0) return false;
+    return children.every((child) => {
+      if (!child || typeof child !== "object") return false;
+      const record = child as Record<string, unknown>;
+      return (
+        typeof record.name === "string" &&
+        this.callNeedsOutcomeComparison({
+          name: record.name,
+          args:
+            record.args && typeof record.args === "object"
+              ? (record.args as Record<string, unknown>)
+              : {},
+        })
+      );
+    });
+  }
+
+  private sequenceNeedsOutcomeComparison(
+    calls: readonly { name: string; args?: Record<string, unknown> }[],
+  ): boolean {
+    return calls.every((call) => this.callNeedsOutcomeComparison(call));
+  }
+
+  private callHasUnsafeImmediateRetry(call: {
+    name: string;
+    args?: Record<string, unknown>;
+  }): boolean {
+    if (UNSAFE_IMMEDIATE_RETRY_TOOLS.has(call.name)) return true;
+    if (call.name !== "tool.batch") return false;
+    const children = call.args?.calls;
+    if (!Array.isArray(children)) return true;
+    return children.some((child) => {
+      if (!child || typeof child !== "object") return true;
+      const record = child as Record<string, unknown>;
+      if (typeof record.name !== "string") return true;
+      return this.callHasUnsafeImmediateRetry({
+        name: record.name,
+        args:
+          record.args && typeof record.args === "object"
+            ? (record.args as Record<string, unknown>)
+            : {},
+      });
+    });
+  }
+
   observeActionSequence(
     calls: readonly {
       name: string;
@@ -167,6 +266,8 @@ export class LoopGuard {
       this.lastActionSequence = undefined;
       this.lastActionSequenceEligible = false;
       this.actionSequenceRepetitions = 0;
+      this.lastActionSequenceOutcome = undefined;
+      this.unchangedActionSequenceRuns = 0;
       return none;
     }
     const signature = this.sequenceSignature(calls);
@@ -176,11 +277,32 @@ export class LoopGuard {
       this.lastActionSequence = signature;
       this.lastActionSequenceEligible = false;
       this.actionSequenceRepetitions = 0;
+      this.lastActionSequenceOutcome = undefined;
+      this.unchangedActionSequenceRuns = 0;
       return none;
     }
 
     if (!this.lastActionSequenceEligible) {
       return none;
+    }
+
+    if (this.sequenceNeedsOutcomeComparison(calls)) {
+      if (this.unchangedActionSequenceRuns < 2) {
+        return none;
+      }
+      if (this.unchangedActionSequenceRuns === 2) {
+        return {
+          suppress: false,
+          terminal: false,
+          repetitions: 2,
+          totalSuppressions: this.totalSequenceSuppressions,
+          oscillation: false,
+          warn: true,
+          warnMessage:
+            "This exact observable action has produced the same result twice consecutively. " +
+            "The comparison run will proceed. If further identical runs are intentional, call loop.reset before repeating it again; otherwise use the existing result or change approach.",
+        };
+      }
     }
 
     this.actionSequenceRepetitions += 1;
@@ -226,6 +348,7 @@ export class LoopGuard {
       stateKey?: string | undefined;
     }[],
     eligible: boolean,
+    outcomeFingerprint?: string | undefined,
   ): void {
     if (calls.length === 0) return;
     const signature = this.sequenceSignature(calls);
@@ -233,7 +356,17 @@ export class LoopGuard {
     this.lastActionSequenceEligible = eligible;
     if (!eligible) {
       this.actionSequenceRepetitions = 0;
+      this.lastActionSequenceOutcome = undefined;
+      this.unchangedActionSequenceRuns = 0;
       return;
+    }
+    if (this.sequenceNeedsOutcomeComparison(calls)) {
+      const comparableOutcome = outcomeFingerprint ?? "__no-outcome__";
+      const unchanged = comparableOutcome === this.lastActionSequenceOutcome;
+      this.unchangedActionSequenceRuns = unchanged
+        ? this.unchangedActionSequenceRuns + 1
+        : 1;
+      this.lastActionSequenceOutcome = comparableOutcome;
     }
     this.sequenceRunCounts.set(signature, (this.sequenceRunCounts.get(signature) ?? 0) + 1);
   }
@@ -260,9 +393,17 @@ export class LoopGuard {
   resetAllSequenceCounts(): void {
     this.sequenceRunCounts.clear();
     this.actionSequenceRepetitions = 0;
+    this.lastActionSequenceOutcome = undefined;
+    this.unchangedActionSequenceRuns = 0;
     this.totalSequenceSuppressions = 0;
     this.lastActionSequence = undefined;
     this.lastActionSequenceEligible = false;
+    this.signatureCount.clear();
+    this.signatureSuccess.clear();
+    this.emptySuccessfulCalls.clear();
+    this.failedReadRetryUsed.clear();
+    this.successfulProbes.clear();
+    this.failedProbes.clear();
   }
 
   getSequenceRunCount(
@@ -286,12 +427,17 @@ export class LoopGuard {
     context?: RetryContext | undefined,
   ): void {
     const sig = this.canonicalize(name, args);
+    const observationDigest =
+      output !== undefined
+        ? completedOperationObservationDigest(name, output)
+        : undefined;
     this.attempts.push({
       step,
       callName: name,
       canonicalSignature: sig,
       ok,
       exitCode,
+      ...(observationDigest ? { observationDigest } : {}),
     });
     if (this.attempts.length > MAX_ATTEMPT_HISTORY) {
       this.attempts.splice(0, this.attempts.length - MAX_ATTEMPT_HISTORY);
@@ -343,8 +489,17 @@ export class LoopGuard {
         this.failedProbes.delete(probeSignature);
       } else {
         const priorFailure = this.failedProbes.get(probeSignature);
+        const unchanged =
+          observationDigest !== undefined &&
+          priorFailure?.digest === observationDigest &&
+          priorFailure.stateKey === context?.stateKey;
         this.failedProbes.set(probeSignature, {
+          ...(observationDigest ? { digest: observationDigest } : {}),
+          unchangedRepeats: unchanged
+            ? (priorFailure?.unchangedRepeats ?? 0) + 1
+            : 0,
           ...(context?.stateKey ? { stateKey: context.stateKey } : {}),
+          compareAfterRestore: false,
           ...(priorFailure?.retryReason
             ? { retryReason: priorFailure.retryReason }
             : {}),
@@ -426,6 +581,48 @@ export class LoopGuard {
     return latest !== undefined && latest.canonicalSignature !== signature;
   }
 
+  private hasRepeatedEquivalentAttempt(
+    signature: string,
+    ok: boolean,
+  ): boolean {
+    const latest = this.attempts.at(-1);
+    const previous = this.attempts.at(-2);
+    return Boolean(
+      latest &&
+        previous &&
+        latest.canonicalSignature === signature &&
+        previous.canonicalSignature === signature &&
+        latest.ok === ok &&
+        previous.ok === ok &&
+        latest.exitCode === previous.exitCode &&
+        latest.observationDigest === previous.observationDigest,
+    );
+  }
+
+  private hasThreeEquivalentAttempts(
+    signature: string,
+    ok: boolean,
+  ): boolean {
+    const latest = this.attempts.at(-1);
+    const previous = this.attempts.at(-2);
+    const earlier = this.attempts.at(-3);
+    return Boolean(
+      latest &&
+        previous &&
+        earlier &&
+        latest.canonicalSignature === signature &&
+        previous.canonicalSignature === signature &&
+        earlier.canonicalSignature === signature &&
+        latest.ok === ok &&
+        previous.ok === ok &&
+        earlier.ok === ok &&
+        latest.exitCode === previous.exitCode &&
+        previous.exitCode === earlier.exitCode &&
+        latest.observationDigest === previous.observationDigest &&
+        previous.observationDigest === earlier.observationDigest,
+    );
+  }
+
   shouldBlock(
     name: string,
     args: Record<string, unknown>,
@@ -451,6 +648,12 @@ export class LoopGuard {
       ) {
         return { block: false };
       }
+      if (
+        this.callNeedsOutcomeComparison({ name, args }) &&
+        !this.hasThreeEquivalentAttempts(sig, true)
+      ) {
+        return { block: false };
+      }
       const retryReason = retryContext?.retryReason;
       const reasonKey =
         retryReason?.code.trim() && retryReason.detail.trim()
@@ -466,6 +669,21 @@ export class LoopGuard {
         reason:
           `${name} completed with an empty result and identical arguments. ` +
           "Do not repeat it unchanged; use a different action, wait for an observable state change, or provide one new structured retry reason.",
+      };
+    }
+
+    const latestAttempt = this.attempts.at(-1);
+    if (
+      !this.callNeedsOutcomeComparison({ name, args }) &&
+      latestAttempt?.canonicalSignature === sig &&
+      latestAttempt.ok
+    ) {
+      return {
+        block: true,
+        kind: "unchanged-success",
+        reason:
+          `${name} already completed with identical arguments. ` +
+          "Do not replay the exact same side effect without changing its arguments.",
       };
     }
 
@@ -485,6 +703,9 @@ export class LoopGuard {
         return { block: false };
       }
       if (this.hasInterveningAttempt(sig)) {
+        return { block: false };
+      }
+      if (probe.unchangedRepeats < 2) {
         return { block: false };
       }
       const retryReason = retryContext?.retryReason;
@@ -518,6 +739,13 @@ export class LoopGuard {
         return { block: false };
       }
       if (this.hasInterveningAttempt(sig)) {
+        return { block: false };
+      }
+      if (restoredFailure.compareAfterRestore) {
+        restoredFailure.compareAfterRestore = false;
+        return { block: false };
+      }
+      if (restoredFailure.unchangedRepeats < 1) {
         return { block: false };
       }
       if (READ_ONLY_TOOLS.has(name) && !this.failedReadRetryUsed.has(sig)) {
@@ -567,6 +795,15 @@ export class LoopGuard {
     if (authorized) {
       return { block: false };
     }
+    if (this.callHasUnsafeImmediateRetry({ name, args })) {
+      return {
+        block: true,
+        kind: "failed-retry",
+        reason:
+          `${name} failed with identical arguments and may have partially delivered its side effect. ` +
+          "Do not replay it without changed arguments or an explicit structured retry reason.",
+      };
+    }
     if (READ_ONLY_TOOLS.has(name) && !this.failedReadRetryUsed.has(sig)) {
       const lastFailStep = [...this.attempts]
         .reverse()
@@ -580,6 +817,9 @@ export class LoopGuard {
         this.signatureSuccess.delete(sig);
         return { block: false };
       }
+    }
+    if (!this.hasRepeatedEquivalentAttempt(sig, false)) {
+      return { block: false };
     }
     return {
       block: true,

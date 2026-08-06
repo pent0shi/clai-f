@@ -28,7 +28,7 @@ import {
   fromWireName,
 } from "../llm/tool-protocol.js";
 import { sanitizeAssistantText } from "../ui/ansi-box.js";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   jobManager,
   type BackgroundJob,
@@ -379,6 +379,7 @@ import {
   recordAnswerEvidence,
   recordFailedHypothesis,
   recordToolEvidence,
+  completedOperationObservationDigest,
   saveOutcomeState,
   validateCriterionEvidence,
   type OutcomeEnvelope,
@@ -5908,6 +5909,7 @@ export async function runAgentTurn(
         );
         let actionSequenceExecuted = 0;
         let actionSequenceEligible = allCalls.length > 0;
+        const actionSequenceOutcomes = new Map<string, string>();
 
         /**
          * Record a tool result into history. Failures / user declines are
@@ -5931,6 +5933,21 @@ export async function runAgentTurn(
           consecutiveModelOnlyRounds = 0;
           recordedNativeIds.add(boundCall.id);
           actionSequenceExecuted += 1;
+          const sequenceObservation = res.suppressedRepeat
+            ? loopGuard.getPriorObservation(res.call.name, res.call.args) ??
+              res.contextOutput
+            : res.result.output ?? res.contextOutput;
+          actionSequenceOutcomes.set(
+            boundCall.id,
+            JSON.stringify({
+              ok: res.ok,
+              exitCode: res.result.exitCode ?? null,
+              digest: completedOperationObservationDigest(
+                res.call.name,
+                sequenceObservation,
+              ),
+            }),
+          );
           // A policy-suppressed call is deterministic: replaying it verbatim
           // returns the identical receipt. It must therefore keep the sequence
           // eligible, otherwise the tool-level suppression and the sequence
@@ -6346,6 +6363,14 @@ export async function runAgentTurn(
           );
         }
 
+        const actionSequenceOutcome = createHash("sha256")
+          .update(
+            JSON.stringify(
+              bound.map((entry) => actionSequenceOutcomes.get(entry.id) ?? null),
+            ),
+          )
+          .digest("hex")
+          .slice(0, 24);
         loopGuard.completeActionSequence(
           actionSequenceCalls,
           actionSequenceEligible &&
@@ -6354,6 +6379,7 @@ export async function runAgentTurn(
             !aborted &&
             !awaitingPlanApproval &&
             !governorPauseReason,
+          actionSequenceOutcome,
         );
 
         // Keep ledger system rows outside the native assistant→tool group so
