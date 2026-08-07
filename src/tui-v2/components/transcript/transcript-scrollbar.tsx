@@ -35,12 +35,26 @@ function thumbRange(metrics: ScrollbarMetrics): { top: number; size: number } | 
   return { top: Math.round(maxTop * progress), size };
 }
 
-function buildScrollContent(range: { top: number; size: number }, trackHeight: number): string {
-  const lines: string[] = [];
-  for (let i = 0; i < range.top; i++) lines.push("│");
-  for (let i = 0; i < range.size; i++) lines.push("█");
-  for (let i = range.top + range.size; i < trackHeight; i++) lines.push("│");
-  return lines.join("\n");
+/**
+ * Track rows above and below the thumb.
+ *
+ * The thumb is rendered as its own sibling row instead of being baked into the
+ * track string and then overdrawn by a second absolutely positioned text: two
+ * elements writing the same cells left the thumb visibly striped (alternating
+ * track grey and thumb grey) as frames composited.
+ */
+export function scrollbarSegments(
+  range: { top: number; size: number },
+  trackHeight: number,
+): { above: string; thumb: string; below: string } {
+  const above = Math.max(0, Math.min(range.top, trackHeight));
+  const thumb = Math.max(0, Math.min(range.size, trackHeight - above));
+  const below = Math.max(0, trackHeight - above - thumb);
+  return {
+    above: Array.from({ length: above }, () => "│").join("\n"),
+    thumb: Array.from({ length: thumb }, () => "█").join("\n"),
+    below: Array.from({ length: below }, () => "│").join("\n"),
+  };
 }
 
 export function TranscriptScrollbar(props: {
@@ -156,7 +170,7 @@ export function TranscriptScrollbar(props: {
 
   const trackColor = theme.border;
   const thumbColor = dragging ? theme.cyan : theme.muted;
-  const content = buildScrollContent(range, trackHeight);
+  const segments = scrollbarSegments(range, trackHeight);
 
   return (
     <box
@@ -173,26 +187,25 @@ export function TranscriptScrollbar(props: {
       onMouseDrag={onMouseDrag}
       onMouseUp={onMouseUp}
     >
-      <text
-        selectable={false}
-        content={content}
-        style={{
-          fg: trackColor,
-          attributes: TextAttributes.DIM,
-        }}
-      />
-      {range.size > 0 ? (
+      {segments.above ? (
         <text
           selectable={false}
-          content={"█".repeat(range.size)}
-          style={{
-            position: "absolute",
-            top: range.top,
-            right: 0,
-            width: 1,
-            fg: thumbColor,
-            attributes: TextAttributes.BOLD,
-          }}
+          content={segments.above}
+          style={{ fg: trackColor, attributes: TextAttributes.DIM }}
+        />
+      ) : null}
+      {segments.thumb ? (
+        <text
+          selectable={false}
+          content={segments.thumb}
+          style={{ fg: thumbColor, attributes: TextAttributes.BOLD }}
+        />
+      ) : null}
+      {segments.below ? (
+        <text
+          selectable={false}
+          content={segments.below}
+          style={{ fg: trackColor, attributes: TextAttributes.DIM }}
         />
       ) : null}
     </box>

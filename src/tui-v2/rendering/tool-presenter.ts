@@ -65,6 +65,32 @@ function pathFromArgsDisplay(
   return toolName === "fs.writeMany" ? "files" : "";
 }
 
+/** Max preview rows for the args/command line under a tool title. */
+const ARGS_PREVIEW_MAX_LINES = 3;
+/** Max characters kept per previewed args row. */
+const ARGS_PREVIEW_LINE_CHARS = 200;
+
+/**
+ * Bound the args/command preview.
+ *
+ * A heredoc (`cat > main.py << 'EOF' … EOF`) puts an entire file into
+ * `argsDisplay`. Rendering it verbatim made one card hundreds of rows tall,
+ * which overflowed the card border and corrupted the surrounding transcript
+ * layout. The full command is still available in the pager and the artifact.
+ */
+export function clampArgsDisplay(raw: string | undefined): string | undefined {
+  if (!raw) return raw ?? undefined;
+  const lines = raw.split("\n");
+  const kept = lines
+    .slice(0, ARGS_PREVIEW_MAX_LINES)
+    .map((line) => clipPreviewLine(line, ARGS_PREVIEW_LINE_CHARS));
+  const hidden = lines.length - kept.length;
+  if (hidden > 0) {
+    kept.push(`··· +${hidden} more line${hidden === 1 ? "" : "s"} · click for full ···`);
+  }
+  return kept.join("\n");
+}
+
 export function presentTool(item: ToolItem): ToolPresentation {
   const fileDiff =
     isFileMutationTool(item.name) ||
@@ -76,7 +102,7 @@ export function presentTool(item: ToolItem): ToolPresentation {
       ? "command"
       : "input"
     : undefined;
-  let argsDisplay = item.argsDisplay || undefined;
+  let argsDisplay = clampArgsDisplay(item.argsDisplay || undefined);
   let pathLine: string | undefined;
 
   if (fileDiff) {

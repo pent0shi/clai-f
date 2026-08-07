@@ -652,7 +652,16 @@ export function ToolCard(props: {
 
       {/* Skip SAVED line for file mutations — path is already in the title. */}
       {item.artifactPath && !isFileDiff && !isMutation ? (
-        <box style={{ flexDirection: "row", width: "100%", marginTop: 0 }}>
+        <box
+          style={{
+            flexDirection: "row",
+            width: "100%",
+            marginTop: 0,
+            height: 1,
+            flexShrink: 0,
+            overflow: "hidden",
+          }}
+        >
           <text selectable style={{ fg: theme.white, bg: theme.chipTeal, attributes: TextAttributes.BOLD }}>
             {" SAVED "}
           </text>
@@ -673,6 +682,9 @@ export function ToolCard(props: {
             marginTop: 0,
             marginBottom: 0,
             paddingBottom: 0,
+            height: 1,
+            flexShrink: 0,
+            overflow: "hidden",
           }}
           {...(expanded
             ? {}
