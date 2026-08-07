@@ -962,19 +962,33 @@ export async function fsList(
   const maxEntries = options.maxEntries ?? DEFAULT_LIST_MAX_ENTRIES;
   try {
     const entries = await readdir(resolved, { withFileTypes: true });
-    const truncated = entries.length > maxEntries;
-    const visible = truncated ? entries.slice(0, maxEntries) : entries;
-    const lines = visible.map(
-      (entry) => `${entry.isDirectory() ? "dir " : "file"} ${entry.name}`,
+    const sorted = [...entries].sort((left, right) =>
+      left.name.localeCompare(right.name, undefined, { numeric: true }),
     );
+    const hiddenCount = sorted.filter((entry) => entry.name.startsWith(".")).length;
+    const truncated = sorted.length > maxEntries;
+    const visible = truncated ? sorted.slice(0, maxEntries) : sorted;
+    if (visible.length === 0) {
+      return {
+        ok: true,
+        output: `(empty directory) ${resolved}`,
+        truncated,
+      };
+    }
+    const lines = [
+      `Directory ${resolved}: ${sorted.length.toLocaleString()} entr${sorted.length === 1 ? "y" : "ies"} (${hiddenCount.toLocaleString()} hidden included)`,
+      ...visible.map((entry) =>
+        `${entry.isDirectory() ? "dir " : "file"} ${entry.name}${entry.name.startsWith(".") ? " [hidden]" : ""}`,
+      ),
+    ];
     if (truncated) {
       lines.push(
-        `... (${(entries.length - maxEntries).toLocaleString()} entries omitted of ${entries.length.toLocaleString()})`,
+        `... (${(sorted.length - maxEntries).toLocaleString()} entries omitted of ${sorted.length.toLocaleString()})`,
       );
     }
     return {
       ok: true,
-      output: lines.join("\n") || `(empty directory) ${resolved}`,
+      output: lines.join("\n"),
       truncated,
     };
   } catch (error: unknown) {

@@ -3,6 +3,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ChatImage, CompletionRequest, CompletionResult } from "../../src/types.js";
+import { clearTextOnlyModels } from "../../src/llm/tool-protocol.js";
 
 const streamMock = vi.fn();
 
@@ -46,6 +47,7 @@ describe("native tool loop integration", () => {
   });
 
   afterEach(async () => {
+    clearTextOnlyModels();
     process.chdir(prevCwd);
     await rm(cwd, { recursive: true, force: true });
   });
@@ -241,6 +243,83 @@ describe("native tool loop integration", () => {
     );
     expect(toolCallIds.size).toBe(2);
     expect([...toolCallIds].every((id) => id && toolResultIds.has(id))).toBe(true);
+  });
+
+  it("closes an abandoned streamed native call and falls back to text tools", async () => {
+    await writeFile(join(cwd, "metro.txt"), "ready", "utf8");
+    const events: Array<{ type: string; id?: string; name?: string; reason?: string }> = [];
+    let turn = 0;
+
+    streamMock.mockImplementation(
+      async (
+        request: CompletionRequest,
+        onToken: (token: string) => void,
+      ): Promise<CompletionResult> => {
+        turn += 1;
+        if (turn === 1) {
+          request.onToolCallDelta?.({
+            index: 0,
+            id: "call_incomplete_list",
+            name: "fs.list",
+            argumentsBytes: 12,
+          });
+          return {
+            text: "",
+            provider: "bynara",
+            model: "grok-4.5-free",
+            finishReason: "stop",
+          };
+        }
+
+        if (turn === 2) {
+          expect(request.tools).toBeUndefined();
+          const text = `\`\`\`tool\n${JSON.stringify({
+            name: "fs.list",
+            args: { path: cwd },
+          })}\n\`\`\``;
+          onToken(text);
+          return {
+            text,
+            provider: "bynara",
+            model: "grok-4.5-free",
+            finishReason: "stop",
+          };
+        }
+
+        expect(
+          request.messages.some(
+            (message) =>
+              message.role === "tool" && message.content.includes("metro.txt"),
+          ),
+        ).toBe(true);
+        return {
+          text: "listed successfully",
+          provider: "bynara",
+          model: "grok-4.5-free",
+          finishReason: "stop",
+        };
+      },
+    );
+
+    const { runAgentLoop } = await import("../../src/agent/runner.js");
+    await expect(
+      runAgentLoop("inspect this project", {
+        provider: "bynara",
+        model: "grok-4.5-free",
+        maxSteps: 5,
+        onEvent: (event) => events.push(event),
+      }),
+    ).resolves.toBe("listed successfully");
+
+    expect(streamMock).toHaveBeenCalledTimes(3);
+    expect(
+      events.some(
+        (event) =>
+          event.type === "tool-blocked" &&
+          event.name === "fs.list" &&
+          /never completed/i.test(event.reason ?? ""),
+      ),
+    ).toBe(true);
   });
 
   it("preserves parallel tool bodies and session-state ordering for the next model call", async () => {

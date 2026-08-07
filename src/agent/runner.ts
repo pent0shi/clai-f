@@ -4952,6 +4952,32 @@ export async function runAgentTurn(
 
 
         if (!canonicalAssistantVisible.trim() && !call) {
+          const incompleteNativeStream =
+            nativeToolCalls.length === 0 &&
+            deferredToolCalls.some(
+              (entry) => entry.shown && entry.call.name !== "…",
+            );
+          if (incompleteNativeStream) {
+            const reason =
+              "The provider began this native tool call but never completed it. Nothing ran; reissue a complete call.";
+            for (const deferred of deferredToolCalls) {
+              if (!deferred.shown || deferred.call.name === "…") continue;
+              writeToolBlocked(
+                deferred.eventId,
+                deferred.call.name,
+                reason,
+                chalk.yellow(`  ⚠ ${reason}\n`),
+              );
+            }
+            markTextOnlyModel(provider, model);
+            writeNotice(
+              "warn",
+              "provider abandoned a native tool call — switching this model to the text tool protocol",
+              chalk.yellow(
+                "  ⚠ provider abandoned a native tool call — switching this model to the text tool protocol\n",
+              ),
+            );
+          }
           emptyVisibleRetries += 1;
           if (emptyVisibleRetries <= 3) {
             if (assistantText.hasThinking) {
@@ -4975,7 +5001,9 @@ export async function runAgentTurn(
             commitAssistantRetry(assistantText.visible);
             // Keep nudges SHORT — cheap models lose the key instruction in long text.
             const buildNudge =
-              isPlanMode && !activePlan
+              incompleteNativeStream
+                ? "Your native tool call was incomplete, so nothing ran. Use exactly one complete fenced ```tool block now; do not repeat the incomplete native call."
+                : isPlanMode && !activePlan
                   ? toolsAttached
                     ? "No visible output. In plan mode: gather context or call plan.create when ready (do not only describe the plan)."
                     : "No visible output. In plan mode: emit a ```tool block for research/recon or plan.create. " +

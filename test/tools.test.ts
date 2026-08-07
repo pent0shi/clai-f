@@ -270,6 +270,22 @@ describe("fs.list — entry caps (secret-path gate removed)", () => {
     }
   });
 
+  it("includes hidden entries in a deterministic listing", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "clai-fslist-hidden-"));
+    writeFileSync(join(dir, "visible.txt"), "visible");
+    writeFileSync(join(dir, ".hidden.txt"), "hidden");
+
+    const result = await fsList(dir);
+
+    expect(result.ok).toBe(true);
+    expect(result.output).toContain("2 entries (1 hidden included)");
+    expect(result.output).toContain("file .hidden.txt [hidden]");
+    expect(result.output).toContain("file visible.txt");
+    expect(result.output.indexOf(".hidden.txt")).toBeLessThan(
+      result.output.indexOf("visible.txt"),
+    );
+  });
+
   it("truncates large directories at maxEntries", async () => {
     const dir = mkdtempSync(join(tmpdir(), "clai-fslist-"));
     for (let i = 0; i < 20; i += 1) {

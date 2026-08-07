@@ -1245,6 +1245,20 @@ export function extractResultUrls(output: string): string[] {
   return matches ? matches.map((u) => u.replace(/[",]+$/, "")) : [];
 }
 
+export function normalizeToolResult(
+  name: string,
+  result: ToolResult,
+): ToolResult {
+  if (result.output.trim()) return result;
+  const exit = result.exitCode === undefined ? "" : ` (exit=${result.exitCode})`;
+  return {
+    ...result,
+    output: result.ok
+      ? `Tool ${name} completed successfully${exit}, but produced no textual output.`
+      : `Tool ${name} failed${exit} without textual output.`,
+  };
+}
+
 export async function runToolCall(
   call: ToolCall,
   options: ToolRunOptions = {},
@@ -1254,7 +1268,10 @@ export async function runToolCall(
   if (!handler) {
     throw new Error(`Unknown tool: ${normalized.name}`);
   }
-  return handler(normalized.args, options);
+  return normalizeToolResult(
+    normalized.name,
+    await handler(normalized.args, options),
+  );
 }
 
 /**

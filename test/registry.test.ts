@@ -1,5 +1,5 @@
 import { describe, expect, it, beforeEach } from "vitest";
-import { availableToolNames, toolRegistry } from "../src/tools/registry.js";
+import { availableToolNames, runToolCall, toolRegistry } from "../src/tools/registry.js";
 import { updateConfig } from "../src/store/config.js";
 
 describe("tool registry", () => {
@@ -51,6 +51,18 @@ describe("tool registry", () => {
       command: "nonexistent_command_xyz_123",
     });
     expect(result.ok).toBe(false);
+  });
+
+  it("returns an explicit receipt for a successful command with no output", async () => {
+    const result = await runToolCall({
+      name: "shell.exec",
+      args: { command: 'node -e ""' },
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.output).toMatch(
+      /shell\.exec completed successfully.*no textual output/i,
+    );
   });
 
   it("shell.exec can be aborted", async () => {
