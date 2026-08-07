@@ -148,17 +148,22 @@ export function resolveStepMaxTokens(input: {
   nativeToolsActive: boolean;
   toolsAttached: boolean;
   recoveryNudge?: boolean | undefined;
+  truncationDepth?: number | undefined;
   policy?: ReliabilityPolicy | undefined;
 }): number {
   const policy = input.policy ?? getReliabilityPolicy();
-  if (!policy.adaptiveMaxTokens) return LEGACY_MAX_TOKENS;
-  if (input.recoveryNudge) {
-    return Math.max(ADAPTIVE_MAX_TOKENS_FLOOR, ADAPTIVE_MAX_TOKENS_LIGHT);
-  }
-  if (input.toolsAttached || input.nativeToolsActive) {
-    return ADAPTIVE_MAX_TOKENS_TOOL_STEP;
-  }
-  return ADAPTIVE_MAX_TOKENS_LIGHT;
+  const base = (() => {
+    if (!policy.adaptiveMaxTokens) return LEGACY_MAX_TOKENS;
+    if (input.recoveryNudge) {
+      return Math.max(ADAPTIVE_MAX_TOKENS_FLOOR, ADAPTIVE_MAX_TOKENS_LIGHT);
+    }
+    if (input.toolsAttached || input.nativeToolsActive) {
+      return ADAPTIVE_MAX_TOKENS_TOOL_STEP;
+    }
+    return ADAPTIVE_MAX_TOKENS_LIGHT;
+  })();
+  const depth = input.truncationDepth ?? 0;
+  return depth > 0 ? Math.min(65_536, base * 2 ** depth) : base;
 }
 
 export function isFreeCloudProvider(provider: ProviderId): boolean {

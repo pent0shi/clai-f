@@ -19,7 +19,7 @@ import { renderColumns } from "../../../ui/text-width.js";
 import type { ThinkingItem } from "../../state/transcript-types.js";
 import type { Theme } from "../../rendering/theme.js";
 import { selectableRowStyle } from "./selectable-line.js";
-import { liveThinkingTail } from "../../rendering/thinking-tail.js";
+import { liveThinkingDisplay } from "../../rendering/thinking-tail.js";
 import { wrapPagerLine } from "../../rendering/pager-chrome.js";
 
 /** Body indent inside the block (paddingLeft below). */
@@ -66,7 +66,7 @@ export function ThinkingBlock(props: {
   const bodyLines = useMemo(() => {
     if (!showBody || !item.content) return [];
     const source = item.streaming
-      ? liveThinkingTail(item.content)
+      ? liveThinkingDisplay(item.content)
       : item.content;
     return source
       .replace(/\r\n/g, "\n")

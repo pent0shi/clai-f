@@ -1,7 +1,6 @@
 /** @jsxImportSource @opentui/react */
 
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
-import { TextAttributes } from "@opentui/core";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import type { MouseEvent, ScrollBoxRenderable } from "@opentui/core";
 import type { Theme } from "../../rendering/theme.js";
 
@@ -22,39 +21,25 @@ function readMetrics(sb: ScrollBoxRenderable | null): ScrollbarMetrics {
   };
 }
 
-function thumbRange(metrics: ScrollbarMetrics): { top: number; size: number } | null {
+export function thumbRange(metrics: ScrollbarMetrics): { top: number; size: number } | null {
   const { scrollTop, scrollHeight, viewportHeight } = metrics;
   if (scrollHeight <= viewportHeight || viewportHeight <= 0) return null;
   const trackSize = viewportHeight;
   const ratio = Math.min(1, viewportHeight / scrollHeight);
-  const size = Math.max(1, Math.floor(trackSize * ratio));
+  const size = Math.max(2, Math.floor(trackSize * ratio));
   const maxTop = trackSize - size;
-  const progress = scrollHeight <= viewportHeight
-    ? 0
-    : Math.min(1, scrollTop / Math.max(1, scrollHeight - viewportHeight));
+  const progress = Math.min(1, scrollTop / Math.max(1, scrollHeight - viewportHeight));
   return { top: Math.round(maxTop * progress), size };
 }
 
-/**
- * Track rows above and below the thumb.
- *
- * The thumb is rendered as its own sibling row instead of being baked into the
- * track string and then overdrawn by a second absolutely positioned text: two
- * elements writing the same cells left the thumb visibly striped (alternating
- * track grey and thumb grey) as frames composited.
- */
 export function scrollbarSegments(
   range: { top: number; size: number },
   trackHeight: number,
-): { above: string; thumb: string; below: string } {
+): { above: number; thumb: number; below: number } {
   const above = Math.max(0, Math.min(range.top, trackHeight));
   const thumb = Math.max(0, Math.min(range.size, trackHeight - above));
   const below = Math.max(0, trackHeight - above - thumb);
-  return {
-    above: Array.from({ length: above }, () => "│").join("\n"),
-    thumb: Array.from({ length: thumb }, () => "█").join("\n"),
-    below: Array.from({ length: below }, () => "│").join("\n"),
-  };
+  return { above, thumb, below };
 }
 
 export function TranscriptScrollbar(props: {
@@ -66,7 +51,7 @@ export function TranscriptScrollbar(props: {
   const [metrics, setMetrics] = useState<ScrollbarMetrics>(() =>
     readMetrics(scrollRef.current),
   );
-  const [dragging, setDragging] = useState(false);
+  const [active, setActive] = useState<"idle" | "hover" | "drag">("idle");
   const draggingRef = useRef(false);
   const dragOffset = useRef<number | undefined>(undefined);
   const lastDragUpdate = useRef(0);
@@ -75,8 +60,11 @@ export function TranscriptScrollbar(props: {
     setMetrics(readMetrics(scrollRef.current));
   }, [scrollRef]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     refresh();
+  }, [refresh, followKey]);
+
+  useEffect(() => {
     const id = setInterval(refresh, 100);
     return () => clearInterval(id);
   }, [refresh, followKey]);
@@ -109,13 +97,13 @@ export function TranscriptScrollbar(props: {
         if (Math.abs(relativeY - thumbCenter) <= Math.ceil(r.size / 2)) {
           dragOffset.current = relativeY - r.top;
           draggingRef.current = true;
-          setDragging(true);
+          setActive("drag");
           return;
         }
       }
       dragOffset.current = undefined;
       draggingRef.current = true;
-      setDragging(true);
+      setActive("drag");
       applyScroll(relativeY);
     },
     [scrollRef, applyScroll],
@@ -151,14 +139,32 @@ export function TranscriptScrollbar(props: {
     [scrollRef, applyScroll],
   );
 
-  const onMouseUp = useCallback(
+  const endDrag = useCallback(
     (event: MouseEvent): void => {
       if (!draggingRef.current) return;
       event.preventDefault();
       event.stopPropagation();
       draggingRef.current = false;
-      setDragging(false);
+      setActive("idle");
       setMetrics(readMetrics(scrollRef.current));
+    },
+    [scrollRef],
+  );
+
+  const onWheel = useCallback(
+    (event: MouseEvent): void => {
+      if (!event.scroll) return;
+      event.preventDefault();
+      event.stopPropagation();
+      const sb = scrollRef.current;
+      if (!sb) return;
+      const { direction, delta } = event.scroll;
+      const step = Math.max(1, delta || 1) * 3;
+      const dy = direction === "up" ? -step : direction === "down" ? step : 0;
+      if (dy === 0) return;
+      const max = sb.scrollHeight - (sb.viewport?.height ?? 0);
+      sb.scrollTo(Math.max(0, Math.min(max, sb.scrollTop + dy)));
+      setMetrics(readMetrics(sb));
     },
     [scrollRef],
   );
@@ -168,9 +174,9 @@ export function TranscriptScrollbar(props: {
   const visible = range !== null && trackHeight > 0;
   if (!visible) return null;
 
-  const trackColor = theme.border;
-  const thumbColor = dragging ? theme.cyan : theme.muted;
   const segments = scrollbarSegments(range, trackHeight);
+  const trackColor = active === "idle" ? theme.border : theme.muted;
+  const thumbColor = active === "idle" ? theme.muted : theme.cyan;
 
   return (
     <box
@@ -178,37 +184,27 @@ export function TranscriptScrollbar(props: {
         position: "absolute",
         top: metrics.y,
         right: 0,
-        width: 1,
+        width: 2,
         height: trackHeight,
         zIndex: 50,
         flexDirection: "column",
+        alignItems: "flex-end",
       }}
       onMouseDown={onMouseDown}
       onMouseDrag={onMouseDrag}
-      onMouseUp={onMouseUp}
+      onMouseUp={endDrag}
+      onMouseDragEnd={endDrag}
+      onMouseOver={() => setActive((current) => (draggingRef.current ? current : "hover"))}
+      onMouseOut={() => setActive((current) => (draggingRef.current ? current : "idle"))}
+      onMouseScroll={onWheel}
     >
-      {segments.above ? (
-        <text
-          selectable={false}
-          content={segments.above}
-          style={{ fg: trackColor, attributes: TextAttributes.DIM }}
-        />
+      {segments.above > 0 ? (
+        <box style={{ width: 1, height: segments.above, backgroundColor: trackColor }} />
       ) : null}
-      {segments.thumb ? (
-        <text
-          selectable={false}
-          content={segments.thumb}
-          style={{ fg: thumbColor, attributes: TextAttributes.BOLD }}
-        />
-      ) : null}
-      {segments.below ? (
-        <text
-          selectable={false}
-          content={segments.below}
-          style={{ fg: trackColor, attributes: TextAttributes.DIM }}
-        />
+      <box style={{ width: 1, height: segments.thumb, backgroundColor: thumbColor }} />
+      {segments.below > 0 ? (
+        <box style={{ width: 1, height: segments.below, backgroundColor: trackColor }} />
       ) : null}
     </box>
   );
 }
-

@@ -23,6 +23,8 @@ const STRAY_TOOL_DSML = /<\/?[|｜]+DSML[|｜]+[A-Za-z0-9_]*\b[^>]*>/gi;
 /** Kimi / sentinel-style blocks sometimes leak as prose. */
 const COMPLETE_TOOL_SENTINEL =
   /(?:^|\n)\s*(?:tool_call|invoke_tool)\s*\([\s\S]*?\)\s*(?=\n|$)/gi;
+const TRAILING_TOOL_SENTINEL = /(?:^|\n)\s*(?:tool_call|invoke_tool)\s*\([\s\S]*$/i;
+const TRAILING_PARTIAL_TAG = /<[|｜]+[A-Za-z0-9_|｜]*$/i;
 
 export function stripToolCallSurfaces(text: string): string {
   if (!text) return text;
@@ -37,6 +39,8 @@ export function stripToolCallSurfaces(text: string): string {
   s = s.replace(TRAILING_TOOL_DSML, "");
   s = s.replace(STRAY_TOOL_DSML, "");
   s = s.replace(COMPLETE_TOOL_SENTINEL, "\n");
+  s = s.replace(TRAILING_TOOL_SENTINEL, "");
+  s = s.replace(TRAILING_PARTIAL_TAG, "");
   // Collapse leftover blank runs from removed fences.
   s = s.replace(/[ \t]+\n/g, "\n");
   s = s.replace(/\n{3,}/g, "\n\n");

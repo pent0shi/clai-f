@@ -54,4 +54,22 @@ describe("stripToolCallSurfaces", () => {
     ).toBe(true);
     expect(isToolFenceOnlyText("Just prose.")).toBe(false);
   });
+
+  it("hides a DSML opener that is still mid-tag at the stream edge", () => {
+    expect(stripToolCallSurfaces("Thinking. <｜DSML")).toBe("Thinking. ");
+    expect(stripToolCallSurfaces("Thinking. <|DSML|inv")).toBe("Thinking. ");
+    expect(stripToolCallSurfaces("Thinking. <|DSML|invoke name=\"fs.wri")).toBe("Thinking. ");
+  });
+
+  it("hides a sentinel opener whose arg parens have not closed yet", () => {
+    const stripped = stripToolCallSurfaces(
+      "Reviewing.\ninvoke_tool(\"fs.write\", {\"path\": \"/repo/a.ts\", \"content\": \"long body no paren yet",
+    );
+    expect(stripped).not.toContain("invoke_tool");
+    expect(stripped.trim()).toBe("Reviewing.");
+  });
+
+  it("never hides plain prose that merely contains an angle bracket", () => {
+    expect(stripToolCallSurfaces("a < b and c < d")).toBe("a < b and c < d");
+  });
 });

@@ -15,6 +15,32 @@ export function liveThinkingTail(
   return `…\n${aligned}`;
 }
 
+import { stripToolCallSurfaces } from "./strip-tool-surfaces.js";
+
+const SURFACE_OPENERS = [
+  "<|DSML",
+  "<｜DSML",
+  "```tool",
+  "```json tool",
+  "<tool_call",
+  "\ntool_call(",
+  "\ninvoke_tool(",
+  "<|tool_calls_section_begin|>",
+  "<|tool_call_begin|>",
+];
+
+export function liveThinkingDisplay(
+  content: string,
+  limit = LIVE_THINKING_TAIL_CHARS,
+): string {
+  if (!SURFACE_OPENERS.some((opener) => content.includes(opener))) {
+    return liveThinkingTail(content, limit);
+  }
+  const stripped = stripToolCallSurfaces(content);
+  if (!stripped.trim()) return "…";
+  return liveThinkingTail(stripped, limit);
+}
+
 export const LIVE_COMPACTION_HEAD_CHARS = 1_500;
 export const LIVE_COMPACTION_TAIL_CHARS = 2_500;
 

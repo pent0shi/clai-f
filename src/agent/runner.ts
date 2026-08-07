@@ -1445,6 +1445,7 @@ export async function runAgentTurn(
     // Track consecutive thinking-only responses so we can nudge the model
     // to actually act instead of silently returning an empty answer.
     let emptyVisibleRetries = 0;
+    let truncatedBudgetRounds = 0;
 
     let retryWithoutThinking = false;
 
@@ -1744,6 +1745,7 @@ export async function runAgentTurn(
     /** Successful file mutation this turn — kills false "error diagnosed but not fixed". */
     let sawSuccessfulMutation = false;
     let step = -1;
+    let stepMaxTokens = 0;
     let nextToolEventId = 0;
     const alreadyPrintedIds = new Set<string>();
 
@@ -4288,6 +4290,7 @@ export async function runAgentTurn(
               nativeToolsActive,
               toolsAttached,
               recoveryNudge: retryWithoutThinking,
+              truncationDepth: truncatedBudgetRounds,
             }),
           });
           // Resume / mid-turn abort can leave orphan tool rows or a user
@@ -4298,10 +4301,11 @@ export async function runAgentTurn(
           repairToolProtocol(messages);
           assertValidToolProtocol(messages);
           // E3: adaptive completion budget (still large enough for writes).
-          const stepMaxTokens = resolveStepMaxTokens({
+          stepMaxTokens = resolveStepMaxTokens({
             nativeToolsActive,
             toolsAttached,
             recoveryNudge: retryWithoutThinking,
+            truncationDepth: truncatedBudgetRounds,
           });
           try {
           if (
@@ -5011,6 +5015,33 @@ export async function runAgentTurn(
 
 
         if (!canonicalAssistantVisible.trim() && !call) {
+          const completionTokens = completion.usage?.completionTokens ?? 0;
+          const hitOutputLimit =
+            completion.finishReason === "length" ||
+            (completionTokens > 0 && stepMaxTokens > 0 && completionTokens >= stepMaxTokens - 64);
+          const truncatedRoundText = collapseRepeatedText(completion.text ?? "");
+          if (hitOutputLimit && truncatedRoundText.trim() && truncatedBudgetRounds < 2) {
+            truncatedBudgetRounds += 1;
+            writeNotice(
+              "warn",
+              "response hit the output token limit — continuing from where it stopped",
+              chalk.yellow(
+                "  ⚠ response hit the output token limit — continuing from where it stopped\n",
+              ),
+            );
+            messages.push({
+              role: "assistant",
+              content: sanitizeAssistantText(truncatedRoundText),
+            });
+            messages.push(
+              recoveryUserMessage(
+                "Your previous response was cut off by the output token limit before it completed. " +
+                  "Continue directly from where it stopped — do not restart the analysis or repeat prior text. " +
+                  "Finish briefly: emit the next tool call, or the final answer if the task is complete.",
+              ),
+            );
+            continue;
+          }
           const incompleteNativeStream =
             nativeToolCalls.length === 0 &&
             deferredToolCalls.some(
@@ -5086,6 +5117,7 @@ export async function runAgentTurn(
         } else {
           // Reset the counter on any successful visible output or recovered call.
           emptyVisibleRetries = 0;
+          truncatedBudgetRounds = 0;
           retryWithoutThinking = false;
         }
 

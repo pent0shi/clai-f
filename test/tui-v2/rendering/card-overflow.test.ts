@@ -55,29 +55,16 @@ describe("oversized tool args never blow the card layout", () => {
   });
 });
 
-/**
- * The thumb used to be baked into the track string AND drawn again by an
- * absolutely positioned overlay, so two elements wrote the same cells and the
- * thumb rendered striped (alternating track/thumb grey).
- */
 describe("scrollbar segments do not overlap", () => {
   it("splits the track into above/thumb/below covering the height exactly once", () => {
     const segments = scrollbarSegments({ top: 3, size: 4 }, 10);
-    const rows = (s: string) => (s ? s.split("\n").length : 0);
-    expect(rows(segments.above)).toBe(3);
-    expect(rows(segments.thumb)).toBe(4);
-    expect(rows(segments.below)).toBe(3);
-    expect(segments.above).not.toContain("█");
-    expect(segments.below).not.toContain("█");
-    expect(segments.thumb.replace(/\n/g, "")).toBe("████");
+    expect(segments).toEqual({ above: 3, thumb: 4, below: 3 });
+    expect(segments.above + segments.thumb + segments.below).toBe(10);
   });
 
   it("never exceeds the track height", () => {
     const segments = scrollbarSegments({ top: 8, size: 9 }, 10);
-    const total =
-      (segments.above ? segments.above.split("\n").length : 0) +
-      (segments.thumb ? segments.thumb.split("\n").length : 0) +
-      (segments.below ? segments.below.split("\n").length : 0);
-    expect(total).toBe(10);
+    expect(segments.thumb).toBe(2);
+    expect(segments.above + segments.thumb + segments.below).toBe(10);
   });
 });
