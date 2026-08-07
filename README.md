@@ -498,7 +498,7 @@ npm run compile      # native binaries (Bun)
 
 ## Releasing
 
-Tag-driven CI (`.github/workflows/release.yml`): validate (typecheck + tests + prompt-budget + release checks) → multi-platform binaries → GitHub Release → npm `@pentoshi/clai` → Homebrew tap.
+Tag-driven CI (`.github/workflows/release.yml`): validate (typecheck + tests + release checks) → multi-platform binaries → GitHub Release → npm `@pentoshi/clai` → Homebrew tap.
 
 ```sh
 # package.json "version" is the single source of truth.

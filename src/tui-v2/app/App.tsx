@@ -231,6 +231,8 @@ export function App(): ReactNode {
       return;
     }
 
+    if (contextLimitEditing && chord !== "ctrl+c") return;
+
     // Esc from the transcript region binds to selection.clear, which shadowed
     // the global app.cancel — so double-Esc could never cancel a turn/queue/
     // Responder jobs unless the composer had focus. Clear an active selection
@@ -766,9 +768,14 @@ export function App(): ReactNode {
           onCycleMode={cycleMode}
           cancelArmed={escapeCancelArmed}
           onRequestCancel={() => handleEscapeCancellation(false)}
-          onContextLimitEditingStart={() => setContextLimitEditing(true)}
+          onContextLimitEditingStart={() => {
+            setContextLimitEditing(true);
+            services.focus.setInputCaptured(true);
+            services.focus.focusRegion("composer");
+          }}
           onFocusComposer={() => {
             setContextLimitEditing(false);
+            services.focus.setInputCaptured(false);
             services.focus.focusRegion("composer");
           }}
         />

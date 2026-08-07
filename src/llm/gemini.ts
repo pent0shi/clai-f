@@ -83,7 +83,7 @@ function geminiThinkingConfig(
         : "minimal"
       : effort === "low"
         ? "low"
-        : effort === "high" || effort === "xhigh"
+        : effort === "high" || effort === "xhigh" || effort === "max"
           ? "high"
           : "medium";
     return {
@@ -108,6 +108,7 @@ function geminiThinkingConfig(
       return { thinkingBudget: 1_024, includeThoughts: true };
     case "high":
     case "xhigh":
+    case "max":
       return { thinkingBudget: 16_384, includeThoughts: true };
     default:
       return { thinkingBudget: 4_096, includeThoughts: true };

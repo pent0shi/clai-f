@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { COMPACTION_MAP_MAX_COMPLETION_TOKENS } from "../src/agent/compaction-summary.js";
 import { runAgent } from "../src/modes/agent.js";
 import { deletePlan } from "../src/store/plan.js";
 import type { AgentEvent } from "../src/agent/events.js";
@@ -203,7 +204,7 @@ describe("auto-compaction display (Chunk 3)", () => {
       // nested per-chunk fan-out).
       expect(complete).toHaveBeenCalledTimes(3);
       expect(complete.mock.calls[0]?.[0]).toMatchObject({
-        maxTokens: 1_024,
+        maxTokens: COMPACTION_MAP_MAX_COMPLETION_TOKENS,
         temperature: 0,
         thinking: { enabled: false, effort: "none" },
       });

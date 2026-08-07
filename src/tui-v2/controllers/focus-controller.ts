@@ -22,6 +22,7 @@ const DEFAULT_REGION_ORDER: readonly FocusRegion[] = [
 export class FocusController {
   private currentRegion: FocusRegion;
   private overlay: OverlayContext | undefined;
+  private captured = false;
   private readonly listeners = new Set<(context: ActionContext) => void>();
 
   constructor(
@@ -41,6 +42,14 @@ export class FocusController {
 
   hasOverlay(): boolean {
     return this.overlay !== undefined;
+  }
+
+  get inputCaptured(): boolean {
+    return this.captured;
+  }
+
+  setInputCaptured(captured: boolean): void {
+    this.captured = captured;
   }
 
   focusRegion(region: FocusRegion): void {

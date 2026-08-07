@@ -64,6 +64,7 @@ import { qwenCloudProvider } from "./qwen-cloud.js";
 import { modalProvider } from "./modal.js";
 import { lightningProvider } from "./lightning.js";
 import { tokenrouterProvider } from "./tokenrouter.js";
+import { metaProvider } from "./meta.js";
 import type { LlmProvider, ProviderAuth } from "./provider.js";
 import { maskSecretTail } from "./provider.js";
 import { getCustomProviderSync } from "./custom-providers.js";
@@ -382,6 +383,7 @@ export const providers: Record<ProviderId, LlmProvider> = {
   modal: modalProvider,
   lightning: lightningProvider,
   tokenrouter: tokenrouterProvider,
+  meta: metaProvider,
 };
 
 const fallbackOrder: ProviderId[] = [
@@ -400,6 +402,7 @@ const fallbackOrder: ProviderId[] = [
   "modal",
   "lightning",
   "tokenrouter",
+  "meta",
 ];
 
 
@@ -960,7 +963,7 @@ export async function completeWithProvider(
   const providerImpl = getProvider(requested);
   const isDefaultModel = !request.model || request.model === providerImpl.defaultModel;
   const fallbackEnabled =
-    config.providerFallback && (isDefaultModel || request.allowModelFallback === true);
+    config.providerFallback ? (isDefaultModel || request.allowModelFallback === true) : request.allowModelFallback === true;
   const order = buildFallbackChain(
     requested,
     config.freeOnly,
@@ -1034,7 +1037,7 @@ export async function streamWithProvider(
   const providerImpl = getProvider(requested);
   const isDefaultModel = !request.model || request.model === providerImpl.defaultModel;
   const fallbackEnabled =
-    config.providerFallback && (isDefaultModel || request.allowModelFallback === true);
+    config.providerFallback ? (isDefaultModel || request.allowModelFallback === true) : request.allowModelFallback === true;
   const order = buildFallbackChain(
     requested,
     config.freeOnly,

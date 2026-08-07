@@ -936,6 +936,7 @@ async function handleSlash(
         { value: "medium",  label: "medium",  desc: "balanced quality and latency (default)" },
         { value: "high",    label: "high",    desc: "deep reasoning for complex tasks" },
         { value: "xhigh",   label: "xhigh",   desc: "maximum reasoning depth (highest latency)" },
+        { value: "max",     label: "max",     desc: "highest supported reasoning depth for the model" },
       ];
 
       if (!arg) {
@@ -1014,7 +1015,7 @@ async function handleSlash(
         console.log(chalk.dim(`  thinking: ${chalk.dim("off")}`));
         return true;
       }
-      const validEfforts: ReasoningEffort[] = ["minimal", "low", "medium", "high", "xhigh"];
+      const validEfforts: ReasoningEffort[] = ["minimal", "low", "medium", "high", "xhigh", "max"];
       if (validEfforts.includes(arg as ReasoningEffort)) {
         setThinking({ enabled: true, effort: arg as ReasoningEffort });
         console.log(
@@ -1030,7 +1031,7 @@ async function handleSlash(
         return true;
       }
 
-      console.log(chalk.dim("  usage: /variants on|off|none|minimal|low|medium|high|xhigh"));
+      console.log(chalk.dim("  usage: /variants on|off|none|minimal|low|medium|high|xhigh|max"));
       return true;
     }
     case "/clear":

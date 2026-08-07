@@ -67,6 +67,13 @@ export const providerAliases: Record<string, ProviderId> = {
   tokenrouter: "tokenrouter",
   "token-router": "tokenrouter",
   tr: "tokenrouter",
+  meta: "meta",
+  "meta-ai": "meta",
+  "meta-model-api": "meta",
+  "meta-model": "meta",
+  metamodelapi: "meta",
+  metamodel: "meta",
+  muse: "meta",
 };
 
 export const defaultModels: Record<ProviderId, string> = {
@@ -88,6 +95,7 @@ export const defaultModels: Record<ProviderId, string> = {
   lightning: "openai/gpt-5",
   // TokenRouter ids are short and case-sensitive (kimi-k2p6, not Kimi K2.6).
   tokenrouter: "kimi-k2p6",
+  meta: "muse-spark-1.2",
 };
 
 const retiredModelReplacements: Partial<Record<ProviderId, Record<string, string>>> = {
@@ -135,6 +143,7 @@ export const envVars: Record<ProviderId, string | undefined> = {
   modal: "MODAL_PROXY_TOKEN_ID",
   lightning: "LIGHTNING_API_KEY",
   tokenrouter: "TOKENROUTER_API_KEY",
+  meta: "MODEL_API_KEY",
 };
 
 /** Resolve the env var for any provider, including user-defined custom ones. */
@@ -534,6 +543,53 @@ Reset time
 Plan expires
 
 No expiry`,
+  meta: `Meta Model API — Muse Spark (Meta Superintelligence Labs)
+
+WHAT IT IS
+  Meta's OpenAI-compatible API for agentic and coding workflows. It serves the
+  Muse Spark lineup behind a single bearer key at https://api.meta.ai/v1.
+
+  Base URL   https://api.meta.ai/v1
+  Auth       Authorization: Bearer <key>
+  Endpoints  /models · /chat/completions
+  Context    1,048,576 tokens (1M)
+
+MODELS
+  muse-spark-1.2             current general model (clai default)
+  muse-spark-1.1             previous generation
+  muse-spark-1.2-contributor contributor tier (see /model for the live list)
+
+  Muse Spark is a reasoning-first model: it always thinks internally before
+  answering. /variants maps clai's effort onto the API's reasoning_effort
+  (minimal/low/medium/high/xhigh; "off" degrades to minimal because Muse does
+  not support disabling reasoning — "none" returns HTTP 400).
+
+COST
+  Pay-as-you-go per token. Cached input tokens bill at a lower rate than
+  uncached input. clai classes it paid-cloud, so /freeonly on keeps it out of
+  the fallback chain.
+
+SETUP
+  1. Create an API key in your Meta Model API dashboard (MODEL_API_KEY).
+  2. clai set meta <your-key>
+  3. clai use meta
+  4. /model muse-spark-1.2      (or any id from /model)
+
+MANAGING KEYS IN CLAI
+  clai set meta <key>            add a key (up to 10, rotated on failure)
+  clai set meta <key2>           add another; the last that worked is sticky
+  clai keys                      masked keys + the active endpoint
+  clai unset meta                remove every stored key
+  /set meta                      TUI: multi-key editor
+  /info meta                     this page
+
+GOOD TO KNOW
+  - Reasoning, native tool calling, image understanding and prompt caching all
+    work. Cached tokens arrive as usage.prompt_tokens_details.cached_tokens and
+    show up in the usual usage footer.
+  - Env var: MODEL_API_KEY (used when nothing is stored).
+
+Docs: https://dev.meta.ai/docs`,
 };
 
 export function getProviderInfoText(provider: string): string {

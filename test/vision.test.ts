@@ -186,7 +186,7 @@ describe("loadImageAttachments", () => {
     writeFileSync(png, Buffer.from(PNG_HEX, "hex"));
     const exp = expandMentions(`${png} hi`, dir, true);
     expect(exp.attachments[0]!.note).toMatch(/attached as multimodal input/i);
-    expect(exp.attachments[0]!.note).toMatch(/colors, layout, spacing/i);
+    expect(exp.attachments[0]!.note).toMatch(/inspect it directly/i);
   });
 
   it("notes OCR fallback when vision is disabled", () => {
@@ -195,7 +195,7 @@ describe("loadImageAttachments", () => {
     const png = join(dir, "shot.png");
     writeFileSync(png, Buffer.from(PNG_HEX, "hex"));
     const exp = expandMentions(`${png} hi`, dir, false);
-    expect(exp.attachments[0]!.note).toMatch(/can't view images/i);
+    expect(exp.attachments[0]!.note).toMatch(/not viewable/i);
   });
 
   it("imageAttachmentPaths finds image paths regardless of vision support", () => {

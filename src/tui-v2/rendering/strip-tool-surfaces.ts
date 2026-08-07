@@ -12,14 +12,14 @@ const TRAILING_TOOL_FENCE = /```(?:tool|json\s*tool)\b[\s\S]*$/i;
 const COMPLETE_TOOL_XML = /<tool_call\b[^>]*>[\s\S]*?<\/tool_call>/gi;
 const TRAILING_TOOL_XML = /<tool_call\b[^>]*>[\s\S]*$/i;
 const COMPLETE_TOOL_DSML =
-  /<[|｜]DSML[|｜]tool_calls\b[^>]*>[\s\S]*?<\/[|｜]DSML[|｜]tool_calls>/gi;
+  /<[|｜]+DSML[|｜]+tool_calls\b[^>]*>[\s\S]*?<\/[|｜]+DSML[|｜]+tool_calls>/gi;
 const COMPLETE_TOOL_DSML_INVOKE =
-  /<[|｜]DSML[|｜]invoke\b[^>]*>[\s\S]*?<\/[|｜]DSML[|｜]invoke>/gi;
+  /<[|｜]+DSML[|｜]+invoke\b[^>]*>[\s\S]*?<\/[|｜]+DSML[|｜]+invoke>/gi;
 const COMPLETE_TOOL_DSML_PARAMETER =
-  /<[|｜]DSML[|｜]parameter\b[^>]*>[\s\S]*?<\/[|｜]DSML[|｜]parameter>/gi;
+  /<[|｜]+DSML[|｜]+parameter\b[^>]*>[\s\S]*?<\/[|｜]+DSML[|｜]+parameter>/gi;
 const TRAILING_TOOL_DSML =
-  /<[|｜]DSML[|｜](?:tool_calls|invoke|parameter)\b[\s\S]*$/i;
-const STRAY_TOOL_DSML = /<\/?[|｜]DSML[|｜][A-Za-z0-9_]*\b[^>]*>/gi;
+  /<[|｜]+DSML[|｜]+(?:tool_calls|invoke|parameter)\b[\s\S]*$/i;
+const STRAY_TOOL_DSML = /<\/?[|｜]+DSML[|｜]+[A-Za-z0-9_]*\b[^>]*>/gi;
 /** Kimi / sentinel-style blocks sometimes leak as prose. */
 const COMPLETE_TOOL_SENTINEL =
   /(?:^|\n)\s*(?:tool_call|invoke_tool)\s*\([\s\S]*?\)\s*(?=\n|$)/gi;

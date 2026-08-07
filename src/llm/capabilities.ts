@@ -82,6 +82,7 @@ const reasoningPatterns: Record<ProviderId, RegExp[]> = {
     /gpt-oss/i,
     /minimax/i,
   ],
+  meta: [/muse-spark/i],
 };
 
 // Session-sticky set of provider/model routes that rejected our
@@ -257,6 +258,7 @@ const visionPatterns: Record<ProviderId, RegExp[]> = {
     /gemini-/i,
     /gemma-4/i,
   ],
+  meta: [/muse-spark/i],
 };
 
 const visionCapabilityCache = new Map<
@@ -566,6 +568,7 @@ const preferredVisionModels: Partial<Record<ProviderId, string>> = {
   "qwen-cloud": "qwen3.7-plus",
   lightning: "google/gemini-3.5-flash",
   tokenrouter: "kimi-k2p6",
+  meta: "muse-spark-1.2",
 };
 
 
@@ -606,6 +609,7 @@ const providerToolDialect: Record<ProviderId, ToolDialect> = {
   modal: "openai",
   lightning: "openai",
   tokenrouter: "openai",
+  meta: "openai",
   anthropic: "anthropic",
   "aws-mantle": "openai", // refined by model below
   gemini: "gemini",

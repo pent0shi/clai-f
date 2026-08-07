@@ -1,7 +1,11 @@
 /** @jsxImportSource @opentui/react */
 
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { TextAttributes, type InputRenderable } from "@opentui/core";
+import {
+  TextAttributes,
+  type InputRenderable,
+  type KeyEvent,
+} from "@opentui/core";
 import type { SessionController } from "../../../app/controllers/session-controller.js";
 import type { ContextUsageSnapshot } from "../../../llm/token-usage.js";
 import type { Theme } from "../../rendering/theme.js";
@@ -76,8 +80,13 @@ export function ContextLimitChip(props: {
 
   useEffect(() => {
     if (!editing) return;
+    inputRef.current?.focus();
+    const microtask = Promise.resolve().then(() => inputRef.current?.focus());
     const frame = requestAnimationFrame(() => inputRef.current?.focus());
-    return () => cancelAnimationFrame(frame);
+    return () => {
+      void microtask;
+      cancelAnimationFrame(frame);
+    };
   }, [editing]);
 
   useEffect(
@@ -111,6 +120,15 @@ export function ContextLimitChip(props: {
     onEditingDone?.();
   };
 
+  const onKeyDown = (key: KeyEvent): void => {
+    if (key.name === "escape") {
+      key.preventDefault();
+      editingRef.current = false;
+      setEditing(false);
+      onEditingDone?.();
+    }
+  };
+
   if (editing) {
     return (
       <box style={{ flexDirection: "row", alignItems: "center", flexShrink: 0 }}>
@@ -118,11 +136,13 @@ export function ContextLimitChip(props: {
         <input
           ref={(input: InputRenderable | null) => {
             inputRef.current = input;
+            input?.focus();
           }}
           focused
           value={value}
           onInput={setValue}
           onSubmit={submit}
+          onKeyDown={onKeyDown}
           textColor={theme.foreground}
           backgroundColor={theme.selection}
           placeholder="1m or 253k"

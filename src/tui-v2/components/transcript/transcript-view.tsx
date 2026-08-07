@@ -615,6 +615,7 @@ export function TranscriptView(props: TranscriptViewProps): ReactNode {
 
   useKeyboard((key) => {
     if (key.eventType === "release") return;
+    if (services.focus.inputCaptured) return;
     const chord = chordFromKeyEvent(key);
 
     // ── Filter input open: Esc closes everything; other keys go to <input>.

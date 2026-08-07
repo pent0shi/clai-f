@@ -100,6 +100,8 @@ function invalidFormatHint(provider: ProviderId): string {
     return "Lightning AI keys are alphanumeric (from https://lightning.ai/lightning-ai/model-apis/models?showApiKey=true)";
   if (provider === "tokenrouter")
     return "TokenRouter keys usually start with sk- (create one under My Account → API Keys)";
+  if (provider === "meta")
+    return "Meta Model API keys are alphanumeric (issued in your Meta Model API dashboard, MODEL_API_KEY)";
   return "Ollama expects a URL such as http://localhost:11434";
 }
 

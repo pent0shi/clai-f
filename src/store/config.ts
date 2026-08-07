@@ -167,6 +167,7 @@ export const providerCategory: Record<ProviderId, ProviderCategory> = {
   lightning: "paid-cloud",
   // Prepaid balance, billed per token.
   tokenrouter: "paid-cloud",
+  meta: "paid-cloud",
 };
 
 /**

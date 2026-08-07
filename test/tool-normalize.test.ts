@@ -29,13 +29,13 @@ describe("normalizeToolCall — unknown CLI names → shell.exec", () => {
     expect(out.args.command).toBe("awk '{print $1}' data.txt");
   });
 
-  it("refuses to synthesize a command from arbitrary scalar args (SEC-005)", () => {
+  it("routes grep scalars to fs.search without synthesizing shell text (SEC-005)", () => {
     const out = normalizeToolCall({
       name: "grep",
       args: { pattern: "TODO", path: "src" },
     });
-    expect(out.name).toBe("grep");
-    expect(out.args.command).toBeUndefined();
+    expect(out.name).toBe("fs.search");
+    expect(out.args).toEqual({ pattern: "TODO", path: "src" });
   });
 
   it("refuses content-shaped calls that would inject shell metacharacters", () => {

@@ -12,12 +12,13 @@ You are SUMMARIZING a past session, NOT continuing it. Do not answer the user, d
 Rules:
 - Fidelity over style. Never invent tool results, file contents, findings, URLs, ports, or completions.
 - Prefer concrete artifacts: absolute paths, commands (short form), exit outcomes, HTTP status, plan task ids/states, job ids, open ports, confirmed vs unconfirmed findings.
-- LENGTH: aim for ~800–1500 tokens of dense bullets — complete short memory beats a long dump that cuts mid-sentence. No full tool transcripts or HTML bodies.
+- LENGTH: aim for ~1400–2400 tokens of dense structured bullets — a richer, complete memory beats a terse one, but finish within budget rather than cutting mid-sentence. No full tool transcripts or HTML bodies.
+- DETAIL LEVEL: mechanism-level specificity. For code changes name the file path with line anchors, what changed, the before→after behavior, and the verification evidence (which tests/typecheck/build status prove it). For debugging name the root cause, each failed approach, and why it failed. For research name exact findings with their evidence. For pending work give the next concrete step a cold reader can execute immediately. A reader resuming with no other context must not need to re-discover anything recorded below.
 - NO DUPLICATION: state each fact exactly once, in its best section. This memory is prepended to a live context that ALSO re-injects fresh ACTIVE PLAN, SESSION STATE, and ENGAGEMENT SCOPE — do not restate the full plan or every task, and do not reproduce long user prompts verbatim; capture goals/deltas concisely.
 - Omit secrets, API keys, passwords, tokens, and full credential material. Say "[redacted]" if present.
-- Omit progress bars, repeated failures, and decorative chatter.
+- Omit progress bars, repeated failures, and decorative chatter — but list genuinely informative failures (with cause and attempt count) under Open risks / failures.
 - Do not wrap the whole answer in markdown code fences.
-- If something is unknown, omit it rather than guessing.
+- If something is unknown, write "(unknown)" rather than guessing.
 - PHASE AWARENESS: Temporary UI/mode gates (plan-mode gather-only, "await accept", "do not implement yet") are HISTORICAL context — never rewrite them as permanent forever-rules for the resuming agent. Durable user/engagement policy (scope, non-destructive default, stay on remote target when that is the engagement) may still apply.`;
 
 export interface CompactionPromptParts {
@@ -96,12 +97,27 @@ export function buildCompactionUserPrompt(parts: CompactionPromptParts): string 
       "",
       "Organize under these exact section headings (skip a section only if empty):",
       "## User goals",
+      "## Key facts and environment",
       "## Decisions and constraints",
       "## Work completed",
+      "## In flight / blocked",
       "## Commands/tools and results",
       "## Current state",
       "## Remaining work",
+      "## Relevant files",
       "## Open risks / failures",
+      "",
+      "How to fill sections (resume-quality critical — write for a reader with zero prior context):",
+      "- User goals: the objective plus hard constraints the user imposed verbatim or near-verbatim (style rules, forbiddens, scope limits), and the requested execution boundary (entire program/all phases versus a named phase versus unspecified).",
+      "- Key facts and environment: mechanism-level truths discovered during the session — API/data shapes and field semantics, regex or parser behaviors, gate conditions and flag interactions, environment quirks (broken credentials, unavailable services, tool versions), and anything verified empirically. Each bullet must let the resumer act without re-verifying.",
+      "- Decisions and constraints: each decision with its rationale and source (user directive, discovered evidence, tool constraint), not just the decision itself.",
+      "- Work completed: one bullet per change/result with file path and line anchors, what changed, before→after behavior, and explicit verification evidence (test counts, exit codes, commands that passed, or 'not yet verified'). Group as Completed, then any reverted/abandoned changes with why.",
+      "- In flight / blocked: edits made but not verified, designs decided but not applied, and blocked items with the exact missing piece — including the concrete next edit already determined but not yet performed.",
+      "- Commands/tools and results: key commands with outcomes; notable failures with root cause and how many attempts before success/abandonment so the resumer does not retry dead ends.",
+      "- Current state: what is true at compaction time — running servers/jobs (ids, ports), dirty worktree state, open handles, last observed outputs.",
+      "- Remaining work: an ordered, numbered list of concrete next steps — each step names the action, the file/line or artifact it applies to, and the verification command that proves it done. Do not restate plan tasks already recorded in the live plan; record the deltas and execution detail.",
+      "- Relevant files: path → role, what changed there, and line anchors worth resuming from. Include test files with their pass/fail state.",
+      "- Open risks / failures: unresolved bugs, known-broken neighbors left untouched, suspicious observations not yet explained.",
       "",
       "Preserve: user intentions, decisions, constraints, requested execution boundary (entire program/all phases versus a named phase versus unspecified), referenced roadmap/plan/task/index paths, stack/package manager,",
       "commands and key results, plan task states/hierarchy, errors and failed approaches,",
@@ -121,9 +137,9 @@ export function buildCompactionUserPrompt(parts: CompactionPromptParts): string 
     );
   }
 
-  sections.push(
-    "Be concise but specific. Target ~800–1500 tokens of memory. Dense bullets over prose. No secrets. No fabricated successes. No full tool dumps.",
-  );
+  const target =
+    "Be specific over short. Target ~1400–2400 tokens of memory (~800–1200 for plan-mode handoffs). Dense bullets over prose. No secrets. No fabricated successes. No full tool dumps.";
+  sections.push(target);
 
   if (durable) {
     sections.push("", "DURABLE STATE (trust this over older chatter):", durable);
@@ -137,14 +153,15 @@ export function buildCompactionUserPrompt(parts: CompactionPromptParts): string 
 export const COMPACTION_TRANSCRIPT_CHAR_BUDGET = 48_000;
 
 /**
- * A compaction is a compression operation, not a reasoning task. Keeping this
- * modest prevents reasoning-capable providers from spending thousands of
- * hidden tokens on every map/reduce pass.
+ * A compaction is a compression operation, not a reasoning task. The final
+ * memory is required to carry mechanism-level detail (per the prompts above),
+ * so its allowance must comfortably exceed the ~1400–2400 token target while
+ * still discouraging hidden reasoning blowout.
  */
-export const COMPACTION_MAX_COMPLETION_TOKENS = 2_048;
+export const COMPACTION_MAX_COMPLETION_TOKENS = 3_072;
 
-/** Map passes only extract facts; reserve the larger allowance for final memory. */
-export const COMPACTION_MAP_MAX_COMPLETION_TOKENS = 1_024;
+/** Map passes extract facts at the same detail level but for one region only. */
+export const COMPACTION_MAP_MAX_COMPLETION_TOKENS = 1_536;
 
 /** Chars per map-stage chunk when the transcript exceeds one summarizer call. */
 export const COMPACTION_CHUNK_CHAR_BUDGET = 96_000;
@@ -199,12 +216,12 @@ export function buildCompactionChunkPrompt(input: {
   const focus =
     input.purpose === "plan-implement"
       ? "Preserve targets, stack, confirmed findings, negative results, untested classes, artifact paths, commands and remaining work."
-      : "Preserve goals, decisions, file paths, commands and their results, task states, failures, running jobs and remaining work.";
+      : "Preserve goals, decisions, file paths with line anchors, before→after behavior of each change, verification evidence, environment quirks, commands and their results, task states, failures (with causes), running jobs and remaining work.";
   return [
     `Summarize region ${input.index + 1} of ${input.total} of one continuous session.`,
     "This is a partial region: do not write an orientation line, do not speculate about regions you cannot see, and do not answer the user.",
     focus,
-    "Dense fact bullets only. Transform the material into findings; never copy transcript lines, headings, tool-call JSON, file-write receipts, or long output verbatim. Preserve completed work, negative results, decisions, paths, commands, blockers, and remaining work so they are not repeated after resume.",
+    "Dense fact bullets only, at mechanism level. Transform the material into findings; never copy transcript lines, headings, tool-call JSON, file-write receipts, or long output verbatim. Preserve completed work, negative results, decisions, paths, commands, blockers, and remaining work so they are not repeated after resume.",
     "",
     "SESSION MATERIAL (REGION):",
     "",

@@ -279,19 +279,19 @@ function parseKimiToolCall(text: string): ToolCall | undefined {
   return tryParseCall(JSON.stringify({ name, args: tryJson(match[2]!) ?? {} }));
 }
 
-const DSML_INVOKE_OPEN_RE = /<[|｜]DSML[|｜]invoke\b([^>]*)>/gi;
-const DSML_PARAMETER_OPEN_RE = /<[|｜]DSML[|｜]parameter\b([^>]*)>/gi;
+const DSML_INVOKE_OPEN_RE = /<[|｜]+DSML[|｜]+invoke\b([^>]*)>/gi;
+const DSML_PARAMETER_OPEN_RE = /<[|｜]+DSML[|｜]+parameter\b([^>]*)>/gi;
 
 const DSML_INVOKE_END_RES: RegExp[] = [
-  /<\/[|｜]DSML[|｜]invoke>/i,
-  /<[|｜]DSML[|｜]invoke\b/i,
-  /<\/[|｜]DSML[|｜]tool_calls>/i,
+  /<\/[|｜]+DSML[|｜]+invoke>/i,
+  /<[|｜]+DSML[|｜]+invoke\b/i,
+  /<\/[|｜]+DSML[|｜]+tool_calls>/i,
 ];
 const DSML_PARAMETER_END_RES: RegExp[] = [
-  /<\/[|｜]DSML[|｜]parameter>/i,
-  /<[|｜]DSML[|｜]parameter\b/i,
-  /<\/[|｜]DSML[|｜]invoke>/i,
-  /<\/[|｜]DSML[|｜]tool_calls>/i,
+  /<\/[|｜]+DSML[|｜]+parameter>/i,
+  /<[|｜]+DSML[|｜]+parameter\b/i,
+  /<\/[|｜]+DSML[|｜]+invoke>/i,
+  /<\/[|｜]+DSML[|｜]+tool_calls>/i,
 ];
 
 function boundDsmlBlock(
@@ -380,6 +380,100 @@ function parseAllDsmlToolCalls(text: string): Array<{ index: number; call: ToolC
 
 function parseDsmlToolCall(text: string): ToolCall | undefined {
   return parseAllDsmlToolCalls(text)[0]?.call;
+}
+
+const OPEN_SEP_OPEN_RE = /<[|｜]+open[|｜]+>?([A-Za-z][\w-]*)\b/gi;
+const OPEN_SEP_SEP_RE = /<[|｜]+sep[|｜]+>/gi;
+
+function scanOpenSepElement(
+  text: string,
+  from: number,
+): { tag: string; attrs: string; body: string; end: number } | undefined {
+  OPEN_SEP_OPEN_RE.lastIndex = from;
+  const open = OPEN_SEP_OPEN_RE.exec(text);
+  if (!open) return undefined;
+  const tag = open[1]!;
+  const afterOpen = open.index + open[0].length;
+  OPEN_SEP_SEP_RE.lastIndex = afterOpen;
+  const sep = OPEN_SEP_SEP_RE.exec(text);
+  if (!sep) return undefined;
+  const attrs = text.slice(afterOpen, sep.index);
+  const closeRe = new RegExp(
+    `<[|｜]+close[|｜]+>?${tag.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*>?`,
+    "i",
+  );
+  const close = closeRe.exec(text.slice(sep.index + sep[0].length));
+  const bodyEnd = close
+    ? sep.index + sep[0].length + close.index
+    : text.length;
+  return {
+    tag,
+    attrs,
+    body: text.slice(sep.index + sep[0].length, bodyEnd),
+    end: close ? bodyEnd + close[0].length : text.length,
+  };
+}
+
+function openSepValue(attrs: string, raw: string): unknown {
+  const value = decodeDsmlText(raw.trim());
+  const type = dsmlAttribute(attrs, "type")?.toLowerCase();
+  if (type === "number") {
+    const n = Number(value);
+    return Number.isFinite(n) ? n : value;
+  }
+  if (type === "boolean" || type === "bool") return value.toLowerCase() === "true";
+  if (type === "string") return value;
+  const parsed = lenientJsonParse(value);
+  return parsed === undefined ? value : parsed;
+}
+
+function parseAllOpenSepToolCalls(
+  text: string,
+): Array<{ index: number; call: ToolCall }> {
+  const found: Array<{ index: number; call: ToolCall }> = [];
+  if (!/<[|｜]+open[|｜]+/i.test(text)) return found;
+  let cursor = 0;
+  while (cursor < text.length) {
+    const openIdx = text.slice(cursor).search(OPEN_SEP_OPEN_RE);
+    if (openIdx < 0) break;
+    const element = scanOpenSepElement(text, cursor + openIdx);
+    if (!element) {
+      cursor = cursor + openIdx + 1;
+      continue;
+    }
+    if (element.tag !== "call") {
+      cursor = cursor + openIdx + 1;
+      continue;
+    }
+    {
+      const rawName =
+        dsmlAttribute(element.attrs, "tool") ?? dsmlAttribute(element.attrs, "name");
+      const name = rawName?.replace(/^functions\./, "").trim();
+      if (name) {
+        const args: Record<string, unknown> = {};
+        let inner = 0;
+        while (inner < element.body.length) {
+          const nextOpen = element.body.slice(inner).search(OPEN_SEP_OPEN_RE);
+          if (nextOpen < 0) break;
+          const arg = scanOpenSepElement(element.body, inner + nextOpen);
+          if (!arg) break;
+          if (arg.tag === "argument") {
+            const key =
+              dsmlAttribute(arg.attrs, "key") ?? dsmlAttribute(arg.attrs, "name");
+            if (key) args[key] = openSepValue(arg.attrs, arg.body);
+          }
+          inner = arg.end;
+        }
+        found.push({ index: cursor + openIdx, call: { name, args } });
+      }
+    }
+    cursor = element.end > cursor + openIdx ? element.end : cursor + openIdx + 1;
+  }
+  return found;
+}
+
+function parseOpenSepToolCall(text: string): ToolCall | undefined {
+  return parseAllOpenSepToolCalls(text)[0]?.call;
 }
 
 /**
@@ -674,7 +768,7 @@ function tryJson(raw: string): Record<string, unknown> | undefined {
   return undefined;
 }
 
-const STRAY_DSML_TAG_RE = /<\/?[|｜]DSML[|｜][A-Za-z0-9_]*\b[^>]*>/gi;
+const STRAY_DSML_TAG_RE = /<\/?[|｜]+DSML[|｜]+[A-Za-z0-9_]*\b[^>]*>/gi;
 
 /** Strip any leftover Kimi/Moonshot sentinel tokens from final answers
  *  so a model that mixes prose and tool-call markers never bleeds raw
@@ -693,10 +787,13 @@ export function stripSentinelTokens(text: string): string {
     .replace(/<tool_calls:[A-Za-z0-9_-]+>[\s\S]*?(?:<\/tool_calls:[A-Za-z0-9_-]+>|$)/gi, "")
     .replace(/<tool_call:[A-Za-z0-9_-]+>[\s\S]*?(?:<\/tool_call:[A-Za-z0-9_-]+>|$)/gi, "")
     .replace(/<\/?tool_calls?:[A-Za-z0-9_-]+>/gi, "")
-    .replace(/<[|｜]DSML[|｜]tool_calls\b[^>]*>[\s\S]*?(?:<\/[|｜]DSML[|｜]tool_calls>|$)/gi, "")
-    .replace(/<[|｜]DSML[|｜]invoke\b[^>]*>[\s\S]*?(?:<\/[|｜]DSML[|｜]invoke>|$)/gi, "")
-    .replace(/<[|｜]DSML[|｜]parameter\b[^>]*>[\s\S]*?(?:<\/[|｜]DSML[|｜]parameter>|$)/gi, "")
+    .replace(/<[|｜]+DSML[|｜]+tool_calls\b[^>]*>[\s\S]*?(?:<\/[|｜]+DSML[|｜]+tool_calls>|$)/gi, "")
+    .replace(/<[|｜]+DSML[|｜]+invoke\b[^>]*>[\s\S]*?(?:<\/[|｜]+DSML[|｜]+invoke>|$)/gi, "")
+    .replace(/<[|｜]+DSML[|｜]+parameter\b[^>]*>[\s\S]*?(?:<\/[|｜]+DSML[|｜]+parameter>|$)/gi, "")
     .replace(STRAY_DSML_TAG_RE, "")
+    .replace(/<[|｜]+open[|｜]+>?tools\b[\s\S]*?(?:<[|｜]+close[|｜]+>?tools\s*>?|$)/gi, "")
+    .replace(/<[|｜]+(?:open|close)[|｜]+>?[A-Za-z][\w-]*[^>|<]*>?/gi, "")
+    .replace(/<[|｜]+sep[|｜]+>/gi, "")
     .trim();
 }
 
@@ -732,6 +829,9 @@ export function parseToolCall(
 
   const dsml = parseDsmlToolCall(text);
   if (dsml) return dsml;
+
+  const openSep = parseOpenSepToolCall(text);
+  if (openSep) return openSep;
 
   // 3. Kimi/Moonshot sentinel format (used by kimi-k2 family on NIM).
   const kimi = parseKimiToolCall(text);
@@ -1255,6 +1355,10 @@ export function parseAllToolCalls(text: string): ToolCall[] {
     found.push(entry);
   }
 
+  for (const entry of parseAllOpenSepToolCalls(text)) {
+    found.push(entry);
+  }
+
   const kimiRe = new RegExp(KIMI_TOOL_CALL_RE.source, "gi");
   while ((m = kimiRe.exec(text)) !== null) {
     const call = tryParseCall(
@@ -1436,9 +1540,11 @@ export function textBeforeToolCall(text: string): string {
     // GLM/Tencent id-tagged tool blocks — never show raw XML as ◆ Response.
     /<tool_calls:[A-Za-z0-9_-]+>[\s\S]*$/i,
     /<tool_call:[A-Za-z0-9_-]+>[\s\S]*$/i,
-    /<[|｜]DSML[|｜]tool_calls\b[\s\S]*$/i,
-    /<[|｜]DSML[|｜]invoke\b[\s\S]*$/i,
-    /<[|｜]DSML[|｜]parameter\b[\s\S]*$/i,
+    /<[|｜]+DSML[|｜]+tool_calls\b[\s\S]*$/i,
+    /<[|｜]+DSML[|｜]+invoke\b[\s\S]*$/i,
+    /<[|｜]+DSML[|｜]+parameter\b[\s\S]*$/i,
+    /<[|｜]+open[|｜]+>?tools\b[\s\S]*$/i,
+    /<[|｜]+open[|｜]+>?call\b[\s\S]*$/i,
     // Kimi/Moonshot sentinel block — strip from the section opener
     // (or the first call opener if the section header is missing).
     /<\|tool_calls_section_begin\|>[\s\S]*$/i,

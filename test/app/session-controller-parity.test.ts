@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { COMPACTION_MAX_COMPLETION_TOKENS } from "../../src/agent/compaction-summary.js";
 import type { AgentPort } from "../../src/app/ports/agent-port.js";
 import type {
   PersistencePort,
@@ -265,7 +266,7 @@ describe("SessionController parity helpers (V2-080)", () => {
     expect(result.summarized).toBe(true);
     expect(completeWithProvider).toHaveBeenCalledTimes(2);
     expect(completeWithProvider.mock.calls[1]?.[0]).toMatchObject({
-      maxTokens: 2_048,
+      maxTokens: COMPACTION_MAX_COMPLETION_TOKENS,
       temperature: 0,
       thinking: { enabled: false, effort: "none" },
     });

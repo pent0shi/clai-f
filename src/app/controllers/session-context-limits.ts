@@ -14,9 +14,9 @@ export class SessionContextLimits {
     model: string | undefined,
     limit: number | undefined,
   ): void {
+    const key = this.key(provider, model);
     const config = getConfig();
     const contextLimitTokens = { ...(config.contextLimitTokens ?? {}) };
-    const key = this.key(provider, model);
     if (this.isValid(limit)) {
       contextLimitTokens[key] = Math.floor(limit);
     } else {

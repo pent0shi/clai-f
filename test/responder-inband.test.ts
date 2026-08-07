@@ -386,7 +386,8 @@ describe("ordinary-turn responder delivery", () => {
       onEvent: (event) => events.push(event),
     });
 
-    expect(outcome.answer).toBe("continued without polling");
+    expect(outcome.answer).toContain("Stopped an identical action cycle");
+    expect(outcome.answer).toContain("shell.jobs");
     const calls = events.filter(
       (event): event is Extract<AgentEvent, { type: "tool-call" }> =>
         event.type === "tool-call" && event.name === "shell.jobs",
@@ -403,15 +404,13 @@ describe("ordinary-turn responder delivery", () => {
         event.type === "tool-result" && calls.some((call) => call.id === event.id),
     );
 
-    expect(calls).toHaveLength(4);
-    expect(starts).toHaveLength(4);
-    expect(outputs).toHaveLength(4);
-    expect(results).toHaveLength(4);
+    expect(calls).toHaveLength(2);
+    expect(starts).toHaveLength(2);
+    expect(outputs).toHaveLength(2);
+    expect(results).toHaveLength(2);
     expect(outputs.every((event) => event.chunk.trim().length > 0)).toBe(true);
     expect(outputs[0]!.chunk).toContain("was not dispatched");
     expect(outputs[1]!.chunk).toContain("was not dispatched");
-    expect(outputs[2]!.chunk).toContain("was not dispatched");
-    expect(outputs[3]!.chunk).toContain("same action sequence already ran");
     expect(results.every((event) => event.ok)).toBe(true);
   });
 

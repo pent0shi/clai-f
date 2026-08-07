@@ -57,12 +57,12 @@ export const slashCommands: SlashCommand[] = [
   },
   {
     command: "/variants",
-    usage: "[on|off|none|minimal|low|medium|high|xhigh]",
+    usage: "[on|off|none|minimal|low|medium|high|xhigh|max]",
     description: "toggle thinking/effort (interactive picker if no arg)",
   },
   {
     command: "/reasoning",
-    usage: "[on|off|none|minimal|low|medium|high|xhigh]",
+    usage: "[on|off|none|minimal|low|medium|high|xhigh|max]",
     description: "alias for /variants",
   },
   { command: "/clear", description: "clear context" },

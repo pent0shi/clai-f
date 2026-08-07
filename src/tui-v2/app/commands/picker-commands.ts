@@ -75,6 +75,7 @@ const REASONING_DESCRIPTIONS: Record<string, string> = {
   medium: "balanced",
   high: "deep reasoning",
   xhigh: "maximum depth",
+  max: "highest supported depth",
 };
 
 /**
@@ -714,12 +715,12 @@ function applyReasoning(services: AppServices, value: string): void {
     services.session.notice("info", "thinking → off");
     return;
   }
-  if (["minimal", "low", "medium", "high", "xhigh"].includes(lower)) {
+  if (["minimal", "low", "medium", "high", "xhigh", "max"].includes(lower)) {
     setThinking({ enabled: true, effort: lower as ReasoningEffort });
     services.session.notice("info", `thinking → ${lower}`);
     return;
   }
-  services.session.notice("warn", "usage: /variants [on|off|minimal|low|medium|high|xhigh]");
+  services.session.notice("warn", "usage: /variants [on|off|minimal|low|medium|high|xhigh|max]");
 }
 
 export async function handleHistory(services: AppServices): Promise<void> {

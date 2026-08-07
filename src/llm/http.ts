@@ -612,6 +612,7 @@ export type ReasoningStyle =
   | "agentrouter"
   | "modal"
   | "stepfun"
+  | "meta"
   | "none";
 
 
@@ -660,11 +661,20 @@ export function buildReasoningPayload(
   // providers that only understand the smaller set.
   const clampEffort = (e: string): "low" | "medium" | "high" => {
     if (e === "none" || e === "minimal" || e === "low") return "low";
-    if (e === "xhigh" || e === "high") return "high";
+    if (e === "max" || e === "xhigh" || e === "high") return "high";
     return "medium";
   };
 
   switch (style) {
+    case "meta": {
+      const metaEffort = (e: string): string => {
+        if (e === "none" || e === "minimal") return "minimal";
+        if (e === "max" || e === "xhigh") return "xhigh";
+        return e;
+      };
+      if (!enabled) return { reasoning_effort: "minimal" };
+      return { reasoning_effort: metaEffort(effort) };
+    }
     case "openai": {
       if (!enabled) return {};
       // `reasoning_effort` is the Chat Completions knob. The nested
@@ -687,7 +697,7 @@ export function buildReasoningPayload(
         const gptEffort =
           effort === "none"
             ? "minimal"
-            : effort === "xhigh"
+            : effort === "xhigh" || effort === "max"
               ? "high"
               : effort; // minimal | low | medium | high
         return { reasoning_effort: gptEffort };
@@ -909,7 +919,11 @@ export function imageCapableMessages(
  */
 export function isOpenAiReasoningModel(model: string): boolean {
   const m = model.toLowerCase();
-  return /(?:^|\/)gpt-5(?:\.|-|$)/.test(m) || /(?:^|\/)o[134](?:\.|-|$)/.test(m);
+  return (
+    /(?:^|\/)gpt-5(?:\.|-|$)/.test(m) ||
+    /(?:^|\/)o[134](?:\.|-|$)/.test(m) ||
+    /muse-spark/.test(m)
+  );
 }
 
 export function buildChatBody(options: {

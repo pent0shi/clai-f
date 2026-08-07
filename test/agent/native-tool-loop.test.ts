@@ -7,13 +7,18 @@ import { clearTextOnlyModels } from "../../src/llm/tool-protocol.js";
 
 const streamMock = vi.fn();
 
-vi.mock("../../src/llm/router.js", () => ({
-  streamWithProvider: (
-    request: CompletionRequest,
-    onToken: (t: string) => void,
-  ): Promise<CompletionResult> => streamMock(request, onToken),
-  completeWithProvider: vi.fn(),
-}));
+vi.mock("../../src/llm/router.js", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("../../src/llm/router.js")>();
+  return {
+    ...actual,
+    streamWithProvider: (
+      request: CompletionRequest,
+      onToken: (t: string) => void,
+    ): Promise<CompletionResult> => streamMock(request, onToken),
+    completeWithProvider: vi.fn(),
+  };
+});
 
 vi.mock("../../src/commands/providers.js", () => ({
   ensureProviderConfigured: vi.fn(async () => undefined),
@@ -1035,12 +1040,12 @@ describe("native tool loop integration", () => {
           };
         }
         const toolCalls = request.messages.flatMap((message) => message.toolCalls ?? []);
-        expect(toolCalls.filter((call) => call.name === "fs.list")).toHaveLength(3);
+        expect(toolCalls.filter((call) => call.name === "fs.list")).toHaveLength(4);
         const recovery = request.messages.findLast(
           (message) => message.role === "user" && message.internal,
         );
         expect(recovery?.content).toContain("ACTION CYCLE RECOVERY");
-        expect(recovery?.content).toContain("original successful tool result remains in context");
+        expect(recovery?.content).toContain("original successful tool results remain in context");
         expect(
           request.messages.some(
             (message) => message.role === "tool" && message.content.includes("once.txt"),

@@ -61,6 +61,8 @@ describe("compaction-summary prompts", () => {
   it("system prompt demands fidelity and sections", () => {
     expect(COMPACTION_SYSTEM_PROMPT).toMatch(/Never invent/i);
     expect(COMPACTION_SYSTEM_PROMPT).toMatch(/secrets/i);
+    expect(COMPACTION_SYSTEM_PROMPT).toMatch(/DETAIL LEVEL/i);
+    expect(COMPACTION_SYSTEM_PROMPT).toMatch(/mechanism-level/i);
   });
 
   it("system prompt forbids continuing/replaying instead of summarizing", () => {
@@ -76,6 +78,11 @@ describe("compaction-summary prompts", () => {
     });
     expect(p).toContain("## User goals");
     expect(p).toContain("## Remaining work");
+    expect(p).toContain("## Key facts and environment");
+    expect(p).toContain("## In flight / blocked");
+    expect(p).toContain("## Relevant files");
+    expect(p).toMatch(/mechanism-level/i);
+    expect(p).toMatch(/before→after/i);
     expect(p).toContain("DURABLE STATE");
     expect(p).toContain("ACTIVE PLAN");
     expect(p).toContain("SESSION MATERIAL");

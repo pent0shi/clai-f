@@ -58,4 +58,17 @@ describe("SessionContextLimits (durable config-backed overrides)", () => {
     contextLimits.set("groq", "llama-3.3-70b", 5_000);
     expect(contextLimits.get("groq", "llama-3.3-70b")).toBeUndefined();
   });
+
+  it("picks up external edits to the config file", async () => {
+    const { getConfigPath, getConfig } = await import("../../src/store/config.js");
+    const contextLimits = new limits();
+    contextLimits.set("gemini", "gemini-2.0-flash", 300_000);
+
+    const { readFileSync, writeFileSync } = await import("node:fs");
+    const raw = JSON.parse(readFileSync(getConfigPath(), "utf8")) as Record<string, unknown>;
+    raw.contextLimitTokens = { "gemini:gemini-2.0-flash": 256_000 };
+    writeFileSync(getConfigPath(), JSON.stringify(raw, null, 2));
+    expect(contextLimits.get("gemini", "gemini-2.0-flash")).toBe(256_000);
+    expect(getConfig().contextLimitTokens?.["gemini:gemini-2.0-flash"]).toBe(256_000);
+  });
 });

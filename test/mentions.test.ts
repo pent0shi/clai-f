@@ -176,16 +176,18 @@ describe("expandMentions", () => {
     expect(out.text).toBe("read @notes.txt please");
   });
 
-  it("attaches a whole directory as a listing, not a binary stub", () => {
+  it("attaches a whole directory as an on-demand reference without expanding it", () => {
     mkdirSync(join(dir, "src"));
     writeFileSync(join(dir, "src", "a.ts"), "export {}");
     writeFileSync(join(dir, "src", "b.ts"), "export {}");
     const out = expandMentions("review @src", dir);
     expect(out.attachments).toHaveLength(1);
     expect(out.attachments[0]!.kind).toBe("directory");
-    expect(out.attachments[0]!.content).toContain("a.ts");
-    expect(out.contextBlock).toContain("directory");
-    expect(out.contextBlock).toContain("a.ts");
+    expect(out.attachments[0]!.content).toBeUndefined();
+    expect(out.attachments[0]!.note).toContain("not expanded");
+    expect(out.attachments[0]!.note).toContain("fs.list");
+    expect(out.contextBlock).toContain("dir://src/");
+    expect(out.contextBlock).not.toContain("a.ts");
   });
 
   it("accepts a directory mention with a trailing slash", () => {
@@ -193,7 +195,20 @@ describe("expandMentions", () => {
     writeFileSync(join(dir, "lib", "x.js"), "1");
     const out = expandMentions("see @lib/", dir);
     expect(out.attachments[0]!.kind).toBe("directory");
-    expect(out.attachments[0]!.content).toContain("x.js");
+    expect(out.attachments[0]!.content).toBeUndefined();
+  });
+
+  it("renders reference-style image:// headers for image attachments", () => {
+    writeFileSync(
+      join(dir, "pic.png"),
+      Buffer.from(
+        "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000a49444154789c6360000002000100ffff03000006000557bfabd40000000049454e44ae426082",
+        "hex",
+      ),
+    );
+    const out = expandMentions("describe @pic.png", dir);
+    expect(out.contextBlock).toMatch(/image:\/\/.*-pic\.png|image:\/\/pic\.png/);
+    expect(out.contextBlock).not.toMatch(/\n----- pic\.png -----/);
   });
 
   it("resolves a dropped absolute path with spaces before trailing prompt text", () => {

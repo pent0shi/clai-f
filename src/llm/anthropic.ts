@@ -44,6 +44,8 @@ function anthropicThinkingBudget(
     case "low":
       return 1_024;
     case "high":
+    case "xhigh":
+    case "max":
       return 8_192;
     default:
       return 4_096;

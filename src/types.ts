@@ -14,12 +14,13 @@ export const providerIds = [
   "modal",
   "lightning",
   "tokenrouter",
+  "meta",
 ] as const;
 
 export type ProviderId = (typeof providerIds)[number];
 export type Mode = "ask" | "agent" | "plan";
 export type RiskLevel = "safe" | "confirm" | "block";
-export type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
+export type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
 export interface ReasoningPreference {
   enabled: boolean;

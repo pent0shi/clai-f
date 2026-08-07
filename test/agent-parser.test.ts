@@ -423,6 +423,78 @@ describe("DeepSeek DSML tool-call format", () => {
     expect(stripSentinelTokens(`done</｜DSML｜invoke>`)).toBe("done");
     expect(stripSentinelTokens(`<｜DSML｜parameter name="p">v</｜DSML｜parameter>ok`)).toBe("ok");
   });
+
+  it("parses double fullwidth-bar DSML emitted by DeepSeek v4 variants", () => {
+    const text = `<｜｜DSML｜｜tool_calls>
+<｜｜DSML｜｜invoke name="shell_exec">
+<｜｜DSML｜｜parameter name="command" string="true">cd /repo && ls node_modules</｜｜DSML｜｜parameter>
+<｜｜DSML｜｜parameter name="timeoutMs" string="false">30000</｜｜DSML｜｜parameter>
+</｜｜DSML｜｜invoke>
+</｜｜DSML｜｜tool_calls>`;
+    expect(parseToolCall(text, { strict: true })).toEqual({
+      name: "shell_exec",
+      args: { command: "cd /repo && ls node_modules", timeoutMs: 30000 },
+    });
+    expect(parseAllToolCalls(text)).toEqual([
+      {
+        name: "shell_exec",
+        args: { command: "cd /repo && ls node_modules", timeoutMs: 30000 },
+      },
+    ]);
+    expect(textBeforeToolCall(`Working.\n${text}`)).toBe("Working.");
+    expect(stripSentinelTokens(`Working.\n${text}`)).toBe("Working.");
+  });
+});
+
+describe("open/sep/close pseudo tool-call format (Kimi via some gateways)", () => {
+  const S = "<|" + "sep" + "|>";
+  const C = (tag: string): string => "<|" + "close" + "|>" + tag + ">";
+  const single = [
+    "<|open|>tools" + S,
+    '<|open|>call tool="fs.read" index="1"' + S,
+    '<|open|>argument key="path" type="string"' + S + "/tmp/a.ts" + C("argument"),
+    C("call") + C("tools"),
+  ].join("\n");
+  const multi = [
+    "<|open|>tools" + S,
+    '<|open|>call tool="fs.read" index="1"' + S,
+    '<|open|>argument key="path" type="string"' + S + "/tmp/a.ts" + C("argument"),
+    C("call"),
+    '<|open|>call tool="fs.list" index="2"' + S,
+    '<|open|>argument key="path" type="string"' + S + "/tmp" + C("argument"),
+    C("call") + C("tools"),
+  ].join("\n");
+  const truncated =
+    '<|open|>call tool="fs.read" index="1"' +
+    S +
+    '<|open|>argument key="path" type="string"' +
+    S +
+    "/tmp/a.ts";
+
+  it("parses a single open/sep/close call with typed arguments", () => {
+    expect(parseToolCall(single, { strict: true })).toEqual({
+      name: "fs.read",
+      args: { path: "/tmp/a.ts" },
+    });
+    expect(textBeforeToolCall("Working.\n" + single)).toBe("Working.");
+  });
+
+  it("parses multiple open/sep/close calls in document order", () => {
+    expect(parseAllToolCalls(multi)).toEqual([
+      { name: "fs.read", args: { path: "/tmp/a.ts" } },
+      { name: "fs.list", args: { path: "/tmp" } },
+    ]);
+    expect(stripSentinelTokens("done." + single)).toBe("done.");
+    expect(stripSentinelTokens(single)).toBe("");
+  });
+
+  it("recovers a call from a truncated stream with no close tokens", () => {
+    expect(parseToolCall(truncated)).toEqual({
+      name: "fs.read",
+      args: { path: "/tmp/a.ts" },
+    });
+    expect(textBeforeToolCall("Working.\n" + truncated)).toBe("Working.");
+  });
 });
 
 describe("fresh web-search guard", () => {

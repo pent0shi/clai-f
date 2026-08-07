@@ -1192,9 +1192,47 @@ function buildShellCommandFromCall(
  * rewritten call still flows through the normal shell safety classifier, so
  * dangerous commands are gated exactly as a hand-written shell.exec would be.
  */
+const CLASSIC_TOOL_ALIASES: Record<string, string> = {
+  bash: "shell.exec",
+  read: "fs.read",
+  write: "fs.write",
+  edit: "fs.edit",
+  multiedit: "fs.edit",
+  ls: "fs.list",
+  glob: "fs.list",
+  grep: "fs.search",
+  webfetch: "web.fetch",
+  websearch: "web.search",
+};
+
+function remapClassicArgs(call: ToolCall): ToolCall {
+  const args = { ...(call.args ?? {}) };
+  if (typeof args.file_path === "string" && args.path === undefined) {
+    args.path = args.file_path;
+    delete args.file_path;
+  }
+  if (typeof args.old_string === "string" && args.oldText === undefined) {
+    args.oldText = args.old_string;
+    delete args.old_string;
+  }
+  if (typeof args.new_string === "string" && args.newText === undefined) {
+    args.newText = args.new_string;
+    delete args.new_string;
+  }
+  return { name: call.name, args };
+}
+
 export function normalizeToolCall(call: ToolCall): ToolCall {
   // X1: strip channel/commentary tokens before registry lookup.
   let name = typeof call.name === "string" ? call.name.trim() : "";
+  const classic = CLASSIC_TOOL_ALIASES[name.toLowerCase()];
+  if (classic && !toolRegistry[name]) {
+    const args = call.args ?? {};
+    const hasShellShape = COMMAND_ARG_KEYS.some((key) => args[key] !== undefined);
+    if (classic === "shell.exec" || !hasShellShape) {
+      return remapClassicArgs({ name: classic, args });
+    }
+  }
   if (name && !toolRegistry[name]) {
     const cleaned = sanitizeToolName(name);
     const mapped = fromWireName(cleaned) ?? fromWireName(name) ?? cleaned;

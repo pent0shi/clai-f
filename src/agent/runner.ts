@@ -1408,6 +1408,8 @@ export async function runAgentTurn(
 
 
     const loopGuard = new LoopGuard();
+    let lastExactPromptTokens = 0;
+    let consecutiveSynthesizedRounds = 0;
     const engagementPolicy = new EngagementPolicyEngine();
     const probeStateKey = (call: ToolCall): string | undefined => {
       const project = (job: ReturnType<typeof jobManager.getJob>) =>
@@ -3808,6 +3810,7 @@ export async function runAgentTurn(
             : COMPACTION_MAX_COMPLETION_TOKENS,
         thinking: { enabled: false, effort: "none" as const },
         signal: options.signal,
+        allowModelFallback: true,
       };
       const response = await streamWithProvider(
         request,
@@ -3833,6 +3836,7 @@ export async function runAgentTurn(
             ? COMPACTION_MAP_MAX_COMPLETION_TOKENS
             : COMPACTION_MAX_COMPLETION_TOKENS,
         thinking: { enabled: false, effort: "none" as const },
+        allowModelFallback: true,
       }, { maxRetries: 0 });
       const retryVisible = stripThinking(retry.text).visible.trim();
       if (retryVisible && compactionId) {
@@ -3908,7 +3912,10 @@ export async function runAgentTurn(
       reason: string,
       force = false,
     ): Promise<void> {
-      const beforeTokens = estimateNextRequestTokens(messages);
+      const beforeTokens = Math.max(
+        estimateNextRequestTokens(messages),
+        lastExactPromptTokens,
+      );
       const contextLimitTokens = currentContextLimitTokens();
       const compactTrigger = autoCompactTriggerTokens(getReliabilityPolicy(), {
         provider,
@@ -3992,6 +3999,7 @@ export async function runAgentTurn(
         messages.splice(0, messages.length, ...result.messages);
         compactionAttempts.recordSuccess(attemptKey);
         loopGuard.resetReadOnly();
+        lastExactPromptTokens = 0;
         // Token stats use the same complete request estimate as the trigger.
         const compactedTokens = estimateNextRequestTokens(messages);
         // Re-inject the live plan so the model keeps full plan awareness even
@@ -4668,6 +4676,9 @@ export async function runAgentTurn(
         provider = completion.provider;
         model = completion.model;
         if (completion.usage) {
+          if (completion.usage.exact && completion.usage.promptTokens > 0) {
+            lastExactPromptTokens = completion.usage.promptTokens;
+          }
           emit({
             type: "token-usage",
             usage: completion.usage,
@@ -5155,7 +5166,7 @@ export async function runAgentTurn(
           }
 
           if (
-            /<\|tool_call(?:s_section)?_begin\|>|<\|tool_call_argument_begin\|>|<[|｜]DSML[|｜](?:tool_calls|invoke|parameter)\b/i.test(
+            /<\|tool_call(?:s_section)?_begin\|>|<\|tool_call_argument_begin\|>|<[|｜]+DSML[|｜]+(?:tool_calls|invoke|parameter)\b/i.test(
               assistantText.visible,
             )
           ) {
@@ -5765,6 +5776,38 @@ export async function runAgentTurn(
             writeToolOutput(eventId, output, chalk.dim(`  ${output}`));
             emitToolResult(eventId, result, resultReason);
           }
+          const suppressedCallList = suppressedResults
+            .map(({ b }) => `${b.call.name} ${formatToolArgs(b.call)}`)
+            .join("; ");
+          const deniedContent = (b: BoundCall, resultReason: string): string =>
+            `Tool ${b.call.name} result (exit=130, ok=false):\n` +
+            `NOT EXECUTED — suppressed repeat. ${resultReason}\n\n` +
+            `Suppressed call: ${b.call.name} ${formatToolArgs(b.call)}. ` +
+            "This exact call is blocked for the rest of the turn; its earlier result is already in context — use it, or choose a different action.";
+          if (historyNativeCalls.length) {
+            appendAssistantWithTools(
+              messages,
+              beforeTool ?? "",
+              historyNativeCalls,
+              completion.reasoningBlock ??
+                (assistantText.hasThinking && assistantText.thinkContent
+                  ? { text: assistantText.thinkContent }
+                  : undefined),
+            );
+            for (const { b, resultReason } of suppressedResults) {
+              appendToolResult(messages, b.id, deniedContent(b, resultReason), b.call.name, false);
+            }
+          } else {
+            const standardizedContent =
+              (beforeTool ? beforeTool.trim() + "\n\n" : "") +
+              bound
+                .map((b) => `\`\`\`tool\n${JSON.stringify(b.call)}\n\`\`\``)
+                .join("\n\n");
+            pushAssistantHistory(standardizedContent);
+            for (const { b, resultReason } of suppressedResults) {
+              messages.push({ role: "tool", content: deniedContent(b, resultReason) });
+            }
+          }
           if (sequenceDecision.terminal) {
             const remainingCriteria = unreadResponderNotificationIds.size > 0
               ? ["Analyze and acknowledge the delivered Responder result without repeating completed foreground work."]
@@ -5773,7 +5816,7 @@ export async function runAgentTurn(
             await saveOutcomeState(outcomeState);
             moveTurn("partial", "repeated identical action sequence");
             return finishTurn(
-              "Stopped an identical action cycle before it could execute again.",
+              `Stopped an identical action cycle before it could execute again. Blocked this turn: ${suppressedCallList}. Their earlier results are in context — continue from those, do not re-issue the same calls.`,
               productiveSteps,
               "partial",
               remainingCriteria,
@@ -5782,9 +5825,10 @@ export async function runAgentTurn(
           }
           upsertActionCycleRecovery(
             reason +
+              ` The repeated calls were: ${suppressedCallList}.` +
               (unreadResponderNotificationIds.size > 0
                 ? " A delivered Responder result is still unread: analyze the available result, gather only genuinely necessary bounded evidence, then call job.read before returning to foreground work."
-                : " The original successful tool result remains in context. Reassess that evidence and either finish or select a materially different action; do not replay completed work."),
+                : " The original successful tool results remain in context. Reassess that evidence and either finish or select a materially different action; do not replay completed work."),
           );
           continue;
         }
@@ -5873,6 +5917,7 @@ export async function runAgentTurn(
           activePlan && activePlan.tasks.length > 0,
         );
         let actionSequenceExecuted = 0;
+        let roundSuppressedCount = 0;
         let actionSequenceEligible = allCalls.length > 0;
         const actionSequenceOutcomes = new Map<string, string>();
 
@@ -5898,6 +5943,7 @@ export async function runAgentTurn(
           consecutiveModelOnlyRounds = 0;
           recordedNativeIds.add(boundCall.id);
           actionSequenceExecuted += 1;
+          if (res.suppressedRepeat) roundSuppressedCount += 1;
           const sequenceObservation = res.suppressedRepeat
             ? loopGuard.getPriorObservation(res.call.name, res.call.args) ??
               res.contextOutput
@@ -6346,6 +6392,26 @@ export async function runAgentTurn(
             !governorPauseReason,
           actionSequenceOutcome,
         );
+
+        consecutiveSynthesizedRounds =
+          !aborted && actionSequenceExecuted > 0 && roundSuppressedCount === actionSequenceExecuted
+            ? consecutiveSynthesizedRounds + 1
+            : 0;
+        if (consecutiveSynthesizedRounds >= 2) {
+          const repeatedList = bound
+            .map((b) => `${b.call.name} ${formatToolArgs(b.call)}`)
+            .join("; ");
+          outcomeState.outcome.status = "partial";
+          await saveOutcomeState(outcomeState);
+          moveTurn("partial", "repeated identical action cycle");
+          return finishTurn(
+            `Stopped an identical action cycle: consecutive rounds re-issued calls whose results are already in context (${repeatedList}). Continue from those results or take a materially different action.`,
+            productiveSteps,
+            "partial",
+            ["Continue with a materially different action that can produce new evidence."],
+            "Every call in consecutive rounds repeated already-answered work.",
+          );
+        }
 
         // Keep ledger system rows outside the native assistant→tool group so
         // protocol repair preserves the real successful job.read body.
