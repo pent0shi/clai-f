@@ -1222,12 +1222,34 @@ function remapClassicArgs(call: ToolCall): ToolCall {
   return { name: call.name, args };
 }
 
+const GATEWAY_ARG_ENVELOPES = new Set(["input", "arguments", "parameters"]);
+
+function unwrapGatewayToolArgs(
+  args: Record<string, unknown>,
+): Record<string, unknown> {
+  const keys = Object.keys(args);
+  if (keys.length !== 1 || !GATEWAY_ARG_ENVELOPES.has(keys[0]!)) return args;
+  const value = args[keys[0]!];
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    return value as Record<string, unknown>;
+  }
+  if (typeof value !== "string") return args;
+  try {
+    const parsed = JSON.parse(value.trim()) as unknown;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : args;
+  } catch {
+    return args;
+  }
+}
+
 export function normalizeToolCall(call: ToolCall): ToolCall {
-  // X1: strip channel/commentary tokens before registry lookup.
   let name = typeof call.name === "string" ? call.name.trim() : "";
+  const originalArgs = call.args ?? {};
   const classic = CLASSIC_TOOL_ALIASES[name.toLowerCase()];
   if (classic && !toolRegistry[name]) {
-    const args = call.args ?? {};
+    const args = unwrapGatewayToolArgs(originalArgs);
     const hasShellShape = COMMAND_ARG_KEYS.some((key) => args[key] !== undefined);
     if (classic === "shell.exec" || !hasShellShape) {
       return remapClassicArgs({ name: classic, args });
@@ -1237,24 +1259,24 @@ export function normalizeToolCall(call: ToolCall): ToolCall {
     const cleaned = sanitizeToolName(name);
     const mapped = fromWireName(cleaned) ?? fromWireName(name) ?? cleaned;
     if (mapped && toolRegistry[mapped]) {
-      return { name: mapped, args: call.args ?? {} };
+      return { name: mapped, args: unwrapGatewayToolArgs(originalArgs) };
     }
     if (cleaned && cleaned !== name) name = cleaned;
   }
   if (toolRegistry[name]) {
-    return name === call.name ? call : { name, args: call.args ?? {} };
+    const args = unwrapGatewayToolArgs(originalArgs);
+    return name === call.name && args === originalArgs ? call : { name, args };
   }
-  // Leave genuinely unknown namespaced tools (e.g. a typo'd "fs.reed") to
-  // surface a clear error rather than guessing at a shell command.
   if (!name || name.includes(".") || name.includes("/")) {
-    return name === call.name ? call : { name, args: call.args ?? {} };
+    return name === call.name ? call : { name, args: originalArgs };
   }
-  const args = call.args ?? {};
-  const command = buildShellCommandFromCall(name, args);
+  const command = buildShellCommandFromCall(name, originalArgs);
   if (!command) return call;
   const shellArgs: Record<string, unknown> = { command };
-  if (typeof args.cwd === "string") shellArgs.cwd = args.cwd;
-  if (typeof args.timeoutMs === "number") shellArgs.timeoutMs = args.timeoutMs;
+  if (typeof originalArgs.cwd === "string") shellArgs.cwd = originalArgs.cwd;
+  if (typeof originalArgs.timeoutMs === "number") {
+    shellArgs.timeoutMs = originalArgs.timeoutMs;
+  }
   return { name: "shell.exec", args: shellArgs };
 }
 

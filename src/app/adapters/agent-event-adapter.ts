@@ -191,6 +191,7 @@ export class AgentEventAdapter {
         this.push("compaction-delta", {
           compactionId: event.id,
           text: event.text,
+          ...(event.replace ? { replace: true } : {}),
         });
         return;
       case "compaction-completed":

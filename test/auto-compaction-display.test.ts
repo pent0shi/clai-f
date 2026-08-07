@@ -33,6 +33,13 @@ vi.mock("../src/commands/providers.js", async (importActual) => {
   return { ...actual, ensureProviderConfigured: async () => {} };
 });
 
+function renderedCompaction(events: readonly AgentEvent[]): string {
+  return events.reduce((summary, event) => {
+    if (event.type !== "compaction-delta") return summary;
+    return event.replace ? event.text : summary + event.text;
+  }, "");
+}
+
 const SUMMARY_KEYWORD = "PostgreSQL";
 const SUMMARY_TEXT = `User asked to set up a ${SUMMARY_KEYWORD} cluster with replication. Decisions: use ${SUMMARY_KEYWORD} 15, streaming replication. Work completed: installed binaries, initialized data dir. Remaining work: configure replication slots and failover.`;
 
@@ -109,11 +116,7 @@ describe("auto-compaction display (Chunk 3)", () => {
       const compacted = events.find((e) => e.type === "compaction-completed");
       expect(started, "expected compaction lifecycle to start").toBeDefined();
       expect(deltas.length).toBeGreaterThan(0);
-      const streamedSummary = deltas
-        .map((event) =>
-          event.type === "compaction-delta" ? event.text : "",
-        )
-        .join("");
+      const streamedSummary = renderedCompaction(events);
       expect(streamedSummary).toBe(SUMMARY_TEXT);
       expect(streamedSummary).not.toMatch(/<\/?think|private chain/i);
       expect(
@@ -168,9 +171,13 @@ describe("auto-compaction display (Chunk 3)", () => {
           onToken: (token: string) => void,
         ) => {
           const system = req.messages?.[0]?.content ?? "";
+          const lastPrompt = req.messages?.at(-1)?.content ?? "";
           const isCompaction = system.toLowerCase().includes("continuation memory");
+          const isRetry = lastPrompt.includes("QUALITY RETRY:");
           const rawText = isCompaction
-            ? "<think>the summary allowance contained only reasoning</think>"
+            ? isRetry
+              ? SUMMARY_TEXT
+              : "<think>the summary allowance contained only reasoning</think>"
             : "All set; nothing else to do.";
           onToken(rawText);
           return Promise.resolve({
@@ -199,21 +206,29 @@ describe("auto-compaction display (Chunk 3)", () => {
         onEvent: (event) => events.push(event),
       });
 
-      // Long history uses two evidence-preserving map summaries and one final
-      // reduce. Each may need the no-thinking retry; this is bounded (never a
-      // nested per-chunk fan-out).
-      expect(complete).toHaveBeenCalledTimes(3);
-      expect(complete.mock.calls[0]?.[0]).toMatchObject({
-        maxTokens: COMPACTION_MAP_MAX_COMPLETION_TOKENS,
-        temperature: 0,
-        thinking: { enabled: false, effort: "none" },
-      });
-      const streamed = events
-        .filter((event) => event.type === "compaction-delta")
-        .map((event) => (event.type === "compaction-delta" ? event.text : ""))
-        .join("");
+      expect(
+        stream.mock.calls.some(([request]) => {
+          const typed = request as {
+            maxTokens?: number;
+            temperature?: number;
+            thinking?: { enabled?: boolean; effort?: string };
+          };
+          return (
+            typed.maxTokens === COMPACTION_MAP_MAX_COMPLETION_TOKENS &&
+            typed.temperature === 0 &&
+            typed.thinking?.enabled === false &&
+            typed.thinking.effort === "none"
+          );
+        }),
+      ).toBe(true);
+      const streamed = renderedCompaction(events);
       expect(streamed).toBe(SUMMARY_TEXT);
       expect(streamed).not.toMatch(/final allowance|<\/?think/i);
+      expect(
+        events.some(
+          (event) => event.type === "compaction-delta" && event.replace === true,
+        ),
+      ).toBe(true);
       expect(
         events.some((event) => event.type === "compaction-completed"),
       ).toBe(true);

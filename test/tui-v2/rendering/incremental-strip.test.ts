@@ -45,12 +45,34 @@ describe("incremental tool-surface stripping (TUI-003)", () => {
       "Plain prose across\nseveral lines.\n\nAnd a paragraph.",
       "before\n```tool\n{\"name\":\"fs.read\"}\n```\nafter",
       "text <tool_call name=\"x\">{\"a\":1}</tool_call> tail",
+      "before\n<|tool_calls_section_begin|><|tool_call_begin|>functions.sysinfo:1<|tool_call_argument_begin|>{}<|tool_call_end|><|tool_calls_section_end|>\nafter",
+      `before\n<｜DSML｜tool_calls><｜DSML｜invoke name="fs.list"><｜DSML｜parameter name="path" string="true">/tmp</｜DSML｜parameter></｜DSML｜invoke></｜DSML｜tool_calls>\nafter`,
+      `before\n<|open|>tools<|sep|><|open|>call tool="fs.read" index="1"<|sep|><|open|>argument key="path" type="string"<|sep|>/tmp/a<|close|>argument><|close|>call><|close|>tools>\nafter`,
+      `before\n<tool_calls:abc><tool_call:abc>web.search\n{"query":"term"}\n</tool_call:abc></tool_calls:abc>\nafter`,
       "leading\n\n\n\nblank runs collapse",
       `${"paragraph line\n".repeat(900)}\n\`\`\`tool\n{"name":"fs.write"}\n\`\`\`\ndone`,
     ];
     for (const source of cases) {
       for (const size of [1, 7, 512]) {
         expect(streamAll(chunk(source, size)).text).toBe(stripToolCallSurfaces(source));
+      }
+    }
+  });
+
+  it("never exposes fragmented pseudo-tool markers while streaming", () => {
+    const cases = [
+      `before\n<|tool_calls_section_begin|><|tool_call_begin|>functions.sysinfo:1<|tool_call_argument_begin|>{}<|tool_call_end|><|tool_calls_section_end|>\nafter`,
+      `before\n<｜DSML｜tool_calls><｜DSML｜invoke name="fs.list"><｜DSML｜parameter name="path" string="true">/tmp</｜DSML｜parameter></｜DSML｜invoke></｜DSML｜tool_calls>\nafter`,
+      `before\n<|open|>tools<|sep|><|open|>call tool="fs.read"<|sep|><|open|>argument key="path" type="string"<|sep|>/tmp/a<|close|>argument><|close|>call><|close|>tools>\nafter`,
+      `before\n<tool_calls:abc><tool_call:abc>web.search\n{"query":"term"}\n</tool_call:abc></tool_calls:abc>\nafter`,
+    ];
+    for (const source of cases) {
+      const expected = stripToolCallSurfaces(source);
+      let stream = EMPTY_STRIP_STREAM;
+      for (const character of source) {
+        const pushed = pushStripChunk(stream, character);
+        stream = pushed.stream;
+        expect(expected.startsWith(pushed.text)).toBe(true);
       }
     }
   });

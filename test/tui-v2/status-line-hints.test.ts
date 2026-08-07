@@ -4,6 +4,7 @@ import {
   armedCancelHint,
   busyCancelHint,
   contextChipForDensity,
+  cwdViewportWidth,
   idleHintIds,
   parseContextLimitInput,
   statusDensityForWidth,
@@ -40,6 +41,39 @@ describe("status line hints and Esc semantics", () => {
   it("maps widths to the densities the hint rows are built for", () => {
     expect(statusDensityForWidth(40)).toBe("xs");
     expect(statusDensityForWidth(100)).toBe("lg");
+  });
+
+  it("bounds the cwd rail by density and enables horizontal scrolling", () => {
+    expect(cwdViewportWidth(40, "xs")).toBe(0);
+    expect(cwdViewportWidth(60, "sm")).toBe(12);
+    expect(cwdViewportWidth(80, "md")).toBe(22);
+    expect(cwdViewportWidth(120, "lg")).toBe(33);
+    expect(cwdViewportWidth(240, "lg")).toBe(36);
+    expect(cwdViewportWidth(240, "lg", 14)).toBe(14);
+    expect(cwdViewportWidth(240, "lg", 4)).toBe(4);
+    expect(cwdViewportWidth(240, "lg", 100)).toBe(36);
+
+    const statusLine = readFileSync(STATUS_LINE, "utf8");
+    expect(statusLine).toContain("<CwdViewport");
+    expect(statusLine).toContain("scrollX");
+    expect(statusLine).toContain("scrollbox.scrollLeft + dx");
+    expect(statusLine).toContain('overflow: "hidden"');
+  });
+
+  it("shows context from the initial zero-token state", () => {
+    expect(
+      contextChipForDensity(
+        {
+          contextTokens: 0,
+          contextLimit: 0,
+          lastCompletionTokens: 0,
+          sessionPromptTokens: 0,
+          sessionCompletionTokens: 0,
+          exact: false,
+        },
+        "lg",
+      ),
+    ).toBe("ctx 0");
   });
 
   it("shows only the raw count without an override and the explicit window when set", () => {

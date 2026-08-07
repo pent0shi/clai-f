@@ -277,6 +277,9 @@ describe("native tool loop integration", () => {
         }
 
         if (turn === 2) {
+          expect(
+            events.filter((event) => event.type === "tool-call"),
+          ).toHaveLength(0);
           expect(request.tools).toBeUndefined();
           const text = `\`\`\`tool\n${JSON.stringify({
             name: "fs.list",
@@ -318,13 +321,11 @@ describe("native tool loop integration", () => {
 
     expect(streamMock).toHaveBeenCalledTimes(3);
     expect(
-      events.some(
-        (event) =>
-          event.type === "tool-blocked" &&
-          event.name === "fs.list" &&
-          /never completed/i.test(event.reason ?? ""),
-      ),
-    ).toBe(true);
+      events.filter((event) => event.type === "tool-call"),
+    ).toHaveLength(1);
+    expect(
+      events.some((event) => event.type === "tool-blocked"),
+    ).toBe(false);
   });
 
   it("stops repeating unusable native arguments and falls back to text tools", async () => {

@@ -99,6 +99,7 @@ export interface AppEventPayloads {
   "compaction-delta": {
     readonly compactionId: string;
     readonly text: string;
+    readonly replace?: boolean | undefined;
   };
   "compaction-completed": {
     readonly compactionId: string;

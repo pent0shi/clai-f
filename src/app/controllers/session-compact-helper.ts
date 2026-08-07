@@ -4,8 +4,14 @@
 
 import type { ChatMessage, ProviderId } from "../../types.js";
 import {
+  buildCompactionRetryPrompt,
+  compactionSinglePassInputBudget,
   COMPACTION_MAX_COMPLETION_TOKENS,
   COMPACTION_MAP_MAX_COMPLETION_TOKENS,
+  isCompactionCompletionTruncated,
+  looksLikeIncompleteCompactionSummary,
+  looksLikeTranscriptReplay,
+  normalizeCompactionSummary,
 } from "../../agent/compaction-summary.js";
 import {
   compactMessagesWithSummary,
@@ -14,10 +20,8 @@ import {
   type CompactResult,
 } from "../../agent/context-manager.js";
 import { completeWithProvider, streamWithProvider } from "../../llm/router.js";
-import {
-  createThinkingStreamParser,
-  stripThinking,
-} from "../../ui/thinking.js";
+import { modelContextWindow } from "../../llm/token-usage.js";
+import { createThinkingStreamParser, stripThinking } from "../../ui/thinking.js";
 import type {
   AnyAppEvent,
   AppEventPayloads,
@@ -33,7 +37,8 @@ export async function summarizeForSessionCompact(
     /** plan-implement needs denser handoff memory — allow a larger completion. */
     purpose?: "default" | "plan-implement" | undefined;
     stage?: "single" | "map" | "reduce" | undefined;
-    onToken?: ((token: string) => void) | undefined;
+    sourceMessages?: readonly ChatMessage[] | undefined;
+    onToken?: ((token: string, replace?: boolean) => void) | undefined;
   },
 ): Promise<string> {
   const maxTokens =
@@ -47,60 +52,121 @@ export async function summarizeForSessionCompact(
 
   const completeSummary = async (
     p: string,
-    onToken?: (token: string) => void,
+    onToken?: (token: string, replace?: boolean) => void,
   ): Promise<string> => {
     const request = {
       provider: opts.provider,
       model: opts.model,
-      messages: [
-        {
-          role: "system" as const,
-          content: systemContent,
-        },
-        { role: "user" as const, content: p },
-      ],
+      messages: opts.sourceMessages
+        ? [
+            ...opts.sourceMessages,
+            { role: "user" as const, content: p },
+          ]
+        : [
+            {
+              role: "system" as const,
+              content: systemContent,
+            },
+            { role: "user" as const, content: p },
+          ],
       temperature: 0.1,
       maxTokens,
-      // Summarizing does not benefit from hidden reasoning; disabling it keeps
-      // compaction cheap and consistent for reasoning-capable providers.
       thinking: { enabled: false, effort: "none" as const },
       signal: opts.signal,
     };
-    let rawSummary: string;
-    if (!onToken) {
-      rawSummary = (await completeWithProvider(request, { maxRetries: 0 })).text;
-    } else {
-      const parser = createThinkingStreamParser(onToken, undefined, {
-        remember: false,
-      });
-      const response = await streamWithProvider(
-        request,
+    const runAttempt = async (
+      attemptRequest: typeof request,
+      replace = false,
+    ) => {
+      if (!onToken) {
+        return completeWithProvider(attemptRequest, { maxRetries: 0 });
+      }
+      if (replace) onToken("", true);
+      const parser = createThinkingStreamParser(
+        (text) => onToken(text),
+        undefined,
+        { remember: false },
+      );
+      const result = await streamWithProvider(
+        attemptRequest,
         (token) => parser.push(token),
         { onStatus: () => undefined, maxRetries: 0 },
       );
       parser.finish();
-      rawSummary = response.text;
+      return result;
+    };
+    const first = await runAttempt(request);
+    let visible = normalizeCompactionSummary(
+      stripThinking(first.text).visible,
+    );
+    let retryReason:
+      | "truncated"
+      | "incomplete"
+      | "reasoning-only"
+      | "replayed"
+      | undefined;
+    if (isCompactionCompletionTruncated(first, maxTokens)) {
+      retryReason = "truncated";
+    } else if (!visible) {
+      retryReason = "reasoning-only";
+    } else if (looksLikeTranscriptReplay(visible)) {
+      retryReason = "replayed";
+    } else if (looksLikeIncompleteCompactionSummary(visible)) {
+      retryReason = "incomplete";
     }
 
-    const parsed = stripThinking(rawSummary);
-    if (parsed.visible.trim() || !parsed.hasThinking) return rawSummary;
-
-    const retry = await completeWithProvider({
-      ...request,
-      messages: [
+    if (retryReason) {
+      const retry = await runAttempt(
         {
-          role: "system" as const,
-          content: `${systemContent}\nReturn only the continuation-memory summary. Do not include analysis, reasoning, or <think> tags.`,
+          ...request,
+          messages: opts.sourceMessages
+            ? [
+                ...opts.sourceMessages,
+                {
+                  role: "user" as const,
+                  content: buildCompactionRetryPrompt(p, retryReason),
+                },
+              ]
+            : [
+                {
+                  role: "system" as const,
+                  content: `${systemContent}\nReturn only a complete continuation-memory summary. Do not include analysis, reasoning, or <think> tags.`,
+                },
+                {
+                  role: "user" as const,
+                  content: buildCompactionRetryPrompt(p, retryReason),
+                },
+              ],
+          temperature: 0,
+          maxTokens,
+          thinking: { enabled: false, effort: "none" as const },
         },
-        { role: "user" as const, content: p },
-      ],
-      temperature: 0,
-      maxTokens,
-      thinking: { enabled: false, effort: "none" as const },
-    }, { maxRetries: 0 });
-    const retryVisible = stripThinking(retry.text).visible.trim();
-    if (retryVisible && onToken) onToken(retryVisible);
-    return retry.text;
+        true,
+      );
+      if (isCompactionCompletionTruncated(retry, maxTokens)) {
+        throw new Error(
+          "compaction failed: model hit the summary output limit twice — original context retained",
+        );
+      }
+      visible = normalizeCompactionSummary(
+        stripThinking(retry.text).visible,
+      );
+      if (!visible) {
+        throw new Error("compaction failed: model returned an empty summary");
+      }
+      if (looksLikeTranscriptReplay(visible)) {
+        throw new Error(
+          "compaction failed: model replayed the transcript twice — original context retained",
+        );
+      }
+      if (looksLikeIncompleteCompactionSummary(visible)) {
+        throw new Error(
+          "compaction failed: model returned an incomplete summary twice — original context retained",
+        );
+      }
+    }
+
+    return visible;
   };
 
   // `compactMessagesWithSummary` owns chunking/map-reduce. A second splitting
@@ -116,6 +182,7 @@ interface RunSessionCompactionOptions {
   readonly purpose?: "default" | "plan-implement" | undefined;
   readonly provider: ProviderId | undefined;
   readonly model: string | undefined;
+  readonly contextLimitTokens?: number | undefined;
   readonly persist: boolean;
   readonly compactionId: string;
   readonly sequencer: EventSequencer;
@@ -161,13 +228,17 @@ export async function runSessionCompaction(
           signal: options.signal,
           purpose: options.purpose,
           stage: stage?.phase,
+          ...(stage?.sourceMessages
+            ? { sourceMessages: stage.sourceMessages }
+            : {}),
           ...(options.persist && stage?.phase !== "map"
             ? {
-                onToken: (text: string) => {
+                onToken: (text: string, replace?: boolean) => {
                   if (options.isCurrent()) {
                     emit("compaction-delta", {
                       compactionId: options.compactionId,
                       text,
+                      ...(replace ? { replace: true } : {}),
                     });
                   }
                 },
@@ -178,6 +249,10 @@ export async function runSessionCompaction(
         budgetTokens: 0,
         keepRecent: options.keepRecent,
         purpose: options.purpose,
+        singlePassInputBudgetTokens: compactionSinglePassInputBudget(
+          options.contextLimitTokens ??
+            modelContextWindow(options.model, options.provider),
+        ),
       },
       options.sessionTranscript,
     );

@@ -52,6 +52,15 @@ function fakeAgent(): AgentPort {
   };
 }
 
+function renderedCompaction(events: readonly AnyAppEvent[]): string {
+  return events.reduce((summary, event) => {
+    if (event.type !== "compaction-delta") return summary;
+    return event.payload.replace
+      ? event.payload.text
+      : summary + event.payload.text;
+  }, "");
+}
+
 describe("SessionController parity helpers (V2-080)", () => {
   beforeEach(() => {
     completeWithProvider.mockReset();
@@ -124,6 +133,22 @@ describe("SessionController parity helpers (V2-080)", () => {
     const est = session.estimateContext();
     expect(est.messages).toBe(2);
     expect(est.tokens).toBeGreaterThan(0);
+  });
+
+  it("exposes estimated context before the first model turn", () => {
+    const session = new SessionController({
+      agent: fakeAgent(),
+      persistence: fakePersistence(),
+      emit: () => {},
+      provider: "modal" as never,
+      model: "moonshotai/Kimi-K3",
+    });
+    const state = session.getState();
+    expect(state.contextUsage).toMatchObject({
+      contextTokens: 0,
+      exact: false,
+    });
+    expect(state.contextChip).toBe("ctx:~0");
   });
 
   it("setPlanApproved is readable via isPlanApproved", () => {
@@ -218,10 +243,7 @@ describe("SessionController parity helpers (V2-080)", () => {
       ),
     ).toBe(true);
     expect(events.some((e) => e.type === "compaction-completed")).toBe(true);
-    const streamedSummary = events
-      .filter((event) => event.type === "compaction-delta")
-      .map((event) => event.payload.text)
-      .join("");
+    const streamedSummary = renderedCompaction(events);
     expect(streamedSummary).toBe(visibleSummary);
     expect(streamedSummary).not.toMatch(/<\/?think|hidden compaction/i);
     const completed = events.find(
@@ -270,13 +292,63 @@ describe("SessionController parity helpers (V2-080)", () => {
       temperature: 0,
       thinking: { enabled: false, effort: "none" },
     });
-    const streamed = events
-      .filter((event) => event.type === "compaction-delta")
-      .map((event) => event.payload.text)
-      .join("");
+    const streamed = renderedCompaction(events);
     expect(streamed).toBe(visibleSummary);
     expect(streamed).not.toMatch(/reasoning consumed|<\/?think/i);
     expect(session.messages.some(isCompactionMemoryMessage)).toBe(true);
+  });
+
+  it("rewrites an output-limit manual summary before emitting it", async () => {
+    const accepted =
+      "## User goals\nPreserve the session.\n## Remaining work\nContinue implementation.";
+    completeWithProvider
+      .mockResolvedValueOnce({
+        text: "## User goals\nPreserve the session.\n## Remaining work\nContinue with",
+        chunks: ["## User goals\nPreserve the session.", "\n## Remaining work\nContinue with"],
+        finishReason: "length",
+        usage: { completionTokens: COMPACTION_MAX_COMPLETION_TOKENS },
+      })
+      .mockResolvedValueOnce({ text: accepted, finishReason: "stop" });
+    const events: AnyAppEvent[] = [];
+    const session = new SessionController({
+      agent: fakeAgent(),
+      persistence: fakePersistence(),
+      emit: (event) => events.push(event),
+      sessionId: "sess-length-retry",
+      provider: "nvidia" as never,
+      model: "thinking-model",
+    });
+    session.loadHistory(
+      [
+        { role: "user", content: "build the feature" },
+        { role: "assistant", content: "implementation started" },
+        { role: "user", content: "preserve the context" },
+        { role: "assistant", content: "continuing" },
+      ],
+      { sessionId: "sess-length-retry" },
+    );
+
+    await expect(session.compact(undefined, 2)).resolves.toMatchObject({
+      summarized: true,
+    });
+    expect(completeWithProvider).toHaveBeenCalledTimes(2);
+    expect(
+      completeWithProvider.mock.calls[1]?.[0]?.messages?.at(-1)?.content,
+    ).toMatch(/hit its output limit|rewrite the entire/i);
+    const streamed = renderedCompaction(events);
+    expect(streamed).toBe(accepted);
+    const deltas = events.filter(
+      (event) => event.type === "compaction-delta",
+    );
+    const resetIndex = deltas.findIndex((event) => event.payload.replace === true);
+    expect(resetIndex).toBeGreaterThan(0);
+    expect(
+      deltas
+        .slice(0, resetIndex)
+        .map((event) => event.payload.text)
+        .join(""),
+    ).toContain("Continue with");
+    expect(streamed).not.toContain("Continue with");
   });
 
   it("keeps the exact original messages when both manual summary attempts contain only reasoning", async () => {
@@ -407,11 +479,11 @@ describe("SessionController parity helpers (V2-080)", () => {
       purpose: "plan-implement",
     });
 
-    const systemPrompt = String(
-      completeWithProvider.mock.calls.at(-1)?.[0]?.messages?.[0]?.content ?? "",
+    const compactionInstruction = String(
+      completeWithProvider.mock.calls.at(-1)?.[0]?.messages?.at(-1)?.content ?? "",
     );
-    expect(systemPrompt).toContain("Do not add framing");
-    expect(systemPrompt).not.toContain("State clearly that this context");
+    expect(compactionInstruction).toMatch(/Do not add (?:another )?framing/);
+    expect(compactionInstruction).not.toContain("State clearly that this context");
     const compacted = events.find(
       (event) => event.type === "compaction-completed",
     );

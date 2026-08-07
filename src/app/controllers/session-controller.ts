@@ -485,6 +485,9 @@ export class SessionController implements Disposable {
         purpose: options.purpose,
         provider,
         model: this.model ?? cfg.defaultModel,
+        ...(this.contextLimitTokens
+          ? { contextLimitTokens: this.contextLimitTokens }
+          : {}),
         persist,
         compactionId: String(this.sequencer.ids.message()),
         sequencer: this.sequencer,

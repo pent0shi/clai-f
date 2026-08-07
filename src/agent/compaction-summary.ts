@@ -12,7 +12,7 @@ You are SUMMARIZING a past session, NOT continuing it. Do not answer the user, d
 Rules:
 - Fidelity over style. Never invent tool results, file contents, findings, URLs, ports, or completions.
 - Prefer concrete artifacts: absolute paths, commands (short form), exit outcomes, HTTP status, plan task ids/states, job ids, open ports, confirmed vs unconfirmed findings.
-- LENGTH: aim for ~1400–2400 tokens of dense structured bullets — a richer, complete memory beats a terse one, but finish within budget rather than cutting mid-sentence. No full tool transcripts or HTML bodies.
+- LENGTH: aim for ~1800–3600 tokens of dense structured bullets — preserve every consequential fact, but finish every section and bullet within budget rather than cutting mid-sentence. Prefer one precise mention over repeated coverage.
 - DETAIL LEVEL: mechanism-level specificity. For code changes name the file path with line anchors, what changed, the before→after behavior, and the verification evidence (which tests/typecheck/build status prove it). For debugging name the root cause, each failed approach, and why it failed. For research name exact findings with their evidence. For pending work give the next concrete step a cold reader can execute immediately. A reader resuming with no other context must not need to re-discover anything recorded below.
 - NO DUPLICATION: state each fact exactly once, in its best section. This memory is prepended to a live context that ALSO re-injects fresh ACTIVE PLAN, SESSION STATE, and ENGAGEMENT SCOPE — do not restate the full plan or every task, and do not reproduce long user prompts verbatim; capture goals/deltas concisely.
 - Omit secrets, API keys, passwords, tokens, and full credential material. Say "[redacted]" if present.
@@ -138,7 +138,7 @@ export function buildCompactionUserPrompt(parts: CompactionPromptParts): string 
   }
 
   const target =
-    "Be specific over short. Target ~1400–2400 tokens of memory (~800–1200 for plan-mode handoffs). Dense bullets over prose. No secrets. No fabricated successes. No full tool dumps.";
+    "Be specific over short. Target ~1800–3600 tokens of dense continuation memory (~900–1600 for plan-mode handoffs), using more only when required to preserve verified state. Finish every bullet and section. End on a complete sentence. No secrets, fabricated successes, raw pseudo-tool syntax, or full tool dumps.";
   sections.push(target);
 
   if (durable) {
@@ -147,6 +147,18 @@ export function buildCompactionUserPrompt(parts: CompactionPromptParts): string 
 
   sections.push("", "SESSION MATERIAL:", "", transcript);
   return sections.join("\n");
+}
+
+export function buildDirectCompactionPrompt(input: {
+  readonly durableState?: string | undefined;
+  readonly purpose?: "default" | "plan-implement" | undefined;
+}): string {
+  return buildCompactionUserPrompt({
+    messageTranscript:
+      "The session material is the exact conversation-message prefix immediately before this instruction. Summarize that prefix only; do not treat this instruction as session content.",
+    ...(input.durableState ? { durableState: input.durableState } : {}),
+    ...(input.purpose ? { purpose: input.purpose } : {}),
+  });
 }
 
 /** Soft cap for transcript fed to the summarizer (chars). */
@@ -158,20 +170,27 @@ export const COMPACTION_TRANSCRIPT_CHAR_BUDGET = 48_000;
  * so its allowance must comfortably exceed the ~1400–2400 token target while
  * still discouraging hidden reasoning blowout.
  */
-export const COMPACTION_MAX_COMPLETION_TOKENS = 3_072;
+export const COMPACTION_MAX_COMPLETION_TOKENS = 8_192;
 
-/** Map passes extract facts at the same detail level but for one region only. */
-export const COMPACTION_MAP_MAX_COMPLETION_TOKENS = 1_536;
+export const COMPACTION_INPUT_SAFETY_TOKENS = 4_096;
 
-/** Chars per map-stage chunk when the transcript exceeds one summarizer call. */
-export const COMPACTION_CHUNK_CHAR_BUDGET = 96_000;
+export function compactionSinglePassInputBudget(
+  contextLimitTokens: number,
+): number {
+  if (!Number.isFinite(contextLimitTokens)) return 0;
+  return Math.max(
+    0,
+    Math.floor(contextLimitTokens) -
+      COMPACTION_MAX_COMPLETION_TOKENS -
+      COMPACTION_INPUT_SAFETY_TOKENS,
+  );
+}
 
-/**
- * Upper bound on map-stage summarizer calls. Chunks grow instead of being
- * dropped, so a very long session costs more chars per call but never loses a
- * region of history.
- */
-export const MAX_COMPACTION_CHUNKS = 2;
+export const COMPACTION_MAP_MAX_COMPLETION_TOKENS = 3_072;
+
+export const COMPACTION_CHUNK_CHAR_BUDGET = 64_000;
+
+export const MAX_COMPACTION_CHUNKS = 8;
 
 /**
  * Split the transcript into ordered chunks that together contain every
@@ -269,12 +288,69 @@ export function trimTranscriptForCompaction(
  * contains these artifacts, so their presence means the summary is unusable and
  * compaction should fail loudly rather than persist garbage.
  */
+export function normalizeCompactionSummary(summary: string): string {
+  const seenBullets = new Set<string>();
+  const output: string[] = [];
+  for (const line of summary.replace(/\r\n?/g, "\n").split("\n")) {
+    const trimmed = line.trim();
+    const bullet = /^(?:[-*+]|\d+[.)])\s+(.+)$/.exec(trimmed);
+    if (bullet) {
+      const key = bullet[1]!.replace(/\s+/g, " ").trim().toLowerCase();
+      if (seenBullets.has(key)) continue;
+      seenBullets.add(key);
+    }
+    if (!trimmed && output[output.length - 1]?.trim() === "") continue;
+    output.push(line.replace(/[ \t]+$/g, ""));
+  }
+  return output.join("\n").trim();
+}
+
+export function looksLikeIncompleteCompactionSummary(summary: string): boolean {
+  const text = summary.trim();
+  if (!text) return true;
+  if ((text.match(/```/g)?.length ?? 0) % 2 !== 0) return true;
+  const last = text.split("\n").at(-1)?.trim() ?? "";
+  if (/^#{1,6}\s+\S/.test(last)) return true;
+  if (/[,;:(\[{=+\-–—]$/.test(last)) return true;
+  return /\b(?:and|or|the|a|an|to|with|without|has|have|had|is|are|was|were|from|for|of|in|on|at|by|as|that|which|whose|because|so)$/i.test(last);
+}
+
+export function isCompactionCompletionTruncated(
+  response: {
+    finishReason?: string | undefined;
+    usage?: { completionTokens?: number | undefined } | undefined;
+  },
+  maxTokens: number,
+): boolean {
+  if (response.finishReason?.toLowerCase() === "length") return true;
+  const used = response.usage?.completionTokens;
+  return typeof used === "number" && used >= Math.max(1, maxTokens - 32);
+}
+
+export function buildCompactionRetryPrompt(
+  prompt: string,
+  reason: "truncated" | "incomplete" | "reasoning-only" | "replayed",
+): string {
+  const issue =
+    reason === "truncated"
+      ? "The previous draft hit its output limit."
+      : reason === "reasoning-only"
+        ? "The previous draft contained no visible memory."
+        : reason === "replayed"
+          ? "The previous draft replayed source transcript or raw pseudo-tool syntax."
+          : "The previous draft ended abruptly or was structurally incomplete.";
+  return `${prompt}\n\nQUALITY RETRY: ${issue} Rewrite the entire continuation memory from the source, not a continuation of the failed draft. Preserve all consequential facts once, use dense bullets, stay within the requested target, finish every section and bullet, and end on a complete sentence.`;
+}
+
 export function looksLikeTranscriptReplay(summary: string): boolean {
   const hardMarkers = [
     /sha256_12\s*=/i,
     /Do NOT re-read this file/i,
     /\(\s*exit\s*=\s*-?\d+\s*,\s*ok\s*=\s*(?:true|false)\s*\)/i,
-    /<tool_call>|<arg_key>|<arg_value>|<\/tool_call>/i,
+    /<tool_calls?(?::[^>]+)?>|<arg_key>|<arg_value>|<\/tool_call/i,
+    /<\|tool_(?:calls_section|call|call_argument)_(?:begin|end)\|>/i,
+    /<[|｜]+DSML[|｜]+(?:tool_calls|invoke|parameter)\b/i,
+    /<[|｜]+(?:open|close|sep)[|｜]+>/i,
     /\bbytes\s*=\s*\d+\s+lines\s*=\s*\d+/i,
   ];
   if (hardMarkers.some((re) => re.test(summary))) return true;

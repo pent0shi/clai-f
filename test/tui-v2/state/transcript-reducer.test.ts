@@ -668,10 +668,31 @@ describe("transcript reducer (V2-050)", () => {
     state = applyAppEvent(
       state,
       seq.build(
+        "compaction-delta",
+        { compactionId: "c1", text: "", replace: true },
+        undefined,
+      ),
+    );
+    state = applyAppEvent(
+      state,
+      seq.build(
+        "compaction-delta",
+        { compactionId: "c1", text: "## Accepted\n- safe" },
+        undefined,
+      ),
+    );
+    expect(transcriptItems(state)[0]).toMatchObject({
+      summary: "## Accepted\n- safe",
+      streaming: true,
+    });
+
+    state = applyAppEvent(
+      state,
+      seq.build(
         "compaction-completed",
         {
           compactionId: "c1",
-          summary: "## Work\n- done",
+          summary: "## Accepted\n- safe",
           beforeTokens: 900,
           afterTokens: 300,
         },

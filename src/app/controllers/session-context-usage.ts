@@ -38,7 +38,6 @@ export function resolveContextUsageSnapshot(
   if (current?.exact && current.contextTokens > 0) {
     return { ...current, contextLimit };
   }
-  if (history.length === 0 && !current) return undefined;
   const estimated = snapshotFromEstimate(
     history,
     target.model,

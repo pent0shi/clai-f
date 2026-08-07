@@ -461,7 +461,9 @@ export function applyAppEvent(state: TranscriptState, event: AnyAppEvent): Trans
       if (!withSeq.byId.has(id)) return withSeq;
       return updateItem(withSeq, id, (item) => ({
         ...(item as CompactedItem),
-        summary: (item as CompactedItem).summary + event.payload.text,
+        summary: event.payload.replace
+          ? event.payload.text
+          : (item as CompactedItem).summary + event.payload.text,
         streaming: true,
       }));
     }

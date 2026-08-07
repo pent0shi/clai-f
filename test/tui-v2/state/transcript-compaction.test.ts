@@ -125,6 +125,23 @@ describe("serializeTranscriptForCompaction", () => {
     expect(source).toContain("ASSISTANT RESPONSE:\nport 5000 is open");
   });
 
+  it("preserves complete long tool fields for upstream chunking", () => {
+    const args = `${"a".repeat(12_000)}ARGS-END`;
+    const output = `${"o".repeat(16_000)}OUTPUT-END`;
+    const state = stateFrom([
+      {
+        kind: "tool",
+        id: "t-long",
+        name: "shell.exec",
+        argsDisplay: args,
+      },
+    ]);
+    const source = serializeTranscriptForCompaction(state, () => output);
+    expect(source).toContain("ARGS-END");
+    expect(source).toContain("OUTPUT-END");
+    expect(source).not.toContain("truncated");
+  });
+
   it("starts from the last compacted card so prior memory is kept", () => {
     const state = stateFrom([
       { kind: "user", id: "u0", text: "ancient" },

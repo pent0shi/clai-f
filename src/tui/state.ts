@@ -83,11 +83,8 @@ export type TranscriptItem =
   | PlanItem
   | CompactedItem;
 
-const MAX_COMPACTION_FIELD_CHARS = 12_000;
-
 function compactField(value: string): string {
-  if (value.length <= MAX_COMPACTION_FIELD_CHARS) return value;
-  return `${value.slice(0, MAX_COMPACTION_FIELD_CHARS)}\n…[truncated; full output remains in the session transcript/artifact]`;
+  return value;
 }
 
 /** Plain, detailed session record used as source material for model compaction. */
@@ -515,7 +512,10 @@ function applyEvent(state: TuiState, event: AgentEvent): TuiState {
         ...state,
         items: state.items.map((item) =>
           item.id === id && item.kind === "compacted"
-            ? { ...item, summary: item.summary + event.text }
+            ? {
+                ...item,
+                summary: event.replace ? event.text : item.summary + event.text,
+              }
             : item,
         ),
       };

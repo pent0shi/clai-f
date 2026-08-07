@@ -16,11 +16,8 @@ import {
   type TranscriptState,
 } from "./transcript-types.js";
 
-const MAX_FIELD_CHARS = 8_000;
-
 function compactField(value: string): string {
-  if (value.length <= MAX_FIELD_CHARS) return value;
-  return `${value.slice(0, MAX_FIELD_CHARS)}\n…[truncated; full output remains in the session transcript/artifact]`;
+  return value;
 }
 
 export type ToolOutputLookup = (toolCallId: ToolCallId) => string;

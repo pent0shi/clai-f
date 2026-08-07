@@ -2,9 +2,12 @@ import { describe, expect, it } from "vitest";
 import {
   buildCompactionUserPrompt,
   chunkTranscriptForCompaction,
+  compactionSinglePassInputBudget,
+  COMPACTION_MAX_COMPLETION_TOKENS,
   COMPACTION_SYSTEM_PROMPT,
   looksLikeTranscriptReplay,
   MAX_COMPACTION_CHUNKS,
+  normalizeCompactionSummary,
   trimTranscriptForCompaction,
 } from "../src/agent/compaction-summary.js";
 import {
@@ -150,6 +153,29 @@ describe("looksLikeTranscriptReplay", () => {
         "<tool_call>fs.read<arg_key>path<arg_value>/app/package.json</arg_value>",
       ),
     ).toBe(true);
+    expect(
+      looksLikeTranscriptReplay(
+        "<|tool_calls_section_begin|><|tool_call_begin|>functions.fs.read:0<|tool_call_argument_begin|>{}<|tool_call_end|>",
+      ),
+    ).toBe(true);
+    expect(
+      looksLikeTranscriptReplay(
+        '<｜DSML｜invoke name="fs.read"><｜DSML｜parameter name="path">x</｜DSML｜parameter>',
+      ),
+    ).toBe(true);
+    expect(
+      looksLikeTranscriptReplay(
+        '<|open|>call tool="fs.read"<|sep|><|close|>call>',
+      ),
+    ).toBe(true);
+  });
+
+  it("deduplicates repeated bullets while retaining their first occurrence", () => {
+    const normalized = normalizeCompactionSummary(
+      "## Work completed\n- Updated runner.ts\n- Updated runner.ts\n## Remaining work\n1. Run tests.\n1. Run tests.",
+    );
+    expect(normalized.match(/Updated runner\.ts/g)).toHaveLength(1);
+    expect(normalized.match(/Run tests\./g)).toHaveLength(1);
   });
 
   it("does not flag a faithful structured summary", () => {
@@ -197,6 +223,43 @@ describe("LLM compaction integration shape", () => {
     );
   });
 
+  it("compacts a roughly 600k-token prefix once within a 1m window", async () => {
+    const messages: ChatMessage[] = [
+      { role: "system", content: "stable system prefix" },
+      { role: "user", content: `large history ${"x".repeat(1_960_000)}` },
+      { role: "assistant", content: "prior work completed" },
+      { role: "user", content: "recent request" },
+      { role: "assistant", content: "recent response" },
+    ];
+    const stages: Array<{
+      prompt: string;
+      sourceMessages: readonly ChatMessage[] | undefined;
+    }> = [];
+    const result = await compactMessagesWithSummary(
+      messages,
+      async (prompt, stage) => {
+        stages.push({ prompt, sourceMessages: stage?.sourceMessages });
+        return "## Work completed\nPrior work is preserved.\n## Remaining work\nContinue.";
+      },
+      {
+        budgetTokens: 0,
+        keepRecent: 2,
+        singlePassInputBudgetTokens:
+          compactionSinglePassInputBudget(1_000_000),
+      },
+    );
+
+    expect(compactionSinglePassInputBudget(1_000_000)).toBe(
+      1_000_000 - COMPACTION_MAX_COMPLETION_TOKENS - 4_096,
+    );
+    expect(stages).toHaveLength(1);
+    expect(stages[0]?.sourceMessages).toHaveLength(3);
+    expect(stages[0]?.sourceMessages?.[1]).toBe(messages[1]);
+    expect(stages[0]?.prompt).not.toContain("large history");
+    expect(result.summarized).toBe(true);
+    expect(result.messages.slice(-2)).toEqual(messages.slice(-2));
+  });
+
   it("keeps every region while bounding a manual compaction to map-reduce", async () => {
     const msgs: ChatMessage[] = Array.from({ length: 10 }, (_, index) => ({
       role: index % 2 === 0 ? ("user" as const) : ("assistant" as const),
@@ -209,14 +272,11 @@ describe("LLM compaction integration shape", () => {
       { length: 80 },
       (_, index) => `TOOL ${index}:\n${"x".repeat(2_000)}`,
     ).join("\n\n");
-    let calls = 0;
+    const prompts: string[] = [];
     const result = await compactMessagesWithSummary(
       msgs,
       async (prompt) => {
-        calls += 1;
-        if (calls <= 2) {
-          expect(prompt).toContain(calls === 1 ? "TOOL 0:" : "TOOL 79:");
-        }
+        prompts.push(prompt);
         return "## Work completed\nCompacted bounded transcript.\n## Remaining work\nContinue.";
       },
       { budgetTokens: 0, keepRecent: 2 },
@@ -224,7 +284,10 @@ describe("LLM compaction integration shape", () => {
     );
 
     expect(result.summarized).toBe(true);
-    expect(calls).toBe(3);
+    expect(prompts.length).toBeGreaterThan(2);
+    expect(prompts.length).toBeLessThanOrEqual(MAX_COMPACTION_CHUNKS + 1);
+    expect(prompts.some((prompt) => prompt.includes("TOOL 0:"))).toBe(true);
+    expect(prompts.some((prompt) => prompt.includes("TOOL 79:"))).toBe(true);
   });
 
   it("fails compaction when the model replays the transcript instead of summarizing", async () => {

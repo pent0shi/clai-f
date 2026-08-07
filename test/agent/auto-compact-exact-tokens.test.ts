@@ -84,7 +84,9 @@ describe("auto-compaction on provider-exact tokens and session limits", () => {
         onToken: (t: string) => void,
       ) => {
         call += 1;
-        if (req.messages?.[0]?.content.toLowerCase().includes("continuation memory")) {
+        const compactionInstruction =
+          req.messages?.at(-1)?.content.toLowerCase() ?? "";
+        if (compactionInstruction.includes("continuation memory")) {
           onToken("summary text");
           return Promise.resolve({
             text: "summary text",
@@ -153,7 +155,9 @@ describe("auto-compaction on provider-exact tokens and session limits", () => {
         onToken: (t: string) => void,
       ) => {
         call += 1;
-        if (req.messages?.[0]?.content.toLowerCase().includes("continuation memory")) {
+        const compactionInstruction =
+          req.messages?.at(-1)?.content.toLowerCase() ?? "";
+        if (compactionInstruction.includes("continuation memory")) {
           onToken("summary text");
           return Promise.resolve({
             text: "summary text",

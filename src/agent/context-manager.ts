@@ -10,8 +10,12 @@ import {
   buildCompactionChunkPrompt,
   buildCompactionReducePrompt,
   buildCompactionUserPrompt,
+  buildDirectCompactionPrompt,
   chunkTranscriptForCompaction,
+  COMPACTION_CHUNK_CHAR_BUDGET,
+  looksLikeIncompleteCompactionSummary,
   looksLikeTranscriptReplay,
+  normalizeCompactionSummary,
 } from "./compaction-summary.js";
 import {
   DURABLE_ENVELOPE_PREFIX,
@@ -114,6 +118,7 @@ export interface CompactOptions {
   budgetTokens?: number | undefined;
   /** Keep this many trailing messages (system + user/assistant pairs). */
   keepRecent?: number | undefined;
+  singlePassInputBudgetTokens?: number | undefined;
   /**
    * Bias summarizer prompt (e.g. plan-implement preserves recon evidence).
    * Does not change accept/reject heuristics.
@@ -255,6 +260,7 @@ export interface CompactionSummaryStage {
   readonly phase: "single" | "map" | "reduce";
   readonly index?: number | undefined;
   readonly total?: number | undefined;
+  readonly sourceMessages?: readonly ChatMessage[] | undefined;
 }
 
 /**
@@ -323,7 +329,11 @@ export async function compactMessagesWithSummary(
   // after compaction and their current form is captured in durableState below.
   // Feeding old copies into the summarizer only bloats input and invites the
   // model to restate the plan — drop them from the transcript.
-  const messageTranscript = older
+  const visual = sessionTranscript?.trim()
+    ? redactSecrets(sessionTranscript.trim())
+    : "";
+
+  const historyRecords = older
     .filter(
       (message) => !(message.role === "system" && isDurableSystem(message.content)),
     )
@@ -332,28 +342,25 @@ export async function compactMessagesWithSummary(
       if (message.role === "assistant") {
         content = stripThinking(content).visible;
       }
+      const source = content.trim();
       if (message.toolCalls?.length) {
         content +=
           "\n[tools: " +
           message.toolCalls.map((t) => t.name).join(", ") +
           "]";
       }
-      return `${message.role.toUpperCase()}: ${content}`;
-    })
+      return { source, rendered: `${message.role.toUpperCase()}: ${content}` };
+    });
+  const uncoveredHistory = visual
+    ? historyRecords.filter(
+        (record) => !record.source || !visual.includes(record.source),
+      )
+    : historyRecords;
+  const messageTranscript = uncoveredHistory
+    .map((record) => record.rendered)
     .join("\n\n");
-
-  const visual = sessionTranscript?.trim()
-    ? redactSecrets(sessionTranscript.trim())
-    : "";
-
-  // The V2 transcript normally contains the same user/assistant/tool evidence
-  // as model history, but additionally labels tool output. Sending both makes
-  // a compaction pay twice for identical material. Only omit model history
-  // after proving each non-system older turn is represented verbatim in the
-  // visual transcript; partial/restored transcripts retain both sources.
-  const visualCoversOlderHistory = Boolean(visual) && older
-    .filter((message) => message.role !== "system" && message.content.trim())
-    .every((message) => visual.includes(message.content.trim()));
+  const visualCoversOlderHistory =
+    Boolean(visual) && uncoveredHistory.length === 0;
 
   const durableBits = messages
     .filter((m) => m.role === "system" && isDurableSystem(m.content))
@@ -383,12 +390,6 @@ export async function compactMessagesWithSummary(
     .filter((part): part is string => Boolean(part))
     .join("\n\n");
 
-  // Keep every region of both sources. The visual transcript has tool-output
-  // detail while model history is the authoritative fallback after resumes;
-  // trimming either would make the agent forget completed checks and repeat
-  // work. `chunkTranscriptForCompaction` limits this to two map calls plus one
-  // final reduce, so preserving evidence does not recreate the old request
-  // fan-out.
   const combinedTranscript = [
     visual ? `VISUAL TRANSCRIPT:\n\n${visual}` : "",
     messageTranscript && !visualCoversOlderHistory
@@ -397,28 +398,73 @@ export async function compactMessagesWithSummary(
   ]
     .filter(Boolean)
     .join("\n\n---\n\n");
-  const chunks = chunkTranscriptForCompaction(combinedTranscript);
+  const directPrompt = buildDirectCompactionPrompt({
+    ...(durableState ? { durableState } : {}),
+    ...(options.purpose ? { purpose: options.purpose } : {}),
+  });
+  const directSourceMessages = visual
+    ? undefined
+    : messages.slice(0, tailStart);
+  const singlePassInputBudget = Math.max(
+    0,
+    options.singlePassInputBudgetTokens ?? 0,
+  );
+  const directInputTokens = directSourceMessages
+    ? estimateMessagesTokens([
+        ...directSourceMessages,
+        { role: "user", content: directPrompt },
+      ])
+    : Number.POSITIVE_INFINITY;
+  const useDirectSinglePass =
+    Boolean(directSourceMessages?.length) &&
+    singlePassInputBudget > 0 &&
+    directInputTokens <= singlePassInputBudget;
+  const serializedPromptTokens = estimateTokens(
+    buildCompactionUserPrompt({
+      messageTranscript: "",
+      ...(durableState ? { durableState } : {}),
+      ...(options.purpose ? { purpose: options.purpose } : {}),
+    }),
+  );
+  const dynamicChunkChars =
+    singlePassInputBudget > serializedPromptTokens
+      ? Math.max(
+          COMPACTION_CHUNK_CHAR_BUDGET,
+          Math.floor(
+            (singlePassInputBudget - serializedPromptTokens) * 3.3,
+          ),
+        )
+      : COMPACTION_CHUNK_CHAR_BUDGET;
+  const chunks = chunkTranscriptForCompaction(
+    combinedTranscript,
+    dynamicChunkChars,
+  );
 
-  // Weak models occasionally echo a region verbatim. Retry that one stage with
-  // an explicit correction before it contaminates the final memory; never
-  // blindly spend another whole map/reduce pass.
   const summarizeUsable = async (
     prompt: string,
     stage: CompactionSummaryStage,
   ): Promise<string> => {
     const first = await summarize(prompt, stage);
-    const visible = stripThinking(first ?? "").visible.trim();
-    // Provider adapters already make one no-thinking retry for an empty/
-    // reasoning-only response. Do not add another request here in that case.
+    const visible = normalizeCompactionSummary(
+      stripThinking(first ?? "").visible,
+    );
     if (!visible) {
       throw new Error("compaction failed: model returned an empty summary");
     }
-    if (!looksLikeTranscriptReplay(visible)) return first;
+    const replayed = looksLikeTranscriptReplay(visible);
+    const incomplete = looksLikeIncompleteCompactionSummary(visible);
+    if (!replayed && !incomplete) return visible;
     const repaired = await summarize(
-      `${prompt}\n\nQUALITY CORRECTION: Your previous result was unusable because it was empty or replayed source material. Return only a concise transformed memory of facts; do not quote or reproduce the transcript.`,
+      `${prompt}\n\nQUALITY CORRECTION: The previous result was unusable because it ${
+        replayed
+          ? "replayed raw source or pseudo-tool material"
+          : "ended abruptly before the memory was complete"
+      }. Rewrite the entire memory from the source, preserve every consequential fact once, finish all bullets and sections, and return only the completed structured memory.`,
       stage,
     );
-    const repairedVisible = stripThinking(repaired ?? "").visible.trim();
+    const repairedVisible = normalizeCompactionSummary(
+      stripThinking(repaired ?? "").visible,
+    );
     if (!repairedVisible) {
       throw new Error("compaction failed: model returned an empty summary");
     }
@@ -427,11 +473,21 @@ export async function compactMessagesWithSummary(
         "compaction failed: model replayed the transcript instead of summarizing — original context retained",
       );
     }
-    return repaired;
+    if (looksLikeIncompleteCompactionSummary(repairedVisible)) {
+      throw new Error(
+        "compaction failed: model returned an incomplete summary — original context retained",
+      );
+    }
+    return repairedVisible;
   };
 
   let modelSummary: string;
-  if (chunks.length <= 1) {
+  if (useDirectSinglePass && directSourceMessages) {
+    modelSummary = await summarizeUsable(directPrompt, {
+      phase: "single",
+      sourceMessages: directSourceMessages,
+    });
+  } else if (chunks.length <= 1) {
     modelSummary = await summarizeUsable(
       buildCompactionUserPrompt({
         visualTranscript: visual || undefined,
@@ -473,13 +529,20 @@ export async function compactMessagesWithSummary(
   }
 
   const rawSummary = redactSecrets(modelSummary.trim());
-  const summary = stripThinking(rawSummary).visible.trim();
+  const summary = normalizeCompactionSummary(
+    stripThinking(rawSummary).visible,
+  );
   if (!summary) {
     throw new Error("compaction failed: model returned an empty summary");
   }
   if (looksLikeTranscriptReplay(summary)) {
     throw new Error(
       "compaction failed: model replayed the transcript instead of summarizing — retry /compact or switch model",
+    );
+  }
+  if (looksLikeIncompleteCompactionSummary(summary)) {
+    throw new Error(
+      "compaction failed: model returned an incomplete summary — retry /compact or switch model",
     );
   }
 

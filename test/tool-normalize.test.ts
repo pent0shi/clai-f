@@ -90,6 +90,41 @@ describe("normalizeToolCall — unknown CLI names → shell.exec", () => {
     expect(out.args.command).toBe("whoami");
   });
 
+  it("canonicalizes shell_exec and unwraps an object input envelope", () => {
+    const out = normalizeToolCall({
+      name: "shell_exec",
+      args: { input: { command: "ls -la", cwd: "/tmp" } },
+    });
+    expect(out).toEqual({
+      name: "shell.exec",
+      args: { command: "ls -la", cwd: "/tmp" },
+    });
+  });
+
+  it("unwraps JSON-string argument envelopes for canonical tools", () => {
+    const out = normalizeToolCall({
+      name: "fs.read",
+      args: { arguments: '{"path":"x.ts"}' },
+    });
+    expect(out).toEqual({ name: "fs.read", args: { path: "x.ts" } });
+  });
+
+  it("unwraps object parameter envelopes after wire-name canonicalization", () => {
+    const out = normalizeToolCall({
+      name: "fs_list",
+      args: { parameters: { path: "src" } },
+    });
+    expect(out).toEqual({ name: "fs.list", args: { path: "src" } });
+  });
+
+  it("does not unwrap an envelope when it is a legitimate sibling field", () => {
+    const call = {
+      name: "fs.write",
+      args: { path: "x.json", input: { nested: true } },
+    };
+    expect(normalizeToolCall(call)).toBe(call);
+  });
+
   it("leaves registered tools untouched", () => {
     const call = { name: "fs.read", args: { path: "x" } };
     expect(normalizeToolCall(call)).toBe(call);

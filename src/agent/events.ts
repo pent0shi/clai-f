@@ -42,7 +42,7 @@ export type AgentEvent =
   | { type: "turn-aborted" }
   | { type: "turn-error"; message: string }
   | { type: "compaction-start"; id: string; beforeTokens: number }
-  | { type: "compaction-delta"; id: string; text: string }
+  | { type: "compaction-delta"; id: string; text: string; replace?: boolean | undefined }
   | {
       type: "compaction-completed";
       id: string;

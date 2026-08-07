@@ -11,10 +11,15 @@
  */
 
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { TextAttributes } from "@opentui/core";
+import {
+  TextAttributes,
+  type MouseEvent,
+  type ScrollBoxRenderable,
+} from "@opentui/core";
 import { homedir } from "node:os";
 import { execFile } from "node:child_process";
 import { safeCwd } from "../../../os/cwd.js";
+import { renderColumns } from "../../../ui/text-width.js";
 import type {
   SessionController,
 } from "../../../app/controllers/session-controller.js";
@@ -159,6 +164,89 @@ function clip(value: string, max: number): string {
   if (max <= 1) return "…";
   if (value.length <= max) return value;
   return `${value.slice(0, Math.max(0, max - 1))}…`;
+}
+
+const HIDDEN_SCROLLBARS = {
+  visible: false,
+  showArrows: false,
+} as const;
+
+export function cwdViewportWidth(
+  width: number,
+  density: StatusDensity,
+  contentWidth?: number,
+): number {
+  if (density === "xs") return 0;
+  const cap = density === "sm" ? 12 : density === "md" ? 22 : 36;
+  const available = Math.max(8, Math.min(cap, Math.floor(width * 0.28)));
+  if (contentWidth === undefined) return available;
+  return Math.max(1, Math.min(available, Math.floor(contentWidth)));
+}
+
+function CwdViewport(props: {
+  readonly content: string;
+  readonly width: number;
+  readonly theme: Theme;
+}): ReactNode {
+  const { content, width, theme } = props;
+  const contentWidth = renderColumns(content);
+  const scrollRef = useRef<ScrollBoxRenderable>(null);
+
+  useEffect(() => {
+    scrollRef.current?.scrollTo({ x: 0, y: 0 });
+  }, [content]);
+
+  const onMouseScroll = (event: MouseEvent): void => {
+    if (!event.scroll) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const scrollbox = scrollRef.current;
+    if (!scrollbox) return;
+    const { direction, delta } = event.scroll;
+    const step = Math.max(1, delta || 1) * 3;
+    const dx =
+      direction === "up" || direction === "left"
+        ? -step
+        : direction === "down" || direction === "right"
+          ? step
+          : 0;
+    if (dx === 0) return;
+    const viewportWidth = scrollbox.viewport?.width ?? width;
+    const max = Math.max(0, scrollbox.scrollWidth - viewportWidth);
+    scrollbox.scrollTo({
+      x: Math.max(0, Math.min(max, scrollbox.scrollLeft + dx)),
+      y: 0,
+    });
+  };
+
+  return (
+    <scrollbox
+      ref={scrollRef}
+      scrollX
+      scrollY={false}
+      scrollbarOptions={HIDDEN_SCROLLBARS}
+      verticalScrollbarOptions={HIDDEN_SCROLLBARS}
+      horizontalScrollbarOptions={HIDDEN_SCROLLBARS}
+      onMouseScroll={onMouseScroll}
+      style={{
+        width,
+        height: 1,
+        flexShrink: 0,
+        backgroundColor: theme.background,
+      }}
+    >
+      <text
+        selectable={false}
+        content={content}
+        style={{
+          fg: theme.muted,
+          width: Math.max(width, contentWidth),
+          height: 1,
+          flexShrink: 0,
+        }}
+      />
+    </scrollbox>
+  );
 }
 
 function formatActivity(
@@ -369,6 +457,11 @@ export function StatusLine(props: StatusLineProps): ReactNode {
 
   const queued = state.queued.length;
   const density = statusDensityForWidth(width);
+  const cwdWidth = cwdViewportWidth(
+    width,
+    density,
+    renderColumns(cwdDisplay),
+  );
   const busy = state.running || state.compacting;
   const showTasks = (hasActivePlan || planVisible) && density !== "xs";
 
@@ -431,6 +524,7 @@ export function StatusLine(props: StatusLineProps): ReactNode {
             alignItems: "center",
             flexShrink: 1,
             minWidth: 0,
+            overflow: "hidden",
           }}
         >
           <ModeBadge mode={mode} theme={theme} />
@@ -503,11 +597,13 @@ export function StatusLine(props: StatusLineProps): ReactNode {
             justifyContent: "flex-end",
           }}
         >
-          <text
-            selectable={false}
-            content={cwdDisplay}
-            style={{ fg: theme.muted, flexShrink: 1, minWidth: 0 }}
-          />
+          {cwdWidth > 0 ? (
+            <CwdViewport
+              content={cwdDisplay}
+              width={cwdWidth}
+              theme={theme}
+            />
+          ) : null}
           {gitBranch ? (
             <text
               selectable={false}
@@ -693,11 +789,13 @@ export function StatusLine(props: StatusLineProps): ReactNode {
           justifyContent: "flex-end",
         }}
       >
-        <text
-          selectable={false}
-          content={cwdDisplay}
-          style={{ fg: theme.muted, flexShrink: 1, minWidth: 0 }}
-        />
+        {cwdWidth > 0 ? (
+          <CwdViewport
+            content={cwdDisplay}
+            width={cwdWidth}
+            theme={theme}
+          />
+        ) : null}
         {gitBranch ? (
           <text
             selectable={false}

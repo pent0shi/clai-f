@@ -252,6 +252,25 @@ describe("TUI compaction transcript", () => {
     expect(source).toContain("FULL ARTIFACT: /tmp/nmap.txt");
   });
 
+  it("preserves complete long fields for upstream chunking", () => {
+    const argsDisplay = `${"a".repeat(14_000)}ARGS-END`;
+    const output = `${"o".repeat(18_000)}OUTPUT-END`;
+    const source = serializeTranscriptForCompaction([
+      {
+        kind: "tool",
+        id: "t-long",
+        name: "shell.exec",
+        argsDisplay,
+        output,
+        status: "ok",
+        done: true,
+      },
+    ]);
+    expect(source).toContain("ARGS-END");
+    expect(source).toContain("OUTPUT-END");
+    expect(source).not.toContain("truncated");
+  });
+
   it("handles serialization of compacted items", () => {
     const source = serializeTranscriptForCompaction([
       { kind: "compacted", id: "c", summary: "Previously did task X", originalItems: [], done: true },

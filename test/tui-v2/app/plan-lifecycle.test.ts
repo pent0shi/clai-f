@@ -27,6 +27,14 @@ vi.mock("../../../src/llm/router.js", async (importActual) => {
   return {
     ...actual,
     completeWithProvider: (...args: unknown[]) => completeWithProvider(...args),
+    streamWithProvider: async (
+      request: unknown,
+      onToken: (text: string) => void,
+    ) => {
+      const result = await completeWithProvider(request);
+      onToken(String(result.text ?? ""));
+      return result;
+    },
   };
 });
 

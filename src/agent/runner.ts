@@ -12,6 +12,7 @@ import type {
   ToolResult,
 } from "../types.js";
 import { completeWithProvider, streamWithProvider } from "../llm/router.js";
+import { modelContextWindow } from "../llm/token-usage.js";
 import { streamAlreadyEmitted } from "../llm/stream-progress.js";
 import {
   classifyStreamFailure,
@@ -155,9 +156,15 @@ import {
   type EnvelopeJobState,
 } from "./durable-envelope.js";
 import {
+  buildCompactionRetryPrompt,
+  compactionSinglePassInputBudget,
   COMPACTION_SYSTEM_PROMPT,
   COMPACTION_MAX_COMPLETION_TOKENS,
   COMPACTION_MAP_MAX_COMPLETION_TOKENS,
+  isCompactionCompletionTruncated,
+  looksLikeIncompleteCompactionSummary,
+  looksLikeTranscriptReplay,
+  normalizeCompactionSummary,
 } from "./compaction-summary.js";
 import {
   maybeAppendPlanModeReminder,
@@ -728,10 +735,22 @@ export async function runAgentTurn(
       process.stdout.write(chalk.dim("  ✦ Compacted Context · streaming Markdown\n\n"));
     }
   };
-  const writeCompactionDelta = (id: string, text: string): void => {
-    if (!text) return;
-    emit({ type: "compaction-delta", id, text });
-    if (writesDirectly) process.stdout.write(text);
+  const writeCompactionDelta = (
+    id: string,
+    text: string,
+    replace = false,
+  ): void => {
+    if (!text && !replace) return;
+    emit({
+      type: "compaction-delta",
+      id,
+      text,
+      ...(replace ? { replace: true } : {}),
+    });
+    if (writesDirectly) {
+      if (replace) process.stdout.write(chalk.dim("\n  ↻ rewriting compacted context\n\n"));
+      if (text) process.stdout.write(text);
+    }
   };
   const writeCompactionCompleted = (
     id: string,
@@ -3791,60 +3810,139 @@ export async function runAgentTurn(
     ): Promise<string> => {
       const streamFinalSummary = stage?.phase !== "map";
       const compactionId = streamFinalSummary ? activeCompactionId : undefined;
-      const deltaParser = compactionId
-        ? createThinkingStreamParser(
-            (text) => writeCompactionDelta(compactionId, text),
-            undefined,
-            { remember: false },
-          )
+      const maxTokens =
+        stage?.phase === "map"
+          ? COMPACTION_MAP_MAX_COMPLETION_TOKENS
+          : COMPACTION_MAX_COMPLETION_TOKENS;
+      const sourceMessages = stage?.sourceMessages;
+      const compactionTools = sourceMessages
+        ? selectToolDefs(nativeToolsActive, useCompactSystemPrompt)
         : undefined;
       const request = {
         provider,
         model,
-        messages: [
-          { role: "system" as const, content: COMPACTION_SYSTEM_PROMPT },
-          { role: "user" as const, content: summaryPrompt },
-        ],
+        messages: sourceMessages
+          ? [
+              ...sourceMessages,
+              { role: "user" as const, content: summaryPrompt },
+            ]
+          : [
+              { role: "system" as const, content: COMPACTION_SYSTEM_PROMPT },
+              { role: "user" as const, content: summaryPrompt },
+            ],
         temperature: 0.1,
-        maxTokens:
-          stage?.phase === "map"
-            ? COMPACTION_MAP_MAX_COMPLETION_TOKENS
-            : COMPACTION_MAX_COMPLETION_TOKENS,
+        maxTokens,
         thinking: { enabled: false, effort: "none" as const },
         signal: options.signal,
         allowModelFallback: true,
+        ...(compactionTools?.length
+          ? {
+              tools: compactionTools,
+              toolChoice: "none" as const,
+            }
+          : {}),
       };
-      const response = await streamWithProvider(
-        request,
-        (token) => deltaParser?.push(token),
-        { onStatus: () => undefined, maxRetries: 0 },
-      );
-      deltaParser?.finish();
-      const parsed = stripThinking(response.text);
-      if (parsed.visible.trim() || !parsed.hasThinking) return response.text;
-
-      const retry = await completeWithProvider({
-        ...request,
-        messages: [
-          {
-            role: "system" as const,
-            content: `${COMPACTION_SYSTEM_PROMPT}\nReturn only the continuation-memory summary. Do not include analysis, reasoning, or <think> tags.`,
+      const runAttempt = async (
+        attemptRequest: typeof request,
+        replace = false,
+      ) => {
+        if (compactionId && replace) {
+          writeCompactionDelta(compactionId, "", true);
+        }
+        const parser = createThinkingStreamParser(
+          (text) => {
+            if (compactionId) writeCompactionDelta(compactionId, text);
           },
-          { role: "user" as const, content: summaryPrompt },
-        ],
-        temperature: 0,
-        maxTokens:
-          stage?.phase === "map"
-            ? COMPACTION_MAP_MAX_COMPLETION_TOKENS
-            : COMPACTION_MAX_COMPLETION_TOKENS,
-        thinking: { enabled: false, effort: "none" as const },
-        allowModelFallback: true,
-      }, { maxRetries: 0 });
-      const retryVisible = stripThinking(retry.text).visible.trim();
-      if (retryVisible && compactionId) {
-        writeCompactionDelta(compactionId, retryVisible);
+          undefined,
+          { remember: false },
+        );
+        const result = await streamWithProvider(
+          attemptRequest,
+          (token) => parser.push(token),
+          { onStatus: () => undefined, maxRetries: 0 },
+        );
+        parser.finish();
+        return result;
+      };
+      const first = await runAttempt(request);
+      let visible = normalizeCompactionSummary(
+        stripThinking(first.text).visible,
+      );
+      let retryReason:
+        | "truncated"
+        | "incomplete"
+        | "reasoning-only"
+        | "replayed"
+        | undefined;
+      if (isCompactionCompletionTruncated(first, maxTokens)) {
+        retryReason = "truncated";
+      } else if (!visible) {
+        retryReason = "reasoning-only";
+      } else if (looksLikeTranscriptReplay(visible)) {
+        retryReason = "replayed";
+      } else if (looksLikeIncompleteCompactionSummary(visible)) {
+        retryReason = "incomplete";
       }
-      return retry.text;
+
+      if (retryReason) {
+        const retry = await runAttempt(
+          {
+            ...request,
+            messages: sourceMessages
+              ? [
+                  ...sourceMessages,
+                  {
+                    role: "user" as const,
+                    content: buildCompactionRetryPrompt(
+                      summaryPrompt,
+                      retryReason,
+                    ),
+                  },
+                ]
+              : [
+                  {
+                    role: "system" as const,
+                    content: `${COMPACTION_SYSTEM_PROMPT}\nReturn only a complete continuation-memory summary. Do not include analysis, reasoning, or <think> tags.`,
+                  },
+                  {
+                    role: "user" as const,
+                    content: buildCompactionRetryPrompt(
+                      summaryPrompt,
+                      retryReason,
+                    ),
+                  },
+                ],
+            temperature: 0,
+            maxTokens,
+            thinking: { enabled: false, effort: "none" as const },
+            allowModelFallback: true,
+          },
+          true,
+        );
+        if (isCompactionCompletionTruncated(retry, maxTokens)) {
+          throw new Error(
+            "compaction failed: model hit the summary output limit twice — original context retained",
+          );
+        }
+        visible = normalizeCompactionSummary(
+          stripThinking(retry.text).visible,
+        );
+        if (!visible) {
+          throw new Error("compaction failed: model returned an empty summary");
+        }
+        if (looksLikeTranscriptReplay(visible)) {
+          throw new Error(
+            "compaction failed: model replayed the transcript twice — original context retained",
+          );
+        }
+        if (looksLikeIncompleteCompactionSummary(visible)) {
+          throw new Error(
+            "compaction failed: model returned an incomplete summary twice — original context retained",
+          );
+        }
+      }
+
+      return visible;
     };
 
     /**
@@ -3944,12 +4042,26 @@ export async function runAgentTurn(
       activeCompactionId = compactionId;
       writeCompactionStarted(compactionId, beforeTokens);
       try {
+        const compactionTools = selectToolDefs(
+          nativeToolsActive,
+          useCompactSystemPrompt,
+        );
+        const compactionSchemaTokens = buildContextBreakdown(
+          [],
+          compactionTools,
+        ).estimatedTotalTokens;
         const result = await compactMessagesWithSummary(
           messages,
           summarizeForCompaction,
           {
             budgetTokens: 0,
             keepRecent: AUTO_COMPACT_KEEP_RECENT,
+            singlePassInputBudgetTokens: Math.max(
+              0,
+              compactionSinglePassInputBudget(
+                contextLimitTokens ?? modelContextWindow(model, provider),
+              ) - compactionSchemaTokens,
+            ),
             ...(durableEnvelope ? { durableEnvelope } : {}),
           },
         );
@@ -4209,6 +4321,7 @@ export async function runAgentTurn(
           rendered: string;
           shown: boolean;
         }[] = [];
+        const streamedNativeCallNames = new Map<number, string>();
         const deltaParser = writesDirectly
           ? undefined
           : createThinkingStreamParser(
@@ -4341,70 +4454,22 @@ export async function runAgentTurn(
                   tools: turnTools,
                   toolChoice: "auto" as const,
                   parallelToolCalls: true,
-                  // P2-3: emit tool cards as soon as the function name arrives.
                   onToolCallDelta: (delta) => {
                     if (!delta.name) return;
-                    const name =
-                      fromWireName(delta.name) ?? delta.name;
-                    const existing = deferredToolCalls[delta.index];
-                    if (existing && existing.call.name !== "…") {
-                      if (
-                        delta.argumentsBytes &&
-                        delta.argumentsBytes >= 4096 &&
-                        !writesDirectly
-                      ) {
-                        emit({
-                          type: "status",
-                          text: `${name} (${Math.round(delta.argumentsBytes / 1024)}KB args)`,
-                        });
-                      }
-                      return;
-                    }
-                    while (deferredToolCalls.length < delta.index) {
-                      const slot = deferredToolCalls.length;
-                      const placeholderId = `tool-${++nextToolEventId}`;
-                      callIds[slot] = placeholderId;
-                      deferredToolCalls.push({
-                        eventId: placeholderId,
-                        call: { name: "…", args: {} },
-                        rendered: "",
-                        shown: false,
-                      });
-                    }
-                    const call = normalizeToolCall({
-                      name,
-                      args: {},
-                    });
-                    const eventId = existing?.eventId ?? `tool-${++nextToolEventId}`;
-                    callIds[delta.index] = eventId;
-                    alreadyPrintedIds.add(eventId);
-                    const toolCallLine =
-                      chalk.cyan(`  ▶ ${call.name}`) +
-                      chalk.gray(` ${formatToolArgs(call)}`);
-                    const entry = {
-                      eventId,
-                      call,
-                      rendered:
-                        styleToolChatter(call, toolCallLine) + "\n",
-                      shown: false,
-                    };
-                    if (deferredToolCalls.length === delta.index) {
-                      deferredToolCalls.push(entry);
-                    } else {
-                      deferredToolCalls[delta.index] = entry;
-                    }
-                    streamedCallsCount = Math.max(
-                      streamedCallsCount,
-                      deferredToolCalls.length,
-                    );
+                    const name = fromWireName(delta.name) ?? delta.name;
+                    streamedNativeCallNames.set(delta.index, name);
                     if (!writesDirectly) {
-                      writeToolCall(eventId, call, entry.rendered);
-                      entry.shown = true;
-                      emit({ type: "status", text: call.name });
+                      emit({
+                        type: "status",
+                        text:
+                          delta.argumentsBytes && delta.argumentsBytes >= 4096
+                            ? `${name} (${Math.round(delta.argumentsBytes / 1024)}KB args)`
+                            : name,
+                      });
                     } else {
                       spinner.stop();
                       spinner = startThinkingSpinner(
-                        `tool ${call.name}…`,
+                        `tool ${name}…`,
                         options.signal,
                       );
                     }
@@ -4426,7 +4491,9 @@ export async function runAgentTurn(
                     spinner.stop();
                   }
                   while (streamedCallsCount < parsedCalls.length) {
-                    const call = parsedCalls[streamedCallsCount]!;
+                    const call = normalizeToolCall(
+                      parsedCalls[streamedCallsCount]!,
+                    );
                     const eventId = `tool-${++nextToolEventId}`;
                     callIds[streamedCallsCount] = eventId;
                     alreadyPrintedIds.add(eventId);
@@ -5044,9 +5111,7 @@ export async function runAgentTurn(
           }
           const incompleteNativeStream =
             nativeToolCalls.length === 0 &&
-            deferredToolCalls.some(
-              (entry) => entry.shown && entry.call.name !== "…",
-            );
+            streamedNativeCallNames.size > 0;
           if (incompleteNativeStream) {
             const reason =
               "The provider began this native tool call but never completed it. Nothing ran; reissue a complete call.";
@@ -5654,13 +5719,14 @@ export async function runAgentTurn(
             assistantText.visible || assistantText.thinkContent,
           );
           if (parsed.length === 0 && call) parsed = [call];
-          bound = parsed.map((c, index) => {
+          bound = parsed.map((rawCall, index) => {
+            const call = normalizeToolCall(rawCall);
             const id = syntheticToolCallId(index);
             return {
               index,
               id,
-              call: c,
-              native: { id, name: c.name, args: c.args },
+              call,
+              native: { id, name: call.name, args: call.args },
             };
           });
         }
@@ -5887,7 +5953,7 @@ export async function runAgentTurn(
 
         for (const deferred of activeDeferredToolCalls.slice(0, allCalls.length)) {
           if (!deferred.call.name || deferred.call.name === "…") continue;
-          if (!deferred.shown || !writesDirectly) {
+          if (!deferred.shown) {
             writeToolCall(deferred.eventId, deferred.call, deferred.rendered);
             deferred.shown = true;
           }
