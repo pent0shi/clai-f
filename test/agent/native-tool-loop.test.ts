@@ -322,6 +322,72 @@ describe("native tool loop integration", () => {
     ).toBe(true);
   });
 
+  it("stops repeating unusable native arguments and falls back to text tools", async () => {
+    await writeFile(join(cwd, "metro.txt"), "ready", "utf8");
+    let turn = 0;
+    const truncated = '{"path":"/Users/x/indian-metro","filter":"a';
+
+    streamMock.mockImplementation(
+      async (
+        request: CompletionRequest,
+        onToken: (token: string) => void,
+      ): Promise<CompletionResult> => {
+        turn += 1;
+        if (turn <= 2) {
+          return {
+            text: "",
+            provider: "bynara",
+            model: "grok-4.5-free",
+            toolCalls: [
+              {
+                id: `call_bad_${turn}`,
+                name: "fs.list",
+                args: { _parseError: true, _raw: truncated },
+                rawArguments: truncated,
+              },
+            ],
+            finishReason: "tool_calls",
+          };
+        }
+
+        if (turn === 3) {
+          expect(request.tools).toBeUndefined();
+          const text = `\`\`\`tool\n${JSON.stringify({
+            name: "fs.list",
+            args: { path: cwd },
+          })}\n\`\`\``;
+          onToken(text);
+          return {
+            text,
+            provider: "bynara",
+            model: "grok-4.5-free",
+            finishReason: "stop",
+          };
+        }
+
+        return {
+          text: "listing complete",
+          provider: "bynara",
+          model: "grok-4.5-free",
+          finishReason: "stop",
+        };
+      },
+    );
+
+    const { runAgentLoop } = await import("../../src/agent/runner.js");
+    await expect(
+      runAgentLoop("inspect this project", {
+        provider: "bynara",
+        model: "grok-4.5-free",
+        maxSteps: 8,
+      }),
+    ).resolves.toBe("listing complete");
+
+    // Two malformed rounds, then the text protocol takes over — not an
+    // unbounded retry cycle on the same unusable call.
+    expect(streamMock).toHaveBeenCalledTimes(4);
+  });
+
   it("preserves parallel tool bodies and session-state ordering for the next model call", async () => {
     const evidencePath = join(cwd, "evidence.txt");
     const appPath = join(cwd, "index.js");

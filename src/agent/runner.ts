@@ -1459,6 +1459,9 @@ export async function runAgentTurn(
     // to retry in smaller pieces instead of leaking broken JSON as an answer.
     let truncatedToolRetries = 0;
 
+    /** Consecutive model rounds whose native tool arguments were unusable. */
+    let malformedNativeArgsRounds = 0;
+
 
     let bareToolJsonRetries = 0;
 
@@ -4947,6 +4950,51 @@ export async function runAgentTurn(
                 }
               }
             }
+          }
+        }
+
+
+        if (nativeToolCalls.length) {
+          const unparseable = nativeToolCalls.filter((tc) =>
+            Boolean(tc.args?._parseError),
+          );
+          if (unparseable.length > 0) {
+            malformedNativeArgsRounds += 1;
+            if (malformedNativeArgsRounds >= 2) {
+              const names = [...new Set(unparseable.map((tc) => tc.name))].join(", ");
+              for (const entry of deferredToolCalls) {
+                if (!entry.shown || entry.call.name === "…") continue;
+                writeToolBlocked(
+                  entry.eventId,
+                  entry.call.name,
+                  "Native tool arguments were unusable again; nothing ran. Reissue as a fenced tool block.",
+                  chalk.yellow(
+                    "  ⚠ native tool arguments were unusable again — nothing ran\n",
+                  ),
+                );
+              }
+              markTextOnlyModel(provider, model);
+              writeNotice(
+                "warn",
+                "native tool arguments keep arriving unusable — switching this model to the text tool protocol",
+                chalk.yellow(
+                  "  ⚠ native tool arguments keep arriving unusable — switching this model to the text tool protocol\n",
+                ),
+              );
+              commitAssistantRetry(assistantText.visible);
+              messages.push(
+                recoveryUserMessage(
+                  `Your native ${names || "tool"} call arguments were not usable, so nothing ran. ` +
+                    "Do not repeat that call. Emit exactly one complete fenced ```tool block with valid JSON arguments now.",
+                ),
+              );
+              nativeToolCalls = [];
+              call = undefined;
+              deferredToolCalls.length = 0;
+              continue;
+            }
+          } else {
+            malformedNativeArgsRounds = 0;
           }
         }
 

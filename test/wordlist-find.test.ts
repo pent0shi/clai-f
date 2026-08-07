@@ -90,13 +90,13 @@ describe("wordlist.find", () => {
     expect(result.output).not.toContain("top-usernames-shortlist.txt");
   }, 30_000);
 
-  it("fails cleanly (no throw, no noisy stderr) when nothing is found and expand=false", async () => {
+  it("reports a completed search that found nothing as success, not failure", async () => {
     const result = await wordlistFind({
       query: "zzqxwordlistdoesnotexistxyzzy",
       expand: false,
     });
-    expect(result.ok).toBe(false);
-    expect(result.exitCode).toBe(1);
+    expect(result.ok).toBe(true);
+    expect(result.exitCode).toBe(0);
     expect(result.output).toContain("No match");
   }, 30_000);
 

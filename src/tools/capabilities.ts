@@ -266,9 +266,10 @@ export async function toolCheckHandler(
     return `✗ ${r.name} — not found${hint}`;
   });
 
-  // Fail only when a hard-required tool is missing. node+npm ✓ with yarn ○ is ok=true.
+  // A completed probe is a successful observation even when something is
+  // missing: the model needs the report, not a tool failure. Absence is
+  // reported in the body so it can install or substitute.
   const hardMissing = results.filter((r, index) => !r.available && !softMissing[index]);
-  const ok = hardMissing.length === 0;
   const footer =
     hardMissing.length > 0
       ? `\n\nHard-missing (required): ${hardMissing.map((r) => r.name).join(", ")}. ` +
@@ -277,8 +278,8 @@ export async function toolCheckHandler(
         ? `\n\nNote: ○ = optional/substitute available — overall check OK. Proceed with the tools marked ✓.`
         : "";
   return {
-    ok,
+    ok: true,
     output: lines.join("\n") + footer,
-    exitCode: ok ? 0 : 1,
+    exitCode: 0,
   };
 }
